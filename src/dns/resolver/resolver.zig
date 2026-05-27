@@ -54,10 +54,6 @@ const Bucket = struct {
     waiters: SimpleQueue(WaiterNode) = .empty,
 };
 
-fn eqlCacheKey(a: CacheKey, b: CacheKey) bool {
-    return a.len == b.len and std.mem.eql(u8, a.buf[0..a.len], b.buf[0..b.len]);
-}
-
 pub const Resolver = struct {
     allocator: std.mem.Allocator,
     lock: RwLock,
@@ -73,6 +69,7 @@ pub const Resolver = struct {
     conf_reloading: std.atomic.Value(bool),
 
     cache: Cache,
+    hash_seed: u64,
     rotate_index: std.atomic.Value(u32) = .init(0),
 
     prng_mutex: Mutex,
@@ -84,6 +81,8 @@ pub const Resolver = struct {
         var hosts_mtime: i64 = 0;
         var conf_mtime: i64 = 0;
         const next_check_s: u32 = @as(u32, @truncate(Timestamp.now(.monotonic).toSeconds())) +% check_interval_secs;
+        var prng = std.Random.DefaultPrng.init(Timestamp.now(.realtime).value);
+        const hash_seed = prng.random().int(u64);
         return .{
             .allocator = allocator,
             .lock = .init,
@@ -96,15 +95,15 @@ pub const Resolver = struct {
             .conf_next_check = .init(next_check_s),
             .conf_reloading = .init(false),
             .cache = std.mem.zeroes(Cache),
+            .hash_seed = hash_seed,
             .prng_mutex = .init,
-            .prng = .init(Timestamp.now(.realtime).value),
+            .prng = prng,
             .dedup_buckets = [_]Bucket{.{}} ** num_dedup_buckets,
         };
     }
 
     fn getDedupBucket(self: *Resolver, key: *const CacheKey) *Bucket {
-        const hash: usize = @truncate(std.hash.Wyhash.hash(0, key.buf[0..key.len]));
-        return &self.dedup_buckets[hash & (num_dedup_buckets - 1)];
+        return &self.dedup_buckets[@as(usize, @truncate(key.hash)) & (num_dedup_buckets - 1)];
     }
 
     fn nextQueryId(self: *Resolver) u16 {
@@ -127,6 +126,9 @@ pub const Resolver = struct {
         self.maybeReloadHosts(now);
         self.maybeReloadResolvConf(now);
 
+        var key: CacheKey = undefined;
+        CacheKey.init(&key, options.name, self.hash_seed);
+
         // 1. Check /etc/hosts and DNS cache
         {
             try self.lock.lockShared();
@@ -147,34 +149,30 @@ pub const Resolver = struct {
                 if (i > 0) return i;
             }
 
-            if (CacheKey.init(options.name)) |key| {
-                if (self.cache.get(&key, now)) |entry| {
-                    var i: usize = 0;
-                    for (entry.addrs[0..entry.count]) |addr_in| {
-                        if (i >= storage.len) break;
-                        if (options.family) |f| {
-                            if (addr_in.getFamily() != f) continue;
-                        }
-                        var addr = addr_in;
-                        addr.setPort(options.port);
-                        storage[i] = .{ .address = addr };
-                        i += 1;
+            if (self.cache.get(&key, now)) |entry| {
+                var i: usize = 0;
+                for (entry.addrs[0..entry.count]) |addr_in| {
+                    if (i >= storage.len) break;
+                    if (options.family) |f| {
+                        if (addr_in.getFamily() != f) continue;
                     }
-                    if (i > 0) return i;
+                    var addr = addr_in;
+                    addr.setPort(options.port);
+                    storage[i] = .{ .address = addr };
+                    i += 1;
                 }
+                if (i > 0) return i;
             }
         }
 
-        // 2. Deduplicate concurrent identical DNS queries. Names that exceed the
-        //    CacheKey limit are too rare to bother deduplicating.
-        const key = CacheKey.init(options.name) orelse return self.lookupDns(storage, options);
+        // 2. Deduplicate concurrent identical DNS queries.
         const bucket = self.getDedupBucket(&key);
 
         try bucket.mutex.lock();
 
         var it = bucket.waiters.head;
         while (it) |n| : (it = n.next) {
-            if (n.is_active and n.family == options.family and eqlCacheKey(n.key, key)) {
+            if (n.is_active and n.family == options.family and n.key.eql(&key)) {
                 // An identical query is already in flight — join it.
                 var node: WaiterNode = .{
                     .key = key,
@@ -221,7 +219,7 @@ pub const Resolver = struct {
         bucket.mutex.lockUncancelable();
         var wit = bucket.waiters.head;
         while (wit) |n| : (wit = n.next) {
-            if (!n.is_active and !n.done and n.family == options.family and eqlCacheKey(n.key, key)) {
+            if (!n.is_active and !n.done and n.family == options.family and n.key.eql(&key)) {
                 if (result) |count| {
                     const jcount = @min(n.storage.len, count);
                     @memcpy(n.storage[0..jcount], buf[0..jcount]);
@@ -360,7 +358,8 @@ pub const Resolver = struct {
 
     fn cacheInsert(self: *Resolver, options: dns.LookupOptions, results: []const dns.LookupResult, ttl: u32, now: Timestamp) void {
         if (options.family != null) return;
-        const key = CacheKey.init(options.name) orelse return;
+        var key: CacheKey = undefined;
+        CacheKey.init(&key, options.name, self.hash_seed);
 
         if (results.len == 0 or results.len > max_cached_addrs) {
             self.lock.lockUncancelable();

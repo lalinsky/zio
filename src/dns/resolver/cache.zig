@@ -6,23 +6,28 @@ const net = @import("../../net.zig");
 const Timestamp = @import("../../time.zig").Timestamp;
 
 pub const max_cached_addrs = 3;
-pub const max_cached_name_len = 31;
 const cache_capacity = 1024;
 const probe_limit = 8;
+pub const key_prefix_len = 23;
 
 pub const CacheKey = struct {
     len: u8,
-    buf: [max_cached_name_len]u8,
+    prefix: [key_prefix_len]u8,
+    hash: u64,
 
-    pub fn init(name: []const u8) ?CacheKey {
-        if (name.len > max_cached_name_len) return null;
-        var key: CacheKey = .{ .len = @intCast(name.len), .buf = undefined };
-        @memcpy(key.buf[0..name.len], name);
-        return key;
+    pub fn init(key: *CacheKey, name: []const u8, seed: u64) void {
+        std.debug.assert(name.len <= std.math.maxInt(u8));
+        const plen = @min(name.len, key_prefix_len);
+        key.len = @intCast(name.len);
+        key.hash = std.hash.Wyhash.hash(seed, name);
+        @memset(&key.prefix, 0);
+        @memcpy(key.prefix[0..plen], name[0..plen]);
     }
 
-    fn slice(self: *const CacheKey) []const u8 {
-        return self.buf[0..self.len];
+    pub fn eql(a: *const CacheKey, b: *const CacheKey) bool {
+        if (a.len != b.len or a.hash != b.hash) return false;
+        const plen = @min(a.len, key_prefix_len);
+        return std.mem.eql(u8, a.prefix[0..plen], b.prefix[0..plen]);
     }
 };
 
@@ -42,11 +47,7 @@ const CacheSlot = struct {
 };
 
 fn slotIndex(key: *const CacheKey) usize {
-    return @as(usize, @truncate(std.hash.Wyhash.hash(0, key.slice()))) & (cache_capacity - 1);
-}
-
-fn eqlKey(a: CacheKey, b: *const CacheKey) bool {
-    return a.len == b.len and std.mem.eql(u8, a.buf[0..a.len], b.buf[0..b.len]);
+    return @as(usize, @truncate(key.hash)) & (cache_capacity - 1);
 }
 
 pub const Cache = struct {
@@ -58,7 +59,7 @@ pub const Cache = struct {
         for (0..probe_limit) |probe| {
             const slot = &self.slots[(start + probe) & (cache_capacity - 1)];
             if (slot.key.len == 0) return null;
-            if (!eqlKey(slot.key, key)) continue;
+            if (!slot.key.eql(key)) continue;
             if (now.value < slot.entry.expiry.value) {
                 return slot.entry;
             }
@@ -75,7 +76,7 @@ pub const Cache = struct {
         for (0..probe_limit) |probe| {
             const idx = (start + probe) & (cache_capacity - 1);
             const slot = &self.slots[idx];
-            if (slot.key.len == 0 or eqlKey(slot.key, key)) {
+            if (slot.key.len == 0 or slot.key.eql(key)) {
                 target = idx;
                 break;
             }
@@ -94,7 +95,7 @@ pub const Cache = struct {
         for (0..probe_limit) |probe| {
             const slot = &self.slots[(start + probe) & (cache_capacity - 1)];
             if (slot.key.len == 0) break;
-            if (eqlKey(slot.key, key)) {
+            if (slot.key.eql(key)) {
                 slot.entry.expiry = .{ .value = 0 };
                 break;
             }
@@ -104,7 +105,8 @@ pub const Cache = struct {
 
 test "Cache: put and get" {
     var cache: Cache = std.mem.zeroes(Cache);
-    const key = CacheKey.init("example.com").?;
+    var key: CacheKey = undefined;
+    CacheKey.init(&key, "example.com", 0);
     var entry: CacheEntry = std.mem.zeroes(CacheEntry);
     entry.count = 1;
     entry.expiry = .{ .value = std.math.maxInt(u64) };
@@ -118,7 +120,8 @@ test "Cache: put and get" {
 
 test "Cache: expired entry not returned" {
     var cache: Cache = std.mem.zeroes(Cache);
-    const key = CacheKey.init("example.com").?;
+    var key: CacheKey = undefined;
+    CacheKey.init(&key, "example.com", 0);
     var entry: CacheEntry = std.mem.zeroes(CacheEntry);
     entry.count = 1;
     entry.expiry = .{ .value = 0 };
@@ -130,7 +133,8 @@ test "Cache: expired entry not returned" {
 
 test "Cache: expire invalidates entry" {
     var cache: Cache = std.mem.zeroes(Cache);
-    const key = CacheKey.init("example.com").?;
+    var key: CacheKey = undefined;
+    CacheKey.init(&key, "example.com", 0);
     var entry: CacheEntry = std.mem.zeroes(CacheEntry);
     entry.count = 1;
     entry.expiry = .{ .value = std.math.maxInt(u64) };
@@ -144,7 +148,8 @@ test "Cache: expire invalidates entry" {
 
 test "Cache: update existing entry" {
     var cache: Cache = std.mem.zeroes(Cache);
-    const key = CacheKey.init("example.com").?;
+    var key: CacheKey = undefined;
+    CacheKey.init(&key, "example.com", 0);
 
     const now: Timestamp = .{ .value = 1 };
 
@@ -170,7 +175,8 @@ test "Cache: multiple independent entries" {
     const now: Timestamp = .{ .value = 1 };
 
     for (names, 0..) |name, i| {
-        const k = CacheKey.init(name).?;
+        var k: CacheKey = undefined;
+        CacheKey.init(&k, name, 0);
         var e: CacheEntry = std.mem.zeroes(CacheEntry);
         e.count = @intCast(i + 1);
         e.expiry = .{ .value = std.math.maxInt(u64) };
@@ -178,9 +184,36 @@ test "Cache: multiple independent entries" {
     }
 
     for (names, 0..) |name, i| {
-        const k = CacheKey.init(name).?;
+        var k: CacheKey = undefined;
+        CacheKey.init(&k, name, 0);
         const result = cache.get(&k, now);
         try std.testing.expect(result != null);
         try std.testing.expectEqual(@as(u8, @intCast(i + 1)), result.?.count);
     }
+}
+
+test "Cache: long names with shared prefix stay distinct" {
+    var cache: Cache = std.mem.zeroes(Cache);
+    const name1 = "abcdefghijklmnopqrstuvw-one.test";
+    const name2 = "abcdefghijklmnopqrstuvw-two.test";
+    comptime std.debug.assert(name1.len > key_prefix_len);
+
+    const now: Timestamp = .{ .value = 1 };
+
+    var k1: CacheKey = undefined;
+    CacheKey.init(&k1, name1, 0);
+    var e1: CacheEntry = std.mem.zeroes(CacheEntry);
+    e1.count = 1;
+    e1.expiry = .{ .value = std.math.maxInt(u64) };
+    cache.put(&k1, e1, now);
+
+    var k2: CacheKey = undefined;
+    CacheKey.init(&k2, name2, 0);
+    var e2: CacheEntry = std.mem.zeroes(CacheEntry);
+    e2.count = 2;
+    e2.expiry = .{ .value = std.math.maxInt(u64) };
+    cache.put(&k2, e2, now);
+
+    try std.testing.expectEqual(@as(u8, 1), cache.get(&k1, now).?.count);
+    try std.testing.expectEqual(@as(u8, 2), cache.get(&k2, now).?.count);
 }
