@@ -106,7 +106,7 @@ pub const Resolver = struct {
     }
 
     fn getDedupBucket(self: *Resolver, key: *const CacheKey) *Bucket {
-        const hash = std.hash.Wyhash.hash(0, key.buf[0..key.len]);
+        const hash: usize = @truncate(std.hash.Wyhash.hash(0, key.buf[0..key.len]));
         return &self.dedup_buckets[hash & (num_dedup_buckets - 1)];
     }
 
