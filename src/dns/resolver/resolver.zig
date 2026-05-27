@@ -149,20 +149,22 @@ pub const Resolver = struct {
                 if (i > 0) return i;
             }
 
-            if (self.cache.get(&key, now)) |entry| {
-                var i: usize = 0;
-                for (entry.addrs[0..entry.count]) |addr_in| {
-                    if (i >= storage.len) break;
-                    if (options.family) |f| {
-                        if (addr_in.getFamily() != f) continue;
+            var i: usize = 0;
+            const families: []const net.IpAddress.Family = if (options.family) |f| &.{f} else &.{ .ipv4, .ipv6 };
+            for (families) |fam| {
+                var fkey: CacheKey = undefined;
+                CacheKey.init(&fkey, options.name, familySeed(self.hash_seed, fam));
+                if (self.cache.get(&fkey, now)) |entry| {
+                    for (entry.addrs[0..entry.count]) |addr_in| {
+                        if (i >= storage.len) break;
+                        var addr = addr_in;
+                        addr.setPort(options.port);
+                        storage[i] = .{ .address = addr };
+                        i += 1;
                     }
-                    var addr = addr_in;
-                    addr.setPort(options.port);
-                    storage[i] = .{ .address = addr };
-                    i += 1;
                 }
-                if (i > 0) return i;
             }
+            if (i > 0) return i;
         }
 
         // 2. Deduplicate concurrent identical DNS queries.
@@ -302,7 +304,7 @@ pub const Resolver = struct {
         var fqdn_buf: [256]u8 = undefined;
         var last_err: dns.LookupError = error.UnknownHostName;
 
-        const r: QueryResult = blk: {
+        const count: usize = blk: {
             // Rooted name: only try exactly as given.
             if (rooted) {
                 break :blk try queryOneName(self, storage, options, name, srvs, attempts, timeout);
@@ -317,8 +319,8 @@ pub const Resolver = struct {
             // Enough dots: try unsuffixed first (Go's nameList logic).
             if (has_enough_dots) {
                 if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
-                    if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |r| {
-                        if (r.count > 0) break :blk r;
+                    if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |n| {
+                        if (n > 0) break :blk n;
                     } else |err| {
                         if (err != error.UnknownHostName) return err;
                     }
@@ -329,8 +331,8 @@ pub const Resolver = struct {
             for (0..search_count) |i| {
                 const suffix = search_store[i][0..search_lens[i]];
                 if (makeFqdn(&fqdn_buf, name, suffix)) |fqdn| {
-                    if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |r| {
-                        if (r.count > 0) break :blk r;
+                    if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |n| {
+                        if (n > 0) break :blk n;
                     } else |err| {
                         if (err != error.UnknownHostName) return err;
                     }
@@ -340,8 +342,8 @@ pub const Resolver = struct {
             // Not enough dots: try unsuffixed last.
             if (!has_enough_dots) {
                 if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
-                    if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |r| {
-                        if (r.count > 0) break :blk r;
+                    if (queryOneName(self, storage, options, fqdn, srvs, attempts, timeout)) |n| {
+                        if (n > 0) break :blk n;
                     } else |err| {
                         last_err = err;
                     }
@@ -351,15 +353,12 @@ pub const Resolver = struct {
             return last_err;
         };
 
-        const now = Timestamp.now(.monotonic);
-        self.cacheInsert(options, storage[0..r.count], r.ttl, now);
-        return r.count;
+        return count;
     }
 
-    fn cacheInsert(self: *Resolver, options: dns.LookupOptions, results: []const dns.LookupResult, ttl: u32, now: Timestamp) void {
-        if (options.family != null) return;
+    fn cacheInsert(self: *Resolver, name: []const u8, family: net.IpAddress.Family, results: []const dns.LookupResult, ttl: u32, now: Timestamp) void {
         var key: CacheKey = undefined;
-        CacheKey.init(&key, options.name, self.hash_seed);
+        CacheKey.init(&key, name, familySeed(self.hash_seed, family));
 
         if (results.len == 0 or results.len > max_cached_addrs) {
             self.lock.lockUncancelable();
@@ -458,8 +457,16 @@ fn makeFqdn(buf: *[256]u8, name: []const u8, suffix: ?[]const u8) ?[]u8 {
 
 const QueryResult = struct { count: usize, ttl: u32 };
 
+fn familySeed(seed: u64, family: net.IpAddress.Family) u64 {
+    return seed ^ switch (family) {
+        .ipv4 => @as(u64, 1),
+        .ipv6 => @as(u64, 2),
+    };
+}
+
 /// Try a single FQDN against all servers, querying A and/or AAAA based on
-/// options.family. Fills storage and returns count + minimum TTL.
+/// options.family. Fills storage and returns the total address count.
+/// Each RRset is cached immediately after its query returns, using its own timestamp.
 fn queryOneName(
     resolver: *Resolver,
     storage: []dns.LookupResult,
@@ -468,10 +475,9 @@ fn queryOneName(
     servers: []const net.IpAddress,
     attempts: u8,
     timeout: Duration,
-) dns.LookupError!QueryResult {
+) dns.LookupError!usize {
     const sock_timeout: Timeout = .{ .duration = timeout };
     var filled: usize = 0;
-    var min_ttl: u32 = std.math.maxInt(u32);
     var last_err: dns.LookupError = error.UnknownHostName;
 
     const do_a = options.family == null or options.family == .ipv4;
@@ -479,8 +485,9 @@ fn queryOneName(
 
     if (do_a and filled < storage.len) {
         if (queryOneType(resolver, storage[filled..], options, fqdn, .a, servers, attempts, sock_timeout)) |r| {
+            const now = Timestamp.now(.monotonic);
+            resolver.cacheInsert(options.name, .ipv4, storage[filled..][0..r.count], r.ttl, now);
             filled += r.count;
-            min_ttl = @min(min_ttl, r.ttl);
         } else |err| switch (err) {
             error.Canceled, error.RuntimeShutdown, error.NoThreadPool => return err,
             else => last_err = err,
@@ -489,8 +496,9 @@ fn queryOneName(
 
     if (do_aaaa and filled < storage.len) {
         if (queryOneType(resolver, storage[filled..], options, fqdn, .aaaa, servers, attempts, sock_timeout)) |r| {
+            const now = Timestamp.now(.monotonic);
+            resolver.cacheInsert(options.name, .ipv6, storage[filled..][0..r.count], r.ttl, now);
             filled += r.count;
-            min_ttl = @min(min_ttl, r.ttl);
         } else |err| switch (err) {
             error.Canceled, error.RuntimeShutdown, error.NoThreadPool => return err,
             else => last_err = err,
@@ -498,7 +506,7 @@ fn queryOneName(
     }
 
     if (filled == 0) return last_err;
-    return .{ .count = filled, .ttl = if (min_ttl == std.math.maxInt(u32)) 0 else min_ttl };
+    return filled;
 }
 
 /// Query all servers for one record type (A or AAAA), retrying up to `attempts`
