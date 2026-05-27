@@ -6,28 +6,28 @@ const net = @import("../../net.zig");
 const Timestamp = @import("../../time.zig").Timestamp;
 
 pub const max_cached_addrs = 3;
-pub const max_cached_name_len = 31;
 const cache_capacity = 1024;
 const probe_limit = 8;
 
 pub const CacheKey = struct {
+    hash: u64,
     len: u8,
-    buf: [max_cached_name_len]u8,
+    buf: [48 - @sizeOf(u64) - @sizeOf(u8)]u8,
 
-    pub fn init(name: []const u8) ?CacheKey {
-        if (name.len > max_cached_name_len) return null;
-        var key: CacheKey = .{ .len = @intCast(name.len), .buf = undefined };
-        @memcpy(key.buf[0..name.len], name);
+    pub fn init(name: []const u8) CacheKey {
+        var key: CacheKey = .{
+            .len = @intCast(name.len),
+            .hash = std.hash.Wyhash.hash(0, name),
+            .buf = @splat(0),
+        };
+        const n = @min(name.len, key.buf.len);
+        @memcpy(key.buf[0..n], name[0..n]);
         return key;
-    }
-
-    fn slice(self: *const CacheKey) []const u8 {
-        return self.buf[0..self.len];
     }
 };
 
 comptime {
-    if (@sizeOf(CacheKey) != 32) @compileError("CacheKey must be exactly 32 bytes");
+    if (@sizeOf(CacheKey) != 48) @compileError("CacheKey must be exactly 48 bytes");
 }
 
 pub const CacheEntry = struct {
@@ -42,11 +42,11 @@ const CacheSlot = struct {
 };
 
 fn slotIndex(key: *const CacheKey) usize {
-    return @as(usize, @truncate(std.hash.Wyhash.hash(0, key.slice()))) & (cache_capacity - 1);
+    return @as(usize, @truncate(key.hash)) & (cache_capacity - 1);
 }
 
 fn eqlKey(a: CacheKey, b: *const CacheKey) bool {
-    return a.len == b.len and std.mem.eql(u8, a.buf[0..a.len], b.buf[0..b.len]);
+    return a.len == b.len and a.hash == b.hash and std.mem.eql(u8, &a.buf, &b.buf);
 }
 
 pub const Cache = struct {
@@ -105,7 +105,7 @@ pub const Cache = struct {
 
 test "Cache: put and get" {
     var cache: Cache = std.mem.zeroes(Cache);
-    const key = CacheKey.init("example.com").?;
+    const key = CacheKey.init("example.com");
     var entry: CacheEntry = std.mem.zeroes(CacheEntry);
     entry.count = 1;
     entry.expiry = .{ .value = std.math.maxInt(u64) };
@@ -118,7 +118,7 @@ test "Cache: put and get" {
 
 test "Cache: expired entry not returned" {
     var cache: Cache = std.mem.zeroes(Cache);
-    const key = CacheKey.init("example.com").?;
+    const key = CacheKey.init("example.com");
     var entry: CacheEntry = std.mem.zeroes(CacheEntry);
     entry.count = 1;
     entry.expiry = .{ .value = 0 };
@@ -129,7 +129,7 @@ test "Cache: expired entry not returned" {
 
 test "Cache: expire invalidates entry" {
     var cache: Cache = std.mem.zeroes(Cache);
-    const key = CacheKey.init("example.com").?;
+    const key = CacheKey.init("example.com");
     var entry: CacheEntry = std.mem.zeroes(CacheEntry);
     entry.count = 1;
     entry.expiry = .{ .value = std.math.maxInt(u64) };
@@ -142,7 +142,7 @@ test "Cache: expire invalidates entry" {
 
 test "Cache: update existing entry" {
     var cache: Cache = std.mem.zeroes(Cache);
-    const key = CacheKey.init("example.com").?;
+    const key = CacheKey.init("example.com");
 
     var e1: CacheEntry = std.mem.zeroes(CacheEntry);
     e1.count = 1;
@@ -164,7 +164,7 @@ test "Cache: multiple independent entries" {
     const names = [_][]const u8{ "a.test", "b.test", "c.test", "d.test" };
 
     for (names, 0..) |name, i| {
-        const k = CacheKey.init(name).?;
+        const k = CacheKey.init(name);
         var e: CacheEntry = std.mem.zeroes(CacheEntry);
         e.count = @intCast(i + 1);
         e.expiry = .{ .value = std.math.maxInt(u64) };
@@ -172,7 +172,7 @@ test "Cache: multiple independent entries" {
     }
 
     for (names, 0..) |name, i| {
-        const k = CacheKey.init(name).?;
+        const k = CacheKey.init(name);
         const result = cache.get(&k);
         try std.testing.expect(result != null);
         try std.testing.expectEqual(@as(u8, @intCast(i + 1)), result.?.count);

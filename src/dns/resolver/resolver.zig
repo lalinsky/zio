@@ -149,27 +149,25 @@ pub const Resolver = struct {
                 if (i > 0) return i;
             }
 
-            if (CacheKey.init(options.name)) |key| {
-                if (self.cache.get(&key)) |entry| {
-                    var i: usize = 0;
-                    for (entry.addrs[0..entry.count]) |addr_in| {
-                        if (i >= storage.len) break;
-                        if (options.family) |f| {
-                            if (addr_in.getFamily() != f) continue;
-                        }
-                        var addr = addr_in;
-                        addr.setPort(options.port);
-                        storage[i] = .{ .address = addr };
-                        i += 1;
+            const cache_key = CacheKey.init(options.name);
+            if (self.cache.get(&cache_key)) |entry| {
+                var i: usize = 0;
+                for (entry.addrs[0..entry.count]) |addr_in| {
+                    if (i >= storage.len) break;
+                    if (options.family) |f| {
+                        if (addr_in.getFamily() != f) continue;
                     }
-                    if (i > 0) return i;
+                    var addr = addr_in;
+                    addr.setPort(options.port);
+                    storage[i] = .{ .address = addr };
+                    i += 1;
                 }
+                if (i > 0) return i;
             }
         }
 
-        // 2. Deduplicate concurrent identical DNS queries. Names that exceed the
-        //    CacheKey limit are too rare to bother deduplicating.
-        const key = CacheKey.init(options.name) orelse return self.lookupDns(storage, options);
+        // 2. Deduplicate concurrent identical DNS queries.
+        const key = CacheKey.init(options.name);
         const bucket = self.getDedupBucket(&key);
 
         try bucket.mutex.lock();
@@ -359,7 +357,7 @@ pub const Resolver = struct {
 
     fn cacheInsert(self: *Resolver, options: dns.LookupOptions, results: []const dns.LookupResult, ttl: u32) void {
         if (options.family != null) return;
-        const key = CacheKey.init(options.name) orelse return;
+        const key = CacheKey.init(options.name);
 
         if (results.len == 0 or results.len > max_cached_addrs) {
             self.lock.lockUncancelable();
