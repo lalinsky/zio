@@ -145,6 +145,7 @@ pub const Resolver = struct {
             @memcpy(buf[0..len], options.name[0..len]);
         }
         const addr_storage = if (cname_buf != null and storage.len > 0) storage[1..] else storage;
+        if (cname_buf != null and storage.len == 0) return 0;
 
         // 0. Numeric IP literal — parse directly without touching hosts or DNS.
         if (net.IpAddress.parseIp4(options.name, options.port) catch null) |addr| {

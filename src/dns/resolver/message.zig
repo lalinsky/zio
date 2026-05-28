@@ -70,17 +70,20 @@ pub fn decodeName(buf: []const u8, pos: usize, out: []u8) !struct { end: usize, 
     var end: usize = 0;
     var jumped = false;
     var depth: usize = 0;
-    while (p < buf.len and depth < 128) : (depth += 1) {
+    while (depth < 128) : (depth += 1) {
+        if (p >= buf.len) return error.Truncated;
         const b = buf[p];
         if (b == 0) {
             if (!jumped) end = p + 1;
-            break;
+            return .{ .end = end, .len = out_len };
         }
         if (b & 0xc0 == 0xc0) {
             if (p + 2 > buf.len) return error.Truncated;
             if (!jumped) end = p + 2;
             jumped = true;
-            p = (@as(usize, b & 0x3f) << 8) | buf[p + 1];
+            const target = (@as(usize, b & 0x3f) << 8) | buf[p + 1];
+            if (target >= buf.len) return error.InvalidMessage;
+            p = target;
             continue;
         }
         if (b & 0xc0 != 0) return error.InvalidMessage;
@@ -97,8 +100,7 @@ pub fn decodeName(buf: []const u8, pos: usize, out: []u8) !struct { end: usize, 
         out_len += label_len;
         p += label_len;
     }
-    if (!jumped) end = p + 1;
-    return .{ .end = end, .len = out_len };
+    return error.InvalidMessage; // compression pointer loop
 }
 
 /// Skip a DNS-encoded name starting at buf[pos], following compression pointers.
