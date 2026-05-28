@@ -63,7 +63,7 @@ pub const RuntimeOptions = struct {
     stack_pool: StackPoolConfig = .{
         .maximum_size = 8 * 1024 * 1024,
         .committed_size = 256 * 1024,
-        .max_unused_stacks = 16,
+        .max_unused_stacks = 1000,
         .max_age = .fromSeconds(60),
     },
     /// Number of executor threads to run (including main).
@@ -269,6 +269,9 @@ pub const Executor = struct {
     // When notified, it calls loop.stop() to exit the event loop.
     shutdown: ev.Async = ev.Async.init(),
 
+    // Periodic timer for evicting idle stacks from the shared stack pool.
+    stack_pool_eviction_timer: ev.Timer = ev.Timer.init(.{ .duration = .fromSeconds(60) }),
+
     // The task currently executing on this executor.
     // Updated before every context switch into a task and after every switch back.
     // Used by getCurrentTaskOrNull() instead of the TLS current_context chain.
@@ -328,6 +331,10 @@ pub const Executor = struct {
         self.shutdown.c.callback = shutdownCallback;
         self.loop.add(&self.shutdown.c);
 
+        // Register periodic stack pool eviction timer
+        self.stack_pool_eviction_timer.c.callback = stackPoolEvictionCallback;
+        self.loop.add(&self.stack_pool_eviction_timer.c);
+
         self.main_task.coro.setCurrent();
         Executor.current = self;
         self.current_task = &self.main_task;
@@ -344,6 +351,13 @@ pub const Executor = struct {
 
     fn shutdownCallback(loop: *ev.Loop, _: *ev.Completion) void {
         loop.stop();
+    }
+
+    fn stackPoolEvictionCallback(loop: *ev.Loop, c: *ev.Completion) void {
+        const timer = c.cast(ev.Timer);
+        const self: *Executor = @alignCast(@fieldParentPtr("stack_pool_eviction_timer", timer));
+        self.runtime.stack_pool.cleanup(loop.now(), 16);
+        loop.add(c);
     }
 
     pub const YieldCancelMode = enum { allow_cancel, no_cancel };

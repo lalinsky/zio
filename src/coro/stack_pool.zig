@@ -170,6 +170,39 @@ pub const StackPool = struct {
         }
     }
 
+    /// Evicts up to `limit` expired stacks from the pool.
+    /// Intended to be called periodically from a timer to reclaim idle stacks.
+    pub fn cleanup(self: *StackPool, now: Timestamp, limit: usize) void {
+        if (self.config.max_age.value == 0) return;
+
+        var to_free_head: ?*FreeNode = null;
+        var to_free_count: usize = 0;
+
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            while (self.head) |node| {
+                if (to_free_count >= limit) break;
+                const age = node.timestamp.durationTo(now);
+                if (age.value > self.config.max_age.value) {
+                    self.removeNode(node);
+                    node.next = to_free_head;
+                    to_free_head = node;
+                    to_free_count += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        while (to_free_head) |free_node| {
+            const next = free_node.next;
+            stack.stackFree(free_node.stack_info);
+            to_free_head = next;
+        }
+    }
+
     /// Removes a node from the doubly linked list and updates pool_size.
     fn removeNode(self: *StackPool, node: *FreeNode) void {
         if (node.prev) |prev| {
