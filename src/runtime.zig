@@ -74,7 +74,7 @@ pub const RuntimeOptions = struct {
 
 pub const DnsOptions = struct {
     /// Use the built-in native DNS resolver instead of getaddrinfo.
-    custom_resolver: bool = true,
+    custom_resolver: bool = ev.backend == .io_uring,
 };
 
 const Awaitable = @import("awaitable.zig").Awaitable;
