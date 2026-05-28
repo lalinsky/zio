@@ -27,8 +27,9 @@ It's similar to [goroutines] in Go, but with the pros and cons of being implemen
 - User-mode coroutine context switching for `x86_64`, `aarch64`, `arm`, `thumb`, `riscv32`, `riscv64`, `loongarch64` and `powerpc64` architectures.
 - Growable stacks for the coroutines implemented by auto-extending virtual memory reservations.
 - Single-threaded or multi-threaded coroutine scheduler.
-- Fully asynchronous network I/O on all systems. Supports TCP, UDP, Unix sockets, raw IP sockets. DNS lookups.
-- Fully asynchronous file I/O on Linux, partially (read/write) on Windows, simulated using auxiliary thread pool on other systems.
+- Fully asynchronous network I/O on all systems. Supports TCP, UDP, Unix sockets, raw IP sockets, etc.
+- Fully asynchronous file I/O on Linux, partially asynchronous (read/write) on Windows. Using blocking syscalls in a thread pool on other systems.
+- Fully asynchronous DNS resolver on Linux, Windows and macOS. Using `getaddrinfo` in a thread pool on other systems.
 - Safe cancelation support for all operations.
 - Structured concurrency using task groups.
 - Synchronization primitives, including more advanced ones, like channels.
