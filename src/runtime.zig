@@ -331,9 +331,11 @@ pub const Executor = struct {
         self.shutdown.c.callback = shutdownCallback;
         self.loop.add(&self.shutdown.c);
 
-        // Register periodic stack pool eviction timer
-        self.stack_pool_eviction_timer.c.callback = stackPoolEvictionCallback;
-        self.loop.add(&self.stack_pool_eviction_timer.c);
+        // Register periodic stack pool eviction timer (skipped when max_age is zero)
+        if (self.runtime.options.stack_pool.max_age.value > 0) {
+            self.stack_pool_eviction_timer.c.callback = stackPoolEvictionCallback;
+            self.loop.add(&self.stack_pool_eviction_timer.c);
+        }
 
         self.main_task.coro.setCurrent();
         Executor.current = self;
@@ -357,7 +359,9 @@ pub const Executor = struct {
         const timer = c.cast(ev.Timer);
         const self: *Executor = @alignCast(@fieldParentPtr("stack_pool_eviction_timer", timer));
         self.runtime.stack_pool.cleanup(loop.now(), 16);
-        loop.add(c);
+        if (self.runtime.options.stack_pool.max_age.value > 0) {
+            loop.add(c);
+        }
     }
 
     pub const YieldCancelMode = enum { allow_cancel, no_cancel };
