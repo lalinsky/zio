@@ -8,24 +8,27 @@ const Timestamp = @import("../../time.zig").Timestamp;
 pub const max_cached_addrs = 3;
 const cache_capacity = 1024;
 const probe_limit = 8;
-pub const key_prefix_len = 23;
+pub const key_prefix_len = 22;
 
 pub const CacheKey = struct {
     len: u8,
+    // 0 = any (used for dedup keys), 1 = ipv4, 2 = ipv6
+    family: u8,
     prefix: [key_prefix_len]u8,
     hash: u64,
 
-    pub fn init(key: *CacheKey, name: []const u8, seed: u64) void {
+    pub fn init(key: *CacheKey, name: []const u8, seed: u64, family: ?net.IpAddress.Family) void {
         std.debug.assert(name.len <= std.math.maxInt(u8));
         const plen = @min(name.len, key_prefix_len);
         key.len = @intCast(name.len);
+        key.family = if (family) |f| @as(u8, @intFromEnum(f)) + 1 else 0;
         key.hash = std.hash.Wyhash.hash(seed, name);
         @memset(&key.prefix, 0);
         @memcpy(key.prefix[0..plen], name[0..plen]);
     }
 
     pub fn eql(a: *const CacheKey, b: *const CacheKey) bool {
-        if (a.len != b.len or a.hash != b.hash) return false;
+        if (a.len != b.len or a.family != b.family or a.hash != b.hash) return false;
         const plen = @min(a.len, key_prefix_len);
         return std.mem.eql(u8, a.prefix[0..plen], b.prefix[0..plen]);
     }
@@ -106,7 +109,7 @@ pub const Cache = struct {
 test "Cache: put and get" {
     var cache: Cache = std.mem.zeroes(Cache);
     var key: CacheKey = undefined;
-    CacheKey.init(&key, "example.com", 0);
+    CacheKey.init(&key, "example.com", 0, .ipv4);
     var entry: CacheEntry = std.mem.zeroes(CacheEntry);
     entry.count = 1;
     entry.expiry = .{ .value = std.math.maxInt(u64) };
@@ -121,7 +124,7 @@ test "Cache: put and get" {
 test "Cache: expired entry not returned" {
     var cache: Cache = std.mem.zeroes(Cache);
     var key: CacheKey = undefined;
-    CacheKey.init(&key, "example.com", 0);
+    CacheKey.init(&key, "example.com", 0, .ipv4);
     var entry: CacheEntry = std.mem.zeroes(CacheEntry);
     entry.count = 1;
     entry.expiry = .{ .value = 0 };
@@ -134,7 +137,7 @@ test "Cache: expired entry not returned" {
 test "Cache: expire invalidates entry" {
     var cache: Cache = std.mem.zeroes(Cache);
     var key: CacheKey = undefined;
-    CacheKey.init(&key, "example.com", 0);
+    CacheKey.init(&key, "example.com", 0, .ipv4);
     var entry: CacheEntry = std.mem.zeroes(CacheEntry);
     entry.count = 1;
     entry.expiry = .{ .value = std.math.maxInt(u64) };
@@ -149,7 +152,7 @@ test "Cache: expire invalidates entry" {
 test "Cache: update existing entry" {
     var cache: Cache = std.mem.zeroes(Cache);
     var key: CacheKey = undefined;
-    CacheKey.init(&key, "example.com", 0);
+    CacheKey.init(&key, "example.com", 0, .ipv4);
 
     const now: Timestamp = .{ .value = 1 };
 
@@ -176,7 +179,7 @@ test "Cache: multiple independent entries" {
 
     for (names, 0..) |name, i| {
         var k: CacheKey = undefined;
-        CacheKey.init(&k, name, 0);
+        CacheKey.init(&k, name, 0, .ipv4);
         var e: CacheEntry = std.mem.zeroes(CacheEntry);
         e.count = @intCast(i + 1);
         e.expiry = .{ .value = std.math.maxInt(u64) };
@@ -185,7 +188,7 @@ test "Cache: multiple independent entries" {
 
     for (names, 0..) |name, i| {
         var k: CacheKey = undefined;
-        CacheKey.init(&k, name, 0);
+        CacheKey.init(&k, name, 0, .ipv4);
         const result = cache.get(&k, now);
         try std.testing.expect(result != null);
         try std.testing.expectEqual(@as(u8, @intCast(i + 1)), result.?.count);
@@ -201,14 +204,14 @@ test "Cache: long names with shared prefix stay distinct" {
     const now: Timestamp = .{ .value = 1 };
 
     var k1: CacheKey = undefined;
-    CacheKey.init(&k1, name1, 0);
+    CacheKey.init(&k1, name1, 0, .ipv4);
     var e1: CacheEntry = std.mem.zeroes(CacheEntry);
     e1.count = 1;
     e1.expiry = .{ .value = std.math.maxInt(u64) };
     cache.put(&k1, e1, now);
 
     var k2: CacheKey = undefined;
-    CacheKey.init(&k2, name2, 0);
+    CacheKey.init(&k2, name2, 0, .ipv4);
     var e2: CacheEntry = std.mem.zeroes(CacheEntry);
     e2.count = 2;
     e2.expiry = .{ .value = std.math.maxInt(u64) };
