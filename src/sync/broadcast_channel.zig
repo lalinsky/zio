@@ -274,9 +274,7 @@ const AsyncReceiveImpl = struct {
 /// }
 ///
 /// fn listener(rt: *Runtime, ch: *BroadcastChannel(u32)) !void {
-///     var consumer = BroadcastChannel(u32).Consumer{};
-///     ch.subscribe(&consumer);
-///     defer ch.unsubscribe(&consumer);
+///     var consumer = ch.subscribe();
 ///
 ///     while (ch.receive(&consumer)) |value| {
 ///         std.debug.print("Received: {}\n", .{value});
@@ -321,8 +319,6 @@ pub fn BroadcastChannel(comptime T: type) type {
         ///
         /// The consumer begins at the current write position and will only receive
         /// messages sent after subscription. Past messages are not available.
-        ///
-        /// The consumer must remain valid until `unsubscribe()` is called.
         pub fn subscribe(self: *Self) Consumer {
             return self.impl.subscribe();
         }
@@ -382,9 +378,7 @@ pub fn BroadcastChannel(comptime T: type) type {
         ///
         /// Example:
         /// ```zig
-        /// var consumer = BroadcastChannel(u32).Consumer{};
-        /// channel.subscribe(&consumer);
-        /// defer channel.unsubscribe(&consumer);
+        /// var consumer = channel.subscribe();
         ///
         /// var recv = channel.asyncReceive(&consumer);
         /// const result = try select(.{ .recv = &recv });
@@ -406,10 +400,8 @@ pub fn BroadcastChannel(comptime T: type) type {
 ///
 /// Example:
 /// ```zig
-/// var consumer1 = BroadcastChannel(u32).Consumer{};
-/// var consumer2 = BroadcastChannel(u32).Consumer{};
-/// channel.subscribe(&consumer1);
-/// channel.subscribe(&consumer2);
+/// var consumer1 = channel.subscribe();
+/// var consumer2 = channel.subscribe();
 ///
 /// const result = try select(.{
 ///     .ch1 = channel.asyncReceive(&consumer1),
