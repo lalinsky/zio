@@ -652,6 +652,11 @@ pub fn getCurrentExecutor() *Executor {
     return Executor.current orelse @panic("no current executor");
 }
 
+/// Get the current thread's executor, or null if not in executor context.
+pub fn getCurrentExecutorOrNull() ?*Executor {
+    return Executor.current;
+}
+
 /// Get the currently executing task.
 /// Panics if called from a thread without an active executor context.
 pub fn getCurrentTask() *AnyTask {
