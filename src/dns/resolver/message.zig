@@ -60,6 +60,47 @@ pub fn buildQuery(buf: []u8, id: u16, name: []const u8, qtype: QType) ![]u8 {
     return buf[0 .. p + 4];
 }
 
+/// Decode a DNS wire-format name at buf[pos] into out, following compression
+/// pointers. Labels are joined with '.', no trailing dot. Returns the decoded
+/// length and the end position in the *original* location (after the pointer
+/// word, not after the pointer target).
+pub fn decodeName(buf: []const u8, pos: usize, out: []u8) !struct { end: usize, len: usize } {
+    var p = pos;
+    var out_len: usize = 0;
+    var end: usize = 0;
+    var jumped = false;
+    var depth: usize = 0;
+    while (p < buf.len and depth < 128) : (depth += 1) {
+        const b = buf[p];
+        if (b == 0) {
+            if (!jumped) end = p + 1;
+            break;
+        }
+        if (b & 0xc0 == 0xc0) {
+            if (p + 2 > buf.len) return error.Truncated;
+            if (!jumped) end = p + 2;
+            jumped = true;
+            p = (@as(usize, b & 0x3f) << 8) | buf[p + 1];
+            continue;
+        }
+        if (b & 0xc0 != 0) return error.InvalidMessage;
+        const label_len = b & 0x3f;
+        p += 1;
+        if (p + label_len > buf.len) return error.Truncated;
+        if (out_len > 0) {
+            if (out_len >= out.len) return error.BufferTooSmall;
+            out[out_len] = '.';
+            out_len += 1;
+        }
+        if (out_len + label_len > out.len) return error.BufferTooSmall;
+        @memcpy(out[out_len..][0..label_len], buf[p..][0..label_len]);
+        out_len += label_len;
+        p += label_len;
+    }
+    if (!jumped) end = p + 1;
+    return .{ .end = end, .len = out_len };
+}
+
 /// Skip a DNS-encoded name starting at buf[pos], following compression pointers.
 /// Returns the position of the byte after the name in the *current* location
 /// (i.e. after the pointer word, not after the pointer target).
@@ -83,9 +124,12 @@ pub const ParseResult = struct {
     rcode: RCode,
     count: usize,
     ttl: u32,
+    canonical_name_len: usize = 0,
 };
 
 /// Parse a DNS response. Fills addresses with port into storage.
+/// If cname_out is provided, the last CNAME target is decoded into it and
+/// null-terminated (the caller reads it back via sliceTo).
 /// Returns error if the message is malformed or the ID doesn't match.
 pub fn parseResponse(
     buf: []const u8,
@@ -93,6 +137,7 @@ pub fn parseResponse(
     qtype: QType,
     storage: []net.IpAddress,
     port: u16,
+    cname_out: ?[]u8,
 ) !ParseResult {
     if (buf.len < 12) return error.Truncated;
     if (std.mem.readInt(u16, buf[0..2], .big) != id) return error.IdMismatch;
@@ -115,7 +160,9 @@ pub fn parseResponse(
 
     var count: usize = 0;
     var ttl: u32 = 0;
+    var canonical_name_len: usize = 0;
     for (0..ancount) |_| {
+        const name_start = p;
         p = try skipName(buf, p);
         if (p + 10 > buf.len) return error.Truncated;
         const rtype = std.mem.readInt(u16, buf[p..][0..2], .big);
@@ -132,18 +179,30 @@ pub fn parseResponse(
                 if (count < storage.len)
                     storage[count] = net.IpAddress.initIp4(rdata[0..4].*, port);
                 count += 1;
+                // Decode the owner name of the first A record as the canonical name.
+                if (count == 1) if (cname_out) |out| {
+                    if (decodeName(buf, name_start, out)) |r| {
+                        canonical_name_len = r.len;
+                    } else |_| {}
+                };
             },
             28 => if (qtype == .aaaa and rdlength == 16) { // AAAA
                 ttl = if (count == 0) record_ttl else @min(ttl, record_ttl);
                 if (count < storage.len)
                     storage[count] = net.IpAddress.initIp6(rdata[0..16].*, port, 0, 0);
                 count += 1;
+                // Decode the owner name of the first AAAA record as the canonical name.
+                if (count == 1) if (cname_out) |out| {
+                    if (decodeName(buf, name_start, out)) |r| {
+                        canonical_name_len = r.len;
+                    } else |_| {}
+                };
             },
             else => {},
         }
     }
 
-    return .{ .truncated = truncated, .rcode = rcode, .count = count, .ttl = ttl };
+    return .{ .truncated = truncated, .rcode = rcode, .count = count, .ttl = ttl, .canonical_name_len = canonical_name_len };
 }
 
 test "buildQuery encodes correctly" {
@@ -200,7 +259,7 @@ test "parseResponse extracts A record" {
     pos += 16;
 
     var storage: [4]net.IpAddress = undefined;
-    const result = try parseResponse(buf[0..pos], 0x1234, .a, &storage, 80);
+    const result = try parseResponse(buf[0..pos], 0x1234, .a, &storage, 80, null);
 
     try std.testing.expectEqual(false, result.truncated);
     try std.testing.expectEqual(RCode.no_error, result.rcode);

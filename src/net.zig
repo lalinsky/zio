@@ -1359,6 +1359,28 @@ test "HostName: lookup with canonical name" {
     try std.testing.expect(has_address);
 }
 
+test "HostName: lookup www.github.com follows CNAME" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
+
+    const host = try HostName.init("www.github.com");
+    var storage: [32]HostName.LookupResult = undefined;
+    var cname_buf: [HostName.max_len]u8 = undefined;
+    const count = try host.lookup(&storage, .{ .port = 80, .canonical_name_buffer = &cname_buf });
+
+    var canonical_name: ?HostName = null;
+    var has_address = false;
+    for (storage[0..count]) |entry| {
+        switch (entry) {
+            .address => has_address = true,
+            .canonical_name => |name| canonical_name = name,
+        }
+    }
+    try std.testing.expect(has_address);
+    const cname = canonical_name orelse return error.NoCanonicalName;
+    try std.testing.expectEqualStrings("github.com", cname.bytes);
+}
+
 test "HostName: connect" {
     if (builtin.os.tag == .macos) return error.SkipZigTest;
     if (builtin.os.tag == .netbsd) return error.SkipZigTest;

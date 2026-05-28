@@ -134,6 +134,16 @@ pub const Resolver = struct {
         self.maybeReloadHosts(now);
         self.maybeReloadResolvConf(now);
 
+        // When canonical name is requested, reserve storage[0] for it and use
+        // storage[1..] for addresses. Pre-fill the buffer with the queried name
+        // as the default; the DNS path may overwrite it with a real CNAME target.
+        const cname_buf = options.canonical_name_buffer;
+        if (cname_buf) |buf| {
+            const len = @min(options.name.len, buf.len);
+            @memcpy(buf[0..len], options.name[0..len]);
+        }
+        const addr_storage = if (cname_buf != null and storage.len > 0) storage[1..] else storage;
+
         // 1. Check /etc/hosts
         {
             try self.lock.lockShared();
@@ -142,44 +152,66 @@ pub const Resolver = struct {
             if (self.hosts.lookupByName(options.name)) |addrs| {
                 var i: usize = 0;
                 for (addrs) |addr_in| {
-                    if (i >= storage.len) break;
+                    if (i >= addr_storage.len) break;
                     if (options.family) |f| {
                         if (addr_in.getFamily() != f) continue;
                     }
                     var addr = addr_in;
                     addr.setPort(options.port);
-                    storage[i] = .{ .address = addr };
+                    addr_storage[i] = .{ .address = addr };
                     i += 1;
                 }
-                if (i > 0) return i;
+                if (i > 0) {
+                    if (cname_buf) |buf| {
+                        storage[0] = .{ .canonical_name = .{ .bytes = buf[0..options.name.len] } };
+                        return i + 1;
+                    }
+                    return i;
+                }
             }
         }
 
         // 2. Query each requested family through its own cache/dedup/DNS path.
         if (options.family) |fam| {
-            return self.lookupOneFamily(storage, options, fam, now);
+            const r = try self.lookupOneFamily(addr_storage, options, fam, now);
+            if (cname_buf) |buf| {
+                const len = if (r.canonical_name_len > 0) r.canonical_name_len else options.name.len;
+                storage[0] = .{ .canonical_name = .{ .bytes = buf[0..len] } };
+                return r.count + 1;
+            }
+            return r.count;
         }
 
         var total: usize = 0;
+        var cname_len: usize = 0;
         var last_err: dns.LookupError = error.UnknownHostName;
 
-        if (self.lookupOneFamily(storage, options, .ipv4, now)) |n| {
-            total += n;
+        if (self.lookupOneFamily(addr_storage, options, .ipv4, now)) |r| {
+            total += r.count;
+            if (r.canonical_name_len > 0) cname_len = r.canonical_name_len;
         } else |err| switch (err) {
             error.Canceled, error.RuntimeShutdown => return err,
             else => last_err = err,
         }
 
-        if (self.lookupOneFamily(storage[total..], options, .ipv6, now)) |n| {
-            total += n;
+        if (self.lookupOneFamily(addr_storage[total..], options, .ipv6, now)) |r| {
+            total += r.count;
+            if (r.canonical_name_len > 0) cname_len = r.canonical_name_len;
         } else |err| switch (err) {
             error.Canceled, error.RuntimeShutdown => return err,
             else => last_err = err,
         }
 
         if (total == 0) return last_err;
+        if (cname_buf) |buf| {
+            const len = if (cname_len > 0) cname_len else options.name.len;
+            storage[0] = .{ .canonical_name = .{ .bytes = buf[0..len] } };
+            return total + 1;
+        }
         return total;
     }
+
+    const OneFamilyResult = struct { count: usize, canonical_name_len: usize };
 
     fn lookupOneFamily(
         self: *Resolver,
@@ -187,8 +219,8 @@ pub const Resolver = struct {
         options: dns.LookupOptions,
         family: net.IpAddress.Family,
         now: Timestamp,
-    ) dns.LookupError!usize {
-        if (storage.len == 0) return 0;
+    ) dns.LookupError!OneFamilyResult {
+        if (storage.len == 0) return .{ .count = 0, .canonical_name_len = 0 };
         var opts = options;
         opts.family = family;
 
@@ -208,7 +240,7 @@ pub const Resolver = struct {
                     storage[i] = .{ .address = addr };
                     i += 1;
                 }
-                if (i > 0) return i;
+                if (i > 0) return .{ .count = i, .canonical_name_len = 0 };
             }
         }
 
@@ -243,7 +275,7 @@ pub const Resolver = struct {
 
                 if (node.err) |err| return err;
                 for (node.storage[0..node.count]) |*r| r.address.setPort(options.port);
-                return node.count;
+                return .{ .count = node.count, .canonical_name_len = 0 };
             }
         }
 
@@ -290,9 +322,9 @@ pub const Resolver = struct {
         if (buf.ptr != storage.ptr) {
             const acount = @min(storage.len, r.count);
             @memcpy(storage[0..acount], buf[0..acount]);
-            return acount;
+            return .{ .count = acount, .canonical_name_len = r.canonical_name_len };
         }
-        return r.count;
+        return .{ .count = r.count, .canonical_name_len = r.canonical_name_len };
     }
 
     fn lookupDns(
@@ -508,7 +540,7 @@ fn makeFqdn(buf: *[256]u8, name: []const u8, suffix: ?[]const u8) ?[]u8 {
     return buf[0..total];
 }
 
-const QueryResult = struct { count: usize, ttl: u32 };
+const QueryResult = struct { count: usize, ttl: u32, canonical_name_len: usize = 0 };
 
 /// Query all servers for one record type (A or AAAA), retrying up to `attempts`
 /// times. Returns count + TTL from the successful response, or an error if all
@@ -542,7 +574,8 @@ fn queryOneType(
             };
 
             const max_addrs = @min(addr_storage.len, storage.len);
-            const result = message.parseResponse(response, id, qtype, addr_storage[0..max_addrs], options.port) catch |err| {
+            const cname_out: ?[]u8 = if (options.canonical_name_buffer) |b| b[0..] else null;
+            const result = message.parseResponse(response, id, qtype, addr_storage[0..max_addrs], options.port, cname_out) catch |err| {
                 log.debug("dns: parse error for {s}: {}", .{ fqdn, err });
                 last_err = error.NameServerFailure;
                 continue;
@@ -565,7 +598,7 @@ fn queryOneType(
             for (addr_storage[0..count], 0..) |addr, i| {
                 storage[i] = .{ .address = addr };
             }
-            return .{ .count = count, .ttl = result.ttl };
+            return .{ .count = count, .ttl = result.ttl, .canonical_name_len = result.canonical_name_len };
         }
     }
 
