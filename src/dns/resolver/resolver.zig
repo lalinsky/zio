@@ -150,29 +150,25 @@ pub const Resolver = struct {
         // 0. Numeric IP literal — parse directly without touching hosts or DNS.
         if (net.IpAddress.parseIp4(options.name, options.port) catch null) |addr| {
             if (options.family == null or options.family == .ipv4) {
-                const addr_count: usize = if (addr_storage.len > 0) blk: {
-                    addr_storage[0] = .{ .address = addr };
-                    break :blk 1;
-                } else 0;
+                if (addr_storage.len == 0) return error.TooManyAddresses;
+                addr_storage[0] = .{ .address = addr };
                 if (cname_buf) |buf| {
                     storage[0] = .{ .canonical_name = .{ .bytes = buf[0..options.name.len] } };
-                    return addr_count + 1;
+                    return 2;
                 }
-                return addr_count;
+                return 1;
             }
             return 0;
         }
         if (net.IpAddress.parseIp6(options.name, options.port) catch null) |addr| {
             if (options.family == null or options.family == .ipv6) {
-                const addr_count: usize = if (addr_storage.len > 0) blk: {
-                    addr_storage[0] = .{ .address = addr };
-                    break :blk 1;
-                } else 0;
+                if (addr_storage.len == 0) return error.TooManyAddresses;
+                addr_storage[0] = .{ .address = addr };
                 if (cname_buf) |buf| {
                     storage[0] = .{ .canonical_name = .{ .bytes = buf[0..options.name.len] } };
-                    return addr_count + 1;
+                    return 2;
                 }
-                return addr_count;
+                return 1;
             }
             return 0;
         }
@@ -185,10 +181,10 @@ pub const Resolver = struct {
             if (self.hosts.lookupByName(options.name)) |addrs| {
                 var i: usize = 0;
                 for (addrs) |addr_in| {
-                    if (i >= addr_storage.len) break;
                     if (options.family) |f| {
                         if (addr_in.getFamily() != f) continue;
                     }
+                    if (i >= addr_storage.len) return error.TooManyAddresses;
                     var addr = addr_in;
                     addr.setPort(options.port);
                     addr_storage[i] = .{ .address = addr };

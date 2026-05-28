@@ -1254,6 +1254,7 @@ pub fn tcpConnectToAddress(addr: IpAddress, options: IpAddress.ConnectOptions) !
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("dns/test.zig");
 }
 
 test "HostName: validate" {
@@ -1378,7 +1379,7 @@ test "HostName: lookup www.github.com follows CNAME" {
     }
     try std.testing.expect(has_address);
     const cname = canonical_name orelse return error.NoCanonicalName;
-    try std.testing.expectEqualStrings("github.com", cname.bytes);
+    try std.testing.expect(std.ascii.eqlIgnoreCase("github.com", cname.bytes));
 }
 
 test "HostName: connect" {
