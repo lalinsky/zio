@@ -6,6 +6,7 @@ const dns = @import("../root.zig");
 const fs = @import("../../fs.zig");
 const net = @import("../../net.zig");
 const os = @import("../../os/root.zig");
+const getCurrentExecutorOrNull = @import("../../runtime.zig").getCurrentExecutorOrNull;
 const Hosts = @import("hosts.zig").Hosts;
 const ResolvConf = @import("resolvconf.zig").ResolvConf;
 const message = @import("message.zig");
@@ -53,6 +54,13 @@ const Bucket = struct {
     waiters: SimpleQueue(WaiterNode) = .empty,
 };
 
+fn getCurrentTime() Timestamp {
+    if (getCurrentExecutorOrNull()) |exec| {
+        return exec.loop.now();
+    }
+    return Timestamp.now(.monotonic);
+}
+
 pub const Resolver = struct {
     allocator: std.mem.Allocator,
     lock: RwLock,
@@ -79,8 +87,9 @@ pub const Resolver = struct {
     pub fn init(allocator: std.mem.Allocator) Resolver {
         var hosts_mtime: i64 = 0;
         var conf_mtime: i64 = 0;
-        const next_check_s: u32 = @as(u32, @truncate(Timestamp.now(.monotonic).toSeconds())) +% check_interval_secs;
-        var prng = std.Random.DefaultPrng.init(Timestamp.now(.realtime).value);
+        const now = getCurrentTime();
+        const next_check_s: u32 = @as(u32, @truncate(now.toSeconds())) +% check_interval_secs;
+        var prng = std.Random.DefaultPrng.init(now.value);
         const hash_seed = prng.random().int(u64);
         return .{
             .allocator = allocator,
@@ -121,7 +130,7 @@ pub const Resolver = struct {
         storage: []dns.LookupResult,
         options: dns.LookupOptions,
     ) dns.ResolverError!usize {
-        const now = Timestamp.now(.monotonic);
+        const now = getCurrentTime();
         self.maybeReloadHosts(now);
         self.maybeReloadResolvConf(now);
 
@@ -148,20 +157,20 @@ pub const Resolver = struct {
 
         // 2. Query each requested family through its own cache/dedup/DNS path.
         if (options.family) |fam| {
-            return self.lookupOneFamily(storage, options, fam);
+            return self.lookupOneFamily(storage, options, fam, now);
         }
 
         var total: usize = 0;
         var last_err: dns.LookupError = error.UnknownHostName;
 
-        if (self.lookupOneFamily(storage, options, .ipv4)) |n| {
+        if (self.lookupOneFamily(storage, options, .ipv4, now)) |n| {
             total += n;
         } else |err| switch (err) {
             error.Canceled, error.RuntimeShutdown => return err,
             else => last_err = err,
         }
 
-        if (self.lookupOneFamily(storage[total..], options, .ipv6)) |n| {
+        if (self.lookupOneFamily(storage[total..], options, .ipv6, now)) |n| {
             total += n;
         } else |err| switch (err) {
             error.Canceled, error.RuntimeShutdown => return err,
@@ -177,6 +186,7 @@ pub const Resolver = struct {
         storage: []dns.LookupResult,
         options: dns.LookupOptions,
         family: net.IpAddress.Family,
+        now: Timestamp,
     ) dns.LookupError!usize {
         if (storage.len == 0) return 0;
         var opts = options;
@@ -189,7 +199,7 @@ pub const Resolver = struct {
         {
             try self.lock.lockShared();
             defer self.lock.unlockShared();
-            if (self.cache.get(&key, Timestamp.now(.monotonic))) |entry| {
+            if (self.cache.get(&key, now)) |entry| {
                 var i: usize = 0;
                 for (entry.addrs[0..entry.count]) |addr_in| {
                     if (i >= storage.len) break;
@@ -251,8 +261,8 @@ pub const Resolver = struct {
         const result = self.lookupDns(buf, opts);
 
         if (result) |r| {
-            const now = Timestamp.now(.monotonic);
-            self.cacheInsert(options.name, family, buf[0..r.count], r.ttl, now);
+            const now_updated = getCurrentTime();
+            self.cacheInsert(options.name, family, buf[0..r.count], r.ttl, now_updated);
         } else |_| {}
 
         // Notify all joiners, then remove the active node.
