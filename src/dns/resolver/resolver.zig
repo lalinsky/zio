@@ -150,25 +150,31 @@ pub const Resolver = struct {
         // 0. Numeric IP literal — parse directly without touching hosts or DNS.
         if (net.IpAddress.parseIp4(options.name, options.port) catch null) |addr| {
             if (options.family == null or options.family == .ipv4) {
-                if (addr_storage.len > 0) addr_storage[0] = .{ .address = addr };
+                const addr_count: usize = if (addr_storage.len > 0) blk: {
+                    addr_storage[0] = .{ .address = addr };
+                    break :blk 1;
+                } else 0;
                 if (cname_buf) |buf| {
                     storage[0] = .{ .canonical_name = .{ .bytes = buf[0..options.name.len] } };
-                    return 2;
+                    return addr_count + 1;
                 }
-                return 1;
+                return addr_count;
             }
-            return if (cname_buf != null) 1 else 0;
+            return 0;
         }
         if (net.IpAddress.parseIp6(options.name, options.port) catch null) |addr| {
             if (options.family == null or options.family == .ipv6) {
-                if (addr_storage.len > 0) addr_storage[0] = .{ .address = addr };
+                const addr_count: usize = if (addr_storage.len > 0) blk: {
+                    addr_storage[0] = .{ .address = addr };
+                    break :blk 1;
+                } else 0;
                 if (cname_buf) |buf| {
                     storage[0] = .{ .canonical_name = .{ .bytes = buf[0..options.name.len] } };
-                    return 2;
+                    return addr_count + 1;
                 }
-                return 1;
+                return addr_count;
             }
-            return if (cname_buf != null) 1 else 0;
+            return 0;
         }
 
         // 1. Check /etc/hosts
