@@ -44,6 +44,8 @@ const WaiterNode = struct {
     is_active: bool,
     storage: []dns.LookupResult,
     count: usize = 0,
+    canonical_name_buffer: ?*[net.HostName.max_len]u8 = null,
+    canonical_name_len: usize = 0,
     err: ?dns.LookupError = null,
     done: bool = false,
     cond: Condition = .init,
@@ -247,6 +249,11 @@ pub const Resolver = struct {
         if (storage.len == 0) return .{ .count = 0, .canonical_name_len = 0 };
         var opts = options;
         opts.family = family;
+        // Always decode the canonical name into a local buffer (mirroring the
+        // tmp address buffer pattern) so waiters receive it regardless of
+        // whether the active requester requested one.
+        var cname_buf: [net.HostName.max_len]u8 = undefined;
+        opts.canonical_name_buffer = &cname_buf;
 
         var key: CacheKey = undefined;
         CacheKey.init(&key, options.name, self.hash_seed, family);
@@ -281,6 +288,7 @@ pub const Resolver = struct {
                     .key = key,
                     .is_active = false,
                     .storage = storage,
+                    .canonical_name_buffer = options.canonical_name_buffer,
                 };
                 bucket.waiters.push(&node);
 
@@ -299,7 +307,7 @@ pub const Resolver = struct {
 
                 if (node.err) |err| return err;
                 for (node.storage[0..node.count]) |*r| r.address.setPort(options.port);
-                return .{ .count = node.count, .canonical_name_len = 0 };
+                return .{ .count = node.count, .canonical_name_len = node.canonical_name_len };
             }
         }
 
@@ -330,6 +338,10 @@ pub const Resolver = struct {
                     const jcount = @min(n.storage.len, r.count);
                     @memcpy(n.storage[0..jcount], buf[0..jcount]);
                     n.count = jcount;
+                    n.canonical_name_len = r.canonical_name_len;
+                    if (r.canonical_name_len > 0) if (n.canonical_name_buffer) |cbuf| {
+                        @memcpy(cbuf[0..r.canonical_name_len], cname_buf[0..r.canonical_name_len]);
+                    };
                     n.err = null;
                 } else |err| {
                     n.count = 0;
@@ -343,6 +355,9 @@ pub const Resolver = struct {
         bucket.mutex.unlock();
 
         const r = result catch |err| return err;
+        if (r.canonical_name_len > 0) if (options.canonical_name_buffer) |cbuf| {
+            @memcpy(cbuf[0..r.canonical_name_len], cname_buf[0..r.canonical_name_len]);
+        };
         if (buf.ptr != storage.ptr) {
             const acount = @min(storage.len, r.count);
             @memcpy(storage[0..acount], buf[0..acount]);
