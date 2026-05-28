@@ -48,9 +48,11 @@ pub fn now(clock: Clock) Timestamp {
                 .monotonic => posix.system.CLOCK.MONOTONIC,
                 .realtime => posix.system.CLOCK.REALTIME,
             };
-            var tp: posix.system.timespec = undefined;
-            const rc = posix.system.clock_gettime(clock_id, &tp);
-            switch (posix.errno(rc)) {
+            // TODO: use our posix layer, not std.posix
+            // https://codeberg.org/ziglang/zig/pulls/35506
+            var tp: std.posix.system.timespec = undefined;
+            const rc = std.posix.system.clock_gettime(clock_id, &tp);
+            switch (std.posix.errno(rc)) {
                 .SUCCESS => {
                     return .fromTimespec(tp);
                 },
