@@ -165,7 +165,7 @@ pub const Resolver = struct {
             total += n;
         } else |err| switch (err) {
             error.Canceled, error.RuntimeShutdown => return err,
-            else => {},
+            else => last_err = err,
         }
 
         if (total == 0) return last_err;
@@ -178,6 +178,7 @@ pub const Resolver = struct {
         options: dns.LookupOptions,
         family: net.IpAddress.Family,
     ) dns.LookupError!usize {
+        if (storage.len == 0) return 0;
         var opts = options;
         opts.family = family;
 
@@ -341,15 +342,13 @@ pub const Resolver = struct {
             .ipv4 => .a,
             .ipv6 => .aaaa,
         };
-        const deadline = (Timeout{ .duration = timeout }).toDeadline();
-
         var fqdn_buf: [256]u8 = undefined;
         var last_err: dns.LookupError = error.UnknownHostName;
 
         const r: QueryResult = blk: {
             // Rooted name: only try exactly as given.
             if (rooted) {
-                const r = try queryOneType(self, storage, options, name, qtype, srvs, attempts, deadline);
+                const r = try queryOneType(self, storage, options, name, qtype, srvs, attempts, .{ .duration = timeout });
                 if (r.count == 0) return error.UnknownHostName;
                 break :blk r;
             }
@@ -363,7 +362,7 @@ pub const Resolver = struct {
             // Enough dots: try unsuffixed first (Go's nameList logic).
             if (has_enough_dots) {
                 if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
-                    if (queryOneType(self, storage, options, fqdn, qtype, srvs, attempts, deadline)) |r| {
+                    if (queryOneType(self, storage, options, fqdn, qtype, srvs, attempts, .{ .duration = timeout })) |r| {
                         if (r.count > 0) break :blk r;
                     } else |err| {
                         if (err != error.UnknownHostName) return err;
@@ -375,7 +374,7 @@ pub const Resolver = struct {
             for (0..search_count) |i| {
                 const suffix = search_store[i][0..search_lens[i]];
                 if (makeFqdn(&fqdn_buf, name, suffix)) |fqdn| {
-                    if (queryOneType(self, storage, options, fqdn, qtype, srvs, attempts, deadline)) |r| {
+                    if (queryOneType(self, storage, options, fqdn, qtype, srvs, attempts, .{ .duration = timeout })) |r| {
                         if (r.count > 0) break :blk r;
                     } else |err| {
                         if (err != error.UnknownHostName) return err;
@@ -386,7 +385,7 @@ pub const Resolver = struct {
             // Not enough dots: try unsuffixed last.
             if (!has_enough_dots) {
                 if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
-                    if (queryOneType(self, storage, options, fqdn, qtype, srvs, attempts, deadline)) |r| {
+                    if (queryOneType(self, storage, options, fqdn, qtype, srvs, attempts, .{ .duration = timeout })) |r| {
                         if (r.count > 0) break :blk r;
                     } else |err| {
                         last_err = err;
