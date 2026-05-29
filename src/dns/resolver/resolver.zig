@@ -728,10 +728,13 @@ fn queryBatch(
     // TCP fallback for any truncated family.
     for (qs, 0..) |*q, i| {
         if (!q.truncated) continue;
+        q.truncated = false;
+        var resolved = false;
         for (servers) |server| {
             const deadline = (Timeout{ .duration = timeout }).toDeadline();
             const resp = exchangeTcp(server, query_bufs[i][0..query_lens[i]], &recv_buf, deadline) catch |err| {
                 if (err == error.Canceled) return error.Canceled;
+                last_err = error.TemporaryNameServerFailure;
                 continue;
             };
             const result = message.parseResponse(
@@ -741,7 +744,10 @@ fn queryBatch(
                 &parse_addrs,
                 options.port,
                 if (canonical_name_len == 0) cname_out else null,
-            ) catch continue;
+            ) catch {
+                last_err = error.NameServerFailure;
+                continue;
+            };
             switch (result.rcode) {
                 .no_error => {
                     const c = @min(result.count, parse_addrs.len);
@@ -752,16 +758,27 @@ fn queryBatch(
                     if (q.found and canonical_name_len == 0 and result.canonical_name_len > 0) {
                         canonical_name_len = result.canonical_name_len;
                     }
+                    resolved = true;
                 },
                 .nx_domain => {
                     q.count = 0;
                     q.found = false;
+                    resolved = true;
                 },
-                else => {},
+                .serv_fail => {
+                    last_err = error.TemporaryNameServerFailure;
+                    continue;
+                },
+                else => {
+                    last_err = error.NameServerFailure;
+                    continue;
+                },
             }
             break;
         }
-        q.truncated = false;
+        // No definitive TCP answer — keep the family pending so the batch
+        // reports a temporary failure instead of a false empty result.
+        if (!resolved) q.done = false;
     }
 
     // Assemble the union of all families that found records.
