@@ -73,3 +73,7 @@ pub const Resolver = if (builtin.os.tag != .windows)
     @import("resolver/root.zig").Resolver
 else
     @import("resolver/noop.zig").NoResolver;
+
+test {
+    _ = @import("test.zig");
+}
