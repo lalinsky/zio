@@ -32,7 +32,11 @@ const max_search_domain_len = 254;
 const Cache = @import("cache.zig").Cache;
 const CacheKey = @import("cache.zig").CacheKey;
 const CacheEntry = @import("cache.zig").CacheEntry;
+const Shape = @import("cache.zig").Shape;
 const max_cached_addrs = @import("cache.zig").max_cached_addrs;
+
+// Maximum addresses parsed/returned per family within one batched query.
+const max_addrs_per_family = 8;
 
 const num_dedup_buckets = 64;
 
@@ -200,65 +204,41 @@ pub const Resolver = struct {
             }
         }
 
-        // 2. Query each requested family through its own cache/dedup/DNS path.
-        if (options.family) |fam| {
-            const r = try self.lookupOneFamily(addr_storage, options, fam, now);
-            if (cname_buf) |buf| {
-                const len = if (r.canonical_name_len > 0) r.canonical_name_len else options.name.len;
-                storage[0] = .{ .canonical_name = .{ .bytes = buf[0..len] } };
-                return r.count + 1;
-            }
-            return r.count;
-        }
+        // 2. DNS. The request shape (single family or dual-stack) drives a
+        // single cache/dedup unit and a single batched query.
+        const shape: Shape = if (options.family) |f| switch (f) {
+            .ipv4 => .ipv4,
+            .ipv6 => .ipv6,
+        } else .both;
 
-        var total: usize = 0;
-        var cname_len: usize = 0;
-        var last_err: dns.LookupError = error.UnknownHostName;
-
-        if (self.lookupOneFamily(addr_storage, options, .ipv4, now)) |r| {
-            total += r.count;
-            if (r.canonical_name_len > 0) cname_len = r.canonical_name_len;
-        } else |err| switch (err) {
-            error.Canceled, error.RuntimeShutdown => return err,
-            else => last_err = err,
-        }
-
-        if (self.lookupOneFamily(addr_storage[total..], options, .ipv6, now)) |r| {
-            total += r.count;
-            if (r.canonical_name_len > 0) cname_len = r.canonical_name_len;
-        } else |err| switch (err) {
-            error.Canceled, error.RuntimeShutdown => return err,
-            else => last_err = err,
-        }
-
-        if (total == 0) return last_err;
+        const r = try self.lookupShape(addr_storage, options, shape, now);
         if (cname_buf) |buf| {
-            const len = if (cname_len > 0) cname_len else options.name.len;
+            const len = if (r.canonical_name_len > 0) r.canonical_name_len else options.name.len;
             storage[0] = .{ .canonical_name = .{ .bytes = buf[0..len] } };
-            return total + 1;
+            return r.count + 1;
         }
-        return total;
+        return r.count;
     }
 
-    const OneFamilyResult = struct { count: usize, canonical_name_len: usize };
+    const ShapeResult = struct { count: usize, canonical_name_len: usize };
 
-    fn lookupOneFamily(
+    /// Resolve one request shape through its cache/dedup/DNS path. The whole
+    /// shape (e.g. A+AAAA for a dual-stack lookup) is one coalescing unit.
+    fn lookupShape(
         self: *Resolver,
         storage: []dns.LookupResult,
         options: dns.LookupOptions,
-        family: net.IpAddress.Family,
+        shape: Shape,
         now: Timestamp,
-    ) dns.LookupError!OneFamilyResult {
+    ) dns.LookupError!ShapeResult {
         var opts = options;
-        opts.family = family;
-        // Always decode the canonical name into a local buffer (mirroring the
-        // tmp address buffer pattern) so waiters receive it regardless of
-        // whether the active requester requested one.
+        // Always decode the canonical name into a local buffer so waiters
+        // receive it regardless of whether the active requester asked for one.
         var cname_buf: [net.HostName.max_len]u8 = undefined;
         opts.canonical_name_buffer = &cname_buf;
 
         var key: CacheKey = undefined;
-        CacheKey.init(&key, options.name, self.hash_seed, family);
+        CacheKey.init(&key, options.name, self.hash_seed, shape);
 
         // 1. Check DNS cache.
         {
@@ -277,7 +257,7 @@ pub const Resolver = struct {
             }
         }
 
-        // 2. Deduplicate concurrent identical DNS queries.
+        // 2. Deduplicate concurrent identical lookups (same name + shape).
         const bucket = self.getDedupBucket(&key);
 
         try bucket.mutex.lock();
@@ -285,7 +265,7 @@ pub const Resolver = struct {
         var it = bucket.waiters.head;
         while (it) |n| : (it = n.next) {
             if (n.is_active and n.key.eql(&key)) {
-                // An identical query is already in flight — join it.
+                // An identical lookup is already in flight — join it.
                 var node: WaiterNode = .{
                     .key = key,
                     .is_active = false,
@@ -313,7 +293,7 @@ pub const Resolver = struct {
             }
         }
 
-        // No in-flight request for this name+family — become the active requester.
+        // No in-flight lookup for this name+shape — become the active requester.
         var active_node: WaiterNode = .{
             .key = key,
             .is_active = true,
@@ -322,13 +302,13 @@ pub const Resolver = struct {
         bucket.waiters.push(&active_node);
         bucket.mutex.unlock();
 
-        var tmp: [16]dns.LookupResult = undefined;
+        var tmp: [2 * max_addrs_per_family]dns.LookupResult = undefined;
         const buf: []dns.LookupResult = if (storage.len >= tmp.len) storage else tmp[0..];
-        const result = self.lookupDns(buf, opts);
+        const result = self.lookupDnsBatched(buf, opts, shape);
 
         if (result) |r| {
             const now_updated = getCurrentTime();
-            self.cacheInsert(options.name, family, buf[0..r.count], r.ttl, now_updated);
+            self.cacheInsert(options.name, shape, buf[0..r.count], r.ttl, now_updated);
         } else |_| {}
 
         // Notify all joiners, then remove the active node.
@@ -371,10 +351,11 @@ pub const Resolver = struct {
         return .{ .count = r.count, .canonical_name_len = r.canonical_name_len };
     }
 
-    fn lookupDns(
+    fn lookupDnsBatched(
         self: *Resolver,
         storage: []dns.LookupResult,
         options: dns.LookupOptions,
+        shape: Shape,
     ) dns.LookupError!QueryResult {
         // Snapshot conf fields while holding the shared lock so we don't hold
         // it across I/O operations.
@@ -424,70 +405,56 @@ pub const Resolver = struct {
         const srvs = servers[0..server_count];
         const name = options.name;
         const rooted = name.len > 0 and name[name.len - 1] == '.';
-        const qtype: message.QType = switch (options.family.?) {
-            .ipv4 => .a,
-            .ipv6 => .aaaa,
-        };
         var fqdn_buf: [256]u8 = undefined;
         var last_err: dns.LookupError = error.UnknownHostName;
 
-        const r: QueryResult = blk: {
-            // Rooted name: only try exactly as given.
-            if (rooted) {
-                const r = try queryOneType(self, storage, options, name, qtype, srvs, attempts, .{ .duration = timeout });
-                if (r.count == 0) return error.UnknownHostName;
-                break :blk r;
-            }
+        // Rooted name: only try exactly as given.
+        if (rooted) {
+            const r = try queryBatch(self, storage, options, name, shape, srvs, attempts, timeout);
+            if (r.count == 0) return error.UnknownHostName;
+            return r;
+        }
 
-            var dot_count: usize = 0;
-            for (name) |c| {
-                if (c == '.') dot_count += 1;
-            }
-            const has_enough_dots = dot_count >= ndots;
+        var dot_count: usize = 0;
+        for (name) |c| {
+            if (c == '.') dot_count += 1;
+        }
+        const has_enough_dots = dot_count >= ndots;
 
-            // Enough dots: try unsuffixed first (Go's nameList logic).
-            if (has_enough_dots) {
-                if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
-                    if (queryOneType(self, storage, options, fqdn, qtype, srvs, attempts, .{ .duration = timeout })) |r| {
-                        if (r.count > 0) break :blk r;
-                    } else |err| {
-                        if (err != error.UnknownHostName) return err;
-                    }
+        // Enough dots: try unsuffixed first (Go's nameList logic).
+        if (has_enough_dots) {
+            if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
+                const r = try queryBatch(self, storage, options, fqdn, shape, srvs, attempts, timeout);
+                if (r.count > 0) return r;
+            }
+        }
+
+        // Try with each search domain.
+        for (0..search_count) |i| {
+            const suffix = search_store[i][0..search_lens[i]];
+            if (makeFqdn(&fqdn_buf, name, suffix)) |fqdn| {
+                const r = try queryBatch(self, storage, options, fqdn, shape, srvs, attempts, timeout);
+                if (r.count > 0) return r;
+            }
+        }
+
+        // Not enough dots: try unsuffixed last.
+        if (!has_enough_dots) {
+            if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
+                if (queryBatch(self, storage, options, fqdn, shape, srvs, attempts, timeout)) |r| {
+                    if (r.count > 0) return r;
+                } else |err| {
+                    last_err = err;
                 }
             }
+        }
 
-            // Try with each search domain.
-            for (0..search_count) |i| {
-                const suffix = search_store[i][0..search_lens[i]];
-                if (makeFqdn(&fqdn_buf, name, suffix)) |fqdn| {
-                    if (queryOneType(self, storage, options, fqdn, qtype, srvs, attempts, .{ .duration = timeout })) |r| {
-                        if (r.count > 0) break :blk r;
-                    } else |err| {
-                        if (err != error.UnknownHostName) return err;
-                    }
-                }
-            }
-
-            // Not enough dots: try unsuffixed last.
-            if (!has_enough_dots) {
-                if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
-                    if (queryOneType(self, storage, options, fqdn, qtype, srvs, attempts, .{ .duration = timeout })) |r| {
-                        if (r.count > 0) break :blk r;
-                    } else |err| {
-                        last_err = err;
-                    }
-                }
-            }
-
-            return last_err;
-        };
-
-        return r;
+        return last_err;
     }
 
-    fn cacheInsert(self: *Resolver, name: []const u8, family: net.IpAddress.Family, results: []const dns.LookupResult, ttl: u32, now: Timestamp) void {
+    fn cacheInsert(self: *Resolver, name: []const u8, shape: Shape, results: []const dns.LookupResult, ttl: u32, now: Timestamp) void {
         var key: CacheKey = undefined;
-        CacheKey.init(&key, name, self.hash_seed, family);
+        CacheKey.init(&key, name, self.hash_seed, shape);
 
         if (results.len == 0 or results.len > max_cached_addrs) {
             self.lock.lockUncancelable();
@@ -586,66 +553,243 @@ fn makeFqdn(buf: *[256]u8, name: []const u8, suffix: ?[]const u8) ?[]u8 {
 
 const QueryResult = struct { count: usize, ttl: u32, canonical_name_len: usize = 0 };
 
-/// Query all servers for one record type (A or AAAA), retrying up to `attempts`
-/// times. Returns count + TTL from the successful response, or an error if all
-/// attempts failed.
-fn queryOneType(
-    resolver: *Resolver,
+/// Per-family state tracked across the attempts × servers loop of one batched
+/// query. A query is `done` once it reaches a terminal state (records found or
+/// a definitive empty answer); temporary failures leave it pending for retry.
+const FamilyQuery = struct {
+    qtype: message.QType,
+    id: u16,
+    done: bool = false,
+    found: bool = false,
+    truncated: bool = false,
+    answered: bool = false, // got a response this send-round (for recv accounting)
+    addrs: [max_addrs_per_family]net.IpAddress = undefined,
+    count: usize = 0,
+    ttl: u32 = 0,
+};
+
+/// Query all needed families for one FQDN over a single UDP socket per server,
+/// demultiplexing responses by query id. Returns the union of addresses found.
+///
+/// Semantics (matching Go/c-ares dual-stack behavior):
+///   - count > 0  → at least one family had records at this name; stop searching.
+///   - count == 0 → every family answered definitively with no records
+///                  (NODATA/NXDOMAIN); caller advances to the next candidate.
+///   - error      → a family never got a definitive answer (all temp failures).
+fn queryBatch(
+    self: *Resolver,
     storage: []dns.LookupResult,
     options: dns.LookupOptions,
     fqdn: []const u8,
-    qtype: message.QType,
+    shape: Shape,
     servers: []const net.IpAddress,
     attempts: u8,
-    timeout: Timeout,
+    timeout: Duration,
 ) dns.LookupError!QueryResult {
-    const id = resolver.nextQueryId();
+    var queries: [2]FamilyQuery = undefined;
+    var nq: usize = 0;
+    if (shape != .ipv6) {
+        queries[nq] = .{ .qtype = .a, .id = self.nextQueryId() };
+        nq += 1;
+    }
+    if (shape != .ipv4) {
+        var id = self.nextQueryId();
+        // Keep ids distinct so demux is unambiguous.
+        if (nq > 0 and id == queries[0].id) id +%= 1;
+        queries[nq] = .{ .qtype = .aaaa, .id = id };
+        nq += 1;
+    }
+    const qs = queries[0..nq];
 
-    var query_buf: [message.max_udp_size]u8 = undefined;
-    const query = message.buildQuery(&query_buf, id, fqdn, qtype) catch return error.Unexpected;
+    // Build the query packets once; ids are stable across retries.
+    var query_bufs: [2][message.max_udp_size]u8 = undefined;
+    var query_lens: [2]usize = undefined;
+    for (qs, 0..) |*q, i| {
+        const built = message.buildQuery(&query_bufs[i], q.id, fqdn, q.qtype) catch return error.Unexpected;
+        query_lens[i] = built.len;
+    }
 
     var recv_buf: [4096]u8 = undefined;
-    var addr_storage: [16]net.IpAddress = undefined;
-    var last_err: dns.LookupError = error.UnknownHostName;
+    var parse_addrs: [max_addrs_per_family]net.IpAddress = undefined;
 
-    for (0..attempts) |_| {
+    // The canonical name is decoded from the first family that yields records.
+    const cname_out: ?[]u8 = if (options.canonical_name_buffer) |b| b[0..] else null;
+    var canonical_name_len: usize = 0;
+
+    var last_err: dns.LookupError = error.TemporaryNameServerFailure;
+
+    attempt_loop: for (0..attempts) |_| {
         for (servers) |server| {
-            const response = exchange(server, query, &recv_buf, id, timeout) catch |err| {
-                if (err == error.Canceled) return error.Canceled;
-                log.debug("dns: {s}: {}", .{ fqdn, err });
+            var any_pending = false;
+            for (qs) |*q| {
+                q.answered = false;
+                if (!q.done) any_pending = true;
+            }
+            if (!any_pending) break :attempt_loop;
+
+            const domain: os.net.Domain = switch (server.getFamily()) {
+                .ipv4 => .ipv4,
+                .ipv6 => .ipv6,
+            };
+            var sock = net.Socket.open(.dgram, domain, .ip) catch {
                 last_err = error.TemporaryNameServerFailure;
                 continue;
             };
+            defer sock.close();
 
-            const max_addrs = @min(addr_storage.len, storage.len);
-            const cname_out: ?[]u8 = if (options.canonical_name_buffer) |b| b[0..] else null;
-            const result = message.parseResponse(response, id, qtype, addr_storage[0..max_addrs], options.port, cname_out) catch |err| {
-                log.debug("dns: parse error for {s}: {}", .{ fqdn, err });
-                last_err = error.NameServerFailure;
+            const deadline = (Timeout{ .duration = timeout }).toDeadline();
+
+            // Send all pending queries to this server on the one socket.
+            var sent = false;
+            for (qs, 0..) |*q, i| {
+                if (q.done) continue;
+                _ = sock.sendTo(.{ .ip = server }, query_bufs[i][0..query_lens[i]], deadline) catch |err| {
+                    if (err == error.Canceled) return error.Canceled;
+                    continue;
+                };
+                sent = true;
+            }
+            if (!sent) {
+                last_err = error.TemporaryNameServerFailure;
                 continue;
-            };
+            }
 
-            switch (result.rcode) {
-                .no_error => {},
-                .nx_domain => return error.UnknownHostName,
-                .serv_fail => {
-                    last_err = error.TemporaryNameServerFailure;
-                    continue;
-                },
-                else => {
+            // Receive and demux until every pending query answered this round
+            // or the deadline hits (unanswered families retry on the next server).
+            while (true) {
+                var still_waiting = false;
+                for (qs) |*q| {
+                    if (!q.done and !q.answered) still_waiting = true;
+                }
+                if (!still_waiting) break;
+
+                const r = sock.receiveFrom(&recv_buf, deadline) catch |err| {
+                    if (err == error.Canceled) return error.Canceled;
+                    break;
+                };
+                if (!sameEndpoint(r.from.ip, server)) continue;
+                if (r.len < 2) continue;
+                const resp_id = std.mem.readInt(u16, recv_buf[0..2], .big);
+
+                var qi: ?usize = null;
+                for (qs, 0..) |*q, i| {
+                    if (!q.done and !q.answered and q.id == resp_id) {
+                        qi = i;
+                        break;
+                    }
+                }
+                const idx = qi orelse continue; // unknown / duplicate / stale
+                const q = &qs[idx];
+
+                const result = message.parseResponse(
+                    recv_buf[0..r.len],
+                    q.id,
+                    q.qtype,
+                    &parse_addrs,
+                    options.port,
+                    if (canonical_name_len == 0) cname_out else null,
+                ) catch {
                     last_err = error.NameServerFailure;
+                    q.answered = true; // got a (bad) response; retry on next server
                     continue;
-                },
-            }
+                };
 
-            const count = @min(result.count, storage.len);
-            for (addr_storage[0..count], 0..) |addr, i| {
-                storage[i] = .{ .address = addr };
+                q.answered = true;
+                switch (result.rcode) {
+                    .no_error => {
+                        if (result.truncated) {
+                            // Partial UDP payload — defer to TCP below.
+                            q.truncated = true;
+                            q.done = true;
+                        } else {
+                            const c = @min(result.count, parse_addrs.len);
+                            @memcpy(q.addrs[0..c], parse_addrs[0..c]);
+                            q.count = c;
+                            q.ttl = result.ttl;
+                            q.found = c > 0;
+                            q.done = true;
+                            if (q.found and canonical_name_len == 0 and result.canonical_name_len > 0) {
+                                canonical_name_len = result.canonical_name_len;
+                            }
+                        }
+                    },
+                    .nx_domain => {
+                        q.count = 0;
+                        q.found = false;
+                        q.done = true;
+                    },
+                    .serv_fail => last_err = error.TemporaryNameServerFailure,
+                    else => last_err = error.NameServerFailure,
+                }
             }
-            return .{ .count = count, .ttl = result.ttl, .canonical_name_len = result.canonical_name_len };
         }
     }
 
+    // TCP fallback for any truncated family.
+    for (qs, 0..) |*q, i| {
+        if (!q.truncated) continue;
+        for (servers) |server| {
+            const deadline = (Timeout{ .duration = timeout }).toDeadline();
+            const resp = exchangeTcp(server, query_bufs[i][0..query_lens[i]], &recv_buf, deadline) catch |err| {
+                if (err == error.Canceled) return error.Canceled;
+                continue;
+            };
+            const result = message.parseResponse(
+                resp,
+                q.id,
+                q.qtype,
+                &parse_addrs,
+                options.port,
+                if (canonical_name_len == 0) cname_out else null,
+            ) catch continue;
+            switch (result.rcode) {
+                .no_error => {
+                    const c = @min(result.count, parse_addrs.len);
+                    @memcpy(q.addrs[0..c], parse_addrs[0..c]);
+                    q.count = c;
+                    q.ttl = result.ttl;
+                    q.found = c > 0;
+                    if (q.found and canonical_name_len == 0 and result.canonical_name_len > 0) {
+                        canonical_name_len = result.canonical_name_len;
+                    }
+                },
+                .nx_domain => {
+                    q.count = 0;
+                    q.found = false;
+                },
+                else => {},
+            }
+            break;
+        }
+        q.truncated = false;
+    }
+
+    // Assemble the union of all families that found records.
+    var total: usize = 0;
+    var min_ttl: u32 = 0;
+    var any_found = false;
+    var all_done = true;
+    for (qs) |*q| {
+        if (q.found) {
+            for (q.addrs[0..q.count]) |a| {
+                if (total >= storage.len) break;
+                storage[total] = .{ .address = a };
+                total += 1;
+            }
+            min_ttl = if (!any_found) q.ttl else @min(min_ttl, q.ttl);
+            any_found = true;
+        }
+        if (!q.done) all_done = false;
+    }
+
+    if (any_found) {
+        return .{ .count = total, .ttl = min_ttl, .canonical_name_len = canonical_name_len };
+    }
+    if (all_done) {
+        // Every family answered definitively with no records → advance candidate.
+        return .{ .count = 0, .ttl = 0, .canonical_name_len = 0 };
+    }
+    // At least one family never reached a definitive answer.
     return last_err;
 }
 
@@ -656,44 +800,6 @@ fn sameEndpoint(a: net.IpAddress, b: net.IpAddress) bool {
         .ipv4 => @as(*align(1) const u32, @ptrCast(&a.in.addr)).* == @as(*align(1) const u32, @ptrCast(&b.in.addr)).*,
         .ipv6 => @as(u128, @bitCast(a.in6.addr)) == @as(u128, @bitCast(b.in6.addr)) and a.in6.scope_id == b.in6.scope_id,
     };
-}
-
-/// Send a DNS query via UDP (with automatic TCP fallback when TC bit is set).
-/// Returns the response payload slice into recv_buf.
-fn exchange(
-    server: net.IpAddress,
-    query: []const u8,
-    recv_buf: []u8,
-    id: u16,
-    timeout: Timeout,
-) ![]u8 {
-    const domain: os.net.Domain = switch (server.getFamily()) {
-        .ipv4 => .ipv4,
-        .ipv6 => .ipv6,
-    };
-
-    var sock = try net.Socket.open(.dgram, domain, .ip);
-    defer sock.close();
-
-    const deadline = timeout.toDeadline();
-    _ = try sock.sendTo(.{ .ip = server }, query, deadline);
-    const data = while (true) {
-        const r = try sock.receiveFrom(recv_buf, deadline);
-        if (sameEndpoint(r.from.ip, server)) break recv_buf[0..r.len];
-        log.debug("dns: ignoring response from unexpected source", .{});
-    };
-
-    // TC bit (0x0200) in flags word at offset 2: retry with TCP.
-    // Only upgrade when the ID matches — a spoofed packet with TC=1 and a
-    // wrong ID would otherwise waste a TCP connection.
-    if (data.len >= 4 and
-        std.mem.readInt(u16, data[0..2], .big) == id and
-        std.mem.readInt(u16, data[2..4], .big) & 0x0200 != 0)
-    {
-        return exchangeTcp(server, query, recv_buf, deadline);
-    }
-
-    return data;
 }
 
 /// DNS-over-TCP exchange: 2-byte length-prefixed request and response.
