@@ -265,10 +265,9 @@ pub const Resolver = struct {
             try self.lock.lockShared();
             defer self.lock.unlockShared();
             if (self.cache.get(&key, now)) |entry| {
-                if (entry.count > 0 and storage.len == 0) return error.TooManyAddresses;
                 var i: usize = 0;
                 for (entry.addrs[0..entry.count]) |addr_in| {
-                    if (i >= storage.len) break;
+                    if (i >= storage.len) return error.TooManyAddresses;
                     var addr = addr_in;
                     addr.setPort(options.port);
                     storage[i] = .{ .address = addr };
@@ -338,12 +337,11 @@ pub const Resolver = struct {
         while (wit) |n| : (wit = n.next) {
             if (!n.is_active and !n.done and n.key.eql(&key)) {
                 if (result) |r| {
-                    if (n.storage.len == 0 and r.count > 0) {
+                    if (r.count > n.storage.len) {
                         n.err = error.TooManyAddresses;
                     } else {
-                        const jcount = @min(n.storage.len, r.count);
-                        @memcpy(n.storage[0..jcount], buf[0..jcount]);
-                        n.count = jcount;
+                        @memcpy(n.storage[0..r.count], buf[0..r.count]);
+                        n.count = r.count;
                         n.canonical_name_len = r.canonical_name_len;
                         if (r.canonical_name_len > 0) if (n.canonical_name_buffer) |cbuf| {
                             @memcpy(cbuf[0..r.canonical_name_len], cname_buf[0..r.canonical_name_len]);
@@ -366,10 +364,9 @@ pub const Resolver = struct {
             @memcpy(cbuf[0..r.canonical_name_len], cname_buf[0..r.canonical_name_len]);
         };
         if (buf.ptr != storage.ptr) {
-            if (storage.len == 0 and r.count > 0) return error.TooManyAddresses;
-            const acount = @min(storage.len, r.count);
-            @memcpy(storage[0..acount], buf[0..acount]);
-            return .{ .count = acount, .canonical_name_len = r.canonical_name_len };
+            if (r.count > storage.len) return error.TooManyAddresses;
+            @memcpy(storage[0..r.count], buf[0..r.count]);
+            return .{ .count = r.count, .canonical_name_len = r.canonical_name_len };
         }
         return .{ .count = r.count, .canonical_name_len = r.canonical_name_len };
     }
