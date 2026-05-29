@@ -51,7 +51,6 @@ const zio = b.dependency("zio", .{
     .optimize = optimize,
 });
 
-// the executable from your call to b.addExecutable(...)
 exe.root_module.addImport("zio", zio.module("zio"));
 ```
 
@@ -158,11 +157,11 @@ See `examples/*.zig` for more examples.
 ## Building
 
 ```bash
-# Build the library and examples
-zig build
-
 # Run tests
 zig build test
+
+# Build examples
+zig build examples
 ```
 
 ## Contributing
