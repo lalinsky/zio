@@ -263,12 +263,24 @@ test "HostName: lookup google.com" {
     const count = try host.lookup(&storage, .{ .port = 443 });
 
     try std.testing.expect(count > 0);
+    var has_ipv4 = false;
+    var has_ipv6 = false;
     for (storage[0..count]) |entry| {
         switch (entry) {
             .address => |addr| {
                 try std.testing.expectEqual(443, addr.getPort());
+                switch (addr.getFamily()) {
+                    .ipv4 => has_ipv4 = true,
+                    .ipv6 => has_ipv6 = true,
+                }
             },
             .canonical_name => unreachable,
         }
+    }
+    // google.com is dual-stack; a default (unspecified-family) lookup must
+    // return both A and AAAA addresses via the batched query.
+    try std.testing.expect(has_ipv4);
+    if (builtin.os.tag != .macos and builtin.os.tag != .windows) {
+        try std.testing.expect(has_ipv6);
     }
 }

@@ -1,0 +1,79 @@
+ Implement EDNS0 (RFC 6891) in the native DNS resolver, building on the batched
+  A/AAAA work that just landed in PR #434 (commit "dns: query A and AAAA in
+  parallel for dual-stack lookups").
+
+  ## Background
+
+  The native resolver lives in src/dns/resolver/. Wire format is in message.zig;
+  the query/transport state machine is queryBatch() in resolver.zig. Read
+  DEVELOPMENT.md and CLAUDE.md first. Note CLAUDE.md: NO Claude/LLM attribution in
+  commits, PRs, or anywhere.
+
+  Currently buildQuery() emits a classic DNS query with ARCOUNT=0 and no OPT
+  record, so servers assume the 512-byte UDP limit. Responses larger than that
+  come back with the TC bit set and we fall back to TCP per family (already
+  handled in queryBatch). EDNS0 lets us advertise a larger UDP payload size so
+  large responses arrive over UDP, avoiding most TCP fallbacks — and is the
+  prerequisite for any later DNSSEC/cookie work.
+
+  ## Goal
+
+  Send EDNS0 by default and parse it, with a clean fallback for servers that
+  don't support it.
+
+  ## In scope
+
+  1. message.zig — buildQuery(): append an OPT pseudo-RR in the additional
+     section and set ARCOUNT=1.
+     - OPT RR: NAME=root (single 0x00), TYPE=41, CLASS=advertised UDP payload size
+       (add a const, e.g. edns_udp_payload = 1232 to match the dnsflagday
+       recommendation already noted at message.zig max_udp_size), TTL=0 (ext-rcode
+       0, version 0, flags 0 — DO bit off, no DNSSEC for now), RDLENGTH=0.
+     - The query build buffer is [message.max_udp_size]u8; the 11-byte OPT fits.
+
+  2. message.zig — parseResponse(): currently it parses the question + answer
+     sections only and ignores NSCOUNT/ARCOUNT. To read OPT you must skip the
+     authority records (nscount) and then walk the additional records (arcount)
+     looking for TYPE=41.
+     - Extended RCODE: full rcode is 12 bits = (OPT.TTL high 8 bits << 4) |
+       (header flags low 4 bits). The current RCode enum is enum(u4) — that cannot
+       represent extended codes. Either widen rcode handling to u12 or at minimum
+       detect BADVERS (16, EDNS version unsupported). Decide and document.
+     - Surface whether the response actually contained an OPT (server supports
+       
+  3. resolver.zig — queryBatch(): EDNS fallback per family.
+     - Query packets are currently built once upfront into query_bufs[]. For the
+       fallback you need to rebuild a family's packet without OPT.
+     - Follow c-ares's logic (we studied it; see ares_process.c
+       issue_might_be_edns / rewrite_without_edns): if a server returns FORMERR
+       (or BADVERS) and we sent EDNS, retry that family without EDNS. Add an
+       `edns: bool` field to FamilyQuery and rebuild that family's query buffer
+       when it flips off, then let the existing attempts×servers retry loop resend.
+     - recv_buf is [4096]u8, comfortably larger than the advertised 1232.
+     
+  ## Out of scope (mention as follow-ups, don't implement)
+  
+  - DNSSEC / DO bit, DNS cookies (RFC 7873), client subnet.
+  - A resolv.conf `options edns0`/`no-edns0` toggle (resolvconf.zig parses
+  - A resolv.conf `options edns0`/`no-edns0` toggle (resolvconf.zig parses
+    `options` already if you want to wire a conf flag — optional).
+
+  ## Testing
+
+  - ./check.sh --backend epoll  (and the default io_uring backend).
+  - The native resolver is only the default on io_uring. To exercise it on epoll,
+    temporarily set custom_resolver default to `true` in src/runtime.zig
+    (DnsOptions, ~line 77) — but REVERT that before committing; CI covers it on
+    io_uring.
+  - Network tests (google.com, www.github.com CNAME) in src/dns/test.zig run live;
+    they're fine to run. Add message.zig unit tests: buildQuery with OPT present
+    (check ARCOUNT and the OPT bytes), and parseResponse extracting the extended
+    rcode from an OPT record. The existing hand-built parseResponse test is a good
+    template.
+  - A good end-to-end check: a domain with a large response set that previously
+    forced TCP should now resolve over UDP (you can watch for the TCP-fallback
+    path not triggering).
+
+  When done, open a PR against main (no Claude attribution), closing the relevant
+  issue if one exists.
+

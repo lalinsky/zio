@@ -1,0 +1,2 @@
+- read @README.md and @DEVELOPMENT.md
+- no code attribution to Claude in commits, PRs, anywhere

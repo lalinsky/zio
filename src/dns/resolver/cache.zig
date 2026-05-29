@@ -5,30 +5,40 @@ const std = @import("std");
 const net = @import("../../net.zig");
 const Timestamp = @import("../../time.zig").Timestamp;
 
-pub const max_cached_addrs = 3;
+// A "both" entry holds addresses for both families, so allow room for a few of
+// each before we give up on caching the result.
+pub const max_cached_addrs = 6;
 const cache_capacity = 1024;
 const probe_limit = 8;
 pub const key_prefix_len = 22;
 
+/// The shape of a lookup request. Cache and dedup are keyed by shape so that a
+/// dual-stack ("both") lookup is a single unit — resolved against one search
+/// suffix, cached and coalesced as a whole — which keeps A and AAAA consistent.
+pub const Shape = enum(u8) {
+    ipv4 = 1,
+    ipv6 = 2,
+    both = 3,
+};
+
 pub const CacheKey = struct {
     len: u8,
-    // 0 = any (used for dedup keys), 1 = ipv4, 2 = ipv6
-    family: u8,
+    shape: u8,
     prefix: [key_prefix_len]u8,
     hash: u64,
 
-    pub fn init(key: *CacheKey, name: []const u8, seed: u64, family: ?net.IpAddress.Family) void {
+    pub fn init(key: *CacheKey, name: []const u8, seed: u64, shape: Shape) void {
         std.debug.assert(name.len <= std.math.maxInt(u8));
         const plen = @min(name.len, key_prefix_len);
         key.len = @intCast(name.len);
-        key.family = if (family) |f| @as(u8, @intFromEnum(f)) + 1 else 0;
+        key.shape = @intFromEnum(shape);
         key.hash = std.hash.Wyhash.hash(seed, name);
         @memset(&key.prefix, 0);
         @memcpy(key.prefix[0..plen], name[0..plen]);
     }
 
     pub fn eql(a: *const CacheKey, b: *const CacheKey) bool {
-        if (a.len != b.len or a.family != b.family or a.hash != b.hash) return false;
+        if (a.len != b.len or a.shape != b.shape or a.hash != b.hash) return false;
         const plen = @min(a.len, key_prefix_len);
         return std.mem.eql(u8, a.prefix[0..plen], b.prefix[0..plen]);
     }
@@ -219,4 +229,28 @@ test "Cache: long names with shared prefix stay distinct" {
 
     try std.testing.expectEqual(@as(u8, 1), cache.get(&k1, now).?.count);
     try std.testing.expectEqual(@as(u8, 2), cache.get(&k2, now).?.count);
+}
+
+test "Cache: same name different shapes stay distinct" {
+    var cache: Cache = std.mem.zeroes(Cache);
+    const name = "example.com";
+    const now: Timestamp = .{ .value = 1 };
+
+    var k4: CacheKey = undefined;
+    CacheKey.init(&k4, name, 0, .ipv4);
+    var e4: CacheEntry = std.mem.zeroes(CacheEntry);
+    e4.count = 1;
+    e4.expiry = .{ .value = std.math.maxInt(u64) };
+    cache.put(&k4, e4, now);
+
+    var kboth: CacheKey = undefined;
+    CacheKey.init(&kboth, name, 0, .both);
+    var eboth: CacheEntry = std.mem.zeroes(CacheEntry);
+    eboth.count = 2;
+    eboth.expiry = .{ .value = std.math.maxInt(u64) };
+    cache.put(&kboth, eboth, now);
+
+    try std.testing.expect(!k4.eql(&kboth));
+    try std.testing.expectEqual(@as(u8, 1), cache.get(&k4, now).?.count);
+    try std.testing.expectEqual(@as(u8, 2), cache.get(&kboth, now).?.count);
 }
