@@ -52,12 +52,19 @@ pub fn buildQuery(buf: []u8, id: u16, name: []const u8, qtype: QType) ![]u8 {
     std.mem.writeInt(u16, buf[4..6], 1, .big); // QDCOUNT
     std.mem.writeInt(u16, buf[6..8], 0, .big); // ANCOUNT
     std.mem.writeInt(u16, buf[8..10], 0, .big); // NSCOUNT
-    std.mem.writeInt(u16, buf[10..12], 0, .big); // ARCOUNT
+    std.mem.writeInt(u16, buf[10..12], 1, .big); // ARCOUNT = 1 (OPT record)
     const p = try encodeName(buf, 12, name);
-    if (p + 4 > buf.len) return error.BufferTooSmall;
+    if (p + 4 + 11 > buf.len) return error.BufferTooSmall;
     std.mem.writeInt(u16, buf[p..][0..2], @intFromEnum(qtype), .big);
     std.mem.writeInt(u16, buf[p + 2 ..][0..2], 1, .big); // CLASS IN
-    return buf[0 .. p + 4];
+    // OPT pseudo-record (EDNS0, RFC 6891)
+    const opt = buf[p + 4 ..][0..11];
+    opt[0] = 0x00; // NAME = root label
+    std.mem.writeInt(u16, opt[1..3], 41, .big); // TYPE = OPT
+    std.mem.writeInt(u16, opt[3..5], max_udp_size, .big); // CLASS = UDP payload size
+    std.mem.writeInt(u32, opt[5..9], 0, .big); // TTL = extended RCODE + flags (zero)
+    std.mem.writeInt(u16, opt[9..11], 0, .big); // RDLENGTH = 0
+    return buf[0 .. p + 4 + 11];
 }
 
 /// Decode a DNS wire-format name at buf[pos] into out, following compression
@@ -215,6 +222,7 @@ test "buildQuery encodes correctly" {
     try std.testing.expectEqual(@as(u16, 0x1234), std.mem.readInt(u16, q[0..2], .big));
     try std.testing.expectEqual(@as(u16, 0x0100), std.mem.readInt(u16, q[2..4], .big));
     try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, q[4..6], .big));
+    try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, q[10..12], .big)); // ARCOUNT=1
 
     // Name: 7example3com0
     try std.testing.expectEqual(@as(u8, 7), q[12]);
@@ -226,6 +234,14 @@ test "buildQuery encodes correctly" {
     // QTYPE=A, QCLASS=IN
     try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, q[25..27], .big));
     try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, q[27..29], .big));
+
+    // OPT record (EDNS0)
+    try std.testing.expectEqual(@as(u8, 0x00), q[29]); // NAME = root
+    try std.testing.expectEqual(@as(u16, 41), std.mem.readInt(u16, q[30..32], .big)); // TYPE = OPT
+    try std.testing.expectEqual(@as(u16, max_udp_size), std.mem.readInt(u16, q[32..34], .big)); // CLASS = UDP size
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, q[34..38], .big)); // TTL = 0
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, q[38..40], .big)); // RDLENGTH = 0
+    try std.testing.expectEqual(@as(usize, 40), q.len);
 }
 
 test "parseResponse extracts A record" {
