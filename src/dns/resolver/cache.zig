@@ -230,3 +230,27 @@ test "Cache: long names with shared prefix stay distinct" {
     try std.testing.expectEqual(@as(u8, 1), cache.get(&k1, now).?.count);
     try std.testing.expectEqual(@as(u8, 2), cache.get(&k2, now).?.count);
 }
+
+test "Cache: same name different shapes stay distinct" {
+    var cache: Cache = std.mem.zeroes(Cache);
+    const name = "example.com";
+    const now: Timestamp = .{ .value = 1 };
+
+    var k4: CacheKey = undefined;
+    CacheKey.init(&k4, name, 0, .ipv4);
+    var e4: CacheEntry = std.mem.zeroes(CacheEntry);
+    e4.count = 1;
+    e4.expiry = .{ .value = std.math.maxInt(u64) };
+    cache.put(&k4, e4, now);
+
+    var kboth: CacheKey = undefined;
+    CacheKey.init(&kboth, name, 0, .both);
+    var eboth: CacheEntry = std.mem.zeroes(CacheEntry);
+    eboth.count = 2;
+    eboth.expiry = .{ .value = std.math.maxInt(u64) };
+    cache.put(&kboth, eboth, now);
+
+    try std.testing.expect(!k4.eql(&kboth));
+    try std.testing.expectEqual(@as(u8, 1), cache.get(&k4, now).?.count);
+    try std.testing.expectEqual(@as(u8, 2), cache.get(&kboth, now).?.count);
+}
