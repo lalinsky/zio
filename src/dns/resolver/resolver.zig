@@ -150,31 +150,27 @@ pub const Resolver = struct {
         // 0. Numeric IP literal — parse directly without touching hosts or DNS.
         if (net.IpAddress.parseIp4(options.name, options.port) catch null) |addr| {
             if (options.family == null or options.family == .ipv4) {
-                const addr_count: usize = if (addr_storage.len > 0) blk: {
-                    addr_storage[0] = .{ .address = addr };
-                    break :blk 1;
-                } else 0;
+                if (addr_storage.len == 0) return error.TooManyAddresses;
+                addr_storage[0] = .{ .address = addr };
                 if (cname_buf) |buf| {
                     storage[0] = .{ .canonical_name = .{ .bytes = buf[0..options.name.len] } };
-                    return addr_count + 1;
+                    return 2;
                 }
-                return addr_count;
+                return 1;
             }
-            return 0;
+            return error.AddressFamilyUnsupported;
         }
         if (net.IpAddress.parseIp6(options.name, options.port) catch null) |addr| {
             if (options.family == null or options.family == .ipv6) {
-                const addr_count: usize = if (addr_storage.len > 0) blk: {
-                    addr_storage[0] = .{ .address = addr };
-                    break :blk 1;
-                } else 0;
+                if (addr_storage.len == 0) return error.TooManyAddresses;
+                addr_storage[0] = .{ .address = addr };
                 if (cname_buf) |buf| {
                     storage[0] = .{ .canonical_name = .{ .bytes = buf[0..options.name.len] } };
-                    return addr_count + 1;
+                    return 2;
                 }
-                return addr_count;
+                return 1;
             }
-            return 0;
+            return error.AddressFamilyUnsupported;
         }
 
         // 1. Check /etc/hosts
@@ -185,10 +181,10 @@ pub const Resolver = struct {
             if (self.hosts.lookupByName(options.name)) |addrs| {
                 var i: usize = 0;
                 for (addrs) |addr_in| {
-                    if (i >= addr_storage.len) break;
                     if (options.family) |f| {
                         if (addr_in.getFamily() != f) continue;
                     }
+                    if (i >= addr_storage.len) return error.TooManyAddresses;
                     var addr = addr_in;
                     addr.setPort(options.port);
                     addr_storage[i] = .{ .address = addr };
@@ -253,7 +249,6 @@ pub const Resolver = struct {
         family: net.IpAddress.Family,
         now: Timestamp,
     ) dns.LookupError!OneFamilyResult {
-        if (storage.len == 0) return .{ .count = 0, .canonical_name_len = 0 };
         var opts = options;
         opts.family = family;
         // Always decode the canonical name into a local buffer (mirroring the
@@ -272,7 +267,7 @@ pub const Resolver = struct {
             if (self.cache.get(&key, now)) |entry| {
                 var i: usize = 0;
                 for (entry.addrs[0..entry.count]) |addr_in| {
-                    if (i >= storage.len) break;
+                    if (i >= storage.len) return error.TooManyAddresses;
                     var addr = addr_in;
                     addr.setPort(options.port);
                     storage[i] = .{ .address = addr };
@@ -342,14 +337,17 @@ pub const Resolver = struct {
         while (wit) |n| : (wit = n.next) {
             if (!n.is_active and !n.done and n.key.eql(&key)) {
                 if (result) |r| {
-                    const jcount = @min(n.storage.len, r.count);
-                    @memcpy(n.storage[0..jcount], buf[0..jcount]);
-                    n.count = jcount;
-                    n.canonical_name_len = r.canonical_name_len;
-                    if (r.canonical_name_len > 0) if (n.canonical_name_buffer) |cbuf| {
-                        @memcpy(cbuf[0..r.canonical_name_len], cname_buf[0..r.canonical_name_len]);
-                    };
-                    n.err = null;
+                    if (r.count > n.storage.len) {
+                        n.err = error.TooManyAddresses;
+                    } else {
+                        @memcpy(n.storage[0..r.count], buf[0..r.count]);
+                        n.count = r.count;
+                        n.canonical_name_len = r.canonical_name_len;
+                        if (r.canonical_name_len > 0) if (n.canonical_name_buffer) |cbuf| {
+                            @memcpy(cbuf[0..r.canonical_name_len], cname_buf[0..r.canonical_name_len]);
+                        };
+                        n.err = null;
+                    }
                 } else |err| {
                     n.count = 0;
                     n.err = err;
@@ -366,9 +364,9 @@ pub const Resolver = struct {
             @memcpy(cbuf[0..r.canonical_name_len], cname_buf[0..r.canonical_name_len]);
         };
         if (buf.ptr != storage.ptr) {
-            const acount = @min(storage.len, r.count);
-            @memcpy(storage[0..acount], buf[0..acount]);
-            return .{ .count = acount, .canonical_name_len = r.canonical_name_len };
+            if (r.count > storage.len) return error.TooManyAddresses;
+            @memcpy(storage[0..r.count], buf[0..r.count]);
+            return .{ .count = r.count, .canonical_name_len = r.canonical_name_len };
         }
         return .{ .count = r.count, .canonical_name_len = r.canonical_name_len };
     }

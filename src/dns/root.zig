@@ -56,6 +56,11 @@ pub fn lookup(
     storage: []LookupResult,
     options: LookupOptions,
 ) LookupError!usize {
+    if (options.family) |required_family| {
+        if (IpAddress.parseIp(options.name, 0)) |addr| {
+            if (addr.getFamily() != required_family) return error.AddressFamilyUnsupported;
+        } else |_| {}
+    }
     if (Executor.current) |exec| {
         if (exec.runtime.resolver) |*resolver| {
             if (resolver.lookup(storage, options)) |n| {
@@ -73,3 +78,7 @@ pub const Resolver = if (builtin.os.tag != .windows)
     @import("resolver/root.zig").Resolver
 else
     @import("resolver/noop.zig").NoResolver;
+
+test {
+    _ = @import("test.zig");
+}
