@@ -142,7 +142,7 @@ pub const ConditionNoop = struct {
         _ = self;
         _ = mutex;
         _ = timeout;
-        return error.Timeout;
+        @panic("ConditionNoop.timedWait: cannot wait on a condition variable in single-threaded builds");
     }
 
     pub fn signal(self: *ConditionNoop) void {
