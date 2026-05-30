@@ -109,7 +109,7 @@ pub const Notify = switch (builtin.os.tag) {
 /// defer mutex.unlock();
 /// // critical section
 /// ```
-pub const Mutex = switch (builtin.os.tag) {
+pub const Mutex = if (builtin.single_threaded) MutexNoop else switch (builtin.os.tag) {
     .windows => MutexWindows,
     .freebsd => MutexFreeBSD,
     .netbsd => MutexNotify,
@@ -145,7 +145,7 @@ pub const Mutex = switch (builtin.os.tag) {
 /// mutex.unlock();
 /// cond.signal();
 /// ```
-pub const Condition = switch (builtin.os.tag) {
+pub const Condition = if (builtin.single_threaded) ConditionNoop else switch (builtin.os.tag) {
     .windows => ConditionWindows,
     .freebsd => ConditionFreeBSD,
     else => if (Futex == void) ConditionNotify else ConditionFutex,
@@ -1111,6 +1111,66 @@ const ConditionNotify = struct {
             const waiter: *Waiter = @fieldParentPtr("wait_node", wait_node);
             waiter.notify.signal();
         }
+    }
+};
+
+/// No-op mutex for single-threaded builds.
+const MutexNoop = struct {
+    pub fn init() MutexNoop {
+        return .{};
+    }
+
+    pub fn deinit(self: *MutexNoop) void {
+        _ = self;
+    }
+
+    pub fn lock(self: *MutexNoop) void {
+        _ = self;
+    }
+
+    pub fn unlock(self: *MutexNoop) void {
+        _ = self;
+    }
+
+    pub fn tryLock(self: *MutexNoop) bool {
+        _ = self;
+        return true;
+    }
+};
+
+/// No-op condition variable for single-threaded builds.
+///
+/// signal() and broadcast() are no-ops since there are no waiting threads.
+/// wait() and timedWait() are unreachable — in a single-threaded program
+/// nothing can signal while a thread is blocked.
+const ConditionNoop = struct {
+    pub fn init() ConditionNoop {
+        return .{};
+    }
+
+    pub fn deinit(self: *ConditionNoop) void {
+        _ = self;
+    }
+
+    pub fn wait(self: *ConditionNoop, mutex: *Mutex) void {
+        _ = self;
+        _ = mutex;
+        unreachable;
+    }
+
+    pub fn timedWait(self: *ConditionNoop, mutex: *Mutex, timeout: Timeout) error{Timeout}!void {
+        _ = self;
+        _ = mutex;
+        _ = timeout;
+        unreachable;
+    }
+
+    pub fn signal(self: *ConditionNoop) void {
+        _ = self;
+    }
+
+    pub fn broadcast(self: *ConditionNoop) void {
+        _ = self;
     }
 };
 
