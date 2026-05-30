@@ -609,7 +609,7 @@ fn queryBatch(
         query_lens[i] = built.len;
     }
 
-    var recv_buf: [4096]u8 = undefined;
+    var recv_buf: [65535]u8 = undefined;
     var parse_addrs: [max_addrs_per_family]net.IpAddress = undefined;
 
     // The canonical name is decoded from the first family that yields records.
