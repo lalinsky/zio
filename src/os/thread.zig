@@ -141,6 +141,7 @@ pub const ConditionNoop = struct {
         _ = self;
         _ = mutex;
         _ = timeout;
+        return error.Timeout;
     }
 
     pub fn signal(self: *ConditionNoop) void {
