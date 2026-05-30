@@ -135,14 +135,21 @@ pub const ConditionNoop = struct {
     pub fn wait(self: *ConditionNoop, mutex: *Mutex) void {
         _ = self;
         _ = mutex;
-        @panic("ConditionNoop.wait: cannot wait on a condition variable in single-threaded builds");
+        while (true) {
+            os_time.sleep(.fromSeconds(3600));
+        }
     }
 
     pub fn timedWait(self: *ConditionNoop, mutex: *Mutex, timeout: Timeout) error{Timeout}!void {
         _ = self;
         _ = mutex;
-        _ = timeout;
-        @panic("ConditionNoop.timedWait: cannot wait on a condition variable in single-threaded builds");
+        if (timeout == .none) {
+            return self.wait(mutex);
+        }
+        const remaining = timeout.durationFromNow();
+        if (remaining.value <= 0) return error.Timeout;
+        os_time.sleep(remaining);
+        return error.Timeout;
     }
 
     pub fn signal(self: *ConditionNoop) void {
