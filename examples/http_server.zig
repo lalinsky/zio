@@ -59,8 +59,8 @@ fn handleClient(stream: zio.net.Stream) !void {
     std.log.info("HTTP client disconnected", .{});
 }
 
-pub fn main() !void {
-    const rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
+pub fn main(init: std.process.Init) !void {
+    const rt = try zio.Runtime.init(init.gpa, .{});
     defer rt.deinit();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);

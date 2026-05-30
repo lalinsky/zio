@@ -100,7 +100,7 @@ fn collector(
 // --8<-- [end:collector]
 
 pub fn main(init: std.process.Init) !void {
-    const gpa = std.heap.smp_allocator;
+    const gpa = init.gpa;
 
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 

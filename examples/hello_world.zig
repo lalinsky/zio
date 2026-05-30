@@ -1,8 +1,8 @@
 const std = @import("std");
 const zio = @import("zio");
 
-pub fn main() !void {
-    const rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
+pub fn main(init: std.process.Init) !void {
+    const rt = try zio.Runtime.init(init.gpa, .{});
     defer rt.deinit();
 
     var out = zio.stdout().writer(&.{});

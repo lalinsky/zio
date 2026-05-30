@@ -24,8 +24,8 @@ fn incrementTask(data: *SharedData, id: u32) !void {
     }
 }
 
-pub fn main() !void {
-    var rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
+pub fn main(init: std.process.Init) !void {
+    var rt = try zio.Runtime.init(init.gpa, .{});
     defer rt.deinit();
 
     var shared_data = SharedData{

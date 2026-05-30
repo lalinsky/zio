@@ -4,8 +4,8 @@
 const std = @import("std");
 const zio = @import("zio");
 
-pub fn main() !void {
-    var rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
+pub fn main(init: std.process.Init) !void {
+    var rt = try zio.Runtime.init(init.gpa, .{});
     defer rt.deinit();
 
     for (0..10) |_| {

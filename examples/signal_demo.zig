@@ -41,8 +41,8 @@ fn signalHandler(shutdown: *std.atomic.Value(bool)) !void {
     shutdown.store(true, .release);
 }
 
-pub fn main() !void {
-    var rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
+pub fn main(init: std.process.Init) !void {
+    var rt = try zio.Runtime.init(init.gpa, .{});
     defer rt.deinit();
 
     // Create shutdown flag

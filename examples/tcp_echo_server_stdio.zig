@@ -64,8 +64,8 @@ fn handleClient(io: Io, stream: Io.net.Stream) Io.Cancelable!void {
     std.log.info("Client disconnected", .{});
 }
 
-pub fn main() !void {
-    const rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
+pub fn main(init: std.process.Init) !void {
+    const rt = try zio.Runtime.init(init.gpa, .{});
     defer rt.deinit();
 
     const io = rt.io();
