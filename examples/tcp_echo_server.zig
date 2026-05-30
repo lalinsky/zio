@@ -38,8 +38,8 @@ fn handleClient(stream: zio.net.Stream) !void {
 }
 // --8<-- [end:handleClient]
 
-pub fn main() !void {
-    const rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
+pub fn main(init: std.process.Init) !void {
+    const rt = try zio.Runtime.init(init.gpa, .{});
     defer rt.deinit();
 
     // --8<-- [start:setup]

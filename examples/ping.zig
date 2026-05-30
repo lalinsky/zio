@@ -43,7 +43,7 @@ fn calculateChecksum(data: []const u8) u16 {
 }
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = std.heap.smp_allocator;
+    const allocator = init.gpa;
 
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 

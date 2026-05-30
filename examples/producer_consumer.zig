@@ -41,8 +41,8 @@ fn consumer(channel: *zio.Channel(i32), id: u32) zio.Cancelable!void {
     std.log.info("Consumer {} finished", .{id});
 }
 
-pub fn main() !void {
-    var rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
+pub fn main(init: std.process.Init) !void {
+    var rt = try zio.Runtime.init(init.gpa, .{});
     defer rt.deinit();
 
     var buffer: [8]i32 = undefined;

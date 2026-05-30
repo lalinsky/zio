@@ -793,21 +793,23 @@ pub const Runtime = struct {
 
         errdefer self.shutdownWorkers();
 
-        for (0..num_workers) |i| {
-            log.debug("Spawning worker thread {}", .{i + 1});
-            const worker = self.workers.addOneAssumeCapacity();
-            errdefer _ = self.workers.pop();
-            worker.* = .{};
-            worker.thread = try std.Thread.spawn(.{}, runWorker, .{ self, worker, @as(u6, @intCast(i + 1)) });
-        }
-
-        for (self.workers.items, 0..) |*worker, i| {
-            log.debug("Waiting for worker thread {}", .{i + 1});
-            worker.ready.wait();
-            if (worker.err) |e| {
-                return e;
+        if (!builtin.single_threaded) {
+            for (0..num_workers) |i| {
+                log.debug("Spawning worker thread {}", .{i + 1});
+                const worker = self.workers.addOneAssumeCapacity();
+                errdefer _ = self.workers.pop();
+                worker.* = .{};
+                worker.thread = try std.Thread.spawn(.{}, runWorker, .{ self, worker, @as(u6, @intCast(i + 1)) });
             }
-            self.executors.appendAssumeCapacity(&worker.executor);
+
+            for (self.workers.items, 0..) |*worker, i| {
+                log.debug("Waiting for worker thread {}", .{i + 1});
+                worker.ready.wait();
+                if (worker.err) |e| {
+                    return e;
+                }
+                self.executors.appendAssumeCapacity(&worker.executor);
+            }
         }
     }
 

@@ -79,6 +79,19 @@ pub fn build(b: *std.Build) void {
         examples_step.dependOn(&install_exe.step);
     }
 
+    // Single-threaded build of hello-world to verify single-threaded support
+    const hello_world_st = b.addExecutable(.{
+        .name = "hello-world-single-threaded",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/hello_world.zig"),
+            .target = target,
+            .optimize = optimize,
+            .single_threaded = true,
+        }),
+    });
+    hello_world_st.root_module.addImport("zio", zio);
+    examples_step.dependOn(&b.addInstallArtifact(hello_world_st, .{}).step);
+
     // Tests
     const emit_test_bin = b.option(bool, "emit-test-bin", "Build test binary without running") orelse false;
     const test_filter = b.option([]const u8, "test-filter", "Filter for test names");

@@ -107,7 +107,7 @@ fn queryNtpServer(server: []const u8, port: u16, timeout: zio.Timeout) !void {
 }
 
 pub fn main(init: std.process.Init) !void {
-    const gpa = std.heap.smp_allocator;
+    const gpa = init.gpa;
 
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 

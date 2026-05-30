@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Queue = @import("queue.zig").Queue;
 const Completion = @import("completion.zig").Completion;
 const Work = @import("completion.zig").Work;
@@ -42,6 +43,17 @@ pub const ThreadPool = struct {
     };
 
     pub fn init(self: *ThreadPool, allocator: std.mem.Allocator, options: Options) !void {
+        if (builtin.single_threaded) {
+            self.* = .{
+                .allocator = allocator,
+                .min_threads = 0,
+                .max_threads = 0,
+                .idle_timeout_ns = 0,
+                .scale_threshold = options.scale_threshold,
+            };
+            return;
+        }
+
         const cpu_count = try std.Thread.getCpuCount();
         const max_threads = options.max_threads orelse (cpu_count * 2);
         const min_threads = options.min_threads;
@@ -128,6 +140,21 @@ pub const ThreadPool = struct {
     }
 
     pub fn submit(self: *ThreadPool, work: *Work) void {
+        if (builtin.single_threaded) {
+            if (work.state.cmpxchgStrong(.pending, .running, .acq_rel, .acquire)) |state| {
+                std.debug.assert(state == .canceled);
+                work.c.setError(error.Canceled);
+            } else {
+                work.func(work);
+                work.c.setResult(.work, {});
+                work.state.store(.completed, .release);
+            }
+            if (work.completion_fn) |completion_fn| {
+                completion_fn(work.completion_context, work);
+            }
+            return;
+        }
+
         self.queue_mutex.lock();
         self.queue.push(&work.c);
         self.queue_size += 1;

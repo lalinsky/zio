@@ -1,8 +1,8 @@
 const std = @import("std");
 const zio = @import("zio");
 
-pub fn main() !void {
-    var rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
+pub fn main(init: std.process.Init) !void {
+    var rt = try zio.Runtime.init(init.gpa, .{});
     defer rt.deinit();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
