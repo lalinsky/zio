@@ -11,6 +11,8 @@ pub const thread = @import("thread.zig");
 
 pub const Mutex = thread.Mutex;
 pub const Condition = thread.Condition;
+pub const MutexNoop = thread.MutexNoop;
+pub const ConditionNoop = thread.ConditionNoop;
 pub const ResetEvent = thread.ResetEvent;
 
 pub const iovec = fs.iovec;
