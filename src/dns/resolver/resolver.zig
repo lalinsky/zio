@@ -424,8 +424,12 @@ pub const Resolver = struct {
         // Enough dots: try unsuffixed first (Go's nameList logic).
         if (has_enough_dots) {
             if (makeFqdn(&fqdn_buf, name, null)) |fqdn| {
-                const r = try queryBatch(self, storage, options, fqdn, shape, srvs, attempts, timeout);
-                if (r.count > 0) return r;
+                if (queryBatch(self, storage, options, fqdn, shape, srvs, attempts, timeout)) |r| {
+                    if (r.count > 0) return r;
+                } else |err| switch (err) {
+                    error.Canceled => return err,
+                    else => last_err = err,
+                }
             }
         }
 
@@ -433,8 +437,12 @@ pub const Resolver = struct {
         for (0..search_count) |i| {
             const suffix = search_store[i][0..search_lens[i]];
             if (makeFqdn(&fqdn_buf, name, suffix)) |fqdn| {
-                const r = try queryBatch(self, storage, options, fqdn, shape, srvs, attempts, timeout);
-                if (r.count > 0) return r;
+                if (queryBatch(self, storage, options, fqdn, shape, srvs, attempts, timeout)) |r| {
+                    if (r.count > 0) return r;
+                } else |err| switch (err) {
+                    error.Canceled => return err,
+                    else => last_err = err,
+                }
             }
         }
 
