@@ -63,12 +63,23 @@ const EVFILT_USER: i16 = switch (builtin.target.os.tag) {
 };
 const NOTE_TRIGGER: u32 = 0x01000000;
 
+const delete_marker: usize = std.math.maxInt(usize);
+
+const PollEntry = struct {
+    completions: Queue(Completion),
+};
+
 allocator: std.mem.Allocator,
 kqueue_fd: i32 = -1,
 waker_ident: usize = undefined,
+poll_queue: std.AutoHashMapUnmanaged(u64, PollEntry) = .empty,
 change_buffer: std.ArrayList(std.c.Kevent) = .empty,
 events: []std.c.Kevent,
-queue_size: u16,
+
+fn makeKey(ident: usize, filter: i32) u64 {
+    std.debug.assert(ident <= std.math.maxInt(u32));
+    return (@as(u64, @intCast(ident)) << 32) | @as(u32, @bitCast(filter));
+}
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
     _ = shared_state;
@@ -109,11 +120,13 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
         .waker_ident = waker_ident,
         .change_buffer = change_buffer,
         .events = events,
-        .queue_size = queue_size,
     };
+
+    try self.poll_queue.ensureTotalCapacity(self.allocator, queue_size);
 }
 
 pub fn deinit(self: *Self) void {
+    self.poll_queue.deinit(self.allocator);
     self.change_buffer.deinit(self.allocator);
     self.allocator.free(self.events);
     if (self.kqueue_fd != -1) {
@@ -123,7 +136,6 @@ pub fn deinit(self: *Self) void {
 
 pub fn wake(self: *Self, state: *LoopState) void {
     _ = state;
-    // TODO: Could also submit other pending changes if we have any
     var changes: [1]std.c.Kevent = .{.{
         .ident = self.waker_ident,
         .filter = EVFILT_USER,
@@ -161,59 +173,10 @@ fn getFilter(completion: *Completion) i16 {
                 .write => std.c.EVFILT.WRITE,
             };
         },
+        .process_wait => std.c.EVFILT.PROC,
         .mach_port => if (builtin.os.tag.isDarwin()) std.c.EVFILT.MACHPORT else unreachable,
         else => unreachable,
     };
-}
-
-/// Reserve a slot in the change buffer, flushing with non-blocking poll if full
-fn reserveChange(self: *Self, state: *LoopState) !*std.c.Kevent {
-    // If at capacity, flush with non-blocking poll to drain completions
-    if (self.change_buffer.items.len >= self.queue_size) {
-        _ = try self.poll(state, .zero);
-    }
-    // We pre-allocated capacity, so this will never fail
-    return self.change_buffer.addOneAssumeCapacity();
-}
-
-/// Queue a kevent change to register a completion.
-/// If queuing fails, completes the completion with error.Unexpected.
-fn queueRegister(self: *Self, state: *LoopState, ident: usize, completion: *Completion) void {
-    const filter = getFilter(completion);
-    const change = self.reserveChange(state) catch {
-        log.err("Failed to reserve kevent change slot", .{});
-        completion.setError(error.Unexpected);
-        state.markCompletedFromBackend(completion);
-        return;
-    };
-    change.* = .{
-        .ident = ident,
-        .filter = filter,
-        .flags = std.c.EV.ADD | std.c.EV.ENABLE | std.c.EV.ONESHOT,
-        .fflags = 0,
-        .data = 0,
-        .udata = @intFromPtr(completion),
-    };
-}
-
-/// Queue a kevent change to unregister a completion.
-/// NOTE: Only used for cancellations; normal completions use EV_ONESHOT which auto-removes events
-/// Returns true if successfully queued, false if OOM (caller should let target complete naturally)
-fn queueUnregister(self: *Self, state: *LoopState, ident: usize, completion: *Completion) bool {
-    const filter = getFilter(completion);
-    const change = self.reserveChange(state) catch {
-        log.err("Failed to reserve kevent change slot for unregister", .{});
-        return false;
-    };
-    change.* = .{
-        .ident = ident,
-        .filter = filter,
-        .flags = std.c.EV.DELETE,
-        .fflags = 0,
-        .data = 0,
-        .udata = @intFromPtr(completion),
-    };
-    return true;
 }
 
 fn getIdent(completion: *Completion) usize {
@@ -231,9 +194,82 @@ fn getIdent(completion: *Completion) usize {
         .pipe_read => @intCast(completion.cast(PipeRead).handle),
         .pipe_write => @intCast(completion.cast(PipeWrite).handle),
         .pipe_close => @intCast(completion.cast(PipeClose).handle),
+        .process_wait => @intCast(completion.cast(ProcessWait).handle),
         .mach_port => completion.cast(MachPort).port,
         else => unreachable,
     };
+}
+
+fn getFflags(completion: *Completion) u32 {
+    return switch (completion.op) {
+        .process_wait => std.c.NOTE.EXIT,
+        else => 0,
+    };
+}
+
+fn reserveChange(self: *Self) !*std.c.Kevent {
+    return self.change_buffer.addOne(self.allocator);
+}
+
+fn addToPollQueue(self: *Self, state: *LoopState, completion: *Completion) void {
+    const ident = getIdent(completion);
+    const filter = getFilter(completion);
+    const key = makeKey(ident, filter);
+
+    completion.prev = null;
+    completion.next = null;
+
+    const gop = self.poll_queue.getOrPut(self.allocator, key) catch {
+        log.err("Failed to add to poll queue: OutOfMemory", .{});
+        completion.setError(error.Unexpected);
+        state.markCompletedFromBackend(completion);
+        return;
+    };
+
+    if (!gop.found_existing) {
+        gop.value_ptr.* = .{ .completions = .{} };
+        const change = self.reserveChange() catch {
+            _ = self.poll_queue.remove(key);
+            completion.setError(error.Unexpected);
+            state.markCompletedFromBackend(completion);
+            return;
+        };
+        change.* = .{
+            .ident = ident,
+            .filter = filter,
+            .flags = std.c.EV.ADD | std.c.EV.ENABLE,
+            .fflags = getFflags(completion),
+            .data = 0,
+            .udata = 0,
+        };
+    }
+
+    gop.value_ptr.completions.push(completion);
+}
+
+fn removeFromPollQueue(self: *Self, completion: *Completion) void {
+    const ident = getIdent(completion);
+    const filter = getFilter(completion);
+    const key = makeKey(ident, filter);
+    const entry = self.poll_queue.getPtr(key) orelse return;
+
+    _ = entry.completions.remove(completion);
+
+    if (entry.completions.head == null) {
+        const change = self.reserveChange() catch {
+            _ = self.poll_queue.remove(key);
+            return;
+        };
+        change.* = .{
+            .ident = ident,
+            .filter = filter,
+            .flags = std.c.EV.DELETE,
+            .fflags = 0,
+            .data = 0,
+            .udata = delete_marker,
+        };
+        _ = self.poll_queue.remove(key);
+    }
 }
 
 /// Submit a completion to the backend - infallible.
@@ -276,8 +312,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 state.markCompletedFromBackend(c);
             } else |err| switch (err) {
                 error.WouldBlock, error.ConnectionPending => {
-                    // Queue for completion - queueRegister handles errors
-                    self.queueRegister(state, @intCast(data.handle), c);
+                    self.addToPollQueue(state, c);
                 },
                 else => {
                     c.setError(err);
@@ -286,43 +321,23 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             }
         },
 
-        // Other async operations - queue and try on wakeup
-        .net_accept => {
-            const data = c.cast(NetAccept);
-            self.queueRegister(state, @intCast(data.handle), c);
+        .net_accept,
+        .net_recv,
+        .net_send,
+        .net_recvfrom,
+        .net_sendto,
+        .net_recvmsg,
+        .net_sendmsg,
+        .net_poll,
+        .pipe_poll,
+        .pipe_read,
+        .pipe_write,
+        .mach_port,
+        .process_wait,
+        => {
+            self.addToPollQueue(state, c);
         },
-        .net_recv => {
-            const data = c.cast(NetRecv);
-            self.queueRegister(state, @intCast(data.handle), c);
-        },
-        .net_send => {
-            const data = c.cast(NetSend);
-            self.queueRegister(state, @intCast(data.handle), c);
-        },
-        .net_recvfrom => {
-            const data = c.cast(NetRecvFrom);
-            self.queueRegister(state, @intCast(data.handle), c);
-        },
-        .net_sendto => {
-            const data = c.cast(NetSendTo);
-            self.queueRegister(state, @intCast(data.handle), c);
-        },
-        .net_recvmsg => {
-            const data = c.cast(NetRecvMsg);
-            self.queueRegister(state, @intCast(data.handle), c);
-        },
-        .net_sendmsg => {
-            const data = c.cast(NetSendMsg);
-            self.queueRegister(state, @intCast(data.handle), c);
-        },
-        .net_poll => {
-            const data = c.cast(NetPoll);
-            self.queueRegister(state, @intCast(data.handle), c);
-        },
-        .pipe_poll => {
-            const data = c.cast(PipePoll);
-            self.queueRegister(state, @intCast(data.handle), c);
-        },
+
         .pipe_create => {
             const fds = fs.pipe() catch |err| {
                 c.setError(err);
@@ -331,14 +346,6 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             };
             c.setResult(.pipe_create, fds);
             state.markCompletedFromBackend(c);
-        },
-        .pipe_read => {
-            const data = c.cast(PipeRead);
-            self.queueRegister(state, @intCast(data.handle), c);
-        },
-        .pipe_write => {
-            const data = c.cast(PipeWrite);
-            self.queueRegister(state, @intCast(data.handle), c);
         },
         .pipe_close => {
             const data = c.cast(PipeClose);
@@ -349,27 +356,6 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             }
             state.markCompletedFromBackend(c);
         },
-        .mach_port => {
-            const data = c.cast(MachPort);
-            self.queueRegister(state, data.port, c);
-        },
-        .process_wait => {
-            const data = c.cast(ProcessWait);
-            const change = self.reserveChange(state) catch {
-                log.err("Failed to reserve kevent change slot for process_wait", .{});
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            };
-            change.* = .{
-                .ident = @intCast(data.handle),
-                .filter = std.c.EVFILT.PROC,
-                .flags = std.c.EV.ADD | std.c.EV.ONESHOT,
-                .fflags = std.c.NOTE.EXIT,
-                .data = 0,
-                .udata = @intFromPtr(c),
-            };
-        },
 
         // File operations are handled by Loop via thread pool
         .file_open, .file_create, .file_close, .file_read, .file_write, .file_read_streaming, .file_write_streaming, .file_sync, .file_size, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .file_stat, .dir_open, .dir_close, .dir_read, .dir_create_dir, .dir_rename, .dir_rename_preserve, .dir_delete_file, .dir_delete_dir, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps, .dir_sym_link, .dir_read_link, .dir_hard_link, .dir_access, .dir_real_path, .dir_real_path_file, .file_real_path, .file_hard_link, .device_io_control => unreachable,
@@ -379,15 +365,8 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 /// Cancel a completion - infallible.
 /// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
 pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
-    // Try to queue unregister
-    const fd = getIdent(target);
-    if (!self.queueUnregister(state, fd, target)) {
-        // Queueing failed - target is still registered, let it complete naturally
-        return;
-    }
+    self.removeFromPollQueue(target);
 
-    // Successfully queued - target will be unregistered on flush
-    // Complete target with error.Canceled immediately
     target.setError(error.Canceled);
     state.markCompletedFromBackend(target);
 }
@@ -403,12 +382,11 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         break :blk &timeout_spec;
     } else null;
 
-    // Submit ALL pending changes AND wait for events in a single kevent() call
-    const changes_to_submit = self.change_buffer.items;
+    const changes = self.change_buffer.items;
     const rc = std.c.kevent(
         self.kqueue_fd,
-        changes_to_submit.ptr,
-        @intCast(changes_to_submit.len),
+        changes.ptr,
+        @intCast(changes.len),
         self.events.ptr,
         @intCast(self.events.len),
         timeout_ptr,
@@ -418,8 +396,6 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         .INTR => 0, // Interrupted by signal, no events
         else => |err| return unexpectedError(err),
     };
-
-    // Clear submitted changes from buffer
     self.change_buffer.clearRetainingCapacity();
 
     if (n == 0) {
@@ -432,26 +408,32 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
             continue;
         }
 
-        // Get completion pointer from udata
-        if (event.udata == 0) continue; // Shouldn't happen, but be defensive
+        if (event.udata == delete_marker) continue;
 
-        const completion: *Completion = @ptrFromInt(event.udata);
-        const ident = event.ident;
+        const key = makeKey(event.ident, event.filter);
+        reload: while (true) {
+            const entry = self.poll_queue.get(key) orelse break :reload;
 
-        // Skip if already completed (can happen with cancellations)
-        if (completion.state == .completed or completion.state == .dead) {
-            continue;
-        }
+            var iter: ?*Completion = entry.completions.head;
+            var completed_any = false;
+            while (iter) |completion| {
+                iter = completion.next;
 
-        switch (checkCompletion(completion, &event)) {
-            .completed => {
-                // EV_ONESHOT automatically removes the event
-                state.markCompletedFromBackend(completion);
-            },
-            .requeue => {
-                // Spurious wakeup - EV_ONESHOT already consumed the event, re-register
-                self.queueRegister(state, ident, completion);
-            },
+                if (completion.state == .completed or completion.state == .dead) {
+                    continue;
+                }
+
+                switch (checkCompletion(completion, &event)) {
+                    .completed => {
+                        self.removeFromPollQueue(completion);
+                        state.markCompletedFromBackend(completion);
+                        completed_any = true;
+                        break;
+                    },
+                    .requeue => {},
+                }
+            }
+            if (!completed_any) break :reload;
         }
     }
 
