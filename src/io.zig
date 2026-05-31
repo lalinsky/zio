@@ -3777,3 +3777,67 @@ test "io: batch awaitConcurrent times out when no data arrives" {
     // Should timeout since no data arrives
     try std.testing.expectError(error.Timeout, batch.awaitConcurrent(io, .{ .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake } }));
 }
+
+const CancelUafFut = Io.Future((Io.Cancelable || Io.ConcurrentError)!void);
+
+const CancelUafCtx = struct {
+    ready: std.atomic.Value(u32) = .init(0),
+    canceled: std.atomic.Value(u32) = .init(0),
+};
+
+fn cancelUafCancelOne(io: Io, ctx: *CancelUafCtx, fut: *CancelUafFut) void {
+    if (fut.cancel(io)) |_| {} else |e| {
+        if (e == error.Canceled) _ = ctx.canceled.fetchAdd(1, .release);
+    }
+}
+
+fn cancelUafBareRecv(io: Io, ctx: *CancelUafCtx) (Io.Cancelable || Io.ConcurrentError)!void {
+    var addr: Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    const socket = Io.net.IpAddress.bind(&addr, io, .{ .mode = .dgram }) catch return;
+    defer socket.close(io);
+    var data_buf: [2048]u8 = undefined;
+    var ctrl_buf: [256]u8 align(8) = undefined;
+    var messages = [_]Io.net.IncomingMessage{.{
+        .from = undefined,
+        .data = undefined,
+        .control = &ctrl_buf,
+        .flags = undefined,
+    }};
+    _ = ctx.ready.fetchAdd(1, .release);
+    const maybe_err, _ = socket.receiveManyTimeout(io, &messages, &data_buf, .{}, .none);
+    if (maybe_err) |e| switch (e) {
+        error.Canceled => return error.Canceled,
+        else => return,
+    };
+}
+
+test "io: concurrent cross-executor cancel of N blocked recvmsg fibers is UAF-free" {
+    const N = 8;
+    const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    defer rt.deinit();
+
+    var ctx: CancelUafCtx = .{};
+    const Root = struct {
+        fn run(io: Io, c: *CancelUafCtx) !void {
+            const runtime = Runtime.fromIo(io);
+            var futs: [N]CancelUafFut = undefined;
+            for (&futs) |*f| f.* = try Io.concurrent(io, cancelUafBareRecv, .{ io, c });
+
+            var spins: usize = 0;
+            while (c.ready.load(.acquire) < N and spins < 1000) : (spins += 1) {
+                runtime.sleep(.fromMilliseconds(1)) catch {};
+            }
+            runtime.sleep(.fromMilliseconds(20)) catch {};
+
+            var group: Io.Group = .init;
+            for (&futs) |*f| try group.concurrent(io, cancelUafCancelOne, .{ io, c, f });
+            group.await(io) catch {};
+
+            try std.testing.expectEqual(@as(u32, N), c.ready.load(.acquire));
+            try std.testing.expectEqual(@as(u32, N), c.canceled.load(.acquire));
+        }
+    };
+
+    var handle = try rt.spawn(Root.run, .{ rt.io(), &ctx });
+    try handle.join();
+}
