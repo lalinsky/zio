@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.0] - 2026-05-31
+
+### Added
+
+- Built-in async DNS resolver on Linux (io_uring backend), replacing `getaddrinfo`. Reads `/etc/hosts`
+  and `resolv.conf`, supports search domains, CNAME following, parallel A/AAAA queries, EDNS0,
+  TCP fallback for large responses, response caching, and deduplication of concurrent identical
+  lookups. Enabled by default on io_uring; opt-in via `RuntimeOptions.dns.custom_resolver`.
+- `Runtime.initStatic` for stack-allocated or externally-owned `Runtime` instances that don't
+  need a heap allocation.
+- Single-threaded build support (`single_threaded = true`).
+
+### Changed
+
+- **BREAKING**: DNS lookup API changed from an iterator (`Result` with `next()` / `deinit()`) to a
+  caller-supplied buffer (`lookup(&storage, options)` returning a count). Eliminates the allocation
+  and the need to remember `deinit`.
+- **BREAKING**: `BroadcastChannel.subscribe()` now returns a `Consumer` value instead of taking a
+  pointer, and `unsubscribe()` is gone — consumers no longer need to be unregistered.
+- `HostName` now accepts numeric IPv4 and IPv6 addresses in addition to DNS names.
+- io_uring: when the submission queue is full, operations are queued internally and retried on the
+  next loop iteration instead of failing the caller.
+- Coroutine stacks are now periodically evicted from the pool when they exceed `max_age`, reclaiming
+  virtual memory that would otherwise accumulate during idle periods.
+
 ## [0.12.1] - 2026-05-22
 
 ### Added
@@ -288,6 +313,7 @@ when it's beneficial for load balancing.
 
 Initial release.
 
+[0.13.0]: https://github.com/lalinsky/zio/releases/tag/v0.13.0
 [0.12.1]: https://github.com/lalinsky/zio/releases/tag/v0.12.1
 [0.12.0]: https://github.com/lalinsky/zio/releases/tag/v0.12.0
 [0.11.0]: https://github.com/lalinsky/zio/releases/tag/v0.11.0
