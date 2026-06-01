@@ -38,7 +38,7 @@ pub fn lookup(
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     const allocator = fba.allocator();
 
-    const name_c = allocator.dupeZ(u8, options.name) catch return error.OutOfMemory;
+    const name_c = allocator.dupeSentinel(u8, options.name, 0) catch return error.OutOfMemory;
     const port_c = std.fmt.allocPrintSentinel(allocator, "{d}", .{options.port}, 0) catch return error.OutOfMemory;
 
     var hints: std.c.addrinfo = std.mem.zeroes(std.c.addrinfo);

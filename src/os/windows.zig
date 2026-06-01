@@ -538,7 +538,7 @@ pub fn pipe() !([2]HANDLE) {
     const counter = pipe_counter.fetchAdd(1, .monotonic);
     const pid = GetCurrentProcessId();
     var name_buf: [256]u8 = undefined;
-    const name = std.fmt.bufPrintZ(&name_buf, "\\\\.\\pipe\\zio-{d}-{d}", .{ pid, counter }) catch unreachable;
+    const name = std.fmt.bufPrintSentinel(&name_buf, "\\\\.\\pipe\\zio-{d}-{d}", .{ pid, counter }, 0) catch unreachable;
 
     // Convert to wide string
     var wide_name: [256:0]WCHAR = undefined;

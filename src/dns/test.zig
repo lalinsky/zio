@@ -23,8 +23,8 @@ test "HostName: validate" {
     try HostName.validate("127.0.0.1");
     try HostName.validate("::1");
     try HostName.validate("2001:db8::1");
-    try HostName.validate(@as([63]u8, @splat("a")) ++ ".com"); // Label exactly 63 chars (valid)
-    try HostName.validate(@as([127 * 2]u8, @splat("a.")) ++ "a"); // Total length 255 (valid)
+    try HostName.validate(@as([63]u8, @splat('a')) ++ ".com"); // Label exactly 63 chars (valid)
+    try HostName.validate(@as([127 * 2]u8, @bitCast(@as([127][2]u8, @splat(.{ 'a', '.' })))) ++ "a"); // Total length 255 (valid)
 
     // Invalid hostnames
     try std.testing.expectError(error.InvalidHostName, HostName.validate(""));
@@ -37,8 +37,8 @@ test "HostName: validate" {
     try std.testing.expectError(error.InvalidHostName, HostName.validate("host_name.com"));
     try std.testing.expectError(error.InvalidHostName, HostName.validate("."));
     try std.testing.expectError(error.InvalidHostName, HostName.validate(".."));
-    try std.testing.expectError(error.InvalidHostName, HostName.validate(@as([64]u8, @splat("a")) ++ ".com")); // Label length 64 (too long)
-    try std.testing.expectError(error.NameTooLong, HostName.validate(@as([127 * 2]u8, @splat("a.")) ++ "ab")); // Total length 256 (too long)
+    try std.testing.expectError(error.InvalidHostName, HostName.validate(@as([64]u8, @splat('a')) ++ ".com")); // Label length 64 (too long)
+    try std.testing.expectError(error.NameTooLong, HostName.validate(@as([127 * 2]u8, @bitCast(@as([127][2]u8, @splat(.{ 'a', '.' })))) ++ "ab")); // Total length 256 (too long)
 }
 
 test "HostName: eql" {

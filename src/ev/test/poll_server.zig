@@ -89,7 +89,7 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
                         .path = undefined,
                     };
                     const timestamp = time.now(.realtime);
-                    _ = std.fmt.bufPrintZ(&self.server_addr.path, "ev-test-{d}.sock", .{timestamp.value}) catch unreachable;
+                    _ = std.fmt.bufPrintSentinel(&self.server_addr.path, "ev-test-{d}.sock", .{timestamp.value}, 0) catch unreachable;
                 },
                 else => unreachable,
             }
