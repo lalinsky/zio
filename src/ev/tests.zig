@@ -108,7 +108,7 @@ test "Loop: socket create and bind" {
         .family = net.AF.INET,
         .port = 0,
         .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
-        .zero = [_]u8{0} ** 8,
+        .zero = @splat(0),
     };
     var addr_len: net.socklen_t = @sizeOf(@TypeOf(addr));
     var bind: NetBind = .init(sock, @ptrCast(&addr), &addr_len);

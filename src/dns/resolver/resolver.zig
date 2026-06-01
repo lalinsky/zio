@@ -112,7 +112,7 @@ pub const Resolver = struct {
             .hash_seed = hash_seed,
             .prng_mutex = .init,
             .prng = prng,
-            .dedup_buckets = [_]Bucket{.{}} ** num_dedup_buckets,
+            .dedup_buckets = @splat(.{}),
         };
     }
 

@@ -49,7 +49,7 @@ test "File: open/close" {
     try file_sync1.getResult();
 
     // Read the data back
-    var read_buffer = [_]u8{0} ** 64;
+    var read_buffer: [64]u8 = @splat(0);
     var read_iov: [1]os.iovec = undefined;
     var file_read = ev.FileRead.init(fd, .fromSlice(&read_buffer, &read_iov), 0);
     loop.add(&file_read.c);
@@ -127,7 +127,7 @@ test "File: rename/delete" {
     const fd2 = try file_open.getResult();
 
     // Read and verify the data
-    var read_buffer = [_]u8{0} ** 64;
+    var read_buffer: [64]u8 = @splat(0);
     var read_iov2: [1]os.iovec = undefined;
     var file_read = ev.FileRead.init(fd2, .fromSlice(&read_buffer, &read_iov2), 0);
     loop.add(&file_read.c);
@@ -184,7 +184,7 @@ test "File: read EOF" {
     try std.testing.expectEqual(write_data.len, try file_write.getResult());
 
     // Read all data
-    var read_buffer1 = [_]u8{0} ** 64;
+    var read_buffer1: [64]u8 = @splat(0);
     var read_iov1: [1]os.iovec = undefined;
     var file_read1 = ev.FileRead.init(fd, .fromSlice(&read_buffer1, &read_iov1), 0);
     loop.add(&file_read1.c);
@@ -194,7 +194,7 @@ test "File: read EOF" {
     try std.testing.expectEqualStrings(write_data, read_buffer1[0..bytes_read1]);
 
     // Read at EOF - should return 0 bytes, not an error
-    var read_buffer2 = [_]u8{0} ** 64;
+    var read_buffer2: [64]u8 = @splat(0);
     var read_iov2: [1]os.iovec = undefined;
     var file_read2 = ev.FileRead.init(fd, .fromSlice(&read_buffer2, &read_iov2), write_data.len);
     loop.add(&file_read2.c);

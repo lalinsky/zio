@@ -53,7 +53,7 @@ const Bucket = struct {
 };
 
 /// Global static bucket table for futex operations.
-var global_buckets: [num_buckets]Bucket = [_]Bucket{.{}} ** num_buckets;
+var global_buckets: [num_buckets]Bucket = @splat(.{});
 
 fn getBucket(address: usize) *Bucket {
     // Fibonacci hash - golden ratio distributes addresses evenly

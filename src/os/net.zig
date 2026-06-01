@@ -1516,7 +1516,7 @@ pub fn createLoopbackSocketPair() CreateLoopbackSocketPairError![2]fd_t {
         .family = AF.INET,
         .port = 0, // Let OS choose port
         .addr = 0x0100007F, // 127.0.0.1 in network byte order (little-endian)
-        .zero = [_]u8{0} ** 8,
+        .zero = @splat(0),
     });
     try bind(listen_sock, &bind_addr, @sizeOf(posix.system.sockaddr.in));
 
