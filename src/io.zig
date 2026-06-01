@@ -396,7 +396,7 @@ fn fileReadStreamingImpl(
     var op = ev.FileReadStreaming.init(stdIoHandleToZio(file.handle), .{ .iovecs = iovecs[0..count] });
     try timedWaitForIo(&op.c, timeout);
     const n = op.getResult() catch |err| switch (err) {
-        error.BrokenPipe => return error.Unexpected,
+        error.BrokenPipe, error.Unseekable => return error.Unexpected,
         else => |e| return e,
     };
     return if (n == 0) error.EndOfStream else n;
@@ -421,7 +421,10 @@ fn fileWriteStreamingImpl(
 
     var op = ev.FileWriteStreaming.init(stdIoHandleToZio(file.handle), wbuf);
     try timedWaitForIo(&op.c, timeout);
-    return try op.getResult();
+    return op.getResult() catch |err| switch (err) {
+        error.Unseekable => error.Unexpected,
+        else => |e| e,
+    };
 }
 
 /// Data for a single concurrent batch operation.
@@ -739,14 +742,14 @@ fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Oper
     return switch (tag) {
         .file_read_streaming => .{ .file_read_streaming = blk: {
             const n = data.file_read_streaming.op.getResult() catch |err| switch (err) {
-                error.BrokenPipe, error.Canceled => break :blk error.Unexpected,
+                error.BrokenPipe, error.Canceled, error.Unseekable => break :blk error.Unexpected,
                 else => |e| break :blk e,
             };
             break :blk if (n == 0) error.EndOfStream else n;
         } },
         .file_write_streaming => .{ .file_write_streaming = blk: {
             break :blk data.file_write_streaming.op.getResult() catch |err| switch (err) {
-                error.Canceled => error.Unexpected,
+                error.Canceled, error.Unseekable => error.Unexpected,
                 else => |e| e,
             };
         } },
