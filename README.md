@@ -120,7 +120,7 @@ fn handleClient(io: Io, stream: Io.net.Stream) Io.Cancelable!void {
 
     var write_buffer: [1024]u8 = undefined;
     var writer = stream.writer(io, &write_buffer);
-
+z
     while (true) {
         const line = reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
             error.EndOfStream => break,
@@ -154,19 +154,31 @@ pub fn main() !void {
 
 See `examples/*.zig` for more examples.
 
-## Building
+## Frequently Asked Questions
 
-```bash
-# Run tests
-zig build test
+### What is the difference between this project and `std.Io.Evented`?
 
-# Build examples
+In theory, from user perspective, there is very little difference. However, `std.Io.Evented` is very far from finished. It's missing essential functionality, if it even builds.
+Zio already fully supports multiple operating systems.
+
+The architecture of these two implementations is different. In the standard library, they prefer to reimplement the `std.Io` interface for each I/O backend, while in zio, I chose a layered architecture,
+where I have a cross-platform event loop, and the fiber/coroutine runtime built on top of that. That makes it much easier to support multiple systems. Plus you can even reach into the event loop from your code, in case you need functionality not covered by the `std.Io` interface.
+
+## Development
+
+Building examples
+
+```
 zig build examples
 ```
 
-## Contributing
+Running tests (with options to run specific tests, or select a non-default I/O backend)
 
-See [DEVELOPMENT.md](DEVELOPMENT.md).
+```bash
+zig build test -Dtest-filter="foo" -Dbackend=epoll
+```
+
+See [DEVELOPMENT.md](DEVELOPMENT.md) for more details.
 
 ## License
 
