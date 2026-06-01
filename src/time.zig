@@ -627,6 +627,21 @@ test "Timestamp: untilNow" {
     try std.testing.expect(elapsed.toNanoseconds() < ns_per_s);
 }
 
+// Regression: now() must read the clock from the kernel vDSO, not a
+// syscall. std.os.linux.clock_gettime only reaches the vDSO once
+// std.os.linux.elf_aux_maybe points at the ELF aux vector — Zig sets
+// that from its own _start, but this test binary links libc (see
+// build.zig), so libc owns _start and leaves it null. Without the
+// recovery in os/time.zig, clock_gettime falls back to a real syscall
+// on every read and this assertion fails (elf_aux_maybe stays null).
+test "Timestamp: now() resolves the vDSO under libc" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    _ = Timestamp.now(.monotonic); // first use recovers the aux vector
+    try std.testing.expect(std.os.linux.elf_aux_maybe != null);
+    // The recovered table must actually carry the vDSO base address.
+    try std.testing.expect(std.os.linux.getauxval(std.elf.AT_SYSINFO_EHDR) != 0);
+}
+
 test "Timestamp: addDuration, subDuration, durationTo" {
     const t1 = Timestamp.fromNanoseconds(1_000_000_000);
     const t2 = t1.addDuration(.fromSeconds(5));
