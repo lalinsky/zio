@@ -178,6 +178,7 @@ pub const FileReadError = error{
     BrokenPipe,
     SystemResources,
     NotOpenForReading,
+    Unseekable,
     Canceled,
     Unexpected,
 };
@@ -193,6 +194,7 @@ pub const FileWriteError = error{
     DiskQuota,
     FileTooBig,
     LockViolation,
+    Unseekable,
     Canceled,
     Unexpected,
 };
@@ -1274,6 +1276,7 @@ pub fn errnoToFileReadError(err: E) FileReadError {
                 .PIPE => error.BrokenPipe,
                 .NOMEM => error.SystemResources,
                 .BADF => error.NotOpenForReading,
+                .SPIPE => error.Unseekable,
                 else => |e| unexpectedError(e) catch error.Unexpected,
             };
         },
@@ -1309,6 +1312,7 @@ pub fn errnoToFileWriteError(err: E) FileWriteError {
                 .BADF => error.NotOpenForWriting,
                 .DQUOT => error.DiskQuota,
                 .FBIG => error.FileTooBig,
+                .SPIPE => error.Unseekable,
                 else => |e| unexpectedError(e) catch error.Unexpected,
             };
         },
