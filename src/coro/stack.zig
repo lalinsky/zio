@@ -13,15 +13,13 @@ const std = @import("std");
 const builtin = @import("builtin");
 const coroutines = @import("coroutines.zig");
 
-pub const page_size = if (builtin.os.tag == .freestanding) 1 else std.heap.page_size_min;
-
 const impl = if (builtin.os.tag == .windows)
     @import("stack_windows.zig")
 else
     @import("stack_posix.zig");
 
 pub const StackInfo = extern struct {
-    allocation_ptr: [*]align(page_size) u8, // deallocation_stack on Windows (TEB offset 0x1478)
+    allocation_ptr: [*]align(std.heap.page_size_min) u8, // deallocation_stack on Windows (TEB offset 0x1478)
     base: usize, // stack_base on Windows (TEB offset 0x08)
     limit: usize, // stack_limit on Windows (TEB offset 0x10)
     allocation_len: usize,

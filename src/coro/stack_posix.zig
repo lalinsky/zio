@@ -19,7 +19,6 @@ const stack = @import("stack.zig");
 const StackInfo = stack.StackInfo;
 const StackExtendMode = stack.StackExtendMode;
 const StackPoolConfig = stack.StackPoolConfig;
-const page_size = stack.page_size;
 
 const Allocator = std.mem.Allocator;
 const Timestamp = @import("../time.zig").Timestamp;
@@ -44,7 +43,7 @@ var old_sigbus_action: posix.Sigaction = undefined;
 /// Mode .grow: Grow by 1.5x current size in 64KB chunks
 /// Mode .full: Commit all remaining uncommitted stack
 pub fn stackExtend(info: *StackInfo, mode: StackExtendMode) error{StackOverflow}!void {
-    const guard_end = @intFromPtr(info.allocation_ptr) + page_size;
+    const guard_end = @intFromPtr(info.allocation_ptr) + std.heap.pageSize();
 
     // Calculate new limit based on mode
     const new_limit = switch (mode) {
@@ -81,9 +80,10 @@ pub fn stackExtend(info: *StackInfo, mode: StackExtendMode) error{StackOverflow}
     }
 
     // Commit the memory region
-    const commit_start = std.mem.alignBackward(usize, new_limit, page_size);
+    const ps = std.heap.pageSize();
+    const commit_start = std.mem.alignBackward(usize, new_limit, ps);
     const commit_size = info.limit - commit_start;
-    const addr: [*]align(page_size) u8 = @ptrFromInt(commit_start);
+    const addr: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(commit_start);
     posix.mprotect(addr[0..commit_size], posix.PROT.READ | posix.PROT.WRITE) catch {
         return error.StackOverflow;
     };
@@ -107,7 +107,7 @@ fn setupStackGrowth() !void {
 
     // Setup alternate stack for this thread if not already done
     if (!altstack_installed) {
-        const mem = try std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(page_size), altstack_size);
+        const mem = try std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(std.heap.pageSize()), altstack_size);
         errdefer std.heap.page_allocator.free(mem);
 
         var stack_t = posix.stack_t{
@@ -230,7 +230,7 @@ fn stackFaultHandler(sig: SigInt, info: *const posix.siginfo_t, ctx: ?*anyopaque
 
     // Stack layout: [guard_page][uncommitted][committed]
     const stack_base = @intFromPtr(stack_info.allocation_ptr);
-    const guard_page_end = stack_base + page_size;
+    const guard_page_end = stack_base + std.heap.pageSize();
     const uncommitted_start = guard_page_end;
     const uncommitted_end = stack_info.limit;
 
@@ -259,7 +259,7 @@ fn abortOnStackOverflow(fault_addr: usize, stack_info: *const StackInfo) noretur
     const stack_base = @intFromPtr(stack_info.allocation_ptr);
     const stack_size = stack_info.allocation_len;
     const committed = stack_info.base - stack_info.limit;
-    const is_guard_page_fault = fault_addr >= stack_base and fault_addr < stack_base + page_size;
+    const is_guard_page_fault = fault_addr >= stack_base and fault_addr < stack_base + std.heap.pageSize();
 
     const msg = std.fmt.bufPrint(
         &buf,
@@ -307,7 +307,7 @@ const enable_valgrind = builtin.mode == .Debug and builtin.valgrind_support;
 /// `acquire()` is also syscall-free; only the first use of a slot pays one
 /// `mprotect` to commit its initial region.
 const Slab = struct {
-    base: [*]align(page_size) u8,
+    base: [*]align(std.heap.page_size_min) u8,
     stacks: usize,
     slot_size: usize,
     used: usize,
@@ -369,9 +369,10 @@ pub const PosixStackPool = struct {
         // Guard page is folded into maximum_size: the bottom page of each slot
         // is the guard, so usable stack is (slot_size - page_size). Require at
         // least 2 pages (guard + one usable page).
-        const slot_size = std.mem.alignForward(usize, @max(config.maximum_size, 2 * page_size), page_size);
-        const commit_size = std.mem.alignForward(usize, config.committed_size, page_size);
-        std.debug.assert(commit_size <= slot_size - page_size);
+        const ps = std.heap.pageSize();
+        const slot_size = std.mem.alignForward(usize, @max(config.maximum_size, 2 * ps), ps);
+        const commit_size = std.mem.alignForward(usize, config.committed_size, ps);
+        std.debug.assert(commit_size <= slot_size - ps);
 
         return .{
             .allocator = allocator,
@@ -498,7 +499,7 @@ pub const PosixStackPool = struct {
         if (limit == top) {
             // Never-used slot: commit the initial region at the top of the slot.
             const new_limit = top - self.commit_size;
-            const region: [*]align(page_size) u8 = @ptrFromInt(new_limit);
+            const region: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(new_limit);
             posix.mprotect(region[0..self.commit_size], posix.PROT.READ | posix.PROT.WRITE) catch |err| {
                 log.err("Failed to commit stack slot (size={d}): {}", .{ self.commit_size, err });
                 return error.OutOfMemory;
@@ -601,7 +602,7 @@ pub const StackPool = PosixStackPool;
 
 /// Reserve `len` bytes of PROT_NONE address space for a slab, mirroring the
 /// mmap flags used by the single-stack path above.
-fn reserveSlab(len: usize) error{OutOfMemory}![*]align(page_size) u8 {
+fn reserveSlab(len: usize) error{OutOfMemory}![*]align(std.heap.page_size_min) u8 {
     // PROT.MAX declares future RW permissions upfront for NetBSD/FreeBSD policies.
     const prot_flags = posix.PROT.NONE | posix.PROT.MAX(posix.PROT.READ | posix.PROT.WRITE);
 
@@ -641,8 +642,9 @@ test "PosixStackPool: one mmap per slab, overflow spills to a new slab" {
 
     // All slots are distinct, page-aligned, and guard-prefixed.
     for (stacks) |s| {
-        try testing.expectEqual(@as(usize, 0), @intFromPtr(s.allocation_ptr) % page_size);
-        try testing.expect(s.limit > @intFromPtr(s.allocation_ptr) + page_size); // guard below limit
+        const ps = std.heap.pageSize();
+        try testing.expectEqual(@as(usize, 0), @intFromPtr(s.allocation_ptr) % ps);
+        try testing.expect(s.limit > @intFromPtr(s.allocation_ptr) + ps); // guard below limit
         try testing.expect(s.base - s.limit >= 8 * 1024); // initial commit honored
     }
 

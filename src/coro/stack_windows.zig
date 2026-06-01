@@ -18,7 +18,6 @@ const stack = @import("stack.zig");
 const StackInfo = stack.StackInfo;
 const StackExtendMode = stack.StackExtendMode;
 const StackPoolConfig = stack.StackPoolConfig;
-const page_size = stack.page_size;
 
 const Allocator = std.mem.Allocator;
 const Timestamp = @import("../time.zig").Timestamp;
@@ -85,8 +84,8 @@ pub const WindowsStackPool = struct {
 
     /// Allocate a fresh stack via RtlCreateUserStack.
     fn allocStack(self: *WindowsStackPool) error{OutOfMemory}!StackInfo {
-        const commit_size = std.mem.alignForward(usize, self.config.committed_size, page_size);
-        const max_size = std.mem.alignForward(usize, self.config.maximum_size, page_size);
+        const commit_size = std.mem.alignForward(usize, self.config.committed_size, std.heap.page_size_min);
+        const max_size = std.mem.alignForward(usize, self.config.maximum_size, std.heap.page_size_min);
 
         if (commit_size > max_size) {
             log.err("Committed size ({d}) exceeds maximum size ({d}) after alignment", .{ commit_size, max_size });
@@ -95,7 +94,7 @@ pub const WindowsStackPool = struct {
 
         const ALLOCATION_GRANULARITY = 65536; // 64KB on Windows
         var initial_teb: w.INITIAL_TEB = undefined;
-        const status = w.RtlCreateUserStack(commit_size, max_size, 0, page_size, ALLOCATION_GRANULARITY, &initial_teb);
+        const status = w.RtlCreateUserStack(commit_size, max_size, 0, std.heap.page_size_min, ALLOCATION_GRANULARITY, &initial_teb);
         if (status != .SUCCESS) {
             log.err("RtlCreateUserStack failed with status: 0x{x}", .{@intFromEnum(status)});
             return error.OutOfMemory;
