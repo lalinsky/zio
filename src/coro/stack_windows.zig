@@ -1,12 +1,92 @@
 // SPDX-FileCopyrightText: 2025 Lukáš Lalinský
 // SPDX-License-Identifier: MIT
 
+//! Windows coroutine stack allocation.
+//!
+//! Stacks are created per-stack via RtlCreateUserStack, which sets up automatic
+//! growth through the PAGE_GUARD mechanism, so there is no manual fault handler.
+//! `WindowsStackPool` keeps freed stacks on an intrusive free list (the node is
+//! stored inside the unused stack) and does its own allocation via the methods
+//! below. The platform-neutral facade lives in `stack.zig`.
+
 const std = @import("std");
+const builtin = @import("builtin");
+const w = @import("../os/windows.zig");
+const os = @import("../os/root.zig");
+
 const stack = @import("stack.zig");
 const StackInfo = stack.StackInfo;
+const StackExtendMode = stack.StackExtendMode;
+const Config = stack.Config;
+const page_size = stack.page_size;
+
+const Allocator = std.mem.Allocator;
 const Timestamp = @import("../time.zig").Timestamp;
-const Duration = @import("../time.zig").Duration;
-const os = @import("../os/root.zig");
+const log = @import("../common.zig").log;
+
+// ---------------------------------------------------------------------------
+// Low-level stack allocation
+// ---------------------------------------------------------------------------
+
+// Internal: used by WindowsStackPool below. Public allocation is via the pool.
+fn stackAlloc(info: *StackInfo, maximum_size: usize, committed_size: usize) error{OutOfMemory}!void {
+    // Round sizes up to page boundary
+    const commit_size = std.mem.alignForward(usize, committed_size, page_size);
+    const max_size = std.mem.alignForward(usize, maximum_size, page_size);
+
+    // Validate that committed size doesn't exceed maximum size
+    if (commit_size > max_size) {
+        log.err("Committed size ({d}) exceeds maximum size ({d}) after alignment", .{ commit_size, max_size });
+        return error.OutOfMemory;
+    }
+
+    // Use RtlCreateUserStack for automatic stack growth via PAGE_GUARD
+    const ALLOCATION_GRANULARITY = 65536; // 64KB on Windows
+    var initial_teb: w.INITIAL_TEB = undefined;
+
+    const status = w.RtlCreateUserStack(
+        commit_size,
+        max_size,
+        0, // ZeroBits
+        page_size,
+        ALLOCATION_GRANULARITY,
+        &initial_teb,
+    );
+
+    if (status != .SUCCESS) {
+        log.err("RtlCreateUserStack failed with status: 0x{x}", .{@intFromEnum(status)});
+        return error.OutOfMemory;
+    }
+
+    // Extract stack information from INITIAL_TEB
+    // RtlCreateUserStack creates: [uncommitted][guard_page][committed]
+    // and sets up automatic growth via PAGE_GUARD mechanism
+    const stack_base = @intFromPtr(initial_teb.StackBase);
+    const stack_limit = @intFromPtr(initial_teb.StackLimit);
+    const alloc_base = @intFromPtr(initial_teb.StackAllocationBase);
+
+    info.* = .{
+        .allocation_ptr = @ptrCast(@alignCast(initial_teb.StackAllocationBase)),
+        .base = stack_base,
+        .limit = stack_limit,
+        .allocation_len = stack_base - alloc_base,
+    };
+}
+
+fn stackFree(info: StackInfo) void {
+    w.RtlFreeUserStack(info.allocation_ptr);
+}
+
+/// Windows handles stack growth automatically via PAGE_GUARD; nothing to do.
+/// Exposed for the facade's panicHandler (commit-full before unwinding).
+pub fn stackExtend(info: *StackInfo, mode: StackExtendMode) error{StackOverflow}!void {
+    _ = info;
+    _ = mode;
+}
+
+// ---------------------------------------------------------------------------
+// Per-stack stack pool
+// ---------------------------------------------------------------------------
 
 /// A node in the free list, stored at the base of an unused stack.
 const FreeNode = struct {
@@ -16,33 +96,17 @@ const FreeNode = struct {
     timestamp: Timestamp,
 };
 
-pub const Config = struct {
-    /// Maximum size of stacks in this pool (in bytes).
-    /// This is the total virtual address space reserved for each stack.
-    maximum_size: usize,
-
-    /// Initial committed size of stacks in this pool (in bytes).
-    /// This is the amount of physical memory initially committed.
-    committed_size: usize,
-
-    /// Maximum number of unused stacks to keep in the pool.
-    /// When this limit is exceeded, the oldest stack is freed.
-    max_unused_stacks: usize = 16,
-
-    /// Maximum age of an unused stack.
-    /// Stacks older than this will be freed on the next release() call.
-    /// .zero means no age limit.
-    max_age: Duration = .zero,
-};
-
-pub const StackPool = struct {
+pub const WindowsStackPool = struct {
     config: Config,
     mutex: os.Mutex,
     head: ?*FreeNode,
     tail: ?*FreeNode,
     pool_size: usize,
 
-    pub fn init(config: Config) StackPool {
+    /// The `allocator` parameter is unused (free nodes live inside the stacks
+    /// themselves) but kept for a uniform interface with PosixStackPool.
+    pub fn init(allocator: Allocator, config: Config) WindowsStackPool {
+        _ = allocator;
         return .{
             .config = config,
             .mutex = .init(),
@@ -52,7 +116,7 @@ pub const StackPool = struct {
         };
     }
 
-    pub fn deinit(self: *StackPool) void {
+    pub fn deinit(self: *WindowsStackPool) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -60,7 +124,7 @@ pub const StackPool = struct {
         var current = self.head;
         while (current) |node| {
             const next = node.next;
-            stack.stackFree(node.stack_info);
+            self.freeStack(node.stack_info);
             current = next;
         }
 
@@ -69,9 +133,29 @@ pub const StackPool = struct {
         self.pool_size = 0;
     }
 
+    /// No-op on Windows (stack growth is automatic via PAGE_GUARD). Present for
+    /// interface parity with PosixStackPool.setup.
+    pub fn setup() !void {}
+
+    /// No-op on Windows (nothing to clean up).
+    pub fn teardown() void {}
+
+    /// Allocate a fresh stack via RtlCreateUserStack.
+    fn allocStack(self: *WindowsStackPool) error{OutOfMemory}!StackInfo {
+        var stack_info: StackInfo = undefined;
+        try stackAlloc(&stack_info, self.config.maximum_size, self.config.committed_size);
+        return stack_info;
+    }
+
+    /// Return a stack's address space to the OS.
+    fn freeStack(self: *WindowsStackPool, info: StackInfo) void {
+        _ = self;
+        stackFree(info);
+    }
+
     /// Acquires a stack from the pool, or allocates a new one if the pool is empty.
     /// All stacks from this pool have the configured maximum_size and committed_size.
-    pub fn acquire(self: *StackPool) error{OutOfMemory}!StackInfo {
+    pub fn acquire(self: *WindowsStackPool) error{OutOfMemory}!StackInfo {
         // Try to get from pool under lock
         {
             self.mutex.lock();
@@ -85,16 +169,14 @@ pub const StackPool = struct {
         }
 
         // Pool was empty, allocate new stack outside the lock
-        var stack_info: StackInfo = undefined;
-        try stack.stackAlloc(&stack_info, self.config.maximum_size, self.config.committed_size);
-        return stack_info;
+        return self.allocStack();
     }
 
     /// Releases a stack back to the pool.
     /// Expired stacks are removed before adding the new stack to avoid depleting the pool.
     /// If the pool is full, frees the oldest stack and adds this one.
     /// If the stack's committed region is too small to store the FreeNode, the stack is freed instead.
-    pub fn release(self: *StackPool, stack_info: StackInfo, timestamp: Timestamp) void {
+    pub fn release(self: *WindowsStackPool, stack_info: StackInfo, timestamp: Timestamp) void {
         // Check if the stack has enough committed space to store the FreeNode
         // The FreeNode is stored at the base of the stack (aligned backward)
         const node_addr = std.mem.alignBackward(usize, stack_info.base - @sizeOf(FreeNode), @alignOf(FreeNode));
@@ -102,13 +184,9 @@ pub const StackPool = struct {
         // Verify the FreeNode fits within the committed region (between limit and base)
         if (node_addr < stack_info.limit) {
             // Stack is too small to hold the FreeNode, free it instead of pooling
-            stack.stackFree(stack_info);
+            self.freeStack(stack_info);
             return;
         }
-
-        // Recycle the stack memory (MADV_FREE on POSIX) - no lock needed
-        // NOTE: this turns out to be tooo expensive to be worth it
-        // stack.stackRecycle(stack_info);
 
         // Store the FreeNode at the base of the stack
         const node = @as(*FreeNode, @ptrFromInt(node_addr));
@@ -165,14 +243,14 @@ pub const StackPool = struct {
         // Free collected stacks - no lock held
         while (to_free_head) |free_node| {
             const next = free_node.next;
-            stack.stackFree(free_node.stack_info);
+            self.freeStack(free_node.stack_info);
             to_free_head = next;
         }
     }
 
     /// Evicts up to `limit` expired stacks from the pool.
     /// Intended to be called periodically from a timer to reclaim idle stacks.
-    pub fn cleanup(self: *StackPool, now: Timestamp, limit: usize) void {
+    pub fn cleanup(self: *WindowsStackPool, now: Timestamp, limit: usize) void {
         if (self.config.max_age.value == 0) return;
 
         var to_free_head: ?*FreeNode = null;
@@ -198,13 +276,13 @@ pub const StackPool = struct {
 
         while (to_free_head) |free_node| {
             const next = free_node.next;
-            stack.stackFree(free_node.stack_info);
+            self.freeStack(free_node.stack_info);
             to_free_head = next;
         }
     }
 
     /// Removes a node from the doubly linked list and updates pool_size.
-    fn removeNode(self: *StackPool, node: *FreeNode) void {
+    fn removeNode(self: *WindowsStackPool, node: *FreeNode) void {
         if (node.prev) |prev| {
             prev.next = node.next;
         } else {
@@ -223,7 +301,7 @@ pub const StackPool = struct {
     }
 
     /// Adds a node to the tail of the doubly linked list and updates pool_size.
-    fn addNode(self: *StackPool, node: *FreeNode) void {
+    fn addNode(self: *WindowsStackPool, node: *FreeNode) void {
         node.prev = self.tail;
         node.next = null;
 
@@ -239,41 +317,39 @@ pub const StackPool = struct {
     }
 };
 
-test "StackPool basic acquire and release" {
-    var pool = StackPool.init(.{
+/// The pool selected for this platform (see stack.zig).
+pub const StackPool = WindowsStackPool;
+
+test "WindowsStackPool basic acquire and release" {
+    var pool = WindowsStackPool.init(std.testing.allocator, .{
         .maximum_size = 1024 * 1024,
         .committed_size = 64 * 1024,
         .max_unused_stacks = 4,
     });
     defer pool.deinit();
 
-    // Acquire a stack
     const stack1 = try pool.acquire();
     try std.testing.expect(stack1.base != 0);
     try std.testing.expect(stack1.base > stack1.limit); // Stack grows downward
 
-    // Release it back
     pool.release(stack1, .zero);
     try std.testing.expectEqual(1, pool.pool_size);
 
-    // Acquire again - should reuse the same stack
     const stack2 = try pool.acquire();
     try std.testing.expectEqual(stack1.base, stack2.base);
     try std.testing.expectEqual(0, pool.pool_size);
 
-    // Clean up
-    stack.stackFree(stack2);
+    stackFree(stack2);
 }
 
-test "StackPool respects max_unused_stacks" {
-    var pool = StackPool.init(.{
+test "WindowsStackPool respects max_unused_stacks" {
+    var pool = WindowsStackPool.init(std.testing.allocator, .{
         .maximum_size = 1024 * 1024,
         .committed_size = 64 * 1024,
         .max_unused_stacks = 2,
     });
     defer pool.deinit();
 
-    // Acquire and release 3 stacks
     const stack1 = try pool.acquire();
     const stack2 = try pool.acquire();
     const stack3 = try pool.acquire();
@@ -288,7 +364,6 @@ test "StackPool respects max_unused_stacks" {
     pool.release(stack3, .zero);
     try std.testing.expectEqual(2, pool.pool_size);
 
-    // Verify that stack1 is not in the pool (stack2 and stack3 should be)
     const reused1 = try pool.acquire();
     const reused2 = try pool.acquire();
 
@@ -296,15 +371,14 @@ test "StackPool respects max_unused_stacks" {
     try std.testing.expect(reused2.base == stack2.base or reused2.base == stack3.base);
     try std.testing.expect(reused1.base != reused2.base);
 
-    // Clean up
-    stack.stackFree(reused1);
-    stack.stackFree(reused2);
+    stackFree(reused1);
+    stackFree(reused2);
 }
 
-test "StackPool age-based expiration" {
-    const max_age: Duration = .fromMilliseconds(100);
+test "WindowsStackPool age-based expiration" {
+    const max_age = @import("../time.zig").Duration.fromMilliseconds(100);
 
-    var pool = StackPool.init(.{
+    var pool = WindowsStackPool.init(std.testing.allocator, .{
         .maximum_size = 1024 * 1024,
         .committed_size = 64 * 1024,
         .max_unused_stacks = 4,
@@ -312,22 +386,17 @@ test "StackPool age-based expiration" {
     });
     defer pool.deinit();
 
-    // Acquire and release a stack at timestamp 0
     const stack1 = try pool.acquire();
     pool.release(stack1, .zero);
     try std.testing.expectEqual(1, pool.pool_size);
 
-    // Acquire a new stack and release it with timestamp past expiration
-    // This triggers expiration check and should evict stack1
     const stack2 = try pool.acquire();
     try std.testing.expectEqual(0, pool.pool_size);
     pool.release(stack2, .fromMilliseconds(101));
     try std.testing.expectEqual(1, pool.pool_size);
 
-    // Verify the pool contains stack2 (stack1 was expired)
     const reused = try pool.acquire();
     try std.testing.expectEqual(stack2.base, reused.base);
 
-    // Clean up
-    stack.stackFree(reused);
+    stackFree(reused);
 }

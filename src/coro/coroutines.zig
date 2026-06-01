@@ -9,8 +9,7 @@ const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 const StackInfo = @import("stack.zig").StackInfo;
-const stackAlloc = @import("stack.zig").stackAlloc;
-const stackFree = @import("stack.zig").stackFree;
+const StackPool = @import("stack.zig").StackPool;
 
 /// Current coroutine context for this thread. Used by the SIGSEGV signal handler
 /// to determine if a fault is from a coroutine stack and to access stack metadata.
@@ -1307,8 +1306,10 @@ test "Coroutine: basic" {
         .parent_context_ptr = &parent_context,
         .context = undefined,
     };
-    try stackAlloc(&coro.context.stack_info, 64 * 1024, 4096);
-    defer stackFree(coro.context.stack_info);
+    var pool = StackPool.init(std.testing.allocator, .{ .maximum_size = 64 * 1024, .committed_size = 4096, .slab_stacks = 1 });
+    defer pool.deinit();
+    coro.context.stack_info = try pool.acquire();
+    defer pool.release(coro.context.stack_info, .zero);
 
     const Fn = struct {
         fn sum(_: *Coroutine, a: u32, b: u32) u32 {
@@ -1334,8 +1335,10 @@ test "Coroutine: recursion" {
         .parent_context_ptr = &parent_context,
         .context = undefined,
     };
-    try stackAlloc(&coro.context.stack_info, 64 * 1024, 4096);
-    defer stackFree(coro.context.stack_info);
+    var pool = StackPool.init(std.testing.allocator, .{ .maximum_size = 64 * 1024, .committed_size = 4096, .slab_stacks = 1 });
+    defer pool.deinit();
+    coro.context.stack_info = try pool.acquire();
+    defer pool.release(coro.context.stack_info, .zero);
 
     const Fn = struct {
         fn fib(c: *Coroutine, a: u32) u32 {
@@ -1362,15 +1365,17 @@ test "Coroutine: message passing" {
         .parent_context_ptr = &parent_context,
         .context = undefined,
     };
-    try stackAlloc(&coro1.context.stack_info, 64 * 1024, 4096);
-    defer stackFree(coro1.context.stack_info);
+    var pool = StackPool.init(std.testing.allocator, .{ .maximum_size = 64 * 1024, .committed_size = 4096, .slab_stacks = 2 });
+    defer pool.deinit();
+    coro1.context.stack_info = try pool.acquire();
+    defer pool.release(coro1.context.stack_info, .zero);
 
     var coro2: Coroutine = .{
         .parent_context_ptr = &parent_context,
         .context = undefined,
     };
-    try stackAlloc(&coro2.context.stack_info, 64 * 1024, 4096);
-    defer stackFree(coro2.context.stack_info);
+    coro2.context.stack_info = try pool.acquire();
+    defer pool.release(coro2.context.stack_info, .zero);
 
     // Simple single-slot channel
     const Channel = struct {
@@ -1447,10 +1452,8 @@ test "Coroutine: allocator inside coroutine" {
     //  - it tests the new `std.debug` refactor in Zig 0.16
     //    (https://github.com/ziglang/zig/pull/25227)
 
-    const st = @import("stack.zig");
-
-    try st.setupStackGrowth();
-    defer st.cleanupStackGrowth();
+    try StackPool.setup();
+    defer StackPool.teardown();
 
     var parent_context: Context = undefined;
 
@@ -1458,8 +1461,11 @@ test "Coroutine: allocator inside coroutine" {
         .parent_context_ptr = &parent_context,
         .context = undefined,
     };
-    try stackAlloc(&coro.context.stack_info, 8 * 1024 * 1024, 4096);
-    defer stackFree(coro.context.stack_info);
+
+    var pool = StackPool.init(std.testing.allocator, .{ .maximum_size = 8 * 1024 * 1024, .committed_size = 4096, .slab_stacks = 1 });
+    defer pool.deinit();
+    coro.context.stack_info = try pool.acquire();
+    defer pool.release(coro.context.stack_info, .zero);
 
     const Fn = struct {
         fn main(_: *Coroutine) !void {
@@ -1493,16 +1499,16 @@ test "Coroutine: stack trace" {
     // See https://codeberg.org/ziglang/zig/issues/31082
     if (builtin.cpu.arch == .arm or builtin.cpu.arch == .thumb) return error.SkipZigTest;
 
-    const stack = @import("stack.zig");
-
     var parent_ctx: Context = undefined;
     var coro = Coroutine{
         .parent_context_ptr = &parent_ctx,
         .context = undefined,
     };
 
-    try stack.stackAlloc(&coro.context.stack_info, 4 * 1024 * 1024, 4 * 1024 * 1024);
-    defer stack.stackFree(coro.context.stack_info);
+    var pool = StackPool.init(std.testing.allocator, .{ .maximum_size = 5 * 1024 * 1024, .committed_size = 4 * 1024 * 1024, .slab_stacks = 1 });
+    defer pool.deinit();
+    coro.context.stack_info = try pool.acquire();
+    defer pool.release(coro.context.stack_info, .zero);
 
     const TestData = struct {
         trace: std.debug.StackTrace = undefined,

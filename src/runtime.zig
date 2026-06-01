@@ -18,10 +18,8 @@ const Timestamp = time.Timestamp;
 
 const Coroutine = @import("coro/coroutines.zig").Coroutine;
 const Context = @import("coro/coroutines.zig").Context;
-const StackPool = @import("coro/stack_pool.zig").StackPool;
-const StackPoolConfig = @import("coro/stack_pool.zig").Config;
-const setupStackGrowth = @import("coro/stack.zig").setupStackGrowth;
-const cleanupStackGrowth = @import("coro/stack.zig").cleanupStackGrowth;
+const StackPool = @import("coro/root.zig").StackPool;
+const StackPoolConfig = @import("coro/stack.zig").Config;
 
 const AnyTask = @import("task.zig").AnyTask;
 const TaskPool = @import("task.zig").TaskPool;
@@ -317,8 +315,8 @@ pub const Executor = struct {
         };
         self.main_task.coro.parent_context_ptr = &self.main_task.coro.context;
 
-        try setupStackGrowth();
-        errdefer cleanupStackGrowth();
+        try StackPool.setup();
+        errdefer StackPool.teardown();
 
         try self.loop.init(.{
             .allocator = self.runtime.allocator,
@@ -348,7 +346,7 @@ pub const Executor = struct {
 
         self.loop.deinit();
 
-        cleanupStackGrowth();
+        StackPool.teardown();
     }
 
     fn shutdownCallback(loop: *ev.Loop, _: *ev.Completion) void {
@@ -772,7 +770,7 @@ pub const Runtime = struct {
             .options = options,
             .thread_pool = undefined,
             .main_executor = undefined,
-            .stack_pool = .init(options.stack_pool),
+            .stack_pool = .init(allocator, options.stack_pool),
             .task_pool = .init(allocator),
             .resolver = if (options.dns.custom_resolver) dns.Resolver.init(allocator) else null,
         };

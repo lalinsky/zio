@@ -72,9 +72,17 @@ pub fn main() !void {
     std.log.info("=== Low-level coroutine demo ===", .{});
     std.log.info("", .{});
 
-    // Setup stack growth handler (required for automatic stack extension)
-    try coro.setupStackGrowth();
-    defer coro.cleanupStackGrowth();
+    // Set up per-thread automatic stack growth (no-op on Windows).
+    try coro.StackPool.setup();
+    defer coro.StackPool.teardown();
+
+    // Stacks come from a pool.
+    var pool = coro.StackPool.init(std.heap.page_allocator, .{
+        .maximum_size = 64 * 1024,
+        .committed_size = 4096,
+        .slab_stacks = 2,
+    });
+    defer pool.deinit();
 
     // Parent context - where we return when coroutines yield
     var parent_context: coro.Context = undefined;
@@ -84,16 +92,16 @@ pub fn main() !void {
         .parent_context_ptr = &parent_context,
         .context = undefined,
     };
-    try coro.stackAlloc(&producer_coro.context.stack_info, 64 * 1024, 4096);
-    defer coro.stackFree(producer_coro.context.stack_info);
+    producer_coro.context.stack_info = try pool.acquire();
+    defer pool.release(producer_coro.context.stack_info, .zero);
 
     // Create consumer coroutine
     var consumer_coro: coro.Coroutine = .{
         .parent_context_ptr = &parent_context,
         .context = undefined,
     };
-    try coro.stackAlloc(&consumer_coro.context.stack_info, 64 * 1024, 4096);
-    defer coro.stackFree(consumer_coro.context.stack_info);
+    consumer_coro.context.stack_info = try pool.acquire();
+    defer pool.release(consumer_coro.context.stack_info, .zero);
 
     // Shared channel
     var channel: Channel(?usize) = .{};

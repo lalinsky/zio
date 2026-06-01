@@ -1,27 +1,24 @@
 // SPDX-FileCopyrightText: 2025 Lukáš Lalinský
 // SPDX-License-Identifier: MIT
 
+//! Platform-neutral facade for coroutine stack management.
+//!
+//! Shared types (`StackInfo`, `Config`) and the standalone alloc/free/extend
+//! API live here; the actual allocation lives in the per-platform backends
+//! (`stack_posix.zig` / `stack_windows.zig`) selected by `impl`. Valgrind stack
+//! bookkeeping for the standalone API is applied here so both backends stay
+//! free of it. `StackPool` resolves to the backend's pool implementation.
+
 const std = @import("std");
 const builtin = @import("builtin");
-const posix = @import("../os/posix.zig");
-const fs = @import("../os/fs.zig");
-const w = @import("../os/windows.zig");
 const coroutines = @import("coroutines.zig");
-
-const log = @import("../common.zig").log;
 
 pub const page_size = if (builtin.os.tag == .freestanding) 1 else std.heap.page_size_min;
 
-// Signal type changed from c_int to enum in Zig 0.16
-const is_pre_016 = builtin.zig_version.major == 0 and builtin.zig_version.minor < 16;
-const SigInt = if (is_pre_016) c_int else posix.SIG;
-
-// Stack growth signal handler state (POSIX only)
-threadlocal var altstack_installed: bool = false;
-threadlocal var altstack_mem: ?[]u8 = null;
-var signal_handler_refcount: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);
-var old_sigsegv_action: posix.Sigaction = undefined;
-var old_sigbus_action: posix.Sigaction = undefined;
+const impl = if (builtin.os.tag == .windows)
+    @import("stack_windows.zig")
+else
+    @import("stack_posix.zig");
 
 pub const StackInfo = extern struct {
     allocation_ptr: [*]align(page_size) u8, // deallocation_stack on Windows (TEB offset 0x1478)
@@ -29,130 +26,12 @@ pub const StackInfo = extern struct {
     limit: usize, // stack_limit on Windows (TEB offset 0x10)
     allocation_len: usize,
     valgrind_stack_id: usize = 0,
+    // Opaque value owned by the stack pool, used to locate the backing
+    // allocation in O(1) on release (e.g. the POSIX slab pointer). 0 = unset.
+    // Safe to append: this struct is the tail field of Context and the Windows
+    // context-switch asm only reads allocation_ptr/base/limit by fixed offset.
+    pool_cookie: usize = 0,
 };
-
-pub fn stackAlloc(info: *StackInfo, maximum_size: usize, committed_size: usize) error{OutOfMemory}!void {
-    if (builtin.os.tag == .windows) {
-        try stackAllocWindows(info, maximum_size, committed_size);
-    } else {
-        try stackAllocPosix(info, maximum_size, committed_size);
-    }
-
-    if (builtin.mode == .Debug and builtin.valgrind_support) {
-        const stack_slice: [*]u8 = @ptrFromInt(info.limit);
-        info.valgrind_stack_id = std.valgrind.stackRegister(stack_slice[0 .. info.base - info.limit]);
-    }
-}
-
-fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize) error{OutOfMemory}!void {
-    // Round maximum_size up to page boundary, then add guard page
-    const aligned_max = std.mem.alignForward(usize, maximum_size, page_size);
-    // Ensure we allocate at least 2 pages (guard + usable space)
-    const size = @max(aligned_max + page_size, page_size * 2);
-
-    // Reserve address space with PROT_NONE
-    // On NetBSD/FreeBSD, we must declare future permissions upfront for security policies
-    const prot_flags = posix.PROT.NONE | posix.PROT.MAX(posix.PROT.READ | posix.PROT.WRITE);
-
-    // MAP_STACK is supported on Linux and NetBSD, but not on macOS/FreeBSD
-    // (FreeBSD has the flag but it's incompatible with PROT_NONE)
-    var map_flags = posix.MAP.PRIVATE | posix.MAP.ANONYMOUS;
-    if (builtin.os.tag == .linux or builtin.os.tag == .netbsd) {
-        map_flags |= posix.MAP.STACK;
-    }
-
-    const allocation = posix.mmap(
-        null, // Address hint (null for system to choose)
-        size,
-        prot_flags,
-        map_flags,
-        -1, // File descriptor (not applicable)
-        0, // Offset within the file (not applicable)
-    ) catch |err| {
-        log.err("Failed to mmap stack memory (size={d}): {}", .{ size, err });
-        return error.OutOfMemory;
-    };
-    errdefer posix.munmap(allocation) catch {};
-
-    // Advise kernel not to use transparent huge pages (Linux-specific optimization)
-    // THP can cause memory bloat for small/sparse stack allocations
-    if (@hasDecl(posix.MADV, "NOHUGEPAGE")) {
-        posix.madvise(allocation, posix.MADV.NOHUGEPAGE) catch {};
-    }
-
-    // Guard page stays as PROT_NONE (first page)
-
-    // Round committed size up to page boundary
-    const commit_size = std.mem.alignForward(usize, committed_size, page_size);
-
-    // Validate that committed size doesn't exceed available space (minus guard page)
-    if (commit_size > size - page_size) {
-        log.err("Committed size ({d}) exceeds maximum size ({d}) after alignment", .{ commit_size, size - page_size });
-        return error.OutOfMemory;
-    }
-
-    // Commit initial portion at top of stack
-    const stack_top = @intFromPtr(allocation.ptr) + size;
-    const initial_commit_start = stack_top - commit_size;
-    const initial_region: [*]align(page_size) u8 = @ptrFromInt(initial_commit_start);
-    posix.mprotect(initial_region[0..commit_size], posix.PROT.READ | posix.PROT.WRITE) catch |err| {
-        log.err("Failed to mprotect stack region (commit_size={d}): {}", .{ commit_size, err });
-        return error.OutOfMemory;
-    };
-
-    // Stack layout (grows downward from high to low addresses):
-    // [guard_page (PROT_NONE)][uncommitted (PROT_NONE)][committed (READ|WRITE)]
-    // ^                                                ^                       ^
-    // allocation_ptr                                   limit                   base (allocation_ptr + allocation_len)
-    info.* = .{
-        .allocation_ptr = allocation.ptr,
-        .base = stack_top,
-        .limit = initial_commit_start,
-        .allocation_len = allocation.len,
-    };
-}
-
-pub fn stackFree(info: StackInfo) void {
-    if (builtin.mode == .Debug and builtin.valgrind_support) {
-        if (info.valgrind_stack_id != 0) {
-            std.valgrind.stackDeregister(info.valgrind_stack_id);
-        }
-    }
-
-    if (builtin.os.tag == .windows) {
-        return stackFreeWindows(info);
-    } else {
-        return stackFreePosix(info);
-    }
-}
-
-fn stackFreePosix(info: StackInfo) void {
-    posix.munmap(info.allocation_ptr[0..info.allocation_len]) catch {};
-}
-
-/// Recycle stack memory for reuse by marking committed pages as available for kernel reclamation.
-/// This is useful for stack pooling - the virtual address space remains reserved but the physical
-/// memory can be reclaimed by the kernel if needed. Pages will be zero-filled on next access.
-///
-/// Uses MADV_FREE which allows lazy reclamation - pages are marked as candidates for reclamation
-/// but are only actually freed when the system is under memory pressure.
-///
-/// Supported on: Linux 4.5+, macOS, FreeBSD, NetBSD
-/// On Windows: No-op (stack recycling not currently implemented)
-pub fn stackRecycle(info: StackInfo) void {
-    if (builtin.os.tag == .windows) return;
-
-    // Only recycle committed region (don't touch guard page or uncommitted regions)
-    const committed_start = info.limit;
-    const committed_size = info.base - info.limit;
-    if (committed_size == 0) return;
-
-    const addr: [*]align(page_size) u8 = @ptrFromInt(committed_start);
-
-    // MADV_FREE is available on Linux 4.5+, macOS, FreeBSD, NetBSD
-    // It allows lazy reclamation - physical pages are freed when system needs memory
-    posix.madvise(addr[0..committed_size], posix.MADV.FREE) catch {};
-}
 
 pub const StackExtendMode = enum {
     /// Grow by 1.5x the current committed size (default incremental growth)
@@ -161,494 +40,36 @@ pub const StackExtendMode = enum {
     full,
 };
 
-pub fn stackExtend(info: *StackInfo, mode: StackExtendMode) error{StackOverflow}!void {
-    if (builtin.os.tag == .windows) {
-        try stackExtendWindows(info);
-    } else {
-        try stackExtendPosix(info, mode);
-    }
-
-    if (builtin.mode == .Debug and builtin.valgrind_support) {
-        if (info.valgrind_stack_id != 0) {
-            const stack_slice: [*]u8 = @ptrFromInt(info.limit);
-            std.valgrind.stackChange(info.valgrind_stack_id, stack_slice[0 .. info.base - info.limit]);
-        }
-    }
-}
-
-/// Extend the committed stack region.
-/// Mode .grow: Grow by 1.5x current size in 64KB chunks
-/// Mode .full: Commit all remaining uncommitted stack
-fn stackExtendPosix(info: *StackInfo, mode: StackExtendMode) error{StackOverflow}!void {
-    const guard_end = @intFromPtr(info.allocation_ptr) + page_size;
-
-    // Calculate new limit based on mode
-    const new_limit = switch (mode) {
-        .grow => blk: {
-            const chunk_size = 64 * 1024;
-            const growth_factor_num = 3;
-            const growth_factor_den = 2;
-
-            // Calculate current committed size
-            const current_committed = info.base - info.limit;
-
-            // Calculate new committed size (1.5x current)
-            const new_committed_size = (current_committed * growth_factor_num) / growth_factor_den;
-            const additional_size = new_committed_size - current_committed;
-            const size_to_commit = std.mem.alignForward(usize, additional_size, chunk_size);
-
-            // Check if we have enough uncommitted space
-            if (size_to_commit > info.limit) {
-                return error.StackOverflow;
-            }
-            break :blk info.limit - size_to_commit;
-        },
-        .full => guard_end, // Commit all the way to guard page
-    };
-
-    // Check we don't overflow into guard page
-    if (new_limit < guard_end) {
-        return error.StackOverflow;
-    }
-
-    // Already at or past target
-    if (new_limit >= info.limit) {
-        return;
-    }
-
-    // Commit the memory region
-    const commit_start = std.mem.alignBackward(usize, new_limit, page_size);
-    const commit_size = info.limit - commit_start;
-    const addr: [*]align(page_size) u8 = @ptrFromInt(commit_start);
-    posix.mprotect(addr[0..commit_size], posix.PROT.READ | posix.PROT.WRITE) catch {
-        return error.StackOverflow;
-    };
-
-    // Update limit to new bottom of committed region
-    info.limit = commit_start;
-}
-
-fn stackAllocWindows(info: *StackInfo, maximum_size: usize, committed_size: usize) error{OutOfMemory}!void {
-    // Round sizes up to page boundary
-    const commit_size = std.mem.alignForward(usize, committed_size, page_size);
-    const max_size = std.mem.alignForward(usize, maximum_size, page_size);
-
-    // Validate that committed size doesn't exceed maximum size
-    if (commit_size > max_size) {
-        log.err("Committed size ({d}) exceeds maximum size ({d}) after alignment", .{ commit_size, max_size });
-        return error.OutOfMemory;
-    }
-
-    // Use RtlCreateUserStack for automatic stack growth via PAGE_GUARD
-    const ALLOCATION_GRANULARITY = 65536; // 64KB on Windows
-    var initial_teb: w.INITIAL_TEB = undefined;
-
-    const status = w.RtlCreateUserStack(
-        commit_size,
-        max_size,
-        0, // ZeroBits
-        page_size,
-        ALLOCATION_GRANULARITY,
-        &initial_teb,
-    );
-
-    if (status != .SUCCESS) {
-        log.err("RtlCreateUserStack failed with status: 0x{x}", .{@intFromEnum(status)});
-        return error.OutOfMemory;
-    }
-
-    // Extract stack information from INITIAL_TEB
-    // RtlCreateUserStack creates: [uncommitted][guard_page][committed]
-    // and sets up automatic growth via PAGE_GUARD mechanism
-    const stack_base = @intFromPtr(initial_teb.StackBase);
-    const stack_limit = @intFromPtr(initial_teb.StackLimit);
-    const alloc_base = @intFromPtr(initial_teb.StackAllocationBase);
-
-    info.* = .{
-        .allocation_ptr = @ptrCast(@alignCast(initial_teb.StackAllocationBase)),
-        .base = stack_base,
-        .limit = stack_limit,
-        .allocation_len = stack_base - alloc_base,
-    };
-}
-
-fn stackFreeWindows(info: StackInfo) void {
-    w.RtlFreeUserStack(info.allocation_ptr);
-}
-
-/// Windows handles stack growth automatically via PAGE_GUARD mechanism
-/// when using RtlCreateUserStack. This is a no-op for compatibility.
-fn stackExtendWindows(_: *StackInfo) error{StackOverflow}!void {
-    // PAGE_GUARD handles this automatically on Windows
-}
-
-/// Setup automatic stack growth via SIGSEGV handler for this thread.
-/// This function is idempotent - safe to call multiple times per thread.
-///
-/// On first call (any thread): Installs global SIGSEGV signal handler
-/// On every call: Sets up alternate signal stack for this thread if not already configured
-/// On Windows: No-op (stack growth is automatic via PAGE_GUARD)
-///
-/// Must be called once per thread before using coroutines on that thread.
-pub fn setupStackGrowth() !void {
-    // Windows handles stack growth automatically
-    if (builtin.os.tag == .windows) return;
-
-    const altstack_size = posix.SIGSTKSZ;
-
-    // Setup alternate stack for this thread if not already done
-    if (!altstack_installed) {
-        const mem = try std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(page_size), altstack_size);
-        errdefer std.heap.page_allocator.free(mem);
-
-        var stack = posix.stack_t{
-            .flags = 0,
-            .sp = mem.ptr,
-            .size = altstack_size,
-        };
-
-        try posix.sigaltstack(&stack, null);
-
-        altstack_mem = mem;
-        altstack_installed = true;
-    }
-
-    // Install global signal handler (once per process)
-    // Increment refcount; if this is the first caller, install the handler
-    const prev_refcount = signal_handler_refcount.fetchAdd(1, .acquire);
-    if (prev_refcount == 0) {
-        var sa = posix.Sigaction{
-            .handler = .{ .sigaction = stackFaultHandler },
-            .mask = posix.sigemptyset(),
-            .flags = posix.SA.SIGINFO | posix.SA.ONSTACK,
-        };
-
-        posix.sigaction(posix.SIG.SEGV, &sa, &old_sigsegv_action);
-
-        // macOS sends SIGBUS for PROT_NONE access, not SIGSEGV
-        if (builtin.os.tag.isDarwin()) {
-            posix.sigaction(posix.SIG.BUS, &sa, &old_sigbus_action);
-        }
-    }
-}
-
-/// Cleanup stack growth handler state for this thread.
-/// Disables the alternate stack and frees its memory.
-/// Decrements the global signal handler refcount and uninstalls the handler when it reaches 0.
-/// On Windows: No-op (nothing to clean up)
-///
-/// Should be called when a thread exits if setupStackGrowth() was called.
-pub fn cleanupStackGrowth() void {
-    // Windows has nothing to clean up
-    if (builtin.os.tag == .windows) return;
-
-    if (altstack_installed) {
-        // Disable alternate stack
-        var disable_stack = posix.stack_t{
-            .flags = posix.SS.DISABLE,
-            .sp = null,
-            .size = 0,
-        };
-        posix.sigaltstack(&disable_stack, null) catch {
-            // Best effort - can't do much if this fails
-        };
-
-        // Free the alternate stack memory
-        if (altstack_mem) |mem| {
-            std.heap.page_allocator.free(mem);
-            altstack_mem = null;
-        }
-
-        altstack_installed = false;
-    }
-
-    // Decrement refcount; if this was the last thread, uninstall the handler
-    const prev_refcount = signal_handler_refcount.fetchSub(1, .release);
-    if (prev_refcount == 1) {
-        // We were the last thread - restore the old signal handlers
-        posix.sigaction(posix.SIG.SEGV, &old_sigsegv_action, null);
-        if (builtin.os.tag.isDarwin()) {
-            posix.sigaction(posix.SIG.BUS, &old_sigbus_action, null);
-        }
-    }
-}
-
-/// Extract fault address from siginfo_t in a platform-agnostic way
-inline fn getFaultAddress(info: *const posix.siginfo_t) usize {
-    return @intFromPtr(switch (builtin.os.tag) {
-        .linux => info.fields.sigfault.addr,
-        .macos, .ios, .tvos, .watchos, .visionos => info.addr,
-        .freebsd, .dragonfly => info.addr,
-        .netbsd => info.info.reason.fault.addr,
-        .illumos => info.reason.fault.addr,
-        else => @compileError("Stack growth not supported on this platform"),
-    });
-}
-
-/// Invoke the previous signal handler or use default behavior.
-/// This allows proper signal handler chaining instead of unconditionally aborting.
-fn invokePreviousHandler(sig: SigInt, info: *const posix.siginfo_t, ctx: ?*anyopaque) noreturn {
-    // Get the appropriate old sigaction based on signal number
-    const old_sa = if (sig == posix.SIG.SEGV) &old_sigsegv_action else &old_sigbus_action;
-
-    // Check if the old handler had SA_SIGINFO flag set
-    if ((old_sa.flags & posix.SA.SIGINFO) != 0) {
-        // Previous handler was a sigaction-style handler
-        if (old_sa.handler.sigaction) |sa| {
-            sa(sig, info, ctx);
-        }
-    } else {
-        // Previous handler was a simple handler (or SIG_DFL/SIG_IGN)
-        if (old_sa.handler.handler) |h| {
-            // SIG_DFL = 0, SIG_IGN = 1 (POSIX-universal sentinel values)
-            if (@intFromPtr(h) <= 1) {
-                // Restore the previous handler and re-raise the signal
-                // We must restore the handler first, otherwise the signal comes back to us
-                posix.sigaction(sig, old_sa, null);
-                _ = posix.raise(sig) catch {};
-            } else {
-                // Call the previous simple handler
-                h(sig);
-            }
-        }
-    }
-
-    // If we reach here, either raise failed or the handler returned
-    // In either case, abort
-    std.process.abort();
-}
-
-/// Signal handler for automatic stack growth (SIGSEGV on Linux/BSD, SIGBUS on macOS).
-/// This handler checks if the fault is within a coroutine's uncommitted stack region
-/// and extends the stack if so. Real faults are propagated to the previous handler.
-fn stackFaultHandler(sig: SigInt, info: *const posix.siginfo_t, ctx: ?*anyopaque) callconv(.c) void {
-    const fault_addr = getFaultAddress(info);
-
-    // Get current_context from coroutines module
-    const current_ctx = coroutines.current_context orelse {
-        // Not in a coroutine context - propagate to previous handler
-        invokePreviousHandler(sig, info, ctx);
-    };
-
-    const stack_info = &current_ctx.stack_info;
-
-    // Check if allocation_ptr is null (not our stack)
-    if (@intFromPtr(stack_info.allocation_ptr) == 0) {
-        invokePreviousHandler(sig, info, ctx);
-    }
-
-    // Stack layout: [guard_page][uncommitted][committed]
-    const stack_base = @intFromPtr(stack_info.allocation_ptr);
-    const guard_page_end = stack_base + page_size;
-    const uncommitted_start = guard_page_end;
-    const uncommitted_end = stack_info.limit;
-
-    // Check if fault is in guard page (true stack overflow)
-    if (fault_addr >= stack_base and fault_addr < guard_page_end) {
-        abortOnStackOverflow(fault_addr, stack_info);
-    }
-
-    // Check if fault is in uncommitted region (automatic growth)
-    if (fault_addr >= uncommitted_start and fault_addr < uncommitted_end) {
-        // Fault is in uncommitted region - extend the stack
-        stackExtendPosix(stack_info, .grow) catch {
-            // Extension failed - this is a stack overflow
-            abortOnStackOverflow(fault_addr, stack_info);
-        };
-        // Stack extended successfully - return to resume execution
-        return;
-    }
-
-    // Fault is not in our stack region - propagate to previous handler
-    invokePreviousHandler(sig, info, ctx);
-}
-
-/// Abort with diagnostic message on stack overflow.
-/// Uses async-signal-safe write() to stderr in a single call.
-fn abortOnStackOverflow(fault_addr: usize, stack_info: *const StackInfo) noreturn {
-    var buf: [300]u8 = undefined;
-
-    const stack_base = @intFromPtr(stack_info.allocation_ptr);
-    const stack_size = stack_info.allocation_len;
-    const committed = stack_info.base - stack_info.limit;
-    const is_guard_page_fault = fault_addr >= stack_base and fault_addr < stack_base + page_size;
-
-    const msg = std.fmt.bufPrint(
-        &buf,
-        "Coroutine stack overflow!\n" ++
-            "  Fault address:    0x{x}\n" ++
-            "  Stack base:       0x{x}\n" ++
-            "  Stack size:       {d} KB\n" ++
-            "  Committed:        {d} KB\n" ++
-            "  Guard page fault: {}\n",
-        .{
-            fault_addr,
-            stack_base,
-            stack_size / 1024,
-            committed / 1024,
-            is_guard_page_fault,
-        },
-    ) catch "Coroutine stack overflow (error formatting message)\n";
-
-    _ = fs.write(fs.stderr(), msg) catch {};
-    std.process.abort();
-}
-
-test "Stack: alloc/free" {
-    const maximum_size = 8192;
-    const committed_size = 1024;
-    var stack: StackInfo = undefined;
-    try stackAlloc(&stack, maximum_size, committed_size);
-    defer stackFree(stack);
-
-    // Verify allocation size is at least the requested size (rounded to power of 2 with min 2 pages)
-    try std.testing.expect(stack.allocation_len >= maximum_size);
-
-    // Verify base is at the top (high address)
-    try std.testing.expect(stack.base > stack.limit);
-
-    // Verify at least the requested amount was committed
-    // Note: RtlCreateUserStack on Windows may commit more than requested
-    const commit_size_rounded = std.mem.alignForward(usize, committed_size, page_size);
-    const actual_committed = stack.base - stack.limit;
-    try std.testing.expect(actual_committed >= commit_size_rounded);
-
-    // Verify base is at the top of the allocation
-    try std.testing.expect(stack.base >= @intFromPtr(stack.allocation_ptr));
-    try std.testing.expect(stack.base <= @intFromPtr(stack.allocation_ptr) + stack.allocation_len);
-}
-
-test "Stack: fully committed" {
-    const size = 64 * 1024;
-    var stack: StackInfo = undefined;
-    try stackAlloc(&stack, size, size);
-    defer stackFree(stack);
-
-    // Verify allocation succeeded
-    try std.testing.expect(stack.allocation_len >= size);
-    try std.testing.expect(stack.base > stack.limit);
-
-    // Verify base is at the top of the allocation
-    try std.testing.expect(stack.base >= @intFromPtr(stack.allocation_ptr));
-    try std.testing.expect(stack.base <= @intFromPtr(stack.allocation_ptr) + stack.allocation_len);
-}
-
-test "Stack: extend" {
-    // Skip on Windows - RtlCreateUserStack handles automatic growth
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
-    const maximum_size = 256 * 1024;
-    const initial_commit = 64 * 1024;
-    var stack: StackInfo = undefined;
-    try stackAlloc(&stack, maximum_size, initial_commit);
-    defer stackFree(stack);
-
-    const initial_limit = stack.limit;
-    const initial_committed = stack.base - stack.limit;
-
-    // Extend by growth factor (1.5x)
-    try stackExtend(&stack, .grow);
-
-    // Verify limit moved down
-    try std.testing.expect(stack.limit < initial_limit);
-
-    // Verify committed size increased by ~50%
-    const new_committed = stack.base - stack.limit;
-    try std.testing.expect(new_committed > initial_committed);
-    try std.testing.expect(new_committed >= initial_committed * 14 / 10); // At least 1.4x due to rounding
-
-    // Verify we can write to the extended region
-    const extended_region: [*]u8 = @ptrFromInt(stack.limit);
-    @memset(extended_region[0..1024], 0xAA);
-}
-
-test "Stack: automatic growth" {
-    // Setup signal handler (no-op on Windows where PAGE_GUARD handles it automatically)
-    try setupStackGrowth();
-    defer cleanupStackGrowth();
-
-    var parent_context: coroutines.Context = undefined;
-    var coro: coroutines.Coroutine = .{
-        .parent_context_ptr = &parent_context,
-        .context = undefined,
-    };
-
-    // Allocate a stack with small initial commit but larger maximum
-    const maximum_size = 256 * 1024;
-    const initial_commit = 4096; // Very small initial commit
-    try stackAlloc(&coro.context.stack_info, maximum_size, initial_commit);
-    defer stackFree(coro.context.stack_info);
-
-    const initial_committed = coro.context.stack_info.base - coro.context.stack_info.limit;
-
-    // Recursive function that will exceed initial commit and trigger stack growth
-    const RecursiveFn = struct {
-        fn recurse(c: *coroutines.Coroutine, depth: u32, target: u32) u32 {
-            // Allocate stack space to force growth
-            var buffer: [1024]u8 = undefined;
-            @memset(&buffer, @intCast(depth & 0xFF));
-
-            if (depth >= target) {
-                // Force use of buffer to prevent optimization
-                return buffer[0];
-            }
-
-            // Recurse deeper
-            return recurse(c, depth + 1, target);
-        }
-
-        fn start(c: *coroutines.Coroutine, target: u32) u32 {
-            return recurse(c, 0, target);
-        }
-    };
-
-    const Closure = coroutines.Closure(RecursiveFn.start);
-    var closure = Closure.init(.{100}); // Recurse 100 times with 1KB per frame = ~100KB
-
-    coro.setup(&Closure.start, &closure);
-
-    // Run coroutine - should trigger automatic stack growth
-    // On POSIX: via SIGSEGV/SIGBUS handler
-    // On Windows: via PAGE_GUARD mechanism
-    while (!closure.finished) {
-        coro.step();
-    }
-
-    // Verify stack grew beyond initial commit
-    const final_committed = coro.context.stack_info.base - coro.context.stack_info.limit;
-    try std.testing.expect(final_committed >= initial_committed);
-}
-
-test "Stack: recycle" {
-    const maximum_size = 256 * 1024;
-    const committed_size = 64 * 1024;
-    var stack: StackInfo = undefined;
-    try stackAlloc(&stack, maximum_size, committed_size);
-    defer stackFree(stack);
-
-    const committed_start = stack.limit;
-    const committed_len = stack.base - stack.limit;
-
-    // Write pattern to committed memory
-    const mem: [*]u8 = @ptrFromInt(committed_start);
-    @memset(mem[0..committed_len], 0xAA);
-
-    // Verify pattern was written
-    try std.testing.expect(mem[0] == 0xAA);
-    try std.testing.expect(mem[committed_len - 1] == 0xAA);
-
-    // Recycle the stack (mark pages for kernel reclamation)
-    stackRecycle(stack);
-
-    // Memory should still be accessible (though may be zero-filled by kernel)
-    // We just verify no crash occurs
-    _ = mem[0];
-    _ = mem[committed_len - 1];
-
-    // Stack info should remain unchanged
-    try std.testing.expect(stack.limit == committed_start);
-    try std.testing.expect(stack.base - stack.limit == committed_len);
-}
+pub const Config = struct {
+    /// Maximum size of stacks in this pool (in bytes).
+    /// This is the total virtual address space reserved for each stack.
+    maximum_size: usize,
+
+    /// Initial committed size of stacks in this pool (in bytes).
+    /// This is the amount of physical memory initially committed.
+    committed_size: usize,
+
+    /// Maximum number of unused stacks to keep in the pool.
+    /// When this limit is exceeded, the oldest stack is freed.
+    max_unused_stacks: usize = 16,
+
+    /// Number of stacks carved from a single mmap reservation (slab).
+    /// Batching amortizes the per-stack mmap/munmap syscall cost, which
+    /// dominates short-lived workloads (CLI tools). 0 selects an
+    /// implementation default. Only honored by the POSIX slab allocator.
+    slab_stacks: usize = 0,
+
+    /// Maximum age of an unused stack.
+    /// Stacks older than this will be freed on the next release() call.
+    /// .zero means no age limit.
+    max_age: @import("../time.zig").Duration = .zero,
+};
+
+/// Coroutine stack pool. On Windows, stacks are created per-stack via
+/// RtlCreateUserStack; on POSIX, they are carved from batched mmap slabs to
+/// amortize syscall cost. Both expose the same init/deinit/acquire/release/
+/// cleanup interface.
+pub const StackPool = impl.StackPool;
 
 /// Panic handler that ensures coroutine stacks are fully committed before unwinding.
 /// This prevents SIGSEGV during stack trace generation when the default panic handler
@@ -661,8 +82,56 @@ pub fn panicHandler(msg: []const u8, error_return_trace: ?*std.builtin.StackTrac
     _ = error_return_trace;
 
     if (coroutines.current_context) |ctx| {
-        stackExtend(&ctx.stack_info, .full) catch {};
+        impl.stackExtend(&ctx.stack_info, .full) catch {};
     }
 
     std.debug.defaultPanic(msg, ret_addr);
+}
+
+test "Stack: automatic growth through the pool" {
+    // Exercises growth end-to-end via StackPool on both platforms: the
+    // SIGSEGV/SIGBUS handler on POSIX, PAGE_GUARD on Windows.
+    try StackPool.setup();
+    defer StackPool.teardown();
+
+    var parent_context: coroutines.Context = undefined;
+    var coro: coroutines.Coroutine = .{
+        .parent_context_ptr = &parent_context,
+        .context = undefined,
+    };
+
+    // Small initial commit, large maximum, so the coroutine forces growth.
+    var pool = StackPool.init(std.testing.allocator, .{
+        .maximum_size = 256 * 1024,
+        .committed_size = 4096,
+        .slab_stacks = 1,
+    });
+    defer pool.deinit();
+    coro.context.stack_info = try pool.acquire();
+    defer pool.release(coro.context.stack_info, .zero);
+
+    const initial_committed = coro.context.stack_info.base - coro.context.stack_info.limit;
+
+    const RecursiveFn = struct {
+        fn recurse(c: *coroutines.Coroutine, depth: u32, target: u32) u32 {
+            var buffer: [1024]u8 = undefined;
+            @memset(&buffer, @intCast(depth & 0xFF));
+            if (depth >= target) return buffer[0];
+            return recurse(c, depth + 1, target);
+        }
+        fn start(c: *coroutines.Coroutine, target: u32) u32 {
+            return recurse(c, 0, target);
+        }
+    };
+
+    const Closure = coroutines.Closure(RecursiveFn.start);
+    var closure = Closure.init(.{100}); // ~100KB, far past the 4KB initial commit
+    coro.setup(&Closure.start, &closure);
+
+    while (!closure.finished) {
+        coro.step();
+    }
+
+    const final_committed = coro.context.stack_info.base - coro.context.stack_info.limit;
+    try std.testing.expect(final_committed >= initial_committed);
 }
