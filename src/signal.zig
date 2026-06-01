@@ -48,7 +48,7 @@ const HandlerRegistryUnix = struct {
     handlers: [MAX_HANDLERS]HandlerEntry = @splat(.{}),
     // Reference count for each signal value (0-255)
     // Each signal type has its own OS-level handler that needs tracking
-    installed_handlers: [256]std.atomic.Value(u8) = @splat(std.atomic.Value(u8).init(0)),
+    installed_handlers: [256]std.atomic.Value(u8) = @splat(.init(0)),
     // Store previous signal handlers to restore when refcount reaches 0
     prev_handlers: [256]posix.Sigaction = undefined,
 

@@ -131,7 +131,7 @@ test Queue {
     try std.testing.expect(q.empty());
 
     // Elems
-    var elems: [10]Elem = @splat(Elem{});
+    var elems: [10]Elem = @splat(.{});
 
     // One
     try std.testing.expect(q.pop() == null);
