@@ -740,11 +740,15 @@ test "PosixStackPool: stack slots drive the growth fault handler" {
     const initial_committed = coro.context.stack_info.base - coro.context.stack_info.limit;
 
     const RecursiveFn = struct {
-        fn recurse(c: *coroutines.Coroutine, depth: u32, target: u32) u32 {
+        noinline fn recurse(c: *coroutines.Coroutine, depth: u32, target: u32) u32 {
             var buffer: [1024]u8 = undefined;
-            @memset(&buffer, @intCast(depth & 0xFF));
-            if (depth >= target) return buffer[0];
-            return recurse(c, depth + 1, target);
+            // volatile pointer forces the 1KB frame to actually exist on the stack
+            const p: *volatile [1024]u8 = &buffer;
+            p[depth & 0xFF] = @intCast(depth & 0xFF);
+            if (depth >= target) return p[0];
+            // Use result after volatile read to prevent tail-call optimization
+            const result = recurse(c, depth + 1, target);
+            return result +% p[depth & 0xFF] -% p[depth & 0xFF];
         }
         fn start(c: *coroutines.Coroutine, target: u32) u32 {
             return recurse(c, 0, target);
