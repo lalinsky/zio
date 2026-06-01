@@ -117,7 +117,7 @@ test "cancel: net_accept with loop.cancel()" {
         .family = net.AF.INET,
         .port = 0,
         .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
-        .zero = [_]u8{0} ** 8,
+        .zero = @splat(0),
     };
     var addr_len: net.socklen_t = @sizeOf(@TypeOf(addr));
     var server_bind: NetBind = .init(server_sock, @ptrCast(&addr), &addr_len);
@@ -167,7 +167,7 @@ test "cancel: net_recv with loop.cancel()" {
         .family = net.AF.INET,
         .port = 0,
         .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
-        .zero = [_]u8{0} ** 8,
+        .zero = @splat(0),
     };
     var addr_len: net.socklen_t = @sizeOf(@TypeOf(addr));
     var server_bind: NetBind = .init(server_sock, @ptrCast(&addr), &addr_len);

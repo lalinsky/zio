@@ -768,7 +768,7 @@ pub const sockaddr = extern struct {
         family: ADDRESS_FAMILY = AF.INET,
         port: u16,
         addr: u32,
-        zero: [8]u8 = [_]u8{0} ** 8,
+        zero: [8]u8 = @splat(0),
     };
 
     pub const in6 = extern struct {

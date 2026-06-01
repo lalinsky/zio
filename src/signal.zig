@@ -45,10 +45,10 @@ const HandlerEntry = struct {
 };
 
 const HandlerRegistryUnix = struct {
-    handlers: [MAX_HANDLERS]HandlerEntry = [_]HandlerEntry{.{}} ** MAX_HANDLERS,
+    handlers: [MAX_HANDLERS]HandlerEntry = @splat(.{}),
     // Reference count for each signal value (0-255)
     // Each signal type has its own OS-level handler that needs tracking
-    installed_handlers: [256]std.atomic.Value(u8) = [_]std.atomic.Value(u8){.init(0)} ** 256,
+    installed_handlers: [256]std.atomic.Value(u8) = @splat(.init(0)),
     // Store previous signal handlers to restore when refcount reaches 0
     prev_handlers: [256]posix.Sigaction = undefined,
 
@@ -115,7 +115,7 @@ const HandlerRegistryUnix = struct {
 };
 
 const HandlerRegistryWindows = struct {
-    handlers: [MAX_HANDLERS]HandlerEntry = [_]HandlerEntry{.{}} ** MAX_HANDLERS,
+    handlers: [MAX_HANDLERS]HandlerEntry = @splat(.{}),
     // Total number of handlers across all signal types
     // Only one global console control handler for all signals
     total_handlers: std.atomic.Value(usize) = .init(0),

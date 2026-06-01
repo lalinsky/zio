@@ -24,7 +24,7 @@ test "Blocking sockets: basic smoke test" {
             .family = net.AF.INET,
             .port = 0,
             .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
-            .zero = [_]u8{0} ** 8,
+            .zero = @splat(0),
         },
         .server_addr_len = @sizeOf(net.sockaddr.in),
         .server_ready = os.ResetEvent.init(),

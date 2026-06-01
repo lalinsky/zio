@@ -71,13 +71,13 @@ pub fn EchoServer(comptime domain: net.Domain, comptime sockaddr: type) type {
                         .family = net.AF.INET,
                         .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
                         .port = 0,
-                        .zero = [_]u8{0} ** 8,
+                        .zero = @splat(0),
                     };
                 },
                 .ipv6 => {
                     self.server_addr = .{
                         .family = net.AF.INET6,
-                        .addr = [_]u8{0} ** 15 ++ [_]u8{1},
+                        .addr = @as([15]u8, @splat(0)) ++ [_]u8{1},
                         .port = 0,
                         .flowinfo = 0,
                         .scope_id = 0,

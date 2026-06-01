@@ -276,7 +276,7 @@ test "Barrier: ordering test" {
     try std.testing.expect(!group.hasFailed());
 
     // All three should have unique arrival numbers (0, 1, 2 in some order)
-    var seen = [_]bool{false} ** 3;
+    var seen: [3]bool = @splat(false);
     for (arrivals) |arrival| {
         try std.testing.expect(arrival < 3);
         try std.testing.expect(!seen[arrival]);
