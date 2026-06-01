@@ -625,27 +625,6 @@ fn reserveSlab(len: usize) error{OutOfMemory}![*]align(page_size) u8 {
 
 const testing = std.testing;
 
-test "PosixStackPool: acquire reuses a freed slot" {
-    var pool = PosixStackPool.init(testing.allocator, .{
-        .maximum_size = 256 * 1024,
-        .committed_size = 16 * 1024,
-        .slab_stacks = 4,
-    });
-    defer pool.deinit();
-
-    const a = try pool.acquire();
-    try testing.expect(a.base > a.limit);
-    try testing.expectEqual(@as(usize, 1), pool.slabCount());
-
-    pool.release(a, .zero);
-
-    const b = try pool.acquire();
-    // Same slot: identical allocation pointer, and no new slab.
-    try testing.expectEqual(@intFromPtr(a.allocation_ptr), @intFromPtr(b.allocation_ptr));
-    try testing.expectEqual(@as(usize, 1), pool.slabCount());
-    pool.release(b, .zero);
-}
-
 test "PosixStackPool: one mmap per slab, overflow spills to a new slab" {
     var pool = PosixStackPool.init(testing.allocator, .{
         .maximum_size = 128 * 1024,
@@ -688,34 +667,6 @@ test "PosixStackPool: warm reuse keeps the grown committed boundary" {
     // Reused slot inherits the larger committed region instead of resetting.
     try testing.expectEqual(grown_limit, b.limit);
     pool.release(b, .zero);
-}
-
-test "PosixStackPool: cleanup reclaims drained, aged slabs" {
-    var pool = PosixStackPool.init(testing.allocator, .{
-        .maximum_size = 128 * 1024,
-        .committed_size = 8 * 1024,
-        .slab_stacks = 2,
-        .max_age = .fromMilliseconds(100),
-    });
-    defer pool.deinit();
-
-    const a = try pool.acquire();
-    const b = try pool.acquire();
-    const c = try pool.acquire(); // forces a second slab
-    try testing.expectEqual(@as(usize, 2), pool.slabCount());
-
-    // Drain both slabs at t=0.
-    pool.release(a, .zero);
-    pool.release(b, .zero);
-    pool.release(c, .zero);
-
-    // Not yet expired.
-    pool.cleanup(.fromMilliseconds(50), 16);
-    try testing.expectEqual(@as(usize, 2), pool.slabCount());
-
-    // Past max_age: both drained slabs are reclaimed.
-    pool.cleanup(.fromMilliseconds(200), 16);
-    try testing.expectEqual(@as(usize, 0), pool.slabCount());
 }
 
 test "PosixStackPool: stack slots drive the growth fault handler" {

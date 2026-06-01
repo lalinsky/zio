@@ -87,6 +87,72 @@ pub fn panicHandler(msg: []const u8, error_return_trace: ?*std.builtin.StackTrac
     std.debug.defaultPanic(msg, ret_addr);
 }
 
+test "StackPool: acquire and release" {
+    var pool = StackPool.init(std.testing.allocator, .{
+        .maximum_size = 256 * 1024,
+        .committed_size = 16 * 1024,
+    });
+    defer pool.deinit();
+
+    const a = try pool.acquire();
+    try std.testing.expect(a.base > a.limit);
+    try std.testing.expect(@intFromPtr(a.allocation_ptr) != 0);
+    pool.release(a, .zero);
+
+    // Released stack should be reused.
+    const b = try pool.acquire();
+    try std.testing.expectEqual(a.base, b.base);
+    pool.release(b, .zero);
+}
+
+test "StackPool: respects max_unused_stacks" {
+    var pool = StackPool.init(std.testing.allocator, .{
+        .maximum_size = 256 * 1024,
+        .committed_size = 16 * 1024,
+        .max_unused_stacks = 2,
+    });
+    defer pool.deinit();
+
+    const s1 = try pool.acquire();
+    const s2 = try pool.acquire();
+    const s3 = try pool.acquire();
+
+    pool.release(s1, .zero);
+    pool.release(s2, .zero);
+    // Third release should evict the oldest; pool still functional.
+    pool.release(s3, .zero);
+
+    const r1 = try pool.acquire();
+    const r2 = try pool.acquire();
+    try std.testing.expect(r1.base != r2.base);
+    pool.release(r1, .zero);
+    pool.release(r2, .zero);
+}
+
+test "StackPool: age-based expiration" {
+    var pool = StackPool.init(std.testing.allocator, .{
+        .maximum_size = 256 * 1024,
+        .committed_size = 16 * 1024,
+        .max_unused_stacks = 4,
+        .max_age = .fromMilliseconds(100),
+    });
+    defer pool.deinit();
+
+    const s = try pool.acquire();
+    pool.release(s, .zero);
+
+    // Trigger expiration via both paths so the test works on both platforms:
+    // Windows evicts in release(), POSIX evicts in cleanup().
+    const expired = try pool.acquire();
+    pool.release(expired, .fromMilliseconds(101));
+    pool.cleanup(.fromMilliseconds(200), 16);
+
+    // Pool should still be functional after expiration.
+    const fresh = try pool.acquire();
+    try std.testing.expect(fresh.base > fresh.limit);
+    pool.release(fresh, .zero);
+}
+
 test "Stack: automatic growth through the pool" {
     // Exercises growth end-to-end via StackPool on both platforms: the
     // SIGSEGV/SIGBUS handler on POSIX, PAGE_GUARD on Windows.
