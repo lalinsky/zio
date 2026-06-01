@@ -18,7 +18,7 @@ const os = @import("../os/root.zig");
 const stack = @import("stack.zig");
 const StackInfo = stack.StackInfo;
 const StackExtendMode = stack.StackExtendMode;
-const Config = stack.Config;
+const StackPoolConfig = stack.StackPoolConfig;
 const page_size = stack.page_size;
 
 const Allocator = std.mem.Allocator;
@@ -356,14 +356,14 @@ const Slab = struct {
 
 pub const PosixStackPool = struct {
     allocator: Allocator,
-    config: Config,
+    config: StackPoolConfig,
     stacks_per_slab: usize,
     slot_size: usize,
     commit_size: usize,
     mutex: os.Mutex,
     slabs: ?*Slab,
 
-    pub fn init(allocator: Allocator, config: Config) PosixStackPool {
+    pub fn init(allocator: Allocator, config: StackPoolConfig) PosixStackPool {
         const stacks_per_slab = if (config.slab_stacks == 0) default_slab_stacks else config.slab_stacks;
 
         // Guard page is folded into maximum_size: the bottom page of each slot

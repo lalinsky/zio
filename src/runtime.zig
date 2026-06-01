@@ -19,7 +19,7 @@ const Timestamp = time.Timestamp;
 const Coroutine = @import("coro/coroutines.zig").Coroutine;
 const Context = @import("coro/coroutines.zig").Context;
 const StackPool = @import("coro/root.zig").StackPool;
-const StackPoolConfig = @import("coro/stack.zig").Config;
+const StackPoolConfig = @import("coro/stack.zig").StackPoolConfig;
 
 const AnyTask = @import("task.zig").AnyTask;
 const TaskPool = @import("task.zig").TaskPool;

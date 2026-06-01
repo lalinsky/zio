@@ -17,7 +17,7 @@ const os = @import("../os/root.zig");
 const stack = @import("stack.zig");
 const StackInfo = stack.StackInfo;
 const StackExtendMode = stack.StackExtendMode;
-const Config = stack.Config;
+const StackPoolConfig = stack.StackPoolConfig;
 const page_size = stack.page_size;
 
 const Allocator = std.mem.Allocator;
@@ -97,7 +97,7 @@ const FreeNode = struct {
 };
 
 pub const WindowsStackPool = struct {
-    config: Config,
+    config: StackPoolConfig,
     mutex: os.Mutex,
     head: ?*FreeNode,
     tail: ?*FreeNode,
@@ -105,7 +105,7 @@ pub const WindowsStackPool = struct {
 
     /// The `allocator` parameter is unused (free nodes live inside the stacks
     /// themselves) but kept for a uniform interface with PosixStackPool.
-    pub fn init(allocator: Allocator, config: Config) WindowsStackPool {
+    pub fn init(allocator: Allocator, config: StackPoolConfig) WindowsStackPool {
         _ = allocator;
         return .{
             .config = config,

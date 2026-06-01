@@ -3,7 +3,7 @@
 
 //! Platform-neutral facade for coroutine stack management.
 //!
-//! Shared types (`StackInfo`, `Config`) and the standalone alloc/free/extend
+//! Shared types (`StackInfo`, `StackPoolConfig`) and the standalone alloc/free/extend
 //! API live here; the actual allocation lives in the per-platform backends
 //! (`stack_posix.zig` / `stack_windows.zig`) selected by `impl`. Valgrind stack
 //! bookkeeping for the standalone API is applied here so both backends stay
@@ -27,10 +27,9 @@ pub const StackInfo = extern struct {
     allocation_len: usize,
     valgrind_stack_id: usize = 0,
     // Opaque value owned by the stack pool, used to locate the backing
-    // allocation in O(1) on release (e.g. the POSIX slab pointer). 0 = unset.
-    // Safe to append: this struct is the tail field of Context and the Windows
-    // context-switch asm only reads allocation_ptr/base/limit by fixed offset.
-    pool_cookie: usize = 0,
+    // allocation in O(1) on release (e.g. the POSIX slab pointer).
+    // void on Windows where the per-stack pool needs no back-pointer.
+    pool_cookie: if (builtin.os.tag == .windows) void else usize = if (builtin.os.tag == .windows) {} else 0,
 };
 
 pub const StackExtendMode = enum {
@@ -40,7 +39,7 @@ pub const StackExtendMode = enum {
     full,
 };
 
-pub const Config = struct {
+pub const StackPoolConfig = struct {
     /// Maximum size of stacks in this pool (in bytes).
     /// This is the total virtual address space reserved for each stack.
     maximum_size: usize,

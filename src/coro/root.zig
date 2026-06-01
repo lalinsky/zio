@@ -31,7 +31,7 @@ pub const panicHandler = stack.panicHandler;
 //   try StackPool.setup();         // once per thread
 //   const stack_info = try pool.acquire();
 pub const StackPool = stack.StackPool;
-pub const StackPoolConfig = stack.Config;
+pub const StackPoolConfig = stack.StackPoolConfig;
 
 test {
     std.testing.refAllDecls(@This());
