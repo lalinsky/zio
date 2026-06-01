@@ -107,7 +107,7 @@ fn setupStackGrowth() !void {
 
     // Setup alternate stack for this thread if not already done
     if (!altstack_installed) {
-        const mem = try std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(std.heap.pageSize()), altstack_size);
+        const mem = try std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(std.heap.page_size_min), altstack_size);
         errdefer std.heap.page_allocator.free(mem);
 
         var stack_t = posix.stack_t{
