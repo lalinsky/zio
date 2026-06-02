@@ -666,8 +666,9 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
             .SUCCESS => return @intCast(rc),
             .INTR => continue,
             else => |err| {
-                if (builtin.os.tag == .freebsd or builtin.os.tag.isDarwin()) {
-                    if (flags.resolve_beneath and err == .NOTCAPABLE) return error.PathEscaped;
+                if (flags.resolve_beneath) {
+                    if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.PathEscaped;
+                    if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 107) return error.PathEscaped;
                 }
                 return errnoToFileOpenError(err, flags);
             },
@@ -757,8 +758,9 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
             .SUCCESS => return @intCast(rc),
             .INTR => continue,
             else => |err| {
-                if (builtin.os.tag == .freebsd or builtin.os.tag.isDarwin()) {
-                    if (flags.resolve_beneath and err == .NOTCAPABLE) return error.PathEscaped;
+                if (flags.resolve_beneath) {
+                    if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.PathEscaped;
+                    if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 107) return error.PathEscaped;
                 }
                 return errnoToDirOpenError(err, flags);
             },
@@ -859,8 +861,9 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
             .SUCCESS => return @intCast(rc),
             .INTR => continue,
             else => |err| {
-                if (builtin.os.tag == .freebsd or builtin.os.tag.isDarwin()) {
-                    if (flags.resolve_beneath and err == .NOTCAPABLE) return error.PathEscaped;
+                if (flags.resolve_beneath) {
+                    if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.PathEscaped;
+                    if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 107) return error.PathEscaped;
                 }
                 return errnoToFileOpenError(err, flags);
             },
