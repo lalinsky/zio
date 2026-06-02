@@ -1351,7 +1351,7 @@ test "Dir: resolve_beneath blocks parent escape" {
     f.close();
 
     // Opening ../file1 from dir2 with resolve_beneath must fail
-    try std.testing.expectError(error.PathEscaped, dir2.openFile("../file1", .{ .resolve_beneath = true }));
+    try std.testing.expectError(error.AccessDenied, dir2.openFile("../file1", .{ .resolve_beneath = true }));
 }
 
 test "File: blocking mode without runtime" {

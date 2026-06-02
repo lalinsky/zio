@@ -162,8 +162,6 @@ pub const FileOpenError = error{
     NetworkNotFound,
     ProcessNotFound,
     FileBusy,
-    /// Path resolution attempted to escape the starting directory (resolve_beneath).
-    PathEscaped,
     Canceled,
     Unexpected,
 };
@@ -181,8 +179,6 @@ pub const DirOpenError = error{
     NotDir,
     BadPathName,
     NetworkNotFound,
-    /// Path resolution attempted to escape the starting directory (resolve_beneath).
-    PathEscaped,
     Canceled,
     Unexpected,
 };
@@ -667,8 +663,8 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
             .INTR => continue,
             else => |err| {
                 if (flags.resolve_beneath) {
-                    if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.PathEscaped;
-                    if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 107) return error.PathEscaped;
+                    if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.AccessDenied;
+                    if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 107) return error.AccessDenied;
                 }
                 return errnoToFileOpenError(err, flags);
             },
@@ -759,8 +755,8 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
             .INTR => continue,
             else => |err| {
                 if (flags.resolve_beneath) {
-                    if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.PathEscaped;
-                    if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 107) return error.PathEscaped;
+                    if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.AccessDenied;
+                    if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 107) return error.AccessDenied;
                 }
                 return errnoToDirOpenError(err, flags);
             },
@@ -862,8 +858,8 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
             .INTR => continue,
             else => |err| {
                 if (flags.resolve_beneath) {
-                    if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.PathEscaped;
-                    if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 107) return error.PathEscaped;
+                    if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.AccessDenied;
+                    if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 107) return error.AccessDenied;
                 }
                 return errnoToFileOpenError(err, flags);
             },
@@ -1377,7 +1373,7 @@ pub fn errnoToFileOpenError(errno: posix.system.E, flags: anytype) FileOpenError
         .EXIST => error.PathAlreadyExists,
         .BUSY => error.DeviceBusy,
         .TXTBSY => error.FileBusy,
-        .XDEV => if (flags.resolve_beneath) error.PathEscaped else unexpectedError(errno),
+        .XDEV => if (flags.resolve_beneath) error.AccessDenied else unexpectedError(errno),
         .CANCELED => error.Canceled,
         else => |e| unexpectedError(e) catch error.Unexpected,
     };
@@ -1396,7 +1392,7 @@ pub fn errnoToDirOpenError(errno: posix.system.E, flags: DirOpenFlags) DirOpenEr
         .NAMETOOLONG => error.NameTooLong,
         .NOMEM => error.SystemResources,
         .NOTDIR => error.NotDir,
-        .XDEV => if (flags.resolve_beneath) error.PathEscaped else unexpectedError(errno),
+        .XDEV => if (flags.resolve_beneath) error.AccessDenied else unexpectedError(errno),
         .CANCELED => error.Canceled,
         else => |e| unexpectedError(e) catch error.Unexpected,
     };
