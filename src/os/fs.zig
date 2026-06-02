@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const posix = @import("posix.zig");
+const darwin = @import("darwin.zig");
 const w = @import("windows.zig");
 
 const unexpectedError = @import("base.zig").unexpectedError;
@@ -1106,7 +1107,23 @@ pub fn renameatPreserve(allocator: std.mem.Allocator, old_dir: fd_t, old_path: [
         }
     }
 
-    // Fallback for macOS and other POSIX: hardlink + delete
+    if (comptime builtin.os.tag.isDarwin()) {
+        while (true) {
+            const rc = darwin.renameatx_np(@intCast(old_dir), old_path_z.ptr, @intCast(new_dir), new_path_z.ptr, .{ .EXCL = true });
+            switch (posix.errno(rc)) {
+                .SUCCESS => return,
+                .INTR => continue,
+                .EXIST => return error.PathAlreadyExists,
+                // ENOTSUP (= 45 on Darwin, aliased as OPNOTSUPP in Zig's std.c.E):
+                // filesystem doesn't support RENAME_EXCL — fall through to hardlink+delete.
+                .OPNOTSUPP => break,
+                else => |err| return errnoToDirRenameError(err),
+            }
+        }
+    }
+
+    // Fallback for other POSIX and Darwin filesystems that don't support renameatx_np(RENAME_EXCL):
+    // hardlink + delete
     try dirHardLink(allocator, old_dir, old_path, new_dir, new_path, .{});
     dirDeleteFile(allocator, old_dir, old_path) catch {};
 }

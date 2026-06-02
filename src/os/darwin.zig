@@ -59,6 +59,22 @@ pub extern "c" fn mach_msg(
     notify: std.c.mach_port_name_t,
 ) std.c.kern_return_t;
 
+// renameatx_np - atomic rename with flags (macOS 10.12+, iOS 10.0+)
+// RENAME_EXCL prevents overwriting an existing destination (equivalent to Linux RENAME_NOREPLACE).
+// Reference: https://www.unix.com/man_page/mojave/2/renameatx_np/
+
+pub const RENAME = packed struct(u32) {
+    SECLUDE: bool = false,
+    SWAP: bool = false,
+    EXCL: bool = false,
+    RESERVED1: bool = false,
+    NOFOLLOW_ANY: bool = false,
+    RESOLVE_BENEATH: bool = false,
+    _: u26 = 0,
+};
+
+pub extern "c" fn renameatx_np(fromfd: c_int, from: [*:0]const u8, tofd: c_int, to: [*:0]const u8, flags: RENAME) c_int;
+
 // libinfo async DNS resolution
 
 pub const getaddrinfo_async_callback = *const fn (i32, ?*std.c.addrinfo, ?*anyopaque) callconv(.c) void;

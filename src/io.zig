@@ -3158,6 +3158,32 @@ test "io: dir rename" {
     try std.testing.expectError(error.FileNotFound, dir.rename(old_path, dir, new_path, io));
 }
 
+test "io: dir renamePreserve" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const old_path = "test_io_rename_preserve_old.txt";
+    const new_path = "test_io_rename_preserve_new.txt";
+    defer dir.deleteFile(io, old_path) catch {};
+    defer dir.deleteFile(io, new_path) catch {};
+
+    var file = try dir.createFile(io, old_path, .{});
+    file.close(io);
+
+    // Rename to a free path — should succeed.
+    try dir.renamePreserve(old_path, dir, new_path, io);
+    try std.testing.expectError(error.FileNotFound, dir.openFile(io, old_path, .{}));
+    var moved = try dir.openFile(io, new_path, .{});
+    moved.close(io);
+
+    // Rename onto an existing destination — should fail.
+    var file2 = try dir.createFile(io, old_path, .{});
+    file2.close(io);
+    try std.testing.expectError(error.PathAlreadyExists, dir.renamePreserve(old_path, dir, new_path, io));
+}
+
 test "io: dir create/delete" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
