@@ -1375,7 +1375,7 @@ pub fn errnoToFileOpenError(errno: posix.system.E, flags: anytype) FileOpenError
         .TXTBSY => error.FileBusy,
         .XDEV => if (flags.resolve_beneath) error.AccessDenied else unexpectedError(errno),
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1394,7 +1394,7 @@ pub fn errnoToDirOpenError(errno: posix.system.E, flags: DirOpenFlags) DirOpenEr
         .NOTDIR => error.NotDir,
         .XDEV => if (flags.resolve_beneath) error.AccessDenied else unexpectedError(errno),
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1412,7 +1412,7 @@ pub fn errnoToFileReadError(err: E) FileReadError {
                 .HANDLE_EOF => error.InputOutput,
                 .OPERATION_ABORTED => error.Canceled,
                 .NOT_ENOUGH_MEMORY, .OUTOFMEMORY => error.SystemResources,
-                else => |e| unexpectedError(e) catch error.Unexpected,
+                else => |e| unexpectedError(e),
             };
         },
         else => {
@@ -1426,7 +1426,7 @@ pub fn errnoToFileReadError(err: E) FileReadError {
                 .NOMEM => error.SystemResources,
                 .BADF => error.NotOpenForReading,
                 .SPIPE => error.Unseekable,
-                else => |e| unexpectedError(e) catch error.Unexpected,
+                else => |e| unexpectedError(e),
             };
         },
     }
@@ -1445,7 +1445,7 @@ pub fn errnoToFileWriteError(err: E) FileWriteError {
                 .OPERATION_ABORTED => error.Canceled,
                 .DISK_FULL, .HANDLE_DISK_FULL => error.NoSpaceLeft,
                 .NOT_ENOUGH_MEMORY, .OUTOFMEMORY => error.SystemResources,
-                else => |e| unexpectedError(e) catch error.Unexpected,
+                else => |e| unexpectedError(e),
             };
         },
         else => {
@@ -1462,7 +1462,7 @@ pub fn errnoToFileWriteError(err: E) FileWriteError {
                 .DQUOT => error.DiskQuota,
                 .FBIG => error.FileTooBig,
                 .SPIPE => error.Unseekable,
-                else => |e| unexpectedError(e) catch error.Unexpected,
+                else => |e| unexpectedError(e),
             };
         },
     }
@@ -1473,14 +1473,14 @@ pub fn errnoToFileCloseError(errno: E) FileCloseError {
         .windows => {
             return switch (errno) {
                 .SUCCESS => unreachable,
-                else => |e| unexpectedError(e) catch error.Unexpected,
+                else => |e| unexpectedError(e),
             };
         },
         else => {
             return switch (errno) {
                 .SUCCESS => unreachable,
                 .CANCELED => error.Canceled,
-                else => |e| unexpectedError(e) catch error.Unexpected,
+                else => |e| unexpectedError(e),
             };
         },
     }
@@ -1494,7 +1494,7 @@ pub fn errnoToFileSyncError(errno: posix.system.E) FileSyncError {
         .DQUOT => error.DiskQuota,
         .ACCES, .PERM, .ROFS => error.AccessDenied,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1518,7 +1518,7 @@ pub fn errnoToDirRenameError(errno: posix.system.E) DirRenameError {
         .XDEV => error.CrossDevice,
         .NOTEMPTY => error.DirNotEmpty,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1536,7 +1536,7 @@ pub fn errnoToDirDeleteFileError(errno: posix.system.E) DirDeleteFileError {
         .NOMEM => error.SystemResources,
         .ROFS => error.ReadOnlyFileSystem,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1554,7 +1554,7 @@ pub fn errnoToDirDeleteDirError(errno: posix.system.E) DirDeleteDirError {
         .ROFS => error.ReadOnlyFileSystem,
         .NOTEMPTY => error.DirNotEmpty,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1574,7 +1574,7 @@ pub fn errnoToDirCreateDirError(errno: posix.system.E) DirCreateDirError {
         .NOTDIR => error.NotDir,
         .ROFS => error.ReadOnlyFileSystem,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1587,7 +1587,7 @@ pub fn fileSize(fd: fd_t) FileSizeError!u64 {
         if (success == w.FALSE) {
             switch (w.GetLastError()) {
                 .ACCESS_DENIED => return error.AccessDenied,
-                else => |err| return unexpectedError(err) catch error.Unexpected,
+                else => |err| return unexpectedError(err),
             }
         }
 
@@ -1624,7 +1624,7 @@ pub fn errnoToFileSizeError(errno: posix.system.E) FileSizeError {
         .ACCES => error.AccessDenied,
         .PERM => error.PermissionDenied,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1638,7 +1638,7 @@ pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
             switch (w.GetLastError()) {
                 .INVALID_HANDLE => return error.InvalidFileDescriptor,
                 .ACCESS_DENIED => return error.AccessDenied,
-                else => |err| return unexpectedError(err) catch error.Unexpected,
+                else => |err| return unexpectedError(err),
             }
         }
 
@@ -1715,7 +1715,7 @@ pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
                 .ACCESS_DENIED => error.AccessDenied,
-                else => |err| return unexpectedError(err) catch error.Unexpected,
+                else => |err| return unexpectedError(err),
             };
         }
         defer _ = w.CloseHandle(handle);
@@ -1824,7 +1824,7 @@ pub fn errnoToFileStatError(errno: posix.system.E) FileStatError {
         .LOOP => error.SymLinkLoop,
         .NOMEM => error.SystemResources,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1837,7 +1837,7 @@ pub fn fileSetSize(fd: fd_t, length: u64) FileSetSizeError!void {
             return switch (w.GetLastError()) {
                 .INVALID_HANDLE => error.Unexpected,
                 .ACCESS_DENIED => error.AccessDenied,
-                else => |err| unexpectedError(err) catch error.Unexpected,
+                else => |err| unexpectedError(err),
             };
         }
 
@@ -1852,7 +1852,7 @@ pub fn fileSetSize(fd: fd_t, length: u64) FileSetSizeError!void {
             return switch (w.GetLastError()) {
                 .INVALID_HANDLE => error.Unexpected,
                 .ACCESS_DENIED => error.AccessDenied,
-                else => |err| unexpectedError(err) catch error.Unexpected,
+                else => |err| unexpectedError(err),
             };
         }
 
@@ -1862,7 +1862,7 @@ pub fn fileSetSize(fd: fd_t, length: u64) FileSetSizeError!void {
             _ = w.SetFilePointerEx(fd, current_pos, null, w.FILE_BEGIN);
             return switch (w.GetLastError()) {
                 .ACCESS_DENIED => error.AccessDenied,
-                else => |err| unexpectedError(err) catch error.Unexpected,
+                else => |err| unexpectedError(err),
             };
         }
 
@@ -1890,7 +1890,7 @@ pub fn errnoToFileSetSizeError(errno: posix.system.E) FileSetSizeError {
         .TXTBSY => error.FileBusy,
         .PERM => error.PermissionDenied,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1919,7 +1919,7 @@ pub fn errnoToFileSetPermissionsError(errno: posix.system.E) FileSetPermissionsE
         .PERM => error.PermissionDenied,
         .ROFS => error.ReadOnlyFileSystem,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1949,7 +1949,7 @@ pub fn errnoToFileSetOwnerError(errno: posix.system.E) FileSetOwnerError {
         .PERM => error.PermissionDenied,
         .ROFS => error.ReadOnlyFileSystem,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1976,7 +1976,7 @@ pub fn fileSetTimestamps(fd: fd_t, timestamps: FileTimestamps) FileSetTimestamps
             return switch (w.GetLastError()) {
                 .INVALID_HANDLE => error.Unexpected,
                 .ACCESS_DENIED => error.AccessDenied,
-                else => |err| unexpectedError(err) catch error.Unexpected,
+                else => |err| unexpectedError(err),
             };
         }
         return;
@@ -2012,7 +2012,7 @@ pub fn errnoToFileSetTimestampsError(errno: posix.system.E) FileSetTimestampsErr
         .PERM => error.PermissionDenied,
         .ROFS => error.ReadOnlyFileSystem,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -2162,7 +2162,7 @@ pub fn errnoToSymLinkError(errno: posix.system.E) SymLinkError {
         .NOSPC => error.NoSpaceLeft,
         .NOMEM => error.SystemResources,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -2211,7 +2211,7 @@ pub fn errnoToReadLinkError(errno: posix.system.E) ReadLinkError {
         .NOTDIR => error.NotDir,
         .NOMEM => error.SystemResources,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -2277,7 +2277,7 @@ pub fn errnoToHardLinkError(errno: posix.system.E) HardLinkError {
         .NOMEM => error.SystemResources,
         .XDEV => error.CrossDevice,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -2402,7 +2402,7 @@ pub fn errnoToDirAccessError(errno: posix.system.E) DirAccessError {
         .NAMETOOLONG => error.NameTooLong,
         .NOTDIR => error.FileNotFound,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -2446,7 +2446,7 @@ fn dirReadPosix(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
         switch (posix.errno(rc)) {
             .SUCCESS => {},
             .BADF => return error.Unexpected,
-            else => |err| return unexpectedError(err) catch error.Unexpected,
+            else => |err| return unexpectedError(err),
         }
     }
 
@@ -2473,7 +2473,7 @@ fn dirReadPosix(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
             .ACCES => return error.AccessDenied,
             .PERM => return error.PermissionDenied,
             .NOMEM => return error.SystemResources,
-            else => |err| return unexpectedError(err) catch error.Unexpected,
+            else => |err| return unexpectedError(err),
         }
     }
 }
@@ -2667,7 +2667,7 @@ fn errnoToDirRealPathFileError(errno: posix.system.E) DirRealPathFileError {
         .EXIST => error.PathAlreadyExists,
         .BUSY, .TXTBSY => error.DeviceBusy,
         .ILSEQ, .INVAL => error.BadPathName,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -2685,7 +2685,7 @@ pub fn errnoToDirRealPathError(errno: posix.system.E) DirRealPathError {
         .BADF => error.FileNotFound,
         .NOSPC, .RANGE => error.NameTooLong,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
