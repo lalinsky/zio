@@ -3173,6 +3173,19 @@ test "io: dir create/delete" {
     try std.testing.expectError(error.FileNotFound, dir.deleteDir(io, dir_path));
 }
 
+test "io: deleteFile on a directory returns IsDir" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const dir_path = "test_io_deletefile_on_dir";
+    defer dir.deleteDir(io, dir_path) catch {};
+
+    try dir.createDir(io, dir_path, .default_dir);
+    try std.testing.expectError(error.IsDir, dir.deleteFile(io, dir_path));
+}
+
 test "io: dir createDirPath creates nested directories" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
