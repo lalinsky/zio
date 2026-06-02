@@ -580,6 +580,10 @@ pub const FileSetTimestampsError = error{
 /// Open an existing file using openat() syscall
 pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: FileOpenFlags) FileOpenError!fd_t {
     if (builtin.os.tag == .windows) {
+        if (flags.resolve_beneath) {
+            if (options.resolve_beneath_mode == .strict) return error.Unsupported;
+            std.log.warn("resolve_beneath is not supported on Windows, path escapes will not be detected", .{});
+        }
         const path_w = try w.pathToWide(allocator, dir, path);
         defer allocator.free(path_w);
 
@@ -682,6 +686,10 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
 /// Open a directory using openat() syscall
 pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: DirOpenFlags) DirOpenError!fd_t {
     if (builtin.os.tag == .windows) {
+        if (flags.resolve_beneath) {
+            if (options.resolve_beneath_mode == .strict) return error.Unsupported;
+            std.log.warn("resolve_beneath is not supported on Windows, path escapes will not be detected", .{});
+        }
         const path_w = try w.pathToWide(allocator, dir, path);
         defer allocator.free(path_w);
 
@@ -780,6 +788,10 @@ pub const FileCreateError = FileOpenError;
 /// Create a file using openat() syscall
 pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: FileCreateFlags) FileCreateError!fd_t {
     if (builtin.os.tag == .windows) {
+        if (flags.resolve_beneath) {
+            if (options.resolve_beneath_mode == .strict) return error.Unsupported;
+            std.log.warn("resolve_beneath is not supported on Windows, path escapes will not be detected", .{});
+        }
         const path_w = try w.pathToWide(allocator, dir, path);
         defer allocator.free(path_w);
 
