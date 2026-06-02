@@ -962,6 +962,7 @@ fn dirOpenErrToStdErr(err: ev.DirOpen.Error) Io.Dir.OpenError {
         error.NotDir => error.NotDir,
         error.BadPathName => error.BadPathName,
         error.NetworkNotFound => error.NetworkNotFound,
+        error.PathEscaped => error.AccessDenied,
         error.Canceled => error.Canceled,
         error.Unexpected => error.Unexpected,
     };
@@ -1021,6 +1022,7 @@ fn openErrToFileErr(err: ev.FileOpen.Error) Io.File.OpenError {
         error.BadPathName => error.BadPathName,
         error.NetworkNotFound => error.NetworkNotFound,
         error.FileBusy => error.FileBusy,
+        error.PathEscaped => error.AccessDenied,
         error.Canceled => error.Canceled,
         error.InvalidUtf8,
         error.InvalidWtf8,

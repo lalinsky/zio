@@ -5,6 +5,9 @@ const w = @import("windows.zig");
 
 const unexpectedError = @import("base.zig").unexpectedError;
 
+// Cached probe result: once we see ENOSYS from openat2, skip future attempts.
+var openat2_nosys: std.atomic.Value(bool) = .init(false);
+
 pub const fd_t = switch (builtin.os.tag) {
     .windows => w.HANDLE,
     else => posix.system.fd_t,
@@ -109,6 +112,10 @@ pub const FileOpenFlags = struct {
     /// On Windows this is enforced without extra syscalls (no FILE_FLAG_BACKUP_SEMANTICS).
     /// On POSIX an extra fstat is required; defaults to true to avoid the overhead.
     allow_directory: bool = true,
+    /// Prevent path resolution from escaping the starting directory (e.g. via ".." or symlinks).
+    /// Enforced by the kernel on Linux 5.6+ (openat2 RESOLVE_BENEATH) and FreeBSD 13+ (O_RESOLVE_BENEATH).
+    /// On other platforms a warning is logged and the flag is ignored.
+    resolve_beneath: bool = false,
 };
 
 pub const DirOpenFlags = struct {
@@ -116,6 +123,9 @@ pub const DirOpenFlags = struct {
     follow_symlinks: bool = true,
     /// Whether the directory will be iterated (affects O_PATH optimization on Linux)
     iterate: bool = false,
+    /// Prevent path resolution from escaping the starting directory.
+    /// See FileOpenFlags.resolve_beneath for platform support details.
+    resolve_beneath: bool = false,
 };
 
 pub const FileCreateFlags = struct {
@@ -124,6 +134,9 @@ pub const FileCreateFlags = struct {
     exclusive: bool = false,
     mode: mode_t = 0o664,
     nonblocking: bool = false,
+    /// Prevent path resolution from escaping the starting directory.
+    /// See FileOpenFlags.resolve_beneath for platform support details.
+    resolve_beneath: bool = false,
 };
 
 pub const FileOpenError = error{
@@ -149,6 +162,8 @@ pub const FileOpenError = error{
     NetworkNotFound,
     ProcessNotFound,
     FileBusy,
+    /// Path resolution attempted to escape the starting directory (resolve_beneath).
+    PathEscaped,
     Canceled,
     Unexpected,
 };
@@ -166,6 +181,8 @@ pub const DirOpenError = error{
     NotDir,
     BadPathName,
     NetworkNotFound,
+    /// Path resolution attempted to escape the starting directory (resolve_beneath).
+    PathEscaped,
     Canceled,
     Unexpected,
 };
@@ -604,7 +621,7 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
         return handle;
     }
 
-    const open_flags: posix.system.O = .{
+    var open_flags: posix.system.O = .{
         .ACCMODE = switch (flags.mode) {
             .read_only => .RDONLY,
             .write_only => .WRONLY,
@@ -616,12 +633,44 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    if (builtin.os.tag == .linux and flags.resolve_beneath) {
+        if (!openat2_nosys.load(.monotonic)) {
+            const how: posix.sys.open_how = .{
+                .flags = @as(u64, @as(u32, @bitCast(open_flags))),
+                .mode = 0,
+                .resolve = posix.sys.RESOLVE.BENEATH | posix.sys.RESOLVE.NO_MAGICLINKS,
+            };
+            while (true) {
+                const rc = posix.sys.openat2(dir, path_z.ptr, &how);
+                switch (posix.errno(rc)) {
+                    .SUCCESS => return @intCast(rc),
+                    .INTR, .AGAIN => continue,
+                    .NOSYS => {
+                        openat2_nosys.store(true, .monotonic);
+                        std.log.warn("openat2 not available (requires Linux 5.6+), resolve_beneath will not be enforced", .{});
+                        break;
+                    },
+                    else => |err| return errnoToFileOpenError(err, flags),
+                }
+            }
+        }
+    } else if (@hasField(posix.O, "RESOLVE_BENEATH") and flags.resolve_beneath) {
+        open_flags.RESOLVE_BENEATH = true;
+    } else if (flags.resolve_beneath) {
+        std.log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
+    }
+
     while (true) {
         const rc = posix.system.openat(dir, path_z.ptr, open_flags, @as(mode_t, 0));
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
             .INTR => continue,
-            else => |err| return errnoToFileOpenError(err),
+            else => |err| {
+                if (builtin.os.tag == .freebsd or builtin.os.tag.isDarwin()) {
+                    if (flags.resolve_beneath and err == .NOTCAPABLE) return error.PathEscaped;
+                }
+                return errnoToFileOpenError(err, flags);
+            },
         }
     }
 }
@@ -675,12 +724,44 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    if (builtin.os.tag == .linux and flags.resolve_beneath) {
+        if (!openat2_nosys.load(.monotonic)) {
+            const how: posix.sys.open_how = .{
+                .flags = @as(u64, @as(u32, @bitCast(open_flags))),
+                .mode = 0,
+                .resolve = posix.sys.RESOLVE.BENEATH | posix.sys.RESOLVE.NO_MAGICLINKS,
+            };
+            while (true) {
+                const rc = posix.sys.openat2(dir, path_z.ptr, &how);
+                switch (posix.errno(rc)) {
+                    .SUCCESS => return @intCast(rc),
+                    .INTR, .AGAIN => continue,
+                    .NOSYS => {
+                        openat2_nosys.store(true, .monotonic);
+                        std.log.warn("openat2 not available (requires Linux 5.6+), resolve_beneath will not be enforced", .{});
+                        break;
+                    },
+                    else => |err| return errnoToDirOpenError(err, flags),
+                }
+            }
+        }
+    } else if (builtin.os.tag == .freebsd and flags.resolve_beneath) {
+        open_flags.RESOLVE_BENEATH = true;
+    } else if (flags.resolve_beneath) {
+        std.log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
+    }
+
     while (true) {
         const rc = posix.system.openat(dir, path_z.ptr, open_flags, @as(mode_t, 0));
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
             .INTR => continue,
-            else => |err| return errnoToDirOpenError(err),
+            else => |err| {
+                if (builtin.os.tag == .freebsd or builtin.os.tag.isDarwin()) {
+                    if (flags.resolve_beneath and err == .NOTCAPABLE) return error.PathEscaped;
+                }
+                return errnoToDirOpenError(err, flags);
+            },
         }
     }
 }
@@ -745,12 +826,44 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    if (builtin.os.tag == .linux and flags.resolve_beneath) {
+        if (!openat2_nosys.load(.monotonic)) {
+            const how: posix.sys.open_how = .{
+                .flags = @as(u64, @as(u32, @bitCast(open_flags))),
+                .mode = flags.mode,
+                .resolve = posix.sys.RESOLVE.BENEATH | posix.sys.RESOLVE.NO_MAGICLINKS,
+            };
+            while (true) {
+                const rc = posix.sys.openat2(dir, path_z.ptr, &how);
+                switch (posix.errno(rc)) {
+                    .SUCCESS => return @intCast(rc),
+                    .INTR, .AGAIN => continue,
+                    .NOSYS => {
+                        openat2_nosys.store(true, .monotonic);
+                        std.log.warn("openat2 not available (requires Linux 5.6+), resolve_beneath will not be enforced", .{});
+                        break;
+                    },
+                    else => |err| return errnoToFileOpenError(err, flags),
+                }
+            }
+        }
+    } else if (builtin.os.tag == .freebsd and flags.resolve_beneath) {
+        open_flags.RESOLVE_BENEATH = true;
+    } else if (flags.resolve_beneath) {
+        std.log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
+    }
+
     while (true) {
         const rc = posix.system.openat(dir, path_z.ptr, open_flags, flags.mode);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
             .INTR => continue,
-            else => |err| return errnoToFileOpenError(err),
+            else => |err| {
+                if (builtin.os.tag == .freebsd or builtin.os.tag.isDarwin()) {
+                    if (flags.resolve_beneath and err == .NOTCAPABLE) return error.PathEscaped;
+                }
+                return errnoToFileOpenError(err, flags);
+            },
         }
     }
 }
@@ -1242,7 +1355,7 @@ pub fn mkdirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, mode: 
     }
 }
 
-pub fn errnoToFileOpenError(errno: posix.system.E) FileOpenError {
+pub fn errnoToFileOpenError(errno: posix.system.E, flags: anytype) FileOpenError {
     return switch (errno) {
         .SUCCESS => unreachable,
         .ACCES => error.AccessDenied,
@@ -1261,12 +1374,13 @@ pub fn errnoToFileOpenError(errno: posix.system.E) FileOpenError {
         .EXIST => error.PathAlreadyExists,
         .BUSY => error.DeviceBusy,
         .TXTBSY => error.FileBusy,
+        .XDEV => if (flags.resolve_beneath) error.PathEscaped else unexpectedError(errno),
         .CANCELED => error.Canceled,
         else => |e| unexpectedError(e) catch error.Unexpected,
     };
 }
 
-pub fn errnoToDirOpenError(errno: posix.system.E) DirOpenError {
+pub fn errnoToDirOpenError(errno: posix.system.E, flags: DirOpenFlags) DirOpenError {
     return switch (errno) {
         .SUCCESS => unreachable,
         .ACCES => error.AccessDenied,
@@ -1279,6 +1393,7 @@ pub fn errnoToDirOpenError(errno: posix.system.E) DirOpenError {
         .NAMETOOLONG => error.NameTooLong,
         .NOMEM => error.SystemResources,
         .NOTDIR => error.NotDir,
+        .XDEV => if (flags.resolve_beneath) error.PathEscaped else unexpectedError(errno),
         .CANCELED => error.Canceled,
         else => |e| unexpectedError(e) catch error.Unexpected,
     };
