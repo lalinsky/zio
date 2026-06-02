@@ -1351,7 +1351,13 @@ test "Dir: resolve_beneath blocks parent escape" {
     f.close();
 
     // Opening ../file1 from dir2 with resolve_beneath must fail
-    try std.testing.expectError(error.AccessDenied, dir2.openFile("../file1", .{ .resolve_beneath = true }));
+    if (dir2.openFile("../file1", .{ .resolve_beneath = true })) |file| {
+        file.close();
+        return error.TestUnexpectedResult;
+    } else |err| switch (err) {
+        error.AccessDenied, error.Unsupported => {},
+        else => return err,
+    }
 }
 
 test "File: blocking mode without runtime" {

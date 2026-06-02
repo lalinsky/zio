@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const posix = @import("posix.zig");
 const w = @import("windows.zig");
+const options = @import("zio_options");
 
 const unexpectedError = @import("base.zig").unexpectedError;
 
@@ -163,6 +164,7 @@ pub const FileOpenError = error{
     ProcessNotFound,
     FileBusy,
     Canceled,
+    Unsupported,
     Unexpected,
 };
 
@@ -180,6 +182,7 @@ pub const DirOpenError = error{
     BadPathName,
     NetworkNotFound,
     Canceled,
+    Unsupported,
     Unexpected,
 };
 
@@ -643,16 +646,20 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
                     .INTR, .AGAIN => continue,
                     .NOSYS => {
                         openat2_nosys.store(true, .monotonic);
+                        if (options.resolve_beneath_mode == .strict) return error.Unsupported;
                         std.log.warn("openat2 not available (requires Linux 5.6+), resolve_beneath will not be enforced", .{});
                         break;
                     },
                     else => |err| return errnoToFileOpenError(err, flags),
                 }
             }
+        } else if (options.resolve_beneath_mode == .strict) {
+            return error.Unsupported;
         }
     } else if (@hasField(posix.O, "RESOLVE_BENEATH") and flags.resolve_beneath) {
         open_flags.RESOLVE_BENEATH = true;
     } else if (flags.resolve_beneath) {
+        if (options.resolve_beneath_mode == .strict) return error.Unsupported;
         std.log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
     }
 
@@ -735,16 +742,20 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
                     .INTR, .AGAIN => continue,
                     .NOSYS => {
                         openat2_nosys.store(true, .monotonic);
+                        if (options.resolve_beneath_mode == .strict) return error.Unsupported;
                         std.log.warn("openat2 not available (requires Linux 5.6+), resolve_beneath will not be enforced", .{});
                         break;
                     },
                     else => |err| return errnoToDirOpenError(err, flags),
                 }
             }
+        } else if (options.resolve_beneath_mode == .strict) {
+            return error.Unsupported;
         }
     } else if (builtin.os.tag == .freebsd and flags.resolve_beneath) {
         open_flags.RESOLVE_BENEATH = true;
     } else if (flags.resolve_beneath) {
+        if (options.resolve_beneath_mode == .strict) return error.Unsupported;
         std.log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
     }
 
@@ -838,16 +849,20 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
                     .INTR, .AGAIN => continue,
                     .NOSYS => {
                         openat2_nosys.store(true, .monotonic);
+                        if (options.resolve_beneath_mode == .strict) return error.Unsupported;
                         std.log.warn("openat2 not available (requires Linux 5.6+), resolve_beneath will not be enforced", .{});
                         break;
                     },
                     else => |err| return errnoToFileOpenError(err, flags),
                 }
             }
+        } else if (options.resolve_beneath_mode == .strict) {
+            return error.Unsupported;
         }
     } else if (builtin.os.tag == .freebsd and flags.resolve_beneath) {
         open_flags.RESOLVE_BENEATH = true;
     } else if (flags.resolve_beneath) {
+        if (options.resolve_beneath_mode == .strict) return error.Unsupported;
         std.log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
     }
 
