@@ -1137,6 +1137,24 @@ pub fn dirDeleteFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) 
         switch (posix.errno(rc)) {
             .SUCCESS => return,
             .INTR => continue,
+            .PERM => {
+                // On macOS, unlinkat returns EPERM (not EISDIR) when
+                // the path is a directory.  Check with fstatat so the
+                // caller sees error.IsDir instead of a misleading
+                // error.AccessDenied.  EPERM can also mean the file
+                // has the immutable flag set, which we don't
+                // distinguish here — it stays AccessDenied.
+                if (builtin.os.tag.isDarwin()) {
+                    var stat_buf: posix.system.Stat = undefined;
+                    const stat_rc = posix.system.fstatat(dir, path_z.ptr, &stat_buf, posix.AT.SYMLINK_NOFOLLOW);
+                    if (posix.errno(stat_rc) == .SUCCESS and
+                        stat_buf.mode & posix.system.S.IFMT == posix.system.S.IFDIR)
+                    {
+                        return error.IsDir;
+                    }
+                }
+                return error.AccessDenied;
+            },
             else => |err| return errnoToDirDeleteFileError(err),
         }
     }
