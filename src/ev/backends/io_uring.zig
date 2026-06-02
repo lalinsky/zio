@@ -2,6 +2,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const net = @import("../../os/net.zig");
 const fs = @import("../../os/fs.zig");
+const linux_sys = @import("../../os/system/linux.zig");
 const time = @import("../../os/time.zig");
 const Duration = @import("../../time.zig").Duration;
 const common = @import("common.zig");
@@ -106,10 +107,12 @@ pub const NetSendMsgData = struct {
 
 pub const FileOpenData = struct {
     path: [:0]const u8 = "",
+    how: linux_sys.open_how = undefined,
 };
 
 pub const FileCreateData = struct {
     path: [:0]const u8 = "",
+    how: linux_sys.open_how = undefined,
 };
 
 pub const DirCreateDirData = struct {
@@ -411,8 +414,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                     return;
                 };
             }
-            const sqe = self.getSqeOrDefer(c) orelse return;
-            const flags = linux.O{
+            const oflags = linux.O{
                 .ACCMODE = switch (data.flags.mode) {
                     .read_only => .RDONLY,
                     .write_only => .WRONLY,
@@ -420,7 +422,17 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 },
                 .CLOEXEC = true,
             };
-            sqe.prep_openat(data.dir, data.internal.path, flags, 0);
+            const sqe = self.getSqeOrDefer(c) orelse return;
+            if (data.flags.resolve_beneath) {
+                data.internal.how = .{
+                    .flags = @as(u64, @as(u32, @bitCast(oflags))),
+                    .mode = 0,
+                    .resolve = linux_sys.RESOLVE.BENEATH | linux_sys.RESOLVE.NO_MAGICLINKS,
+                };
+                prep_openat2(sqe, data.dir, data.internal.path, &data.internal.how);
+            } else {
+                sqe.prep_openat(data.dir, data.internal.path, oflags, 0);
+            }
             sqe.user_data = @intFromPtr(c);
         },
         .file_create => {
@@ -432,15 +444,24 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                     return;
                 };
             }
-            const sqe = self.getSqeOrDefer(c) orelse return;
-            const flags = linux.O{
+            const oflags = linux.O{
                 .ACCMODE = if (data.flags.read) .RDWR else .WRONLY,
                 .CLOEXEC = true,
                 .CREAT = true,
                 .TRUNC = data.flags.truncate,
                 .EXCL = data.flags.exclusive,
             };
-            sqe.prep_openat(data.dir, data.internal.path, flags, data.flags.mode);
+            const sqe = self.getSqeOrDefer(c) orelse return;
+            if (data.flags.resolve_beneath) {
+                data.internal.how = .{
+                    .flags = @as(u64, @as(u32, @bitCast(oflags))),
+                    .mode = data.flags.mode,
+                    .resolve = linux_sys.RESOLVE.BENEATH | linux_sys.RESOLVE.NO_MAGICLINKS,
+                };
+                prep_openat2(sqe, data.dir, data.internal.path, &data.internal.how);
+            } else {
+                sqe.prep_openat(data.dir, data.internal.path, oflags, data.flags.mode);
+            }
             sqe.user_data = @intFromPtr(c);
         },
         .file_close => {
@@ -981,7 +1002,7 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
             const data = c.cast(FileOpen);
             self.allocator.free(data.internal.path);
             if (res < 0) {
-                c.setError(fs.errnoToFileOpenError(@enumFromInt(-res)));
+                c.setError(fs.errnoToFileOpenError(@enumFromInt(-res), data.flags));
             } else {
                 c.setResult(.file_open, res);
             }
@@ -991,7 +1012,7 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
             const data = c.cast(FileCreate);
             self.allocator.free(data.internal.path);
             if (res < 0) {
-                c.setError(fs.errnoToFileOpenError(@enumFromInt(-res)));
+                c.setError(fs.errnoToFileOpenError(@enumFromInt(-res), data.flags));
             } else {
                 c.setResult(.file_create, res);
             }
@@ -1140,7 +1161,7 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
             const data = c.cast(DirOpen);
             self.allocator.free(data.internal.path);
             if (res < 0) {
-                c.setError(fs.errnoToFileOpenError(@enumFromInt(-res)));
+                c.setError(fs.errnoToDirOpenError(@enumFromInt(-res), data.flags));
             } else {
                 c.setResult(.dir_open, res);
             }
@@ -1253,4 +1274,23 @@ fn sendFlagsToMsg(flags: net.SendFlags) u32 {
     var msg_flags: u32 = 0;
     if (flags.no_signal) msg_flags |= linux.MSG.NOSIGNAL;
     return msg_flags;
+}
+
+fn prep_openat2(sqe: *linux.io_uring_sqe, fd: linux.fd_t, path: [*:0]const u8, how: *const linux_sys.open_how) void {
+    sqe.* = .{
+        .opcode = .OPENAT2,
+        .fd = fd,
+        .addr = @intFromPtr(path),
+        .len = @sizeOf(linux_sys.open_how),
+        .off = @intFromPtr(how),
+        .user_data = 0,
+        .flags = 0,
+        .ioprio = 0,
+        .rw_flags = 0,
+        .buf_index = 0,
+        .personality = 0,
+        .splice_fd_in = 0,
+        .addr3 = 0,
+        .resv = 0,
+    };
 }

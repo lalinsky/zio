@@ -437,3 +437,38 @@ pub fn mkdirat(dirfd: fd_t, path: [*:0]const u8, mode: mode_t) usize {
         mode,
     );
 }
+
+/// Resolve flags for openat2(2), available since Linux 5.6.
+/// From linux/openat2.h.
+pub const RESOLVE = struct {
+    /// Block mount-point crossings (bind-mounts, rbind-mounts, etc.)
+    pub const NO_XDEV: u64 = 0x01;
+    /// Block magic-link resolution (/proc/self/exe, /proc/self/fd/*, etc.)
+    pub const NO_MAGICLINKS: u64 = 0x02;
+    /// Block all symlink resolution
+    pub const NO_SYMLINKS: u64 = 0x04;
+    /// Block resolution of paths that would escape the starting dirfd
+    pub const BENEATH: u64 = 0x08;
+    /// Treat the dirfd as the filesystem root during resolution
+    pub const IN_ROOT: u64 = 0x10;
+    /// Use cached paths; fail with EAGAIN if a cached lookup is not possible
+    pub const CACHED: u64 = 0x20;
+};
+
+/// Arguments for the openat2(2) syscall, available since Linux 5.6.
+/// From linux/openat2.h (struct open_how).
+pub const open_how = extern struct {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+};
+
+pub fn openat2(dirfd: fd_t, path: [*:0]const u8, how: *const open_how) usize {
+    return linux.syscall4(
+        .openat2,
+        @as(usize, @bitCast(@as(isize, dirfd))),
+        @intFromPtr(path),
+        @intFromPtr(how),
+        @sizeOf(open_how),
+    );
+}

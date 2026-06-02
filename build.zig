@@ -13,9 +13,17 @@ pub fn build(b: *std.Build) void {
         "Override the default event loop backend (io_uring, epoll, kqueue, iocp, poll)",
     );
 
+    const ResolveBeneathMode = enum { strict, best_effort };
+    const resolve_beneath_mode = b.option(
+        ResolveBeneathMode,
+        "resolve-beneath-mode",
+        "How to handle resolve_beneath on platforms without kernel support: strict (error.Unsupported) or best_effort (log warning, continue)",
+    ) orelse .strict;
+
     // Create options for backend selection
     var options = b.addOptions();
     options.addOption(?[]const u8, "backend", backend);
+    options.addOption(ResolveBeneathMode, "resolve_beneath_mode", resolve_beneath_mode);
 
     const zio = b.addModule("zio", .{
         .root_source_file = b.path("src/zio.zig"),

@@ -3,8 +3,12 @@ const builtin = @import("builtin");
 const posix = @import("posix.zig");
 const darwin = @import("darwin.zig");
 const w = @import("windows.zig");
+const options = @import("zio_options");
 
 const unexpectedError = @import("base.zig").unexpectedError;
+
+// Cached probe result: once we see ENOSYS from openat2, skip future attempts.
+var openat2_nosys: std.atomic.Value(bool) = .init(false);
 
 pub const fd_t = switch (builtin.os.tag) {
     .windows => w.HANDLE,
@@ -110,6 +114,10 @@ pub const FileOpenFlags = struct {
     /// On Windows this is enforced without extra syscalls (no FILE_FLAG_BACKUP_SEMANTICS).
     /// On POSIX an extra fstat is required; defaults to true to avoid the overhead.
     allow_directory: bool = true,
+    /// Prevent path resolution from escaping the starting directory (e.g. via ".." or symlinks).
+    /// Enforced by the kernel on Linux 5.6+ (openat2 RESOLVE_BENEATH) and FreeBSD 13+ (O_RESOLVE_BENEATH).
+    /// On other platforms a warning is logged and the flag is ignored.
+    resolve_beneath: bool = false,
 };
 
 pub const DirOpenFlags = struct {
@@ -117,6 +125,9 @@ pub const DirOpenFlags = struct {
     follow_symlinks: bool = true,
     /// Whether the directory will be iterated (affects O_PATH optimization on Linux)
     iterate: bool = false,
+    /// Prevent path resolution from escaping the starting directory.
+    /// See FileOpenFlags.resolve_beneath for platform support details.
+    resolve_beneath: bool = false,
 };
 
 pub const FileCreateFlags = struct {
@@ -125,6 +136,9 @@ pub const FileCreateFlags = struct {
     exclusive: bool = false,
     mode: mode_t = 0o664,
     nonblocking: bool = false,
+    /// Prevent path resolution from escaping the starting directory.
+    /// See FileOpenFlags.resolve_beneath for platform support details.
+    resolve_beneath: bool = false,
 };
 
 pub const FileOpenError = error{
@@ -151,6 +165,7 @@ pub const FileOpenError = error{
     ProcessNotFound,
     FileBusy,
     Canceled,
+    Unsupported,
     Unexpected,
 };
 
@@ -168,6 +183,7 @@ pub const DirOpenError = error{
     BadPathName,
     NetworkNotFound,
     Canceled,
+    Unsupported,
     Unexpected,
 };
 
@@ -565,6 +581,10 @@ pub const FileSetTimestampsError = error{
 /// Open an existing file using openat() syscall
 pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: FileOpenFlags) FileOpenError!fd_t {
     if (builtin.os.tag == .windows) {
+        if (flags.resolve_beneath) {
+            if (options.resolve_beneath_mode == .strict) return error.Unsupported;
+            std.log.warn("resolve_beneath is not supported on Windows, path escapes will not be detected", .{});
+        }
         const path_w = try w.pathToWide(allocator, dir, path);
         defer allocator.free(path_w);
 
@@ -605,7 +625,7 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
         return handle;
     }
 
-    const open_flags: posix.system.O = .{
+    var open_flags: posix.system.O = .{
         .ACCMODE = switch (flags.mode) {
             .read_only => .RDONLY,
             .write_only => .WRONLY,
@@ -617,12 +637,49 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    if (builtin.os.tag == .linux and flags.resolve_beneath) {
+        if (!openat2_nosys.load(.monotonic)) {
+            const how: posix.sys.open_how = .{
+                .flags = @as(u64, @as(u32, @bitCast(open_flags))),
+                .mode = 0,
+                .resolve = posix.sys.RESOLVE.BENEATH | posix.sys.RESOLVE.NO_MAGICLINKS,
+            };
+            while (true) {
+                const rc = posix.sys.openat2(dir, path_z.ptr, &how);
+                switch (posix.errno(rc)) {
+                    .SUCCESS => return @intCast(rc),
+                    .INTR, .AGAIN => continue,
+                    .NOSYS => {
+                        openat2_nosys.store(true, .monotonic);
+                        if (options.resolve_beneath_mode == .strict) return error.Unsupported;
+                        std.log.warn("openat2 not available (requires Linux 5.6+), resolve_beneath will not be enforced", .{});
+                        break;
+                    },
+                    else => |err| return errnoToFileOpenError(err, flags),
+                }
+            }
+        } else if (options.resolve_beneath_mode == .strict) {
+            return error.Unsupported;
+        }
+    } else if (@hasField(posix.O, "RESOLVE_BENEATH") and flags.resolve_beneath) {
+        open_flags.RESOLVE_BENEATH = true;
+    } else if (flags.resolve_beneath) {
+        if (options.resolve_beneath_mode == .strict) return error.Unsupported;
+        std.log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
+    }
+
     while (true) {
         const rc = posix.system.openat(dir, path_z.ptr, open_flags, @as(mode_t, 0));
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
             .INTR => continue,
-            else => |err| return errnoToFileOpenError(err),
+            else => |err| {
+                if (flags.resolve_beneath) {
+                    if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.AccessDenied;
+                    if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 107) return error.AccessDenied;
+                }
+                return errnoToFileOpenError(err, flags);
+            },
         }
     }
 }
@@ -630,6 +687,10 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
 /// Open a directory using openat() syscall
 pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: DirOpenFlags) DirOpenError!fd_t {
     if (builtin.os.tag == .windows) {
+        if (flags.resolve_beneath) {
+            if (options.resolve_beneath_mode == .strict) return error.Unsupported;
+            std.log.warn("resolve_beneath is not supported on Windows, path escapes will not be detected", .{});
+        }
         const path_w = try w.pathToWide(allocator, dir, path);
         defer allocator.free(path_w);
 
@@ -676,12 +737,49 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    if (builtin.os.tag == .linux and flags.resolve_beneath) {
+        if (!openat2_nosys.load(.monotonic)) {
+            const how: posix.sys.open_how = .{
+                .flags = @as(u64, @as(u32, @bitCast(open_flags))),
+                .mode = 0,
+                .resolve = posix.sys.RESOLVE.BENEATH | posix.sys.RESOLVE.NO_MAGICLINKS,
+            };
+            while (true) {
+                const rc = posix.sys.openat2(dir, path_z.ptr, &how);
+                switch (posix.errno(rc)) {
+                    .SUCCESS => return @intCast(rc),
+                    .INTR, .AGAIN => continue,
+                    .NOSYS => {
+                        openat2_nosys.store(true, .monotonic);
+                        if (options.resolve_beneath_mode == .strict) return error.Unsupported;
+                        std.log.warn("openat2 not available (requires Linux 5.6+), resolve_beneath will not be enforced", .{});
+                        break;
+                    },
+                    else => |err| return errnoToDirOpenError(err, flags),
+                }
+            }
+        } else if (options.resolve_beneath_mode == .strict) {
+            return error.Unsupported;
+        }
+    } else if (builtin.os.tag == .freebsd and flags.resolve_beneath) {
+        open_flags.RESOLVE_BENEATH = true;
+    } else if (flags.resolve_beneath) {
+        if (options.resolve_beneath_mode == .strict) return error.Unsupported;
+        std.log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
+    }
+
     while (true) {
         const rc = posix.system.openat(dir, path_z.ptr, open_flags, @as(mode_t, 0));
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
             .INTR => continue,
-            else => |err| return errnoToDirOpenError(err),
+            else => |err| {
+                if (flags.resolve_beneath) {
+                    if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.AccessDenied;
+                    if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 107) return error.AccessDenied;
+                }
+                return errnoToDirOpenError(err, flags);
+            },
         }
     }
 }
@@ -691,6 +789,10 @@ pub const FileCreateError = FileOpenError;
 /// Create a file using openat() syscall
 pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: FileCreateFlags) FileCreateError!fd_t {
     if (builtin.os.tag == .windows) {
+        if (flags.resolve_beneath) {
+            if (options.resolve_beneath_mode == .strict) return error.Unsupported;
+            std.log.warn("resolve_beneath is not supported on Windows, path escapes will not be detected", .{});
+        }
         const path_w = try w.pathToWide(allocator, dir, path);
         defer allocator.free(path_w);
 
@@ -746,12 +848,49 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    if (builtin.os.tag == .linux and flags.resolve_beneath) {
+        if (!openat2_nosys.load(.monotonic)) {
+            const how: posix.sys.open_how = .{
+                .flags = @as(u64, @as(u32, @bitCast(open_flags))),
+                .mode = flags.mode,
+                .resolve = posix.sys.RESOLVE.BENEATH | posix.sys.RESOLVE.NO_MAGICLINKS,
+            };
+            while (true) {
+                const rc = posix.sys.openat2(dir, path_z.ptr, &how);
+                switch (posix.errno(rc)) {
+                    .SUCCESS => return @intCast(rc),
+                    .INTR, .AGAIN => continue,
+                    .NOSYS => {
+                        openat2_nosys.store(true, .monotonic);
+                        if (options.resolve_beneath_mode == .strict) return error.Unsupported;
+                        std.log.warn("openat2 not available (requires Linux 5.6+), resolve_beneath will not be enforced", .{});
+                        break;
+                    },
+                    else => |err| return errnoToFileOpenError(err, flags),
+                }
+            }
+        } else if (options.resolve_beneath_mode == .strict) {
+            return error.Unsupported;
+        }
+    } else if (builtin.os.tag == .freebsd and flags.resolve_beneath) {
+        open_flags.RESOLVE_BENEATH = true;
+    } else if (flags.resolve_beneath) {
+        if (options.resolve_beneath_mode == .strict) return error.Unsupported;
+        std.log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
+    }
+
     while (true) {
         const rc = posix.system.openat(dir, path_z.ptr, open_flags, flags.mode);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
             .INTR => continue,
-            else => |err| return errnoToFileOpenError(err),
+            else => |err| {
+                if (flags.resolve_beneath) {
+                    if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.AccessDenied;
+                    if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 107) return error.AccessDenied;
+                }
+                return errnoToFileOpenError(err, flags);
+            },
         }
     }
 }
@@ -1259,7 +1398,7 @@ pub fn mkdirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, mode: 
     }
 }
 
-pub fn errnoToFileOpenError(errno: posix.system.E) FileOpenError {
+pub fn errnoToFileOpenError(errno: posix.system.E, flags: anytype) FileOpenError {
     return switch (errno) {
         .SUCCESS => unreachable,
         .ACCES => error.AccessDenied,
@@ -1278,12 +1417,13 @@ pub fn errnoToFileOpenError(errno: posix.system.E) FileOpenError {
         .EXIST => error.PathAlreadyExists,
         .BUSY => error.DeviceBusy,
         .TXTBSY => error.FileBusy,
+        .XDEV => if (flags.resolve_beneath) error.AccessDenied else unexpectedError(errno),
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
-pub fn errnoToDirOpenError(errno: posix.system.E) DirOpenError {
+pub fn errnoToDirOpenError(errno: posix.system.E, flags: DirOpenFlags) DirOpenError {
     return switch (errno) {
         .SUCCESS => unreachable,
         .ACCES => error.AccessDenied,
@@ -1296,8 +1436,9 @@ pub fn errnoToDirOpenError(errno: posix.system.E) DirOpenError {
         .NAMETOOLONG => error.NameTooLong,
         .NOMEM => error.SystemResources,
         .NOTDIR => error.NotDir,
+        .XDEV => if (flags.resolve_beneath) error.AccessDenied else unexpectedError(errno),
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1315,7 +1456,7 @@ pub fn errnoToFileReadError(err: E) FileReadError {
                 .HANDLE_EOF => error.InputOutput,
                 .OPERATION_ABORTED => error.Canceled,
                 .NOT_ENOUGH_MEMORY, .OUTOFMEMORY => error.SystemResources,
-                else => |e| unexpectedError(e) catch error.Unexpected,
+                else => |e| unexpectedError(e),
             };
         },
         else => {
@@ -1329,7 +1470,7 @@ pub fn errnoToFileReadError(err: E) FileReadError {
                 .NOMEM => error.SystemResources,
                 .BADF => error.NotOpenForReading,
                 .SPIPE => error.Unseekable,
-                else => |e| unexpectedError(e) catch error.Unexpected,
+                else => |e| unexpectedError(e),
             };
         },
     }
@@ -1348,7 +1489,7 @@ pub fn errnoToFileWriteError(err: E) FileWriteError {
                 .OPERATION_ABORTED => error.Canceled,
                 .DISK_FULL, .HANDLE_DISK_FULL => error.NoSpaceLeft,
                 .NOT_ENOUGH_MEMORY, .OUTOFMEMORY => error.SystemResources,
-                else => |e| unexpectedError(e) catch error.Unexpected,
+                else => |e| unexpectedError(e),
             };
         },
         else => {
@@ -1365,7 +1506,7 @@ pub fn errnoToFileWriteError(err: E) FileWriteError {
                 .DQUOT => error.DiskQuota,
                 .FBIG => error.FileTooBig,
                 .SPIPE => error.Unseekable,
-                else => |e| unexpectedError(e) catch error.Unexpected,
+                else => |e| unexpectedError(e),
             };
         },
     }
@@ -1376,14 +1517,14 @@ pub fn errnoToFileCloseError(errno: E) FileCloseError {
         .windows => {
             return switch (errno) {
                 .SUCCESS => unreachable,
-                else => |e| unexpectedError(e) catch error.Unexpected,
+                else => |e| unexpectedError(e),
             };
         },
         else => {
             return switch (errno) {
                 .SUCCESS => unreachable,
                 .CANCELED => error.Canceled,
-                else => |e| unexpectedError(e) catch error.Unexpected,
+                else => |e| unexpectedError(e),
             };
         },
     }
@@ -1397,7 +1538,7 @@ pub fn errnoToFileSyncError(errno: posix.system.E) FileSyncError {
         .DQUOT => error.DiskQuota,
         .ACCES, .PERM, .ROFS => error.AccessDenied,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1421,7 +1562,7 @@ pub fn errnoToDirRenameError(errno: posix.system.E) DirRenameError {
         .XDEV => error.CrossDevice,
         .NOTEMPTY => error.DirNotEmpty,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1439,7 +1580,7 @@ pub fn errnoToDirDeleteFileError(errno: posix.system.E) DirDeleteFileError {
         .NOMEM => error.SystemResources,
         .ROFS => error.ReadOnlyFileSystem,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1457,7 +1598,7 @@ pub fn errnoToDirDeleteDirError(errno: posix.system.E) DirDeleteDirError {
         .ROFS => error.ReadOnlyFileSystem,
         .NOTEMPTY => error.DirNotEmpty,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1477,7 +1618,7 @@ pub fn errnoToDirCreateDirError(errno: posix.system.E) DirCreateDirError {
         .NOTDIR => error.NotDir,
         .ROFS => error.ReadOnlyFileSystem,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1490,7 +1631,7 @@ pub fn fileSize(fd: fd_t) FileSizeError!u64 {
         if (success == w.FALSE) {
             switch (w.GetLastError()) {
                 .ACCESS_DENIED => return error.AccessDenied,
-                else => |err| return unexpectedError(err) catch error.Unexpected,
+                else => |err| return unexpectedError(err),
             }
         }
 
@@ -1527,7 +1668,7 @@ pub fn errnoToFileSizeError(errno: posix.system.E) FileSizeError {
         .ACCES => error.AccessDenied,
         .PERM => error.PermissionDenied,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1541,7 +1682,7 @@ pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
             switch (w.GetLastError()) {
                 .INVALID_HANDLE => return error.InvalidFileDescriptor,
                 .ACCESS_DENIED => return error.AccessDenied,
-                else => |err| return unexpectedError(err) catch error.Unexpected,
+                else => |err| return unexpectedError(err),
             }
         }
 
@@ -1618,7 +1759,7 @@ pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
                 .ACCESS_DENIED => error.AccessDenied,
-                else => |err| return unexpectedError(err) catch error.Unexpected,
+                else => |err| return unexpectedError(err),
             };
         }
         defer _ = w.CloseHandle(handle);
@@ -1727,7 +1868,7 @@ pub fn errnoToFileStatError(errno: posix.system.E) FileStatError {
         .LOOP => error.SymLinkLoop,
         .NOMEM => error.SystemResources,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1740,7 +1881,7 @@ pub fn fileSetSize(fd: fd_t, length: u64) FileSetSizeError!void {
             return switch (w.GetLastError()) {
                 .INVALID_HANDLE => error.Unexpected,
                 .ACCESS_DENIED => error.AccessDenied,
-                else => |err| unexpectedError(err) catch error.Unexpected,
+                else => |err| unexpectedError(err),
             };
         }
 
@@ -1755,7 +1896,7 @@ pub fn fileSetSize(fd: fd_t, length: u64) FileSetSizeError!void {
             return switch (w.GetLastError()) {
                 .INVALID_HANDLE => error.Unexpected,
                 .ACCESS_DENIED => error.AccessDenied,
-                else => |err| unexpectedError(err) catch error.Unexpected,
+                else => |err| unexpectedError(err),
             };
         }
 
@@ -1765,7 +1906,7 @@ pub fn fileSetSize(fd: fd_t, length: u64) FileSetSizeError!void {
             _ = w.SetFilePointerEx(fd, current_pos, null, w.FILE_BEGIN);
             return switch (w.GetLastError()) {
                 .ACCESS_DENIED => error.AccessDenied,
-                else => |err| unexpectedError(err) catch error.Unexpected,
+                else => |err| unexpectedError(err),
             };
         }
 
@@ -1793,7 +1934,7 @@ pub fn errnoToFileSetSizeError(errno: posix.system.E) FileSetSizeError {
         .TXTBSY => error.FileBusy,
         .PERM => error.PermissionDenied,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1822,7 +1963,7 @@ pub fn errnoToFileSetPermissionsError(errno: posix.system.E) FileSetPermissionsE
         .PERM => error.PermissionDenied,
         .ROFS => error.ReadOnlyFileSystem,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1852,7 +1993,7 @@ pub fn errnoToFileSetOwnerError(errno: posix.system.E) FileSetOwnerError {
         .PERM => error.PermissionDenied,
         .ROFS => error.ReadOnlyFileSystem,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -1879,7 +2020,7 @@ pub fn fileSetTimestamps(fd: fd_t, timestamps: FileTimestamps) FileSetTimestamps
             return switch (w.GetLastError()) {
                 .INVALID_HANDLE => error.Unexpected,
                 .ACCESS_DENIED => error.AccessDenied,
-                else => |err| unexpectedError(err) catch error.Unexpected,
+                else => |err| unexpectedError(err),
             };
         }
         return;
@@ -1915,7 +2056,7 @@ pub fn errnoToFileSetTimestampsError(errno: posix.system.E) FileSetTimestampsErr
         .PERM => error.PermissionDenied,
         .ROFS => error.ReadOnlyFileSystem,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -2065,7 +2206,7 @@ pub fn errnoToSymLinkError(errno: posix.system.E) SymLinkError {
         .NOSPC => error.NoSpaceLeft,
         .NOMEM => error.SystemResources,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -2114,7 +2255,7 @@ pub fn errnoToReadLinkError(errno: posix.system.E) ReadLinkError {
         .NOTDIR => error.NotDir,
         .NOMEM => error.SystemResources,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -2180,7 +2321,7 @@ pub fn errnoToHardLinkError(errno: posix.system.E) HardLinkError {
         .NOMEM => error.SystemResources,
         .XDEV => error.CrossDevice,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -2305,7 +2446,7 @@ pub fn errnoToDirAccessError(errno: posix.system.E) DirAccessError {
         .NAMETOOLONG => error.NameTooLong,
         .NOTDIR => error.FileNotFound,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -2349,7 +2490,7 @@ fn dirReadPosix(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
         switch (posix.errno(rc)) {
             .SUCCESS => {},
             .BADF => return error.Unexpected,
-            else => |err| return unexpectedError(err) catch error.Unexpected,
+            else => |err| return unexpectedError(err),
         }
     }
 
@@ -2376,7 +2517,7 @@ fn dirReadPosix(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
             .ACCES => return error.AccessDenied,
             .PERM => return error.PermissionDenied,
             .NOMEM => return error.SystemResources,
-            else => |err| return unexpectedError(err) catch error.Unexpected,
+            else => |err| return unexpectedError(err),
         }
     }
 }
@@ -2570,7 +2711,7 @@ fn errnoToDirRealPathFileError(errno: posix.system.E) DirRealPathFileError {
         .EXIST => error.PathAlreadyExists,
         .BUSY, .TXTBSY => error.DeviceBusy,
         .ILSEQ, .INVAL => error.BadPathName,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 
@@ -2588,7 +2729,7 @@ pub fn errnoToDirRealPathError(errno: posix.system.E) DirRealPathError {
         .BADF => error.FileNotFound,
         .NOSPC, .RANGE => error.NameTooLong,
         .CANCELED => error.Canceled,
-        else => |e| unexpectedError(e) catch error.Unexpected,
+        else => |e| unexpectedError(e),
     };
 }
 

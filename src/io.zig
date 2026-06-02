@@ -963,6 +963,7 @@ fn dirOpenErrToStdErr(err: ev.DirOpen.Error) Io.Dir.OpenError {
         error.BadPathName => error.BadPathName,
         error.NetworkNotFound => error.NetworkNotFound,
         error.Canceled => error.Canceled,
+        error.Unsupported => error.Unexpected,
         error.Unexpected => error.Unexpected,
     };
 }
@@ -1022,6 +1023,7 @@ fn openErrToFileErr(err: ev.FileOpen.Error) Io.File.OpenError {
         error.NetworkNotFound => error.NetworkNotFound,
         error.FileBusy => error.FileBusy,
         error.Canceled => error.Canceled,
+        error.Unsupported => error.Unexpected,
         error.InvalidUtf8,
         error.InvalidWtf8,
         error.ProcessNotFound,
@@ -1041,11 +1043,11 @@ fn stdIoModeToZio(mode: Io.Dir.OpenFileOptions.Mode) os_fs.FileOpenMode {
 fn dirCreateFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.CreateFileOptions) Io.File.OpenError!Io.File {
     if (options.lock != .none) @panic("TODO: createFile lock");
     if (options.lock_nonblocking) @panic("TODO: createFile lock_nonblocking");
-    if (options.resolve_beneath) @panic("TODO: createFile resolve_beneath");
     var op = ev.FileCreate.init(stdIoHandleToZio(dir.handle), sub_path, .{
         .read = options.read,
         .truncate = options.truncate,
         .exclusive = options.exclusive,
+        .resolve_beneath = options.resolve_beneath,
         .mode = permissionsToZioMode(options.permissions),
     });
     try waitForIo(&op.c);

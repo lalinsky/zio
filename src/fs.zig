@@ -1358,6 +1358,44 @@ test "Pipe: half-close read end" {
     try std.testing.expectError(error.BrokenPipe, result);
 }
 
+test "Dir: resolve_beneath blocks parent escape" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const cwd = Dir.cwd();
+
+    try cwd.createDir("test-resolve-beneath-dir1", 0o755);
+    defer cwd.deleteDir("test-resolve-beneath-dir1") catch {};
+
+    const dir1 = try cwd.openDir("test-resolve-beneath-dir1", .{});
+    defer dir1.close();
+
+    var file1 = try dir1.createFile("file1", .{});
+    file1.close();
+    defer dir1.deleteFile("file1") catch {};
+
+    try dir1.createDir("dir2", 0o755);
+    defer dir1.deleteDir("dir2") catch {};
+
+    const dir2 = try dir1.openDir("dir2", .{});
+    defer dir2.close();
+
+    // Opening ../file1 from dir2 without resolve_beneath succeeds
+    var f = try dir2.openFile(".." ++ std.fs.path.sep_str ++ "file1", .{});
+    f.close();
+
+    // Opening ../file1 from dir2 with resolve_beneath must fail
+    if (dir2.openFile(".." ++ std.fs.path.sep_str ++ "file1", .{ .resolve_beneath = true })) |file| {
+        file.close();
+        return error.TestUnexpectedResult;
+    } else |err| switch (err) {
+        error.AccessDenied, error.Unsupported => {},
+        else => return err,
+    }
+}
+
 test "File: blocking mode without runtime" {
     // This test verifies that file operations work in blocking mode
     // when called without an async runtime
