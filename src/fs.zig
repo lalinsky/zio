@@ -1347,11 +1347,11 @@ test "Dir: resolve_beneath blocks parent escape" {
     defer dir2.close();
 
     // Opening ../file1 from dir2 without resolve_beneath succeeds
-    var f = try dir2.openFile("../file1", .{});
+    var f = try dir2.openFile(".." ++ std.fs.path.sep_str ++ "file1", .{});
     f.close();
 
     // Opening ../file1 from dir2 with resolve_beneath must fail
-    if (dir2.openFile("../file1", .{ .resolve_beneath = true })) |file| {
+    if (dir2.openFile(".." ++ std.fs.path.sep_str ++ "file1", .{ .resolve_beneath = true })) |file| {
         file.close();
         return error.TestUnexpectedResult;
     } else |err| switch (err) {
