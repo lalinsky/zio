@@ -193,6 +193,14 @@ pub const Dir = struct {
         try op.getResult();
     }
 
+    pub const RenamePreserveError = os.fs.DirRenamePreserveError || Cancelable;
+
+    pub fn renamePreserve(self: Dir, old_path: []const u8, new_dir: Dir, new_path: []const u8) RenamePreserveError!void {
+        var op = ev.DirRenamePreserve.init(self.fd, old_path, new_dir.fd, new_path);
+        try waitForIo(&op.c);
+        try op.getResult();
+    }
+
     pub const StatError = os.fs.FileStatError || Cancelable;
 
     pub fn stat(self: Dir) StatError!os.fs.FileStatInfo {
@@ -1124,6 +1132,32 @@ test "Dir: rename" {
         return;
     };
     return error.TestExpectedError;
+}
+
+test "Dir: renamePreserve" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+    const old_path = "test_rename_preserve_old.txt";
+    const new_path = "test_rename_preserve_new.txt";
+
+    var file = try dir.createFile(old_path, .{});
+    file.close();
+
+    // Rename to a path that doesn't exist yet — should succeed.
+    try dir.renamePreserve(old_path, dir, new_path);
+    defer dir.deleteFile(new_path) catch {};
+
+    // Old path should be gone.
+    try std.testing.expectError(error.FileNotFound, dir.openFile(old_path, .{}));
+
+    // Rename again to an existing destination — should fail.
+    var file2 = try dir.createFile(old_path, .{});
+    file2.close();
+    defer dir.deleteFile(old_path) catch {};
+
+    try std.testing.expectError(error.PathAlreadyExists, dir.renamePreserve(old_path, dir, new_path));
 }
 
 test "Dir: access" {
