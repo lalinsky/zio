@@ -1121,7 +1121,19 @@ pub fn dirDeleteFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) 
             return switch (w.GetLastError()) {
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
-                .ACCESS_DENIED => error.AccessDenied,
+                .ACCESS_DENIED => blk: {
+                    // DeleteFileW returns ACCESS_DENIED when the path is a
+                    // directory.  Check with GetFileAttributesW so the caller
+                    // sees error.IsDir instead of a misleading
+                    // error.AccessDenied.
+                    const attrs = w.GetFileAttributesW(path_w.ptr);
+                    if (attrs != w.INVALID_FILE_ATTRIBUTES and
+                        attrs & w.FILE_ATTRIBUTE_DIRECTORY != 0)
+                    {
+                        break :blk error.IsDir;
+                    }
+                    break :blk error.AccessDenied;
+                },
                 .SHARING_VIOLATION => error.FileBusy,
                 else => |err| return unexpectedError(err),
             };
@@ -1138,13 +1150,18 @@ pub fn dirDeleteFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) 
             .SUCCESS => return,
             .INTR => continue,
             .PERM => {
-                // On macOS, unlinkat returns EPERM (not EISDIR) when
-                // the path is a directory.  Check with fstatat so the
-                // caller sees error.IsDir instead of a misleading
-                // error.AccessDenied.  EPERM can also mean the file
-                // has the immutable flag set, which we don't
-                // distinguish here — it stays AccessDenied.
-                if (builtin.os.tag.isDarwin()) {
+                // macOS and BSDs return EPERM (not EISDIR) when unlinkat is
+                // called on a directory without AT_REMOVEDIR.  Check with
+                // fstatat so the caller sees error.IsDir instead of a
+                // misleading error.AccessDenied.  EPERM can also mean the
+                // file has the immutable flag set, which we don't distinguish
+                // here — it stays AccessDenied.
+                if (comptime builtin.os.tag.isDarwin() or
+                    builtin.os.tag == .freebsd or
+                    builtin.os.tag == .netbsd or
+                    builtin.os.tag == .openbsd or
+                    builtin.os.tag == .dragonfly)
+                {
                     var stat_buf: posix.system.Stat = undefined;
                     const stat_rc = posix.system.fstatat(dir, path_z.ptr, &stat_buf, posix.AT.SYMLINK_NOFOLLOW);
                     if (posix.errno(stat_rc) == .SUCCESS and
