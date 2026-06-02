@@ -1043,11 +1043,11 @@ fn stdIoModeToZio(mode: Io.Dir.OpenFileOptions.Mode) os_fs.FileOpenMode {
 fn dirCreateFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.CreateFileOptions) Io.File.OpenError!Io.File {
     if (options.lock != .none) @panic("TODO: createFile lock");
     if (options.lock_nonblocking) @panic("TODO: createFile lock_nonblocking");
-    if (options.resolve_beneath) @panic("TODO: createFile resolve_beneath");
     var op = ev.FileCreate.init(stdIoHandleToZio(dir.handle), sub_path, .{
         .read = options.read,
         .truncate = options.truncate,
         .exclusive = options.exclusive,
+        .resolve_beneath = options.resolve_beneath,
         .mode = permissionsToZioMode(options.permissions),
     });
     try waitForIo(&op.c);
