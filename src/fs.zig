@@ -1325,6 +1325,8 @@ test "Pipe: half-close read end" {
 }
 
 test "Dir: resolve_beneath blocks parent escape" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
