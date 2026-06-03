@@ -1526,12 +1526,12 @@ pub fn Closure(func: anytype) type {
     const FullArgs = std.meta.ArgsTuple(@TypeOf(func));
 
     // Build a new tuple type without the first argument (Coroutine)
-    const args_fields = std.meta.fields(FullArgs);
-    comptime var user_types: [args_fields.len - 1]type = undefined;
-    inline for (args_fields[1..], 0..) |field, i| {
-        user_types[i] = field.type;
+    const arg_types = std.meta.fieldTypes(FullArgs);
+    comptime var user_types: [arg_types.len - 1]type = undefined;
+    inline for (arg_types[1..], 0..) |ArgType, i| {
+        user_types[i] = ArgType;
     }
-    const UserArgs = std.meta.Tuple(&user_types);
+    const UserArgs = @Tuple(&user_types);
 
     return struct {
         args: UserArgs,

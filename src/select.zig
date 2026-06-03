@@ -125,12 +125,12 @@ fn hasWaitContext(comptime future_type: type) bool {
 
 /// Build a struct type containing WaitContext fields for each future that needs one
 fn WaitContextsType(comptime futures_type: type) type {
-    const fields = @typeInfo(futures_type).@"struct".fields;
+    const info = @typeInfo(futures_type).@"struct";
 
     // Count how many fields have non-void WaitContext
     comptime var count: usize = 0;
-    inline for (fields) |field| {
-        if (FutureWaitContext(field.type) != void) {
+    inline for (info.field_types) |FieldType| {
+        if (FutureWaitContext(FieldType) != void) {
             count += 1;
         }
     }
@@ -143,14 +143,14 @@ fn WaitContextsType(comptime futures_type: type) type {
     // Build arrays of field names, types, and attributes
     var field_names: [count][:0]const u8 = undefined;
     var field_types: [count]type = undefined;
-    var field_attrs: [count]std.builtin.Type.StructField.Attributes = undefined;
+    var field_attrs: [count]std.builtin.Type.Struct.FieldAttributes = undefined;
 
     comptime var i: usize = 0;
-    inline for (fields) |field| {
-        const WaitCtx = FutureWaitContext(field.type);
+    inline for (info.field_names, info.field_types) |name, FieldType| {
+        const WaitCtx = FutureWaitContext(FieldType);
         if (WaitCtx != void) {
             const default_value: WaitCtx = .{};
-            field_names[i] = field.name;
+            field_names[i] = name;
             field_types[i] = WaitCtx;
             field_attrs[i] = .{
                 .default_value_ptr = @ptrCast(&default_value),
@@ -183,15 +183,15 @@ pub const WaitFlags = struct {
 };
 
 pub fn SelectResult(comptime S: type) type {
-    const struct_fields = @typeInfo(S).@"struct".fields;
+    const info = @typeInfo(S).@"struct";
 
-    var field_names: [struct_fields.len][:0]const u8 = undefined;
-    var field_types: [struct_fields.len]type = undefined;
-    var field_attrs: [struct_fields.len]std.builtin.Type.UnionField.Attributes = undefined;
+    var field_names: [info.field_names.len][:0]const u8 = undefined;
+    var field_types: [info.field_types.len]type = undefined;
+    var field_attrs: [info.field_names.len]std.builtin.Type.Union.FieldAttributes = undefined;
 
-    for (struct_fields, 0..) |struct_field, i| {
-        const Future = FutureType(struct_field.type);
-        field_names[i] = struct_field.name;
+    for (info.field_names, info.field_types, 0..) |name, FieldType, i| {
+        const Future = FutureType(FieldType);
+        field_names[i] = name;
         field_types[i] = Future.Result;
         field_attrs[i] = .{};
     }
@@ -240,12 +240,13 @@ test "SelectResult: result types" {
 pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     const S = @TypeOf(futures);
     const U = SelectResult(S);
-    const fields = @typeInfo(S).@"struct".fields;
+    const field_names = @typeInfo(S).@"struct".field_names;
+    const field_types = @typeInfo(S).@"struct".field_types;
 
     // Self-wait detection: check all futures for self-wait
     const task = getCurrentTask();
-    inline for (fields) |field| {
-        checkSelfWait(task, @field(futures, field.name));
+    inline for (field_names) |name| {
+        checkSelfWait(task, @field(futures, name));
     }
 
     // Winner tracking: NO_WINNER means no winner yet
@@ -259,7 +260,7 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     var contexts: ContextsType = .{};
 
     // Create waiter structures on the stack
-    var waiters: [fields.len]Waiter = undefined;
+    var waiters: [field_names.len]Waiter = undefined;
     inline for (&waiters, 0..) |*w, i| {
         w.* = Waiter.initSelect(&waiter, &winner, i);
     }
@@ -275,12 +276,12 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
         // Count expected signals: all registered futures will signal unless we cancel them.
         // Successfully canceled futures (asyncCancelWait returns true) won't signal.
         var expected: u32 = @intCast(registered_count);
-        inline for (fields, 0..) |field, i| {
+        inline for (field_names, field_types, 0..) |name, FieldType, i| {
             // Only cancel if we registered and didn't win
             if (i < registered_count and winner_index != i) {
-                var future = @field(futures, field.name);
-                const was_removed = if (comptime hasWaitContext(field.type))
-                    future.asyncCancelWait(&waiters[i], &@field(contexts, field.name))
+                var future = @field(futures, name);
+                const was_removed = if (comptime hasWaitContext(FieldType))
+                    future.asyncCancelWait(&waiters[i], &@field(contexts, name))
                 else
                     future.asyncCancelWait(&waiters[i]);
 
@@ -296,20 +297,20 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     }
 
     // Add waiters to all waiting lists - fast path: return immediately if already complete
-    inline for (fields, 0..) |field, i| {
-        const future = @field(futures, field.name);
-        const waiting = if (comptime hasWaitContext(field.type))
-            future.asyncWait(&waiters[i], &@field(contexts, field.name))
+    inline for (field_names, field_types, 0..) |name, FieldType, i| {
+        const future = @field(futures, name);
+        const waiting = if (comptime hasWaitContext(FieldType))
+            future.asyncWait(&waiters[i], &@field(contexts, name))
         else
             future.asyncWait(&waiters[i]);
 
         if (!waiting) {
             winner.store(i, .release);
-            const result = if (comptime hasWaitContext(field.type))
-                future.getResult(&@field(contexts, field.name))
+            const result = if (comptime hasWaitContext(FieldType))
+                future.getResult(&@field(contexts, name))
             else
                 future.getResult();
-            return @unionInit(U, field.name, result);
+            return @unionInit(U, name, result);
         }
 
         registered_count += 1;
@@ -322,14 +323,14 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     const winner_index = winner.load(.acquire);
 
     // Return result from winner
-    inline for (fields, 0..) |field, i| {
+    inline for (field_names, field_types, 0..) |name, FieldType, i| {
         if (i == winner_index) {
-            const future = @field(futures, field.name);
-            const result = if (comptime hasWaitContext(field.type))
-                future.getResult(&@field(contexts, field.name))
+            const future = @field(futures, name);
+            const result = if (comptime hasWaitContext(FieldType))
+                future.getResult(&@field(contexts, name))
             else
                 future.getResult();
-            return @unionInit(U, field.name, result);
+            return @unionInit(U, name, result);
         }
     }
 
