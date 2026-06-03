@@ -2644,6 +2644,7 @@ test "io: net TCP listen/connect/accept handshake" {
             const accepted = try server.accept(io);
             defer accepted.close(io);
 
+            future.await(io);
             const client = try connect_result;
             defer client.close(io);
         }
@@ -2747,6 +2748,7 @@ test "io: net Unix listen/connect/accept round-trip" {
             const accepted = try server.accept(io);
             defer accepted.close(io);
 
+            future.await(io);
             const client = try connect_result;
             defer client.close(io);
 
