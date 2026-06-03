@@ -14,7 +14,16 @@ const stackFree = @import("stack.zig").stackFree;
 
 /// Current coroutine context for this thread. Used by the SIGSEGV signal handler
 /// to determine if a fault is from a coroutine stack and to access stack metadata.
-pub threadlocal var current_context: ?*Context = null;
+pub threadlocal var current_context_DO_NOT_ACCESS_DIRECTLY: ?*Context = null;
+
+/// Get the current coroutine context for this thread, or null if not in coroutine context.
+pub noinline fn getCurrentContext() ?*Context {
+    return current_context_DO_NOT_ACCESS_DIRECTLY;
+}
+
+noinline fn setCurrentContext(current: ?*Context) void {
+    current_context_DO_NOT_ACCESS_DIRECTLY = current;
+}
 
 pub const Context = switch (builtin.cpu.arch) {
     .x86_64 => extern struct {
@@ -153,7 +162,7 @@ pub inline fn switchContext(
 ) void {
     // Update current context pointer for SIGSEGV handler
     // After the switch, we'll be executing in new_context
-    current_context = new_context;
+    setCurrentContext(new_context);
 
     const is_windows = builtin.os.tag == .windows;
     switch (builtin.cpu.arch) {
@@ -1190,7 +1199,7 @@ pub const Coroutine = struct {
 
     /// Returns the current coroutine for this thread, or null if not in a coroutine.
     pub fn getCurrent() ?*Coroutine {
-        if (current_context) |context| {
+        if (getCurrentContext()) |context| {
             return @alignCast(@fieldParentPtr("context", context));
         }
         return null;
@@ -1198,12 +1207,12 @@ pub const Coroutine = struct {
 
     /// Set the current coroutine context for this thread.
     pub fn setCurrent(self: *Coroutine) void {
-        current_context = &self.context;
+        setCurrentContext(&self.context);
     }
 
     /// Clear the current coroutine context for this thread.
     pub fn clearCurrent() void {
-        current_context = null;
+        setCurrentContext(null);
     }
 
     /// Step into the coroutine
