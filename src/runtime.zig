@@ -472,13 +472,12 @@ pub const Executor = struct {
     /// Schedule a task to the current executor's local queue.
     /// This must only be called when we're on the correct executor thread.
     fn scheduleTaskLocal(self: *Executor, task: *AnyTask) void {
-        // Main task is never queued — the run loop checks its state directly
+        // Main task is never queued — its readiness is driven by its state field,
+        // which the run loop checks directly. processCleanup can reach here with the
+        // main task on the pre-woken park / reschedule paths.
         if (task == &self.main_task) return;
 
         const wait_node = &task.awaitable.wait_node;
-        if (std.debug.runtime_safety) {
-            std.debug.assert(!wait_node.in_list);
-        }
         self.ready_queue.push(wait_node);
         self.ready_count += 1;
     }
@@ -486,15 +485,10 @@ pub const Executor = struct {
     /// Schedule a task to a remote executor (different executor or no current executor).
     /// Uses the thread-safe remote queue and notifies the executor.
     fn scheduleTaskRemote(self: *Executor, task: *AnyTask) void {
+        std.debug.assert(task != &self.main_task);
+
         const wait_node = &task.awaitable.wait_node;
-        if (std.debug.runtime_safety) {
-            std.debug.assert(!wait_node.in_list);
-        }
-
-        // Push to remote ready queue (thread-safe)
         self.next_ready_queue_remote.push(wait_node);
-
-        // Wake the target executor's event loop (only if initialized)
         self.loop.wake();
     }
 
@@ -530,44 +524,34 @@ pub const Executor = struct {
             break;
         }
 
-        // Main task: parent_context_ptr points to its own context (self-referencing, immutable).
-        // main_task is never queued - it just checks state in run().
-        if (task.coro.parent_context_ptr == &task.coro.context) {
-            const home_executor: *Executor = @alignCast(@fieldParentPtr("main_task", task));
-            if (getCurrentExecutorOrNull() != home_executor) {
-                home_executor.loop.wake();
-            }
+        const home_exec = Executor.fromCoroutine(&task.coro);
+
+        if (task == &home_exec.main_task) {
+            home_exec.loop.wake();
             return;
         }
 
-        // Normal scheduling
         if (getCurrentExecutorOrNull()) |current_exec| {
-            // TODO: for now, we are forcing .new tasks to be remotely scheduled
-            //       to distribute them across executors, until we have work stealing
-            //       for re-balancing them
-            if (current_exec.runtime == task.runtime and old.tag != .new) {
-                const home_exec = Executor.fromCoroutine(&task.coro);
-                if (current_exec == home_exec or task.runtime.options.enable_task_migration) {
-                    task.last_run_tick = 0; // Allow immediate execution on new executor
-                    current_exec.scheduleTaskLocal(task);
-                } else {
-                    home_exec.scheduleTaskRemote(task);
-                }
+            if (current_exec == home_exec) {
+                // Schedule locally
+                current_exec.scheduleTaskLocal(task);
+                return;
+            }
+            // New tasks always go to their round-robin assigned home executor to
+            // distribute load across executors. Only already-running tasks may
+            // migrate to the current executor (for cache locality with the waker).
+            // The .new check can be removed once we have work stealing to rebalance
+            // load (see https://github.com/lalinsky/zio/issues/460).
+            if (old.tag != .new and current_exec.runtime == home_exec.runtime and home_exec.runtime.options.enable_task_migration) {
+                // Migrate to the current executor
+                task.last_run_tick = 0;
+                current_exec.scheduleTaskLocal(task);
                 return;
             }
         }
 
-        // Non-migratable tasks must go home, even when scheduled from a foreign
-        // thread or a different runtime. Only .new tasks get round-robin distribution.
-        if (old.tag != .new and !task.getRuntime().options.enable_task_migration) {
-            Executor.fromCoroutine(&task.coro).scheduleTaskRemote(task);
-            return;
-        }
-
-        // No current executor or different runtime — pick an executor round-robin
-        const executors = task.runtime.executors.items;
-        const index = task.runtime.next_executor_index.fetchAdd(1, .monotonic);
-        executors[index % executors.len].scheduleTaskRemote(task);
+        // Schedule on the home executor
+        home_exec.scheduleTaskRemote(task);
     }
 
     const TaskCleanup = union(enum) {
