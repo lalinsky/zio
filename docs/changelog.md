@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Setting `max_threads = 0` in the thread pool options now disables the thread pool, executing
+  blocking work inline on the calling thread (the same behavior as a single-threaded build).
+
 ## [0.13.0] - 2026-05-31
 
 ### Added
