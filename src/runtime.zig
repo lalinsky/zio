@@ -68,6 +68,8 @@ pub const RuntimeOptions = struct {
     },
     /// Number of executor threads to run (including main).
     executors: ExecutorCount = .exact(1),
+    /// Allow tasks to migrate between executors when true.
+    enable_task_migration: bool = true,
     /// DNS resolver configuration.
     dns: DnsOptions = .{},
 };
@@ -278,14 +280,15 @@ pub const Executor = struct {
     current_task: *AnyTask,
 
     // Executor dedicated to this thread. Written once on init, never updated.
-    pub threadlocal var current: ?*Executor = null;
+    pub threadlocal var current_DO_NOT_ACCESS_DIRECTLY: ?*Executor = null;
 
     /// Get the Executor instance from any coroutine that belongs to it.
     /// Coroutines have parent_context_ptr pointing to main_task.coro.context,
     /// so we navigate: context -> coro -> main_task -> executor.
     /// Only valid on the executor thread that is currently running the coroutine.
     pub fn fromCoroutine(coro: *Coroutine) *Executor {
-        const main_coro: *Coroutine = @fieldParentPtr("context", coro.parent_context_ptr);
+        const parent_context_ptr = @atomicLoad(*Context, &coro.parent_context_ptr, .acquire);
+        const main_coro: *Coroutine = @fieldParentPtr("context", parent_context_ptr);
         const main_task: *AnyTask = @fieldParentPtr("coro", main_coro);
         return @alignCast(@fieldParentPtr("main_task", main_task));
     }
@@ -315,7 +318,7 @@ pub const Executor = struct {
             .runtime = runtime,
             .closure = undefined, // main_task has no closure
         };
-        self.main_task.coro.parent_context_ptr = &self.main_task.coro.context;
+        @atomicStore(*Context, &self.main_task.coro.parent_context_ptr, &self.main_task.coro.context, .release);
 
         try setupStackGrowth();
         errdefer cleanupStackGrowth();
@@ -338,12 +341,12 @@ pub const Executor = struct {
         }
 
         self.main_task.coro.setCurrent();
-        Executor.current = self;
+        setCurrentExecutor(self);
         self.current_task = &self.main_task;
     }
 
     pub fn deinit(self: *Executor) void {
-        Executor.current = null;
+        setCurrentExecutor(null);
         Coroutine.clearCurrent();
 
         self.loop.deinit();
@@ -394,10 +397,7 @@ pub const Executor = struct {
         while (true) {
             // Process ready coroutines
             while (self.getNextTask()) |next_task| {
-                // Store parent_context_ptr just before stepping into the coroutine.
-                // Both the store and the subsequent load in fromCoroutine() happen on
-                // the same executor thread, so no cross-thread ordering is needed.
-                next_task.coro.parent_context_ptr = &self.main_task.coro.context;
+                @atomicStore(*Context, &next_task.coro.parent_context_ptr, &self.main_task.coro.context, .release);
                 self.current_task = next_task;
                 next_task.coro.step();
                 self.current_task = &self.main_task;
@@ -534,20 +534,20 @@ pub const Executor = struct {
         // main_task is never queued - it just checks state in run().
         if (task.coro.parent_context_ptr == &task.coro.context) {
             const home_executor: *Executor = @alignCast(@fieldParentPtr("main_task", task));
-            if (Executor.current != home_executor) {
+            if (getCurrentExecutorOrNull() != home_executor) {
                 home_executor.loop.wake();
             }
             return;
         }
 
         // Normal scheduling
-        if (Executor.current) |current_exec| {
+        if (getCurrentExecutorOrNull()) |current_exec| {
             // TODO: for now, we are forcing .new tasks to be remotely scheduled
             //       to distribute them across executors, until we have work stealing
             //       for re-balancing them
             if (current_exec.runtime == task.runtime and old.tag != .new) {
                 const home_exec = Executor.fromCoroutine(&task.coro);
-                if (current_exec == home_exec or task.canMigrate()) {
+                if (current_exec == home_exec or task.runtime.options.enable_task_migration) {
                     task.last_run_tick = 0; // Allow immediate execution on new executor
                     current_exec.scheduleTaskLocal(task);
                 } else {
@@ -559,7 +559,7 @@ pub const Executor = struct {
 
         // Non-migratable tasks must go home, even when scheduled from a foreign
         // thread or a different runtime. Only .new tasks get round-robin distribution.
-        if (old.tag != .new and !task.canMigrate()) {
+        if (old.tag != .new and !task.getRuntime().options.enable_task_migration) {
             Executor.fromCoroutine(&task.coro).scheduleTaskRemote(task);
             return;
         }
@@ -633,10 +633,7 @@ pub const Executor = struct {
     /// Sets current_task for the target and performs the context switch.
     pub fn switchOut(self: *Executor, coro: *Coroutine) void {
         if (self.getNextTask()) |next_task| {
-            // Store parent_context_ptr just before switching into the coroutine.
-            // Both the store and the subsequent load in fromCoroutine() happen on
-            // the same executor thread, so no cross-thread ordering is needed.
-            next_task.coro.parent_context_ptr = &self.main_task.coro.context;
+            @atomicStore(*Context, &next_task.coro.parent_context_ptr, &self.main_task.coro.context, .release);
             self.current_task = next_task;
             coro.yieldTo(&next_task.coro);
         } else {
@@ -646,15 +643,19 @@ pub const Executor = struct {
     }
 };
 
+/// Get the current thread's executor, or null if not in executor context.
+pub noinline fn getCurrentExecutorOrNull() ?*Executor {
+    return Executor.current_DO_NOT_ACCESS_DIRECTLY;
+}
+
+noinline fn setCurrentExecutor(current: ?*Executor) void {
+    Executor.current_DO_NOT_ACCESS_DIRECTLY = current;
+}
+
 /// Get the current thread's executor.
 /// Panics if called from a thread without an active executor context.
 pub fn getCurrentExecutor() *Executor {
-    return Executor.current orelse @panic("no current executor");
-}
-
-/// Get the current thread's executor, or null if not in executor context.
-pub fn getCurrentExecutorOrNull() ?*Executor {
-    return Executor.current;
+    return getCurrentExecutorOrNull() orelse @panic("no current executor");
 }
 
 /// Get the currently executing task.
@@ -665,7 +666,7 @@ pub fn getCurrentTask() *AnyTask {
 
 /// Get the currently executing task, or null if not in task context.
 pub fn getCurrentTaskOrNull() ?*AnyTask {
-    const exec = Executor.current orelse return null;
+    const exec = getCurrentExecutorOrNull() orelse return null;
     return exec.current_task;
 }
 

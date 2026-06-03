@@ -425,7 +425,7 @@ fn stackFaultHandler(sig: SigInt, info: *const posix.siginfo_t, ctx: ?*anyopaque
     const fault_addr = getFaultAddress(info);
 
     // Get current_context from coroutines module
-    const current_ctx = coroutines.current_context orelse {
+    const current_ctx = coroutines.getCurrentContext() orelse {
         // Not in a coroutine context - propagate to previous handler
         invokePreviousHandler(sig, info, ctx);
     };
@@ -660,7 +660,7 @@ test "Stack: recycle" {
 pub fn panicHandler(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
     _ = error_return_trace;
 
-    if (coroutines.current_context) |ctx| {
+    if (coroutines.getCurrentContext()) |ctx| {
         stackExtend(&ctx.stack_info, .full) catch {};
     }
 

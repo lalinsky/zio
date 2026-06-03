@@ -7,6 +7,7 @@ const ev = @import("ev/root.zig");
 
 const Runtime = @import("runtime.zig").Runtime;
 const Executor = @import("runtime.zig").Executor;
+const runtime = @import("runtime.zig");
 const Awaitable = @import("awaitable.zig").Awaitable;
 const Coroutine = @import("coro/coroutines.zig").Coroutine;
 const WaitNode = @import("utils/wait_queue.zig").WaitNode;
@@ -166,11 +167,10 @@ pub const AnyTask = struct {
     // Reset to 0 when stolen, allowing immediate execution on the thief.
     last_run_tick: u32 = 0,
 
-    // Runtime this task belongs to (set at creation, never changes)
-    runtime: *Runtime,
-
     // Closure for the task
     closure: Closure,
+
+    runtime: *Runtime,
 
     /// Task state and park token, packed into a single byte for atomic operations.
     ///
@@ -224,15 +224,10 @@ pub const AnyTask = struct {
         return Executor.fromCoroutine(&self.coro);
     }
 
-    /// Check if this task can be migrated to a different executor.
-    // TODO: Enable migration once we have work-stealing for re-balancing
-    pub inline fn canMigrate(self: *const AnyTask) bool {
-        _ = self;
-        return false;
-    }
-
+    /// Migration of tasks is controlled by Runtime.options.enable_task_migration.
+    /// Use task.getRuntime().options.enable_task_migration to check at runtime.
     pub inline fn getRuntime(self: *AnyTask) *Runtime {
-        return self.runtime;
+        return self.getExecutor().runtime;
     }
 
     pub inline fn getThreadPool(self: *AnyTask) *ev.ThreadPool {
@@ -533,7 +528,7 @@ pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
 
     Executor.scheduleTask(task);
 
-    if (Executor.current) |current_executor| {
+    if (runtime.getCurrentExecutorOrNull()) |current_executor| {
         if (current_executor.runtime == task.runtime) {
             current_executor.maybeYield(.reschedule, .no_cancel);
         }

@@ -4,6 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const net = @import("../net.zig");
+const runtime = @import("../runtime.zig");
 
 pub const IpAddress = net.IpAddress;
 pub const HostName = net.HostName;
@@ -61,7 +62,7 @@ pub fn lookup(
             if (addr.getFamily() != required_family) return error.AddressFamilyUnsupported;
         } else |_| {}
     }
-    if (Executor.current) |exec| {
+    if (runtime.getCurrentExecutorOrNull()) |exec| {
         if (exec.runtime.resolver) |*resolver| {
             if (resolver.lookup(storage, options)) |n| {
                 return n;
