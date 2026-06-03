@@ -43,20 +43,14 @@ pub const ThreadPool = struct {
     };
 
     pub fn init(self: *ThreadPool, allocator: std.mem.Allocator, options: Options) !void {
-        if (builtin.single_threaded) {
-            self.* = .{
-                .allocator = allocator,
-                .min_threads = 0,
-                .max_threads = 0,
-                .idle_timeout_ns = 0,
-                .scale_threshold = options.scale_threshold,
-            };
-            return;
-        }
+        // A max_threads of 0 (explicit, or implied by a single-threaded build)
+        // disables the pool: work is executed inline in submit().
+        const max_threads = if (builtin.single_threaded)
+            0
+        else
+            options.max_threads orelse (try std.Thread.getCpuCount()) * 2;
 
-        const cpu_count = try std.Thread.getCpuCount();
-        const max_threads = options.max_threads orelse (cpu_count * 2);
-        const min_threads = options.min_threads;
+        const min_threads = @min(options.min_threads, max_threads);
 
         self.* = .{
             .allocator = allocator,
@@ -140,7 +134,7 @@ pub const ThreadPool = struct {
     }
 
     pub fn submit(self: *ThreadPool, work: *Work) void {
-        if (builtin.single_threaded) {
+        if (builtin.single_threaded or self.max_threads == 0) {
             if (work.state.cmpxchgStrong(.pending, .running, .acq_rel, .acquire)) |state| {
                 std.debug.assert(state == .canceled);
                 work.c.setError(error.Canceled);
