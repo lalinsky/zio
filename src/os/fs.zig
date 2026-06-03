@@ -2497,7 +2497,7 @@ fn dirReadPosix(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
     // Call getdents64 (Linux) or getdirentries (BSD)
     while (true) {
         const rc = switch (builtin.os.tag) {
-            .linux => std.os.linux.getdents64(handle, buffer.ptr, buffer.len),
+            .linux => std.os.linux.getdents64(handle, buffer.ptr, @intCast(@min(buffer.len, std.math.maxInt(c_uint)))),
             .macos, .ios, .tvos, .watchos, .visionos => blk: {
                 var basep: i64 = 0;
                 break :blk @as(usize, @bitCast(std.c.__getdirentries64(handle, buffer.ptr, buffer.len, &basep)));
