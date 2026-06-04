@@ -41,13 +41,10 @@ pub fn MemoryPoolAligned(comptime Item: type, comptime alignment: Alignment) typ
                 @ptrCast(@alignCast(node))
             else
                 @ptrCast(try pool.allocNew());
-
-            ptr.* = undefined;
             return ptr;
         }
 
         pub fn destroy(pool: *Pool, ptr: ItemPtr) void {
-            ptr.* = undefined;
             pool.free_list.prepend(@ptrCast(ptr));
         }
 
