@@ -66,8 +66,14 @@ pub const RuntimeOptions = struct {
         .max_unused_stacks = 1000,
         .max_age = .fromSeconds(60),
     },
-    /// Number of executor threads to run (including main).
+    /// Total number of executors to run.
+    /// When enable_main_executor is true (default), this includes the main executor on the calling thread.
+    /// When enable_main_executor is false, all executors run as background worker threads.
     executors: ExecutorCount = .exact(1),
+    /// When true (default), the calling thread becomes the main executor (executor 0).
+    /// Set to false when creating runtimes in background threads that should not block
+    /// the creating thread in an event loop. Requires executors >= 1 to have any workers.
+    enable_main_executor: bool = true,
     /// Allow tasks to migrate between executors when true.
     enable_task_migration: bool = true,
     /// DNS resolver configuration.
@@ -751,6 +757,7 @@ pub const Runtime = struct {
 
     pub fn initStatic(self: *Runtime, allocator: Allocator, options: RuntimeOptions) !void {
         const num_executors = options.executors.resolve();
+        const num_workers = if (options.enable_main_executor) num_executors - 1 else num_executors;
 
         self.* = .{
             .allocator = allocator,
@@ -769,26 +776,30 @@ pub const Runtime = struct {
         try self.executors.ensureTotalCapacity(allocator, num_executors);
         errdefer self.executors.deinit(allocator);
 
-        try self.main_executor.init(self, 0);
-        errdefer self.main_executor.deinit();
-        self.executors.appendAssumeCapacity(&self.main_executor);
+        var main_executor_initialized = false;
+        if (options.enable_main_executor) {
+            try self.main_executor.init(self, 0);
+            main_executor_initialized = true;
+            self.executors.appendAssumeCapacity(&self.main_executor);
+        }
+        errdefer if (main_executor_initialized) self.main_executor.deinit();
 
-        const num_workers = num_executors - 1;
         try self.workers.ensureTotalCapacity(allocator, num_workers);
 
         errdefer self.shutdownWorkers();
 
         if (!builtin.single_threaded) {
+            const worker_id_start: u6 = if (options.enable_main_executor) 1 else 0;
             for (0..num_workers) |i| {
-                log.debug("Spawning worker thread {}", .{i + 1});
+                log.debug("Spawning worker thread {}", .{i + worker_id_start});
                 const worker = self.workers.addOneAssumeCapacity();
                 errdefer _ = self.workers.pop();
                 worker.* = .{};
-                worker.thread = try std.Thread.spawn(.{}, runWorker, .{ self, worker, @as(u6, @intCast(i + 1)) });
+                worker.thread = try std.Thread.spawn(.{}, runWorker, .{ self, worker, @as(u6, @intCast(i + worker_id_start)) });
             }
 
             for (self.workers.items, 0..) |*worker, i| {
-                log.debug("Waiting for worker thread {}", .{i + 1});
+                log.debug("Waiting for worker thread {}", .{i + worker_id_start});
                 worker.ready.wait();
                 if (worker.err) |e| {
                     return e;
@@ -832,8 +843,10 @@ pub const Runtime = struct {
         std.debug.assert(self.task_count.load(.acquire) == 0);
 
         // Worker executors clean themselves up via defer in runWorker.
-        // We only need to deinit the main executor here.
-        self.main_executor.deinit();
+        // We only need to deinit the main executor here (if it was created).
+        if (self.options.enable_main_executor) {
+            self.main_executor.deinit();
+        }
 
         self.executors.deinit(allocator);
 
@@ -1362,4 +1375,28 @@ test "runtime: mutex contention with task migration" {
     try group.wait();
     try std.testing.expect(!group.hasFailed());
     try std.testing.expectEqual(2_000, counter);
+}
+
+test "runtime: disable main executor" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    // Create a runtime where the calling thread is not an executor.
+    // All tasks run on background worker threads.
+    const runtime = try Runtime.init(std.testing.allocator, .{
+        .executors = .exact(2),
+        .enable_main_executor = false,
+    });
+    defer runtime.deinit();
+
+    const compute = struct {
+        fn call(x: i32) i32 {
+            return x * 2;
+        }
+    }.call;
+
+    // Spawn tasks and join from the non-executor calling thread.
+    // join() blocks via OS futex when called outside an executor context.
+    var handle = try runtime.spawn(compute, .{21});
+    const result = handle.join();
+    try std.testing.expectEqual(42, result);
 }
