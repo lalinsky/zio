@@ -1499,16 +1499,11 @@ fn fileSetTimestampsImpl(_: ?*anyopaque, file: Io.File, options: Io.File.SetTime
 }
 
 fn fileLockImpl(_: ?*anyopaque, file: Io.File, lock: Io.File.Lock) Io.File.LockError!void {
-    // Unlock never blocks; hand it straight to the OS.
     if (lock == .none) {
         fileUnlockImpl(null, file);
         return;
     }
 
-    // Acquire via repeated non-blocking flock, yielding the fiber between
-    // attempts (capped exponential backoff) rather than parking a thread. The
-    // sleep is the cancel point: error.Canceled propagates straight out, and we
-    // hold no lock yet, so there is nothing to unwind.
     var backoff_ms: u64 = 10;
     while (true) {
         if (try fileTryLockImpl(null, file, lock)) return;
@@ -1518,18 +1513,16 @@ fn fileLockImpl(_: ?*anyopaque, file: Io.File, lock: Io.File.Lock) Io.File.LockE
 }
 
 fn fileTryLockImpl(_: ?*anyopaque, file: Io.File, lock: Io.File.Lock) Io.File.LockError!bool {
-    const op: os_fs.FlockOp = switch (lock) {
+    const op: os_fs.FileLockOp = switch (lock) {
         .none => .unlock,
         .shared => .shared,
         .exclusive => .exclusive,
     };
     while (true) {
-        os_fs.flock(stdIoHandleToZio(file.handle), op, .non_blocking) catch |err| switch (err) {
+        os_fs.fileLock(stdIoHandleToZio(file.handle), op, .non_blocking) catch |err| switch (err) {
             error.Interrupted => continue,
             error.WouldBlock => return false,
-            error.SystemResources => return error.SystemResources,
-            error.FileLocksUnsupported => return error.FileLocksUnsupported,
-            error.Unexpected => return error.Unexpected,
+            else => |e| return e,
         };
         return true;
     }
@@ -1537,10 +1530,8 @@ fn fileTryLockImpl(_: ?*anyopaque, file: Io.File, lock: Io.File.Lock) Io.File.Lo
 
 fn fileUnlockImpl(_: ?*anyopaque, file: Io.File) void {
     while (true) {
-        // Unlock never blocks and must not fail observably; retry on EINTR and
-        // swallow anything else (the lock is gone once the fd is closed anyway).
-        os_fs.flock(stdIoHandleToZio(file.handle), .unlock, .blocking) catch |err| switch (err) {
-            error.Interrupted => continue,
+        os_fs.fileLock(stdIoHandleToZio(file.handle), .unlock, .blocking) catch |err| switch (err) {
+            error.Interrupted, error.WouldBlock => continue,
             else => {},
         };
         return;
@@ -1549,15 +1540,9 @@ fn fileUnlockImpl(_: ?*anyopaque, file: Io.File) void {
 
 fn fileDowngradeLockImpl(_: ?*anyopaque, file: Io.File) Io.File.DowngradeLockError!void {
     while (true) {
-        os_fs.flock(stdIoHandleToZio(file.handle), .shared, .non_blocking) catch |err| switch (err) {
-            error.Interrupted => continue,
-            // Should not occur when downgrading an already-held exclusive lock
-            // (no incompatible holder exists), but retry defensively.
-            error.WouldBlock => continue,
-            // DowngradeLockError has no FileLocksUnsupported member; map to Unexpected.
-            error.FileLocksUnsupported => return error.Unexpected,
-            error.SystemResources => return error.Unexpected,
-            error.Unexpected => return error.Unexpected,
+        os_fs.fileLockDowngrade(stdIoHandleToZio(file.handle)) catch |err| switch (err) {
+            error.Interrupted, error.WouldBlock => continue,
+            else => return error.Unexpected,
         };
         return;
     }
@@ -2959,7 +2944,6 @@ test "io: file create/open/close" {
 }
 
 test "io: file lock/unlock and re-acquire" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const io = rt.io();
@@ -2980,7 +2964,6 @@ test "io: file lock/unlock and re-acquire" {
 }
 
 test "io: file tryLock fails while held by another handle" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const io = rt.io();
@@ -3004,7 +2987,6 @@ test "io: file tryLock fails while held by another handle" {
 }
 
 test "io: file lock blocks until holder releases" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const io = rt.io();
@@ -3035,7 +3017,6 @@ test "io: file lock blocks until holder releases" {
 }
 
 test "io: file downgradeLock exclusive to shared" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const io = rt.io();
@@ -3062,7 +3043,6 @@ test "io: file downgradeLock exclusive to shared" {
 }
 
 test "io: createFile lock option blocks a second nonblocking lock" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const io = rt.io();

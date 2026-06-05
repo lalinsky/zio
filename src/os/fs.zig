@@ -922,15 +922,13 @@ const LOCK_UN: i32 = 8; // unlock
 
 /// Which advisory lock to apply (or remove). These are mutually exclusive
 /// operations, not flags, which is why this is an enum rather than a bitfield.
-pub const FlockOp = enum { shared, exclusive, unlock };
+pub const FileLockOp = enum { shared, exclusive, unlock };
 
 /// Whether the lock attempt may block waiting for an incompatible holder.
-pub const FlockMode = enum { blocking, non_blocking };
+pub const FileLockMode = enum { blocking, non_blocking };
 
-pub const FlockError = error{
-    /// An incompatible lock is held and `.non_blocking` was requested.
+pub const FileLockError = error{
     WouldBlock,
-    /// The call was interrupted by a signal before the lock was acquired.
     Interrupted,
     SystemResources,
     FileLocksUnsupported,
@@ -940,27 +938,61 @@ pub const FlockError = error{
 /// Apply or remove an advisory lock with flock(2). Unlike the other wrappers
 /// here, this does not retry on EINTR; it surfaces error.Interrupted so the
 /// caller decides whether to retry.
-pub fn flock(fd: fd_t, op: FlockOp, mode: FlockMode) FlockError!void {
-    if (builtin.os.tag == .windows) {
-        return error.FileLocksUnsupported;
+pub fn fileLock(fd: fd_t, op: FileLockOp, mode: FileLockMode) FileLockError!void {
+    switch (builtin.os.tag) {
+        .windows => {
+            var overlapped = std.mem.zeroes(w.OVERLAPPED);
+            overlapped.hEvent = @ptrFromInt(1);
+
+            const ok = switch (op) {
+                .unlock => w.UnlockFileEx(fd, 0, 1, 0, &overlapped),
+                .shared, .exclusive => blk: {
+                    var flags: w.DWORD = 0;
+                    if (op == .exclusive) flags |= w.LOCKFILE_EXCLUSIVE_LOCK;
+                    if (mode == .non_blocking) flags |= w.LOCKFILE_FAIL_IMMEDIATELY;
+                    break :blk w.LockFileEx(fd, flags, 0, 1, 0, &overlapped);
+                },
+            };
+            if (ok == w.FALSE) {
+                return switch (w.GetLastError()) {
+                    .LOCK_VIOLATION => error.WouldBlock,
+                    .NOT_SUPPORTED => error.FileLocksUnsupported,
+                    else => error.Unexpected,
+                };
+            }
+        },
+        else => {
+            var operation: i32 = switch (op) {
+                .shared => LOCK_SH,
+                .exclusive => LOCK_EX,
+                .unlock => LOCK_UN,
+            };
+            if (mode == .non_blocking) operation |= LOCK_NB;
+
+            const rc = posix.system.flock(fd, operation);
+            return switch (posix.errno(rc)) {
+                .SUCCESS => {},
+                .INTR => error.Interrupted,
+                .AGAIN => error.WouldBlock,
+                .NOLCK => error.SystemResources,
+                .OPNOTSUPP => error.FileLocksUnsupported,
+                else => |err| unexpectedError(err),
+            };
+        },
     }
+}
 
-    var operation: i32 = switch (op) {
-        .shared => LOCK_SH,
-        .exclusive => LOCK_EX,
-        .unlock => LOCK_UN,
-    };
-    if (mode == .non_blocking) operation |= LOCK_NB;
-
-    const rc = posix.system.flock(fd, operation);
-    return switch (posix.errno(rc)) {
-        .SUCCESS => {},
-        .INTR => error.Interrupted,
-        .AGAIN => error.WouldBlock,
-        .NOLCK => error.SystemResources,
-        .OPNOTSUPP => error.FileLocksUnsupported,
-        else => |err| unexpectedError(err),
-    };
+/// Downgrade a held exclusive whole-file lock to a shared lock.
+pub fn fileLockDowngrade(fd: fd_t) FileLockError!void {
+    switch (builtin.os.tag) {
+        .windows => {
+            try fileLock(fd, .shared, .non_blocking);
+            try fileLock(fd, .unlock, .blocking);
+        },
+        else => {
+            try fileLock(fd, .shared, .non_blocking);
+        },
+    }
 }
 
 /// Read from file at offset using preadv()
