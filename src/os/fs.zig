@@ -912,6 +912,57 @@ pub fn close(fd: fd_t) FileCloseError!void {
     }
 }
 
+// flock(2) operation bits. Identical across Linux and the BSDs, so we define
+// them directly rather than per-platform. Kept private: callers go through the
+// typed `flock` wrapper below, which makes illegal combinations unrepresentable.
+const LOCK_SH: i32 = 1; // shared lock
+const LOCK_EX: i32 = 2; // exclusive lock
+const LOCK_NB: i32 = 4; // don't block, fail with WouldBlock instead
+const LOCK_UN: i32 = 8; // unlock
+
+/// Which advisory lock to apply (or remove). These are mutually exclusive
+/// operations, not flags, which is why this is an enum rather than a bitfield.
+pub const FlockOp = enum { shared, exclusive, unlock };
+
+/// Whether the lock attempt may block waiting for an incompatible holder.
+pub const FlockMode = enum { blocking, non_blocking };
+
+pub const FlockError = error{
+    /// An incompatible lock is held and `.non_blocking` was requested.
+    WouldBlock,
+    /// The call was interrupted by a signal before the lock was acquired.
+    Interrupted,
+    SystemResources,
+    FileLocksUnsupported,
+    Unexpected,
+};
+
+/// Apply or remove an advisory lock with flock(2). Unlike the other wrappers
+/// here, this does not retry on EINTR; it surfaces error.Interrupted so the
+/// caller decides whether to retry.
+pub fn flock(fd: fd_t, op: FlockOp, mode: FlockMode) FlockError!void {
+    if (builtin.os.tag == .windows) {
+        return error.FileLocksUnsupported;
+    }
+
+    var operation: i32 = switch (op) {
+        .shared => LOCK_SH,
+        .exclusive => LOCK_EX,
+        .unlock => LOCK_UN,
+    };
+    if (mode == .non_blocking) operation |= LOCK_NB;
+
+    const rc = posix.system.flock(fd, operation);
+    return switch (posix.errno(rc)) {
+        .SUCCESS => {},
+        .INTR => error.Interrupted,
+        .AGAIN => error.WouldBlock,
+        .NOLCK => error.SystemResources,
+        .OPNOTSUPP => error.FileLocksUnsupported,
+        else => |err| unexpectedError(err),
+    };
+}
+
 /// Read from file at offset using preadv()
 pub fn preadv(fd: fd_t, buffers: []iovec, offset: u64) FileReadError!usize {
     if (builtin.os.tag == .windows) {

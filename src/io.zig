@@ -1479,29 +1479,65 @@ fn fileSetTimestampsImpl(_: ?*anyopaque, file: Io.File, options: Io.File.SetTime
     try op.getResult();
 }
 
-fn fileLockBlocking(file: Io.File, lock: Io.File.Lock) Io.File.LockError!void {
-    const io = globalIo();
-    return io.vtable.fileLock(io.userdata, file, lock);
-}
-
 fn fileLockImpl(_: ?*anyopaque, file: Io.File, lock: Io.File.Lock) Io.File.LockError!void {
-    // TODO: cancellation not supported; to fix, retry flock(LOCK_NB) in a loop with zio.sleep between attempts
-    return common.blockInPlace(fileLockBlocking, .{ file, lock });
+    // Unlock never blocks; hand it straight to the OS.
+    if (lock == .none) {
+        fileUnlockImpl(null, file);
+        return;
+    }
+
+    // Acquire via repeated non-blocking flock, yielding the fiber between
+    // attempts (capped exponential backoff) rather than parking a thread. The
+    // sleep is the cancel point: error.Canceled propagates straight out, and we
+    // hold no lock yet, so there is nothing to unwind.
+    var backoff_ms: u64 = 10;
+    while (true) {
+        if (try fileTryLockImpl(null, file, lock)) return;
+        try runtime_mod.sleep(.fromMilliseconds(backoff_ms));
+        backoff_ms = @min(backoff_ms * 13 / 10, 500);
+    }
 }
 
 fn fileTryLockImpl(_: ?*anyopaque, file: Io.File, lock: Io.File.Lock) Io.File.LockError!bool {
-    const io = globalIo();
-    return io.vtable.fileTryLock(io.userdata, file, lock);
+    const op: os_fs.FlockOp = switch (lock) {
+        .none => .unlock,
+        .shared => .shared,
+        .exclusive => .exclusive,
+    };
+    while (true) {
+        os_fs.flock(stdIoHandleToZio(file.handle), op, .non_blocking) catch |err| switch (err) {
+            error.Interrupted => continue,
+            error.WouldBlock => return false,
+            error.SystemResources => return error.SystemResources,
+            error.FileLocksUnsupported => return error.FileLocksUnsupported,
+            error.Unexpected => return error.Unexpected,
+        };
+        return true;
+    }
 }
 
 fn fileUnlockImpl(_: ?*anyopaque, file: Io.File) void {
-    const io = globalIo();
-    return io.vtable.fileUnlock(io.userdata, file);
+    while (true) {
+        // Unlock never blocks and must not fail observably; retry on EINTR and
+        // swallow anything else (the lock is gone once the fd is closed anyway).
+        os_fs.flock(stdIoHandleToZio(file.handle), .unlock, .blocking) catch |err| switch (err) {
+            error.Interrupted => continue,
+            else => {},
+        };
+        return;
+    }
 }
 
 fn fileDowngradeLockImpl(_: ?*anyopaque, file: Io.File) Io.File.DowngradeLockError!void {
-    const io = globalIo();
-    return io.vtable.fileDowngradeLock(io.userdata, file);
+    while (true) {
+        // Downgrading an already-held exclusive lock to shared cannot block, so
+        // WouldBlock is impossible here; anything but success/EINTR is unexpected.
+        os_fs.flock(stdIoHandleToZio(file.handle), .shared, .non_blocking) catch |err| switch (err) {
+            error.Interrupted => continue,
+            else => return error.Unexpected,
+        };
+        return;
+    }
 }
 
 fn fileRealPathImpl(_: ?*anyopaque, file: Io.File, out_buffer: []u8) Io.File.RealPathError!usize {
@@ -2897,6 +2933,109 @@ test "io: file create/open/close" {
 
     var opened = try dir.openFile(io, file_path, .{});
     opened.close(io);
+}
+
+test "io: file lock/unlock and re-acquire" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_file_lock.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var file = try dir.createFile(io, file_path, .{});
+    defer file.close(io);
+
+    try file.lock(io, .exclusive);
+    file.unlock(io);
+
+    // Re-acquire after unlock.
+    try file.lock(io, .exclusive);
+    file.unlock(io);
+}
+
+test "io: file tryLock fails while held by another handle" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_file_trylock.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var a = try dir.createFile(io, file_path, .{});
+    defer a.close(io);
+    var b = try dir.openFile(io, file_path, .{ .mode = .read_write });
+    defer b.close(io);
+
+    // flock is keyed on the open file description, so two separate opens of the
+    // same file contend even within one process.
+    try std.testing.expect(try a.tryLock(io, .exclusive));
+    try std.testing.expect(!try b.tryLock(io, .exclusive));
+    a.unlock(io);
+    try std.testing.expect(try b.tryLock(io, .exclusive));
+    b.unlock(io);
+}
+
+test "io: file lock blocks until holder releases" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_file_lock_blocks.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var holder = try dir.createFile(io, file_path, .{});
+    defer holder.close(io);
+    var waiter = try dir.openFile(io, file_path, .{ .mode = .read_write });
+    defer waiter.close(io);
+
+    try holder.lock(io, .exclusive);
+
+    const S = struct {
+        fn releaser(io_: Io, h: *Io.File) void {
+            io_.sleep(.fromMilliseconds(30), .awake) catch {};
+            h.unlock(io_);
+        }
+    };
+    var future = io.async(S.releaser, .{ io, &holder });
+    defer future.await(io);
+
+    // Blocks via the backoff loop until the releaser unlocks ~30ms later.
+    try waiter.lock(io, .exclusive);
+    waiter.unlock(io);
+}
+
+test "io: file downgradeLock exclusive to shared" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_file_downgrade.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var a = try dir.createFile(io, file_path, .{});
+    defer a.close(io);
+    var b = try dir.openFile(io, file_path, .{ .mode = .read_write });
+    defer b.close(io);
+
+    try a.lock(io, .exclusive);
+    // While a holds exclusive, b cannot even take a shared lock.
+    try std.testing.expect(!try b.tryLock(io, .shared));
+
+    try a.downgradeLock(io);
+    // After downgrade, b can share but still cannot take exclusive.
+    try std.testing.expect(try b.tryLock(io, .shared));
+    try std.testing.expect(!try b.tryLock(io, .exclusive));
+    b.unlock(io);
+    a.unlock(io);
 }
 
 test "io: file open returns FileNotFound for missing file" {
