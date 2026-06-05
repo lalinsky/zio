@@ -206,6 +206,26 @@ pub extern "kernel32" fn FlushFileBuffers(
     hFile: HANDLE,
 ) callconv(.winapi) BOOL;
 
+pub const LOCKFILE_FAIL_IMMEDIATELY: DWORD = 0x00000001;
+pub const LOCKFILE_EXCLUSIVE_LOCK: DWORD = 0x00000002;
+
+pub extern "kernel32" fn LockFileEx(
+    hFile: HANDLE,
+    dwFlags: DWORD,
+    dwReserved: DWORD,
+    nNumberOfBytesToLockLow: DWORD,
+    nNumberOfBytesToLockHigh: DWORD,
+    lpOverlapped: *OVERLAPPED,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn UnlockFileEx(
+    hFile: HANDLE,
+    dwReserved: DWORD,
+    nNumberOfBytesToUnlockLow: DWORD,
+    nNumberOfBytesToUnlockHigh: DWORD,
+    lpOverlapped: *OVERLAPPED,
+) callconv(.winapi) BOOL;
+
 pub extern "kernel32" fn GetFileSizeEx(
     hFile: HANDLE,
     lpFileSize: *LARGE_INTEGER,
