@@ -1549,11 +1549,15 @@ fn fileUnlockImpl(_: ?*anyopaque, file: Io.File) void {
 
 fn fileDowngradeLockImpl(_: ?*anyopaque, file: Io.File) Io.File.DowngradeLockError!void {
     while (true) {
-        // Downgrading an already-held exclusive lock to shared cannot block, so
-        // WouldBlock is impossible here; anything but success/EINTR is unexpected.
         os_fs.flock(stdIoHandleToZio(file.handle), .shared, .non_blocking) catch |err| switch (err) {
             error.Interrupted => continue,
-            else => return error.Unexpected,
+            // Should not occur when downgrading an already-held exclusive lock
+            // (no incompatible holder exists), but retry defensively.
+            error.WouldBlock => continue,
+            // DowngradeLockError has no FileLocksUnsupported member; map to Unexpected.
+            error.FileLocksUnsupported => return error.Unexpected,
+            error.SystemResources => return error.Unexpected,
+            error.Unexpected => return error.Unexpected,
         };
         return;
     }
