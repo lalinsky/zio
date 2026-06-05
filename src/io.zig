@@ -1040,9 +1040,24 @@ fn stdIoModeToZio(mode: Io.Dir.OpenFileOptions.Mode) os_fs.FileOpenMode {
     };
 }
 
+/// Apply the lock requested by open/create options after the fd is obtained.
+/// LockError coerces into OpenError, so failures propagate directly.
+///
+/// TODO: on BSDs/macOS, O_EXLOCK/O_SHLOCK let us acquire the lock atomically as
+/// part of the open syscall (plumbed through the ev FileOpen/FileCreate flags).
+/// Doing it inline there would save this second syscall and close the brief
+/// window where the file is open but not yet locked. For now we always lock as
+/// a separate step on all platforms.
+fn applyOpenLock(file: Io.File, lock: Io.File.Lock, nonblocking: bool) Io.File.OpenError!void {
+    if (lock == .none) return;
+    if (nonblocking) {
+        if (!try fileTryLockImpl(null, file, lock)) return error.WouldBlock;
+    } else {
+        try fileLockImpl(null, file, lock);
+    }
+}
+
 fn dirCreateFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.CreateFileOptions) Io.File.OpenError!Io.File {
-    if (options.lock != .none) @panic("TODO: createFile lock");
-    if (options.lock_nonblocking) @panic("TODO: createFile lock_nonblocking");
     var op = ev.FileCreate.init(stdIoHandleToZio(dir.handle), sub_path, .{
         .read = options.read,
         .truncate = options.truncate,
@@ -1052,7 +1067,10 @@ fn dirCreateFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options:
     });
     try waitForIo(&op.c);
     const fd = op.getResult() catch |err| return openErrToFileErr(err);
-    return .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    const file: Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    errdefer fileCloseImpl(null, &.{file});
+    try applyOpenLock(file, options.lock, options.lock_nonblocking);
+    return file;
 }
 
 fn dirCreateFileAtomicImpl(_: ?*anyopaque, dir: Io.Dir, dest_path: []const u8, options: Io.Dir.CreateFileAtomicOptions) Io.Dir.CreateFileAtomicError!Io.File.Atomic {
@@ -1111,8 +1129,6 @@ fn atomicFileInit(
 
 fn dirOpenFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
     if (options.path_only) @panic("TODO: openFile path_only");
-    if (options.lock != .none) @panic("TODO: openFile lock");
-    if (options.lock_nonblocking) @panic("TODO: openFile lock_nonblocking");
     if (options.allow_ctty) @panic("TODO: openFile allow_ctty");
     if (!options.follow_symlinks) @panic("TODO: openFile follow_symlinks=false");
     if (options.resolve_beneath) @panic("TODO: openFile resolve_beneath");
@@ -1122,7 +1138,10 @@ fn dirOpenFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: I
     });
     try waitForIo(&op.c);
     const fd = op.getResult() catch |err| return openErrToFileErr(err);
-    return .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    const file: Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    errdefer fileCloseImpl(null, &.{file});
+    try applyOpenLock(file, options.lock, options.lock_nonblocking);
+    return file;
 }
 
 fn dirCloseImpl(_: ?*anyopaque, dirs: []const Io.Dir) void {
@@ -3036,6 +3055,29 @@ test "io: file downgradeLock exclusive to shared" {
     try std.testing.expect(!try b.tryLock(io, .exclusive));
     b.unlock(io);
     a.unlock(io);
+}
+
+test "io: createFile lock option blocks a second nonblocking lock" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_open_lock.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    // Create the file already holding an exclusive lock.
+    var a = try dir.createFile(io, file_path, .{ .lock = .exclusive });
+    defer a.close(io);
+
+    // A second open requesting a non-blocking exclusive lock cannot get it and
+    // fails the open with WouldBlock (the fd is closed on the way out).
+    try std.testing.expectError(error.WouldBlock, dir.openFile(io, file_path, .{
+        .mode = .read_write,
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    }));
 }
 
 test "io: file open returns FileNotFound for missing file" {
