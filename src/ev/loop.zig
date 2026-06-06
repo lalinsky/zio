@@ -439,10 +439,7 @@ pub const Loop = struct {
                 if (comptime Backend.capabilities.net_send_file) {
                     self.backend.cancel(&self.state, completion);
                 } else {
-                    // Forward the cancel to both in-flight children; their
-                    // canceled completions drive the fallback loop to finish.
-                    if (op.internal.reading != null) self.cancel(&op.internal.read.c);
-                    if (op.internal.sending != null) self.cancel(&op.internal.send.c);
+                    self.netSendFileCancel(op);
                 }
             },
 
@@ -848,6 +845,14 @@ pub const Loop = struct {
         self.addInternal(&f.send.c);
     }
 
+    /// Forward a cancel to both in-flight children. Their canceled completions
+    /// re-enter `netSendFileAdvance`, which finishes the parent only once both
+    /// have drained.
+    fn netSendFileCancel(self: *Loop, op: *NetSendFile) void {
+        if (op.internal.reading != null) self.cancel(&op.internal.read.c);
+        if (op.internal.sending != null) self.cancel(&op.internal.send.c);
+    }
+
     fn netSendFileAdvance(self: *Loop, op: *NetSendFile) void {
         const f = &op.internal;
 
@@ -857,9 +862,9 @@ pub const Loop = struct {
         }
 
         if (f.pending_err) |err| {
-            // Cancel whatever is still in flight; finish once both have drained.
-            if (f.reading != null) self.cancel(&f.read.c);
-            if (f.sending != null) self.cancel(&f.send.c);
+            // Cancel whatever is still in flight; only finish once *both* inner
+            // completions are done, so we never complete the parent early.
+            self.netSendFileCancel(op);
             if (f.reading == null and f.sending == null) self.netSendFileFinish(op, err);
             return;
         }
