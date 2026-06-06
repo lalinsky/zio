@@ -1128,13 +1128,13 @@ fn atomicFileInit(
 }
 
 fn dirOpenFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
-    if (options.path_only) @panic("TODO: openFile path_only");
-    if (options.allow_ctty) @panic("TODO: openFile allow_ctty");
-    if (!options.follow_symlinks) @panic("TODO: openFile follow_symlinks=false");
-    if (options.resolve_beneath) @panic("TODO: openFile resolve_beneath");
     var op = ev.FileOpen.init(stdIoHandleToZio(dir.handle), sub_path, .{
         .mode = stdIoModeToZio(options.mode),
         .allow_directory = options.allow_directory,
+        .follow_symlinks = options.follow_symlinks,
+        .path_only = options.path_only,
+        .allow_ctty = options.allow_ctty,
+        .resolve_beneath = options.resolve_beneath,
     });
     try waitForIo(&op.c);
     const fd = op.getResult() catch |err| return openErrToFileErr(err);

@@ -421,6 +421,9 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                     .read_write => .RDWR,
                 },
                 .CLOEXEC = true,
+                .NOFOLLOW = !data.flags.follow_symlinks,
+                .NOCTTY = !data.flags.allow_ctty,
+                .PATH = data.flags.path_only,
             };
             const sqe = self.getSqeOrDefer(c) orelse return;
             if (data.flags.resolve_beneath) {

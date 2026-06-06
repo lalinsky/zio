@@ -13,6 +13,10 @@ All notable changes to this project will be documented in this file.
   (std's own `net.Stream.Writer.sendFile` is unimplemented). The event-loop implementation is
   double-buffered, overlapping the read of the next chunk with the send of the current one so both
   complete in the same poll cycle; an io_uring `splice` fast path can be added later behind the same API.
+- `openFile` now honors the `follow_symlinks`, `path_only`, and `allow_ctty` options. Through the
+  `std.Io` interface these (along with `resolve_beneath`) previously panicked when set to a
+  non-default value. Opening with `follow_symlinks = false` fails with `error.SymLinkLoop` if the
+  final path component is a symlink (`O_NOFOLLOW`, or `FILE_FLAG_OPEN_REPARSE_POINT` on Windows).
 
 ## [0.13.0] - 2026-05-31
 

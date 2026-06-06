@@ -114,6 +114,18 @@ pub const FileOpenFlags = struct {
     /// On Windows this is enforced without extra syscalls (no FILE_FLAG_BACKUP_SEMANTICS).
     /// On POSIX an extra fstat is required; defaults to true to avoid the overhead.
     allow_directory: bool = true,
+    /// When false, if the final path component is a symlink the open fails with
+    /// error.SymLinkLoop. Only the final component is affected; intermediate
+    /// symlinks are still followed. POSIX: O_NOFOLLOW. Windows: opens the reparse
+    /// point itself via FILE_FLAG_OPEN_REPARSE_POINT.
+    follow_symlinks: bool = true,
+    /// Open the file only for close/stat operations (POSIX O_PATH). Ignored on
+    /// platforms without an equivalent (e.g. Windows), where a normal handle is
+    /// returned that still supports close/stat.
+    path_only: bool = false,
+    /// Allow the opened file to become the controlling TTY for the process.
+    /// POSIX: clears O_NOCTTY. No effect on Windows.
+    allow_ctty: bool = false,
     /// Prevent path resolution from escaping the starting directory (e.g. via ".." or symlinks).
     /// Enforced by the kernel on Linux 5.6+ (openat2 RESOLVE_BENEATH) and FreeBSD 13+ (O_RESOLVE_BENEATH).
     /// On other platforms a warning is logged and the flag is ignored.
@@ -602,6 +614,10 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
         // Without it, opening a directory path fails with ACCESS_DENIED, which
         // gives us allow_directory=false semantics for free.
         if (flags.allow_directory) file_flags |= w.FILE_FLAG_BACKUP_SEMANTICS;
+        // Open the reparse point itself instead of following it. This is the
+        // closest Windows analogue to O_NOFOLLOW; allow_ctty and path_only have
+        // no Windows equivalent and are ignored.
+        if (!flags.follow_symlinks) file_flags |= w.FILE_FLAG_OPEN_REPARSE_POINT;
 
         const handle = w.CreateFileW(
             path_w.ptr,
@@ -632,7 +648,10 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
             .read_write => .RDWR,
         },
         .CLOEXEC = true,
+        .NOFOLLOW = !flags.follow_symlinks,
     };
+    if (@hasField(@TypeOf(open_flags), "NOCTTY")) open_flags.NOCTTY = !flags.allow_ctty;
+    if (@hasField(@TypeOf(open_flags), "PATH")) open_flags.PATH = flags.path_only;
 
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
@@ -1482,11 +1501,16 @@ pub fn mkdirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, mode: 
 }
 
 pub fn errnoToFileOpenError(errno: posix.system.E, flags: anytype) FileOpenError {
+    // NetBSD returns EFTYPE (not ELOOP) when O_NOFOLLOW hits a symlink.
+    if (@hasField(@TypeOf(errno), "FTYPE") and errno == .FTYPE)
+        return if (@hasField(@TypeOf(flags), "follow_symlinks") and !flags.follow_symlinks) error.SymLinkLoop else unexpectedError(errno);
     return switch (errno) {
         .SUCCESS => unreachable,
         .ACCES => error.AccessDenied,
         .PERM => error.PermissionDenied,
         .LOOP => error.SymLinkLoop,
+        // BSD returns EMLINK (not ELOOP) when O_NOFOLLOW hits a symlink.
+        .MLINK => if (@hasField(@TypeOf(flags), "follow_symlinks") and !flags.follow_symlinks) error.SymLinkLoop else unexpectedError(errno),
         .MFILE => error.ProcessFdQuotaExceeded,
         .NFILE => error.SystemFdQuotaExceeded,
         .NODEV => error.NoDevice,
