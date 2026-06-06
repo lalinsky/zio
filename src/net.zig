@@ -1444,8 +1444,6 @@ test "tcpConnectToHost: basic" {
 }
 
 test "Stream.Writer.sendFile transfers a file over a socket" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
     const Io = std.Io;
     const path = "test-native-sendfile";
     const total = 40_000;
@@ -1528,19 +1526,104 @@ test "Stream.Writer.sendFile transfers a file over a socket" {
     try group.wait();
 }
 
-test "Stream.Writer.sendFile cancellation unblocks a stalled transfer" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
+test "Stream.Writer.sendFile honors a byte limit" {
     const Io = std.Io;
-    const path = "test-sendfile-cancel";
+    const path = "test-native-sendfile-limit";
+    const total = 40_000;
+    const limit = 10_000;
 
     const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();
     const io = runtime.io();
 
-    // A file larger than the socket buffer, so the send stalls once the buffer
-    // fills and there is no receiver draining the other end.
-    const total = 1024 * 1024;
+    const ServerTask = struct {
+        fn run(server_port: *Channel(u16)) !void {
+            const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+            const server = try addr.listen(.{});
+            defer server.close();
+
+            try server_port.send(server.socket.address.ip.getPort());
+
+            var stream = try server.accept(.{});
+            defer stream.close();
+
+            // Read until the sender closes; it must deliver exactly `limit`
+            // bytes of the file pattern and nothing more.
+            var received: usize = 0;
+            var buf: [4096]u8 = undefined;
+            while (true) {
+                const n = stream.read(&buf, .none) catch break;
+                if (n == 0) break;
+                for (buf[0..n], received..) |b, i| {
+                    try std.testing.expectEqual(@as(u8, @intCast(i % 251)), b);
+                }
+                received += n;
+            }
+            try std.testing.expectEqual(@as(usize, limit), received);
+        }
+    };
+
+    const ClientTask = struct {
+        fn run(client_io: Io, server_port: *Channel(u16)) !void {
+            // Create a source file larger than the limit.
+            {
+                var f = try Io.Dir.cwd().createFile(client_io, path, .{ .truncate = true });
+                defer f.close(client_io);
+                var fw_buf: [4096]u8 = undefined;
+                var fw = f.writer(client_io, &fw_buf);
+                var i: usize = 0;
+                while (i < total) : (i += 1) {
+                    try fw.interface.writeByte(@intCast(i % 251));
+                }
+                try fw.interface.flush();
+            }
+            defer Io.Dir.cwd().deleteFile(client_io, path) catch {};
+
+            var f = try Io.Dir.cwd().openFile(client_io, path, .{});
+            defer f.close(client_io);
+            var fr_buf: [4096]u8 = undefined;
+            var fr = f.reader(client_io, &fr_buf);
+
+            const port = try server_port.receive();
+            const addr = try IpAddress.parseIp4("127.0.0.1", port);
+            var stream = try tcpConnectToAddress(addr, .{});
+            defer stream.close();
+
+            var write_buffer: [4096]u8 = undefined;
+            var writer = stream.writer(&write_buffer);
+
+            // Only `limit` file bytes are sent, even though the file is larger.
+            const sent = try writer.interface.sendFileAll(&fr, .limited(limit));
+            try std.testing.expectEqual(@as(usize, limit), sent);
+            try writer.interface.flush();
+
+            stream.shutdown(.both) catch {};
+        }
+    };
+
+    var server_port_buf: [1]u16 = undefined;
+    var server_port_ch = Channel(u16).init(&server_port_buf);
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(ServerTask.run, .{&server_port_ch});
+    try group.spawn(ClientTask.run, .{ io, &server_port_ch });
+
+    try group.wait();
+}
+
+test "Stream.Writer.sendFile cancellation unblocks a stalled transfer" {
+    const Io = std.Io;
+    const path = "test-native-sendfile-cancel";
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer runtime.deinit();
+    const io = runtime.io();
+
+    // A file much larger than any socket buffer, so the send stalls once the
+    // buffers fill and the peer never reads.
+    const total = 4 * 1024 * 1024;
     {
         var f = try Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
         defer f.close(io);
@@ -1555,48 +1638,80 @@ test "Stream.Writer.sendFile cancellation unblocks a stalled transfer" {
     }
     defer Io.Dir.cwd().deleteFile(io, path) catch {};
 
-    const fds = try os.net.socketpair(.unix, .stream, .ip, .{ .nonblocking = true });
-    defer os.net.close(fds[0]);
-    defer os.net.close(fds[1]); // intentionally never drained
-
     const Outcome = struct {
         completed: bool = false,
         send_err: ?anyerror = null, // error returned by sendFileAll (null = succeeded)
         writer_err: ?anyerror = null, // diagnostic stashed on the writer
     };
 
+    // Accepts a connection and then sits idle without reading, so the sender's
+    // socket buffers fill and the transfer stalls. Held open until canceled.
+    const ServerTask = struct {
+        fn run(server_port: *Channel(u16)) void {
+            const addr = IpAddress.parseIp4("127.0.0.1", 0) catch return;
+            const server = addr.listen(.{}) catch return;
+            defer server.close();
+            server_port.send(server.socket.address.ip.getPort()) catch return;
+            var stream = server.accept(.{}) catch return;
+            defer stream.close();
+            runtime_mod.sleep(.fromMilliseconds(60_000)) catch {}; // until canceled
+        }
+    };
+
     const Sender = struct {
-        fn run(client_io: Io, send_fd: os.net.fd_t, out: *Outcome) void {
+        fn run(client_io: Io, server_port: *Channel(u16), out: *Outcome) void {
+            defer out.completed = true;
+            const port = server_port.receive() catch |e| {
+                out.send_err = e;
+                return;
+            };
             var f = Io.Dir.cwd().openFile(client_io, path, .{}) catch |e| {
                 out.send_err = e;
-                out.completed = true;
                 return;
             };
             defer f.close(client_io);
             var fr_buf: [4096]u8 = undefined;
             var fr = f.reader(client_io, &fr_buf);
+
+            const addr = IpAddress.parseIp4("127.0.0.1", port) catch |e| {
+                out.send_err = e;
+                return;
+            };
+            var stream = tcpConnectToAddress(addr, .{}) catch |e| {
+                out.send_err = e;
+                return;
+            };
+            defer stream.close();
+
             var wbuf: [4096]u8 = undefined;
-            var writer = Stream.Writer.init(send_fd, &wbuf);
-            // Stalls once the socket buffer is full; cancellation makes it return.
+            var writer = stream.writer(&wbuf);
+            // Stalls once the socket buffers are full; cancellation makes it return.
             if (writer.interface.sendFileAll(&fr, .unlimited)) |_| {} else |err| {
                 out.send_err = err;
                 out.writer_err = writer.err;
             }
-            out.completed = true;
         }
     };
 
     // The test body runs as the runtime's main task, so we can spawn/sleep/cancel
-    // directly. cancel() cancels the stalled sender and blocks until it finishes,
-    // which only happens if cancellation unblocks the send (a hang here means it
-    // did not). `outcome` is then populated and safe to read.
+    // directly. Spawn the server and sender independently so we can cancel *only*
+    // the sender: the server's connection stays open, making the sender's own
+    // cancellation the unambiguous reason the stalled send returns (if the server
+    // were canceled too, its socket close could reset the send first and surface
+    // a connection error instead of Canceled). sender.cancel() blocks until the
+    // sender finishes, which only happens if cancellation unblocks the send (a
+    // hang here means it did not).
+    var server_port_buf: [1]u16 = undefined;
+    var server_port_ch = Channel(u16).init(&server_port_buf);
+
     var outcome: Outcome = .{};
-    var group: Group = .init;
-    defer group.cancel();
-    try group.spawn(Sender.run, .{ io, fds[0], &outcome });
-    // Let the sender fill the socket buffer and block in the send.
-    try runtime_mod.sleep(.fromMilliseconds(50));
-    group.cancel();
+    var server = try runtime.spawn(ServerTask.run, .{&server_port_ch});
+    defer server.cancel();
+    var sender = try runtime.spawn(Sender.run, .{ io, &server_port_ch, &outcome });
+    defer sender.cancel();
+    // Let the sender connect and fill the socket buffers, then block in the send.
+    try runtime_mod.sleep(.fromMilliseconds(100));
+    sender.cancel();
 
     // The stalled send was interrupted, and the cancellation propagated out
     // through the std.Io.Writer sendFile path as WriteFailed + writer.err.
