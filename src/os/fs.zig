@@ -1506,6 +1506,8 @@ pub fn errnoToFileOpenError(errno: posix.system.E, flags: anytype) FileOpenError
         .ACCES => error.AccessDenied,
         .PERM => error.PermissionDenied,
         .LOOP => error.SymLinkLoop,
+        // BSD returns EMLINK (not ELOOP) when O_NOFOLLOW hits a symlink.
+        .MLINK => if (!flags.follow_symlinks) error.SymLinkLoop else unexpectedError(errno),
         .MFILE => error.ProcessFdQuotaExceeded,
         .NFILE => error.SystemFdQuotaExceeded,
         .NODEV => error.NoDevice,
