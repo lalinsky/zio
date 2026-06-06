@@ -12,6 +12,11 @@ const Timeout = @import("../time.zig").Timeout;
 const Queue = @import("queue.zig").Queue;
 const Heap = @import("heap.zig").Heap;
 const Work = @import("completion.zig").Work;
+const FileRead = @import("completion.zig").FileRead;
+const NetSend = @import("completion.zig").NetSend;
+const NetSendFile = @import("completion.zig").NetSendFile;
+const ReadBuf = @import("buf.zig").ReadBuf;
+const WriteBuf = @import("buf.zig").WriteBuf;
 const os = @import("../os/root.zig");
 const ThreadPool = @import("thread_pool.zig").ThreadPool;
 const time = @import("../os/time.zig");
@@ -429,6 +434,19 @@ pub const Loop = struct {
                 const work = completion.cast(Work);
                 thread_pool.cancel(work);
             },
+            .net_send_file => {
+                const op = completion.cast(NetSendFile);
+                if (comptime Backend.capabilities.net_send_file) {
+                    self.backend.cancel(&self.state, completion);
+                } else {
+                    // Forward the cancel to whichever child op is in flight; its
+                    // canceled completion drives the fallback loop to finish.
+                    switch (op.internal.current) {
+                        .read => self.cancel(&op.internal.read.c),
+                        .send => self.cancel(&op.internal.send.c),
+                    }
+                }
+            },
 
             inline else => |op| {
                 // File/dir ops that can fallback to thread pool
@@ -555,6 +573,18 @@ pub const Loop = struct {
                     work.state.store(.completed, .release);
                     work.c.setError(error.NoThreadPool);
                     self.state.markCompleted(&work.c);
+                }
+                return;
+            },
+            .net_send_file => {
+                const op = completion.cast(NetSendFile);
+                completion.state = .running;
+                self.state.active += 1;
+                if (comptime Backend.capabilities.net_send_file) {
+                    self.state.inflight_io += 1;
+                    self.backend.submit(&self.state, completion);
+                } else {
+                    netSendFileStart(self, op);
                 }
                 return;
             },
@@ -777,6 +807,78 @@ pub const Loop = struct {
             },
             else => unreachable,
         }
+    }
+
+    // --- NetSendFile generic fallback (read/write callback loop) ---
+    //
+    // Used when the backend does not implement net_send_file natively. The
+    // parent NetSendFile completion stays running while exactly one child op
+    // (FileRead or NetSend) is in flight at a time; each child's callback
+    // re-arms the next via addInternal until EOF, limit, error, or cancel.
+
+    fn netSendFileStart(self: *Loop, op: *NetSendFile) void {
+        op.internal = .{};
+        self.netSendFileSubmitRead(op);
+    }
+
+    fn netSendFileSubmitRead(self: *Loop, op: *NetSendFile) void {
+        // Honor a cancel that arrived while we were between children.
+        if (op.c.cancel_state.load(.acquire).requested) return self.netSendFileFinish(op, error.Canceled);
+
+        const f = &op.internal;
+        const want = @min(f.buf.len, op.remaining);
+        if (want == 0) return self.netSendFileFinish(op, null); // limit reached
+
+        f.current = .read;
+        f.read = FileRead.init(op.file, ReadBuf.fromSlice(f.buf[0..want], &f.read_iov), op.offset);
+        f.read.c.userdata = op;
+        f.read.c.callback = netSendFileOnRead;
+        self.addInternal(&f.read.c);
+    }
+
+    fn netSendFileSubmitSend(self: *Loop, op: *NetSendFile) void {
+        if (op.c.cancel_state.load(.acquire).requested) return self.netSendFileFinish(op, error.Canceled);
+
+        const f = &op.internal;
+        f.current = .send;
+        f.send = NetSend.init(op.handle, WriteBuf.fromSlice(f.buf[f.sent..f.filled], &f.send_iov), .{});
+        f.send.c.userdata = op;
+        f.send.c.callback = netSendFileOnSend;
+        self.addInternal(&f.send.c);
+    }
+
+    fn netSendFileOnRead(loop: *Loop, child: *Completion) void {
+        const op: *NetSendFile = @ptrCast(@alignCast(child.userdata.?));
+        const f = &op.internal;
+        const n = child.cast(FileRead).getResult() catch |err| return loop.netSendFileFinish(op, err);
+        if (n == 0) return loop.netSendFileFinish(op, null); // EOF
+
+        op.offset += n;
+        f.filled = n;
+        f.sent = 0;
+        loop.netSendFileSubmitSend(op);
+    }
+
+    fn netSendFileOnSend(loop: *Loop, child: *Completion) void {
+        const op: *NetSendFile = @ptrCast(@alignCast(child.userdata.?));
+        const f = &op.internal;
+        const n = child.cast(NetSend).getResult() catch |err| return loop.netSendFileFinish(op, err);
+
+        f.sent += n;
+        f.total += n;
+        op.remaining -= n;
+
+        if (f.sent < f.filled) {
+            // Socket short-write: drain the rest of the buffer before reading more.
+            loop.netSendFileSubmitSend(op);
+        } else {
+            loop.netSendFileSubmitRead(op);
+        }
+    }
+
+    fn netSendFileFinish(self: *Loop, op: *NetSendFile, err: ?anyerror) void {
+        if (err) |e| op.c.setError(e) else op.c.setResult(.net_send_file, op.internal.total);
+        self.state.markCompleted(&op.c);
     }
 
     pub fn tick(self: *Loop, wait: bool) !void {

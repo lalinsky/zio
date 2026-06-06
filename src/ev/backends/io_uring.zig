@@ -722,6 +722,8 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             sqe.user_data = @intFromPtr(c);
         },
         .device_io_control => unreachable, // Handled via thread pool
+        // Driven by Loop's generic read/write fallback, never reaches the backend.
+        .net_send_file => unreachable,
         .mach_port => unreachable,
     }
 }
@@ -1227,6 +1229,8 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
             }
         },
         .device_io_control => unreachable, // Handled via thread pool
+        // Driven by Loop's generic read/write fallback, never reaches the backend.
+        .net_send_file => unreachable,
         .mach_port => unreachable,
     }
 }

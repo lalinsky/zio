@@ -508,6 +508,8 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .file_real_path,
         .file_hard_link,
         .device_io_control,
+        // Driven by Loop's generic read/write fallback, never reaches the backend.
+        .net_send_file,
         => unreachable, // These are handled by thread pool (capabilities = false)
 
         .pipe_poll => {

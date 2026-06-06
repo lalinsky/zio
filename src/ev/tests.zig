@@ -29,6 +29,7 @@ test {
     _ = @import("test/group.zig");
     _ = @import("test/blocking_sockets.zig");
     _ = @import("test/process_wait.zig");
+    _ = @import("test/sendfile.zig");
 }
 
 test "Loop: empty run(.no_wait)" {
