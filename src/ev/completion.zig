@@ -777,16 +777,29 @@ pub const NetSendFile = struct {
     pub const Fallback = struct {
         read: FileRead = undefined,
         send: NetSend = undefined,
-        /// Transfer buffer; the userspace equivalent of the splice pipe.
-        buf: [16 * 1024]u8 = undefined,
-        /// Bytes currently in `buf`.
-        filled: usize = 0,
-        /// Drain cursor within `buf[0..filled]`.
-        sent: usize = 0,
+        /// Two ping-pong transfer buffers (userspace equivalent of the splice
+        /// pipe). One is filled by a read while the other is drained by a send.
+        /// Split 2x8K to keep the same total size as the single-buffer version.
+        bufs: [2][8 * 1024]u8 = undefined,
+        /// Bytes available in each buffer (0 = empty/free).
+        filled: [2]usize = .{ 0, 0 },
+        /// Drain cursor within the buffer currently being sent.
+        sent: [2]usize = .{ 0, 0 },
+        /// Next buffer index to read into / send from (both alternate 0,1,0,1
+        /// from the same start, preserving send order).
+        next_read: u1 = 0,
+        next_send: u1 = 0,
+        /// Index of the buffer with a read / send currently in flight.
+        reading: ?u1 = null,
+        sending: ?u1 = null,
+        /// Set once the source file is exhausted.
+        eof: bool = false,
+        /// Bytes still allowed to be read from the file (the limit).
+        read_remaining: usize = 0,
         /// Total bytes sent so far (the operation result).
         total: usize = 0,
-        /// Which child is currently in flight, for cancel forwarding.
-        current: enum { read, send } = .read,
+        /// First error (or cancel) seen; parked until the sibling op drains.
+        pending_err: ?anyerror = null,
         read_iov: [1]os.iovec = undefined,
         send_iov: [1]os.iovec_const = undefined,
     };

@@ -9,10 +9,10 @@ All notable changes to this project will be documented in this file.
 - Setting `max_threads = 0` in the thread pool options now disables the thread pool, executing
   blocking work inline on the calling thread (the same behavior as a single-threaded build).
 - `net.Stream.Writer` now implements the `std.Io.Writer` `sendFile` vtable method, so
-  `sendFile`/`sendFileAll` on a zio network stream transfer a file's contents directly to the socket.
-  This is currently a read/write loop driven by the event loop (the same cross-platform fallback std
-  itself omits — std's own `net.Stream.Writer.sendFile` is unimplemented); an io_uring `splice`
-  fast path can be added later behind the same API.
+  `sendFile`/`sendFileAll` on a zio network stream transfer a file's contents directly to the socket
+  (std's own `net.Stream.Writer.sendFile` is unimplemented). The event-loop implementation is
+  double-buffered, overlapping the read of the next chunk with the send of the current one so both
+  complete in the same poll cycle; an io_uring `splice` fast path can be added later behind the same API.
 
 ## [0.13.0] - 2026-05-31
 

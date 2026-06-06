@@ -439,12 +439,10 @@ pub const Loop = struct {
                 if (comptime Backend.capabilities.net_send_file) {
                     self.backend.cancel(&self.state, completion);
                 } else {
-                    // Forward the cancel to whichever child op is in flight; its
-                    // canceled completion drives the fallback loop to finish.
-                    switch (op.internal.current) {
-                        .read => self.cancel(&op.internal.read.c),
-                        .send => self.cancel(&op.internal.send.c),
-                    }
+                    // Forward the cancel to both in-flight children; their
+                    // canceled completions drive the fallback loop to finish.
+                    if (op.internal.reading != null) self.cancel(&op.internal.read.c);
+                    if (op.internal.sending != null) self.cancel(&op.internal.send.c);
                 }
             },
 
@@ -809,71 +807,126 @@ pub const Loop = struct {
         }
     }
 
-    // --- NetSendFile generic fallback (read/write callback loop) ---
+    // --- NetSendFile generic fallback (double-buffered read/send loop) ---
     //
-    // Used when the backend does not implement net_send_file natively. The
-    // parent NetSendFile completion stays running while exactly one child op
-    // (FileRead or NetSend) is in flight at a time; each child's callback
-    // re-arms the next via addInternal until EOF, limit, error, or cancel.
+    // Used when the backend does not implement net_send_file natively. Two
+    // buffers ping-pong: at most one FileRead and one NetSend are in flight at a
+    // time, into *different* buffers, so a read of the next chunk overlaps the
+    // send of the current one. Both children typically complete in the same poll
+    // window, so the loop retires a read and a send per wakeup (~2x vs. a strict
+    // serial read→send loop). `advance` is the pump: after start and after every
+    // child completion it (re)starts a send and/or read as buffers allow, and
+    // finishes when nothing is in flight and there is nothing left to read.
+    //
+    // Order is preserved by `next_read`/`next_send`, which both alternate 0,1,0,1
+    // from the same start, so buffers are sent in the order they were read.
 
     fn netSendFileStart(self: *Loop, op: *NetSendFile) void {
         op.internal = .{};
-        self.netSendFileSubmitRead(op);
+        op.internal.read_remaining = op.remaining;
+        self.netSendFileAdvance(op);
     }
 
-    fn netSendFileSubmitRead(self: *Loop, op: *NetSendFile) void {
-        // Honor a cancel that arrived while we were between children.
-        if (op.c.cancel_state.load(.acquire).requested) return self.netSendFileFinish(op, error.Canceled);
-
+    fn netSendFileStartRead(self: *Loop, op: *NetSendFile) void {
         const f = &op.internal;
-        const want = @min(f.buf.len, op.remaining);
-        if (want == 0) return self.netSendFileFinish(op, null); // limit reached
-
-        f.current = .read;
-        f.read = FileRead.init(op.file, ReadBuf.fromSlice(f.buf[0..want], &f.read_iov), op.offset);
+        const idx = f.next_read;
+        const want = @min(f.bufs[idx].len, f.read_remaining);
+        f.reading = idx;
+        f.next_read ^= 1;
+        f.read = FileRead.init(op.file, ReadBuf.fromSlice(f.bufs[idx][0..want], &f.read_iov), op.offset);
         f.read.c.userdata = op;
         f.read.c.callback = netSendFileOnRead;
         self.addInternal(&f.read.c);
     }
 
-    fn netSendFileSubmitSend(self: *Loop, op: *NetSendFile) void {
-        if (op.c.cancel_state.load(.acquire).requested) return self.netSendFileFinish(op, error.Canceled);
-
+    fn netSendFileStartSend(self: *Loop, op: *NetSendFile, idx: u1, from: usize) void {
         const f = &op.internal;
-        f.current = .send;
-        f.send = NetSend.init(op.handle, WriteBuf.fromSlice(f.buf[f.sent..f.filled], &f.send_iov), .{});
+        f.sending = idx;
+        f.send = NetSend.init(op.handle, WriteBuf.fromSlice(f.bufs[idx][from..f.filled[idx]], &f.send_iov), .{});
         f.send.c.userdata = op;
         f.send.c.callback = netSendFileOnSend;
         self.addInternal(&f.send.c);
     }
 
+    fn netSendFileAdvance(self: *Loop, op: *NetSendFile) void {
+        const f = &op.internal;
+
+        // A cancel that arrived between callbacks turns into a parked error.
+        if (op.c.cancel_state.load(.acquire).requested and f.pending_err == null) {
+            f.pending_err = error.Canceled;
+        }
+
+        if (f.pending_err) |err| {
+            // Cancel whatever is still in flight; finish once both have drained.
+            if (f.reading != null) self.cancel(&f.read.c);
+            if (f.sending != null) self.cancel(&f.send.c);
+            if (f.reading == null and f.sending == null) self.netSendFileFinish(op, err);
+            return;
+        }
+
+        // Start sending the next buffer in order, if it is filled and ready.
+        if (f.sending == null and f.filled[f.next_send] > 0) {
+            f.sent[f.next_send] = 0;
+            self.netSendFileStartSend(op, f.next_send, 0);
+        }
+
+        // Start the next read into a free buffer, if more data is wanted.
+        const reads_done = f.eof or f.read_remaining == 0;
+        if (f.reading == null and !reads_done and
+            f.filled[f.next_read] == 0 and f.sending != f.next_read)
+        {
+            self.netSendFileStartRead(op);
+        }
+
+        // Nothing in flight and nothing left to read → done.
+        if (f.reading == null and f.sending == null and
+            f.filled[0] == 0 and f.filled[1] == 0 and reads_done)
+        {
+            self.netSendFileFinish(op, null);
+        }
+    }
+
     fn netSendFileOnRead(loop: *Loop, child: *Completion) void {
         const op: *NetSendFile = @ptrCast(@alignCast(child.userdata.?));
         const f = &op.internal;
-        const n = child.cast(FileRead).getResult() catch |err| return loop.netSendFileFinish(op, err);
-        if (n == 0) return loop.netSendFileFinish(op, null); // EOF
-
-        op.offset += n;
-        f.filled = n;
-        f.sent = 0;
-        loop.netSendFileSubmitSend(op);
+        const idx = f.reading.?;
+        f.reading = null;
+        const n = child.cast(FileRead).getResult() catch |err| {
+            f.eof = true;
+            f.pending_err = f.pending_err orelse err;
+            return loop.netSendFileAdvance(op);
+        };
+        if (n == 0) {
+            f.eof = true;
+        } else {
+            f.filled[idx] = n;
+            f.read_remaining -= n;
+            op.offset += n;
+        }
+        loop.netSendFileAdvance(op);
     }
 
     fn netSendFileOnSend(loop: *Loop, child: *Completion) void {
         const op: *NetSendFile = @ptrCast(@alignCast(child.userdata.?));
         const f = &op.internal;
-        const n = child.cast(NetSend).getResult() catch |err| return loop.netSendFileFinish(op, err);
-
-        f.sent += n;
-        f.total += n;
-        op.remaining -= n;
-
-        if (f.sent < f.filled) {
-            // Socket short-write: drain the rest of the buffer before reading more.
-            loop.netSendFileSubmitSend(op);
-        } else {
-            loop.netSendFileSubmitRead(op);
+        const idx = f.sending.?;
+        const m = child.cast(NetSend).getResult() catch |err| {
+            f.sending = null;
+            f.pending_err = f.pending_err orelse err;
+            return loop.netSendFileAdvance(op);
+        };
+        f.sent[idx] += m;
+        f.total += m;
+        if (f.sent[idx] < f.filled[idx]) {
+            // Socket short-write: resume draining the same buffer.
+            loop.netSendFileStartSend(op, idx, f.sent[idx]);
+            return loop.netSendFileAdvance(op);
         }
+        // Buffer fully drained; hand it back to the read side.
+        f.filled[idx] = 0;
+        f.sending = null;
+        f.next_send ^= 1;
+        loop.netSendFileAdvance(op);
     }
 
     fn netSendFileFinish(self: *Loop, op: *NetSendFile, err: ?anyerror) void {
