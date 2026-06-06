@@ -45,6 +45,21 @@ pub const stdin = fs.stdin;
 pub const stdout = fs.stdout;
 pub const stderr = fs.stderr;
 
+/// A `std.Io` instance that routes I/O through zio's async runtime.
+///
+/// Use this as your program's `std_options_debug_io` so that `std.log` and
+/// `std.debug.print` cooperatively yield inside a zio task instead of blocking
+/// an OS thread:
+///
+/// ```zig
+/// pub const std_options_debug_io: std.Io = @import("zio").debug_io;
+/// ```
+///
+/// When called from outside a zio task (e.g. before the runtime starts)
+/// the same call falls back to a blocking write on the OS thread — no
+/// separate fallback is needed.
+pub const debug_io: std.Io = @import("io.zig").debug_io;
+
 pub const net = @import("net.zig");
 
 pub const Mutex = @import("sync/Mutex.zig");
