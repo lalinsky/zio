@@ -1058,7 +1058,13 @@ fn submitFileRead(self: *Self, state: *LoopState, data: *FileRead) !void {
     // the completion will be posted to the IOCP port.
     if (result == .FALSE) {
         const err = windows.GetLastError();
-        if (err != .IO_PENDING) {
+        if (err == .HANDLE_EOF) {
+            // Synchronous EOF - read 0 bytes. No completion packet is queued
+            // in this case, so we must complete it here.
+            data.c.setResult(.file_read, 0);
+            state.markCompletedFromBackend(&data.c);
+            return;
+        } else if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             log.err("ReadFile failed: {}", .{err});
             data.c.setError(fs.errnoToFileReadError(@enumFromInt(@intFromEnum(err))));
@@ -1170,8 +1176,10 @@ fn submitPipeRead(self: *Self, state: *LoopState, data: *PipeRead) !void {
     // the completion will be posted to the IOCP port.
     if (result == .FALSE) {
         const err = windows.GetLastError();
-        if (err == .BROKEN_PIPE) {
-            // Write end closed - this is EOF, not an error
+        if (err == .HANDLE_EOF or err == .BROKEN_PIPE) {
+            // Write end closed (BROKEN_PIPE) or EOF reached (HANDLE_EOF) -
+            // this is EOF, not an error. No completion packet is queued in this
+            // case, so we must complete it here.
             data.c.setResult(.pipe_read, 0);
             state.markCompletedFromBackend(&data.c);
             return;
