@@ -1396,6 +1396,39 @@ test "Dir: resolve_beneath blocks parent escape" {
     }
 }
 
+test "File: follow_symlinks=false rejects a symlink" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const cwd = Dir.cwd();
+
+    var target = try cwd.createFile("test-nofollow-target", .{});
+    target.close();
+    defer cwd.deleteFile("test-nofollow-target") catch {};
+
+    cwd.symLink("test-nofollow-target", "test-nofollow-link", .{}) catch |err| switch (err) {
+        // Some filesystems / sandboxes don't allow creating symlinks.
+        error.AccessDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    defer cwd.deleteFile("test-nofollow-link") catch {};
+
+    // Following the symlink (the default) opens the target.
+    var followed = try cwd.openFile("test-nofollow-link", .{});
+    followed.close();
+
+    // With follow_symlinks=false, opening the symlink itself must fail.
+    if (cwd.openFile("test-nofollow-link", .{ .follow_symlinks = false })) |file| {
+        file.close();
+        return error.TestUnexpectedResult;
+    } else |err| switch (err) {
+        error.SymLinkLoop => {},
+        else => return err,
+    }
+}
+
 test "File: blocking mode without runtime" {
     // This test verifies that file operations work in blocking mode
     // when called without an async runtime
