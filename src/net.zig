@@ -1528,6 +1528,83 @@ test "Stream.Writer.sendFile transfers a file over a socket" {
     try group.wait();
 }
 
+test "Stream.Writer.sendFile cancellation unblocks a stalled transfer" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const Io = std.Io;
+    const path = "test-sendfile-cancel";
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer runtime.deinit();
+    const io = runtime.io();
+
+    // A file larger than the socket buffer, so the send stalls once the buffer
+    // fills and there is no receiver draining the other end.
+    const total = 1024 * 1024;
+    {
+        var f = try Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+        defer f.close(io);
+        var fw_buf: [4096]u8 = undefined;
+        var fw = f.writer(io, &fw_buf);
+        const zeros = [_]u8{0} ** 4096;
+        var written: usize = 0;
+        while (written < total) : (written += zeros.len) {
+            try fw.interface.writeAll(&zeros);
+        }
+        try fw.interface.flush();
+    }
+    defer Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    const fds = try os.net.socketpair(.unix, .stream, .ip, .{ .nonblocking = true });
+    defer os.net.close(fds[0]);
+    defer os.net.close(fds[1]); // intentionally never drained
+
+    const Outcome = struct {
+        completed: bool = false,
+        send_err: ?anyerror = null, // error returned by sendFileAll (null = succeeded)
+        writer_err: ?anyerror = null, // diagnostic stashed on the writer
+    };
+
+    const Sender = struct {
+        fn run(client_io: Io, send_fd: os.net.fd_t, out: *Outcome) void {
+            var f = Io.Dir.cwd().openFile(client_io, path, .{}) catch |e| {
+                out.send_err = e;
+                out.completed = true;
+                return;
+            };
+            defer f.close(client_io);
+            var fr_buf: [4096]u8 = undefined;
+            var fr = f.reader(client_io, &fr_buf);
+            var wbuf: [4096]u8 = undefined;
+            var writer = Stream.Writer.init(send_fd, &wbuf);
+            // Stalls once the socket buffer is full; cancellation makes it return.
+            if (writer.interface.sendFileAll(&fr, .unlimited)) |_| {} else |err| {
+                out.send_err = err;
+                out.writer_err = writer.err;
+            }
+            out.completed = true;
+        }
+    };
+
+    // The test body runs as the runtime's main task, so we can spawn/sleep/cancel
+    // directly. cancel() cancels the stalled sender and blocks until it finishes,
+    // which only happens if cancellation unblocks the send (a hang here means it
+    // did not). `outcome` is then populated and safe to read.
+    var outcome: Outcome = .{};
+    var group: Group = .init;
+    defer group.cancel();
+    try group.spawn(Sender.run, .{ io, fds[0], &outcome });
+    // Let the sender fill the socket buffer and block in the send.
+    try runtime_mod.sleep(.fromMilliseconds(50));
+    group.cancel();
+
+    // The stalled send was interrupted, and the cancellation propagated out
+    // through the std.Io.Writer sendFile path as WriteFailed + writer.err.
+    try std.testing.expect(outcome.completed);
+    try std.testing.expectEqual(error.WriteFailed, outcome.send_err.?);
+    try std.testing.expectEqual(error.Canceled, outcome.writer_err.?);
+}
+
 test "IpAddress: initIp4" {
     const addr = IpAddress.initIp4(@splat(0), 8080);
     try std.testing.expectEqual(os.net.AF.INET, addr.any.family);
