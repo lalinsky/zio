@@ -7,6 +7,7 @@ const Backend = @import("backend.zig").Backend;
 const HeapNode = @import("heap.zig").HeapNode;
 const ReadBuf = @import("buf.zig").ReadBuf;
 const WriteBuf = @import("buf.zig").WriteBuf;
+const os = @import("../os/root.zig");
 const net = @import("../os/net.zig");
 const fs = @import("../os/fs.zig");
 const Timestamp = @import("../time.zig").Timestamp;
@@ -48,6 +49,10 @@ pub const BackendCapabilities = struct {
     dir_real_path_file: bool = false,
     file_real_path: bool = false,
     file_hard_link: bool = false,
+    /// When true, the backend implements file-to-socket transfer natively
+    /// (e.g. io_uring splice). When false, the loop drives a generic
+    /// read/write callback loop fallback (see NetSendFile).
+    net_send_file: bool = false,
     device_io_control: bool = false,
     process_wait: bool = false,
     /// When true, completions submitted to one loop in a group may be completed
@@ -78,6 +83,7 @@ pub const Op = enum {
     net_poll,
     net_shutdown,
     net_close,
+    net_send_file,
     file_open,
     file_create,
     file_close,
@@ -143,6 +149,7 @@ pub const Op = enum {
             .net_poll => NetPoll,
             .net_close => NetClose,
             .net_shutdown => NetShutdown,
+            .net_send_file => NetSendFile,
             .file_open => FileOpen,
             .file_create => FileCreate,
             .file_close => FileClose,
@@ -210,6 +217,7 @@ pub const Op = enum {
             NetPoll => .net_poll,
             NetClose => .net_close,
             NetShutdown => .net_shutdown,
+            NetSendFile => .net_send_file,
             FileOpen => .file_open,
             FileCreate => .file_create,
             FileClose => .file_close,
@@ -737,6 +745,79 @@ pub const NetSend = struct {
 
     pub fn getResult(self: *const NetSend) Error!usize {
         return self.c.getResult(.net_send);
+    }
+};
+
+/// Transfer the contents of a file to a socket ("sendfile").
+///
+/// Backends that advertise `net_send_file` handle this natively (e.g. io_uring
+/// splice). Otherwise the loop drives a generic read/write callback loop using
+/// the `Fallback` state below: read a chunk from the file into `buf`, send it to
+/// the socket, repeat until EOF or `remaining` is exhausted. Socket short-writes
+/// drain the remaining buffer before the next read.
+pub const NetSendFile = struct {
+    c: Completion,
+    result_private_do_not_touch: usize = undefined,
+
+    /// Destination socket.
+    handle: Backend.NetHandle,
+    /// Source file.
+    file: fs.fd_t,
+    /// Current read offset into the file.
+    offset: u64,
+    /// Bytes still allowed to send (use `maxInt(usize)` for the whole file).
+    remaining: usize,
+
+    internal: switch (Backend.capabilities.net_send_file) {
+        true => if (@hasDecl(Backend, "NetSendFileData")) Backend.NetSendFileData else struct {},
+        false => Fallback,
+    } = .{},
+
+    /// State for the generic read/write loop. Unused by native backends.
+    pub const Fallback = struct {
+        read: FileRead = undefined,
+        send: NetSend = undefined,
+        /// Two ping-pong transfer buffers (userspace equivalent of the splice
+        /// pipe). One is filled by a read while the other is drained by a send.
+        /// Split 2x8K to keep the same total size as the single-buffer version.
+        bufs: [2][8 * 1024]u8 = undefined,
+        /// Bytes available in each buffer (0 = empty/free).
+        filled: [2]usize = .{ 0, 0 },
+        /// Drain cursor within the buffer currently being sent.
+        sent: [2]usize = .{ 0, 0 },
+        /// Next buffer index to read into / send from (both alternate 0,1,0,1
+        /// from the same start, preserving send order).
+        next_read: u1 = 0,
+        next_send: u1 = 0,
+        /// Index of the buffer with a read / send currently in flight.
+        reading: ?u1 = null,
+        sending: ?u1 = null,
+        /// Set once the source file is exhausted.
+        eof: bool = false,
+        /// Bytes still allowed to be read from the file (the limit).
+        read_remaining: usize = 0,
+        /// Total bytes sent so far (the operation result).
+        total: usize = 0,
+        /// First error (or cancel) seen; parked until the sibling op drains.
+        pending_err: ?anyerror = null,
+        read_iov: [1]os.iovec = undefined,
+        send_iov: [1]os.iovec_const = undefined,
+    };
+
+    pub const Error = (net.SendError || fs.FileReadError) || Cancelable;
+
+    pub fn init(handle: Backend.NetHandle, file: fs.fd_t, offset: u64, limit: usize) NetSendFile {
+        return .{
+            .c = .init(.net_send_file),
+            .handle = handle,
+            .file = file,
+            .offset = offset,
+            .remaining = limit,
+        };
+    }
+
+    pub fn getResult(self: *const NetSendFile) Error!usize {
+        return self.c.getResult(.net_send_file);
     }
 };
 

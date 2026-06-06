@@ -8,6 +8,11 @@ All notable changes to this project will be documented in this file.
 
 - Setting `max_threads = 0` in the thread pool options now disables the thread pool, executing
   blocking work inline on the calling thread (the same behavior as a single-threaded build).
+- `net.Stream.Writer` now implements the `std.Io.Writer` `sendFile` vtable method, so
+  `sendFile`/`sendFileAll` on a zio network stream transfer a file's contents directly to the socket
+  (std's own `net.Stream.Writer.sendFile` is unimplemented). The event-loop implementation is
+  double-buffered, overlapping the read of the next chunk with the send of the current one so both
+  complete in the same poll cycle; an io_uring `splice` fast path can be added later behind the same API.
 - `openFile` now honors the `follow_symlinks`, `path_only`, and `allow_ctty` options. Through the
   `std.Io` interface these (along with `resolve_beneath`) previously panicked when set to a
   non-default value. Opening with `follow_symlinks = false` fails with `error.SymLinkLoop` if the

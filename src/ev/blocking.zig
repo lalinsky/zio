@@ -16,6 +16,10 @@ const NetClose = @import("completion.zig").NetClose;
 const NetShutdown = @import("completion.zig").NetShutdown;
 const NetRecv = @import("completion.zig").NetRecv;
 const NetSend = @import("completion.zig").NetSend;
+const NetSendFile = @import("completion.zig").NetSendFile;
+const FileRead = @import("completion.zig").FileRead;
+const ReadBuf = @import("buf.zig").ReadBuf;
+const WriteBuf = @import("buf.zig").WriteBuf;
 const NetRecvFrom = @import("completion.zig").NetRecvFrom;
 const NetSendTo = @import("completion.zig").NetSendTo;
 const NetRecvMsg = @import("completion.zig").NetRecvMsg;
@@ -103,6 +107,7 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
         .net_connect => handleNetConnect(c),
         .net_accept => handleNetAccept(c),
         .net_poll => handleNetPoll(c),
+        .net_send_file => handleNetSendFile(c, allocator),
 
         // Timer operation
         .timer => handleTimer(c),
@@ -123,6 +128,41 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
 
         .mach_port => unreachable,
     }
+}
+
+/// Synchronous file-to-socket transfer for the no-runtime path. Drives the same
+/// FileRead/NetSend child ops as the event-loop fallback, but executes each one
+/// inline via `executeBlocking`. Uses a local buffer so it is independent of the
+/// backend's `net_send_file` capability (the loop is unavailable here, so we
+/// can never use a native splice path anyway).
+fn handleNetSendFile(c: *Completion, allocator: std.mem.Allocator) void {
+    const op = c.cast(NetSendFile);
+    var buf: [16 * 1024]u8 = undefined;
+    var read_iov: [1]os.iovec = undefined;
+    var send_iov: [1]os.iovec_const = undefined;
+    var total: usize = 0;
+
+    while (true) {
+        const want = @min(buf.len, op.remaining);
+        if (want == 0) break;
+
+        var rd = FileRead.init(op.file, ReadBuf.fromSlice(buf[0..want], &read_iov), op.offset);
+        executeBlocking(&rd.c, allocator);
+        const n = rd.getResult() catch |err| return c.setError(err);
+        if (n == 0) break; // EOF
+        op.offset += n;
+
+        var off: usize = 0;
+        while (off < n) {
+            var sd = NetSend.init(op.handle, WriteBuf.fromSlice(buf[off..n], &send_iov), .{});
+            executeBlocking(&sd.c, allocator);
+            const m = sd.getResult() catch |err| return c.setError(err);
+            off += m;
+            total += m;
+            op.remaining -= m;
+        }
+    }
+    c.setResult(.net_send_file, total);
 }
 
 /// Poll for socket/pipe readiness with infinite timeout.

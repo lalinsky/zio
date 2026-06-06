@@ -45,6 +45,7 @@ pub const NetSendMsg = completion.NetSendMsg;
 pub const NetPoll = completion.NetPoll;
 pub const NetClose = completion.NetClose;
 pub const NetShutdown = completion.NetShutdown;
+pub const NetSendFile = completion.NetSendFile;
 pub const FileOpen = completion.FileOpen;
 pub const FileCreate = completion.FileCreate;
 pub const FileClose = completion.FileClose;
