@@ -1501,6 +1501,9 @@ pub fn mkdirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, mode: 
 }
 
 pub fn errnoToFileOpenError(errno: posix.system.E, flags: anytype) FileOpenError {
+    // NetBSD returns EFTYPE (not ELOOP) when O_NOFOLLOW hits a symlink.
+    if (@hasField(@TypeOf(errno), "FTYPE") and errno == .FTYPE)
+        return if (@hasField(@TypeOf(flags), "follow_symlinks") and !flags.follow_symlinks) error.SymLinkLoop else unexpectedError(errno);
     return switch (errno) {
         .SUCCESS => unreachable,
         .ACCES => error.AccessDenied,
