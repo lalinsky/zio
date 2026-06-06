@@ -144,8 +144,9 @@ test "sendfile: NetSendFile honors the limit" {
 
     try loop.run(.until_done);
 
-    try std.testing.expectEqual(@as(usize, limit), try send_file.getResult());
+    try std.testing.expectEqual(limit, try send_file.getResult());
     try std.testing.expect(drainer.err == null);
+    try std.testing.expectEqual(limit, drainer.total);
     try std.testing.expectEqualSlices(u8, content[0..limit], &recv_buf);
 }
 
