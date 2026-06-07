@@ -223,6 +223,11 @@ pub const SharedState = struct {
                 0, // Use default number of concurrent threads
             ) orelse return error.Unexpected;
 
+            // Reset shared accounting in case this SharedState is being
+            // reused after a previous teardown that left stale counters.
+            self.active.store(0, .release);
+            self.inflight_io.store(0, .release);
+
             // Load all extension functions using a temporary socket
             // Socket family/type doesn't matter - use AF_INET SOCK_STREAM
             const sock = try net.socket(.ipv4, .stream, .ip, .{ .nonblocking = false });
