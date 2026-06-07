@@ -186,11 +186,16 @@ pub fn setNonblocking(fd: fd_t) error{Unexpected}!void {
 /// Uses lseek(fd, 0, SEEK_CUR): a no-op seek that returns ESPIPE on
 /// non-seekable descriptors without disturbing the file offset.
 pub fn isPollable(fd: fd_t) bool {
-    const rc = sys.lseek(fd, 0, system.SEEK.CUR);
-    return switch (errno(rc)) {
-        .SUCCESS => false,
-        else => true,
-    };
+    while (true) {
+        const rc = sys.lseek(fd, 0, system.SEEK.CUR);
+        switch (errno(rc)) {
+            .SUCCESS => return false,
+            .INTR => continue,
+            .SPIPE => return true, // ESPIPE
+            else => return false,
+        }
+    }
+}
 }
 
 pub fn setCloexec(fd: fd_t) error{Unexpected}!void {
