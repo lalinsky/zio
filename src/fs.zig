@@ -13,6 +13,7 @@ const waitForIo = @import("common.zig").waitForIo;
 const waitForIoUncancelable = @import("common.zig").waitForIoUncancelable;
 const timedWaitForIo = @import("common.zig").timedWaitForIo;
 const fillBuf = @import("utils/writer.zig").fillBuf;
+const probePollable = @import("ev/backends/common.zig").probePollable;
 const Timeout = @import("time.zig").Timeout;
 
 pub const Handle = os.fs.fd_t;
@@ -57,61 +58,42 @@ pub fn createFile(path: []const u8, flags: os.fs.FileCreateFlags) Dir.CreateFile
     return cwd.createFile(path, flags);
 }
 
+pub const PipePair = struct {
+    read: File,
+    write: File,
+
+    pub fn close(self: PipePair) void {
+        self.read.close();
+        self.write.close();
+    }
+};
+
 pub fn createPipe() (os.fs.PipeError || Cancelable)!PipePair {
     var op = ev.PipeCreate.init();
     try waitForIo(&op.c);
     const fds = try op.getResult();
     return .{
-        .read = Pipe.fromFd(fds[0]),
-        .write = Pipe.fromFd(fds[1]),
+        .read = File{ .fd = fds[0], .pollable = true },
+        .write = File{ .fd = fds[1], .pollable = true },
     };
 }
 
-// Global state to track if stdio fds have been set to non-blocking mode
-// TODO: This should be handled more generically by the backend
-var stdio_nonblocking_mutex: os.Mutex = .init();
-var stdio_nonblocking = [3]bool{ false, false, false };
-
-pub fn stdin() Pipe {
+pub fn stdin() File {
     const fd = os.fs.stdin();
-    // Only set non-blocking for backends that require it
-    if (ev.backend != .io_uring and builtin.os.tag != .windows) {
-        stdio_nonblocking_mutex.lock();
-        defer stdio_nonblocking_mutex.unlock();
-        if (!stdio_nonblocking[0]) {
-            os.posix.setNonblocking(fd) catch {};
-            stdio_nonblocking[0] = true;
-        }
-    }
-    return Pipe.fromFd(fd);
+    const pollable = probePollable(fd);
+    return .{ .fd = fd, .pollable = pollable };
 }
 
-pub fn stdout() Pipe {
+pub fn stdout() File {
     const fd = os.fs.stdout();
-    // Only set non-blocking for backends that require it
-    if (ev.backend != .io_uring and builtin.os.tag != .windows) {
-        stdio_nonblocking_mutex.lock();
-        defer stdio_nonblocking_mutex.unlock();
-        if (!stdio_nonblocking[1]) {
-            os.posix.setNonblocking(fd) catch {};
-            stdio_nonblocking[1] = true;
-        }
-    }
-    return Pipe.fromFd(fd);
+    const pollable = probePollable(fd);
+    return .{ .fd = fd, .pollable = pollable };
 }
 
-pub fn stderr() Pipe {
+pub fn stderr() File {
     const fd = os.fs.stderr();
-    // Only set non-blocking for backends that require it
-    if (ev.backend != .io_uring and builtin.os.tag != .windows) {
-        stdio_nonblocking_mutex.lock();
-        defer stdio_nonblocking_mutex.unlock();
-        if (!stdio_nonblocking[2]) {
-            os.posix.setNonblocking(fd) catch {};
-            stdio_nonblocking[2] = true;
-        }
-    }
-    return Pipe.fromFd(fd);
+    const pollable = probePollable(fd);
+    return .{ .fd = fd, .pollable = pollable };
 }
 
 pub fn stat(path: []const u8) Dir.StatError!os.fs.FileStatInfo {
@@ -357,10 +339,48 @@ pub const File = struct {
         return try op.getResult();
     }
 
+    pub const ReadStreamingError = os.fs.FileReadError || Cancelable;
+    pub const ReadStreamingTimeoutError = ReadStreamingError || Timeoutable;
+
+    /// Read from file at its current position (streaming), no timeout.
+    pub fn readStreaming(self: File, buf: ev.ReadBuf) ReadStreamingError!usize {
+        var op = ev.FileReadStreaming.init(self.fd, buf);
+        op.pollable = self.pollable;
+        try waitForIo(&op.c);
+        return try op.getResult();
+    }
+
+    /// Read from file at its current position (streaming), with timeout.
+    pub fn readStreamingTimeout(self: File, buf: ev.ReadBuf, timeout: Timeout) ReadStreamingTimeoutError!usize {
+        var op = ev.FileReadStreaming.init(self.fd, buf);
+        op.pollable = self.pollable;
+        try timedWaitForIo(&op.c, timeout);
+        return try op.getResult();
+    }
+
     /// Write to file using WriteBuf (vectored write).
     pub fn writeBuf(self: File, buf: ev.WriteBuf, offset: u64) WriteError!usize {
         var op = ev.FileWrite.init(self.fd, buf, offset);
         try waitForIo(&op.c);
+        return try op.getResult();
+    }
+
+    pub const WriteStreamingError = os.fs.FileWriteError || Cancelable;
+    pub const WriteStreamingTimeoutError = WriteStreamingError || Timeoutable;
+
+    /// Write to file at its current position (streaming), no timeout.
+    pub fn writeStreaming(self: File, buf: ev.WriteBuf) WriteStreamingError!usize {
+        var op = ev.FileWriteStreaming.init(self.fd, buf);
+        op.pollable = self.pollable;
+        try waitForIo(&op.c);
+        return try op.getResult();
+    }
+
+    /// Write to file at its current position (streaming), with timeout.
+    pub fn writeStreamingTimeout(self: File, buf: ev.WriteBuf, timeout: Timeout) WriteStreamingTimeoutError!usize {
+        var op = ev.FileWriteStreaming.init(self.fd, buf);
+        op.pollable = self.pollable;
+        try timedWaitForIo(&op.c, timeout);
         return try op.getResult();
     }
 
@@ -435,16 +455,34 @@ pub const File = struct {
     }
 };
 
-/// File reader that tracks position and implements std.Io.Reader interface
+/// File reader that implements std.Io.Reader interface.
+/// Dispatches between positional I/O (regular files) and streaming I/O
+/// (pipes, sockets, ttys) based on the File.pollable flag.
 pub const FileReader = struct {
+    pub const Error = os.fs.FileReadError || Cancelable || Timeoutable;
+
+    pub const Mode = enum {
+        /// Use positional I/O (pread/pwrite) with explicit offset.
+        positional,
+        /// Use streaming I/O (read/write) at the current file position.
+        streaming,
+    };
+
     file: File,
+    mode: Mode,
     position: u64 = 0,
-    err: ?File.ReadError = null,
+    timeout: Timeout = .none,
+    err: ?Error = null,
     interface: std.Io.Reader,
 
     pub fn init(file: File, buffer: []u8) FileReader {
+        const mode: Mode = if (file.pollable) |p|
+            if (p) .streaming else .positional
+        else
+            .positional;
         return .{
             .file = file,
+            .mode = mode,
             .interface = .{
                 .vtable = &.{
                     .stream = stream,
@@ -458,49 +496,104 @@ pub const FileReader = struct {
         };
     }
 
+    pub fn setTimeout(self: *FileReader, timeout: Timeout) void {
+        self.timeout = timeout;
+    }
+
     pub fn logicalPos(self: *const FileReader) u64 {
         return self.position - self.interface.end + self.interface.seek;
     }
 
     fn stream(io_reader: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
         const r: *FileReader = @alignCast(@fieldParentPtr("interface", io_reader));
-        const dest = limit.slice(try w.writableSliceGreedy(1));
-
-        const n = r.file.read(dest, r.position) catch |err| {
-            r.err = err;
-            return error.ReadFailed;
-        };
-
-        if (n == 0) return error.EndOfStream;
-
-        r.position += n;
-        w.advance(n);
-        return n;
+        switch (r.mode) {
+            .positional => {
+                const dest = limit.slice(try w.writableSliceGreedy(1));
+                var storage: [1]os.iovec = undefined;
+                var op = ev.FileRead.init(r.file.fd, ev.ReadBuf.fromSlice(dest, &storage), r.position);
+                timedWaitForIo(&op.c, r.timeout) catch |err| {
+                    r.err = err;
+                    return error.ReadFailed;
+                };
+                const n = op.getResult() catch |err| switch (err) {
+                    error.Unseekable => {
+                        r.mode = .streaming;
+                        return 0;
+                    },
+                    else => |e| {
+                        r.err = e;
+                        return error.ReadFailed;
+                    },
+                };
+                if (n == 0) return error.EndOfStream;
+                r.position += n;
+                w.advance(n);
+                return n;
+            },
+            .streaming => {
+                const dest = limit.slice(try w.writableSliceGreedy(1));
+                var storage: [1]os.iovec = undefined;
+                const n = r.file.readStreamingTimeout(ev.ReadBuf.fromSlice(dest, &storage), r.timeout) catch |err| {
+                    r.err = err;
+                    return error.ReadFailed;
+                };
+                if (n == 0) return error.EndOfStream;
+                w.advance(n);
+                return n;
+            },
+        }
     }
 
     fn discard(io_reader: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
         const r: *FileReader = @alignCast(@fieldParentPtr("interface", io_reader));
         const to_discard = @intFromEnum(limit);
-
-        // Nothing to discard
         if (to_discard == 0) return 0;
 
-        // For physical files, we can just seek forward
-        r.position += to_discard;
+        switch (r.mode) {
+            .positional => {
+                // For regular files, we can just seek forward
+                r.position += to_discard;
 
-        // Verify we didn't seek past EOF by reading 2 bytes:
-        // - 1 byte at position-1 (last byte we claim to have discarded)
-        // - 1 byte at position (to verify there's more data or we're exactly at EOF)
-        var buf: [2]u8 = undefined;
-        const n = r.file.read(&buf, r.position - 1) catch |err| {
-            r.err = err;
-            return error.ReadFailed;
-        };
-
-        // If we couldn't read even 1 byte, we went past EOF
-        if (n == 0) return error.EndOfStream;
-
-        return to_discard;
+                // Verify we didn't seek past EOF by reading 2 bytes:
+                // - 1 byte at position-1 (last byte we claim to have discarded)
+                // - 1 byte at position (to verify there's more data or we're exactly at EOF)
+                var buf: [2]u8 = undefined;
+                var iovec_storage: [1]os.iovec = undefined;
+                var op = ev.FileRead.init(r.file.fd, ev.ReadBuf.fromSlice(&buf, &iovec_storage), r.position - 1);
+                timedWaitForIo(&op.c, r.timeout) catch |err| {
+                    r.err = err;
+                    return error.ReadFailed;
+                };
+                const n = op.getResult() catch |err| switch (err) {
+                    error.Unseekable => {
+                        r.mode = .streaming;
+                        return 0;
+                    },
+                    else => |e| {
+                        r.err = e;
+                        return error.ReadFailed;
+                    },
+                };
+                if (n == 0) return error.EndOfStream;
+                return to_discard;
+            },
+            .streaming => {
+                // Read and discard loop.
+                var remaining = to_discard;
+                var trash: [128]u8 = undefined;
+                while (remaining > 0) {
+                    var storage: [1]os.iovec = undefined;
+                    const to_read = @min(remaining, trash.len);
+                    const n = r.file.readStreamingTimeout(ev.ReadBuf.fromSlice(trash[0..to_read], &storage), r.timeout) catch |err| {
+                        r.err = err;
+                        return error.ReadFailed;
+                    };
+                    if (n == 0) return error.EndOfStream;
+                    remaining -= n;
+                }
+                return to_discard;
+            },
+        }
     }
 
     fn readVec(io_reader: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
@@ -513,34 +606,70 @@ pub const FileReader = struct {
             try io_reader.writableVectorPosix(&iovec_storage, data);
         if (dest_n == 0) return 0;
 
-        const buf = ev.ReadBuf{ .iovecs = iovec_storage[0..dest_n] };
-        const n = r.file.readBuf(buf, r.position) catch |err| {
-            r.err = err;
-            return error.ReadFailed;
-        };
-
-        if (n == 0) return error.EndOfStream;
-
-        r.position += n;
-
-        if (n > data_size) {
-            io_reader.end += n - data_size;
-            return data_size;
+        switch (r.mode) {
+            .positional => {
+                const buf = ev.ReadBuf{ .iovecs = iovec_storage[0..dest_n] };
+                var op = ev.FileRead.init(r.file.fd, buf, r.position);
+                timedWaitForIo(&op.c, r.timeout) catch |err| {
+                    r.err = err;
+                    return error.ReadFailed;
+                };
+                const n = op.getResult() catch |err| switch (err) {
+                    error.Unseekable => {
+                        r.mode = .streaming;
+                        return 0;
+                    },
+                    else => |e| {
+                        r.err = e;
+                        return error.ReadFailed;
+                    },
+                };
+                if (n == 0) return error.EndOfStream;
+                r.position += n;
+                if (n > data_size) {
+                    io_reader.end += n - data_size;
+                    return data_size;
+                }
+                return n;
+            },
+            .streaming => {
+                const buf = ev.ReadBuf{ .iovecs = iovec_storage[0..dest_n] };
+                const n = r.file.readStreamingTimeout(buf, r.timeout) catch |err| {
+                    r.err = err;
+                    return error.ReadFailed;
+                };
+                if (n == 0) return error.EndOfStream;
+                if (n > data_size) {
+                    io_reader.end += n - data_size;
+                    return data_size;
+                }
+                return n;
+            },
         }
-        return n;
     }
 };
 
-/// File writer that tracks position and implements std.Io.Writer interface
+/// File writer that implements std.Io.Writer interface.
+/// Dispatches between positional I/O (regular files) and streaming I/O
+/// (pipes, sockets, ttys) based on the File.pollable flag.
 pub const FileWriter = struct {
+    pub const Error = os.fs.FileWriteError || Cancelable || Timeoutable;
+
     file: File,
+    mode: FileReader.Mode,
     position: u64 = 0,
-    err: ?File.WriteError = null,
+    timeout: Timeout = .none,
+    err: ?Error = null,
     interface: std.Io.Writer,
 
     pub fn init(file: File, buffer: []u8) FileWriter {
+        const mode: FileReader.Mode = if (file.pollable) |p|
+            if (p) .streaming else .positional
+        else
+            .positional;
         return .{
             .file = file,
+            .mode = mode,
             .interface = .{
                 .vtable = &.{
                     .drain = drain,
@@ -550,6 +679,10 @@ pub const FileWriter = struct {
                 .end = 0,
             },
         };
+    }
+
+    pub fn setTimeout(self: *FileWriter, timeout: Timeout) void {
+        self.timeout = timeout;
     }
 
     pub fn logicalPos(self: *const FileWriter) u64 {
@@ -563,16 +696,40 @@ pub const FileWriter = struct {
         var splat_buf: [64]u8 = undefined;
         var slices: [max_vecs][]const u8 = undefined;
         const buf_len = fillBuf(&slices, buffered, data, splat, &splat_buf);
-
         if (buf_len == 0) return 0;
 
-        const n = w.file.writeVec(slices[0..buf_len], w.position) catch |err| {
-            w.err = err;
-            return error.WriteFailed;
-        };
-
-        w.position += n;
-        return io_writer.consume(n);
+        switch (w.mode) {
+            .positional => {
+                var storage: [max_vecs]os.iovec_const = undefined;
+                const write_buf = ev.WriteBuf.fromSlices(slices[0..buf_len], &storage);
+                var op = ev.FileWrite.init(w.file.fd, write_buf, w.position);
+                timedWaitForIo(&op.c, w.timeout) catch |err| {
+                    w.err = err;
+                    return error.WriteFailed;
+                };
+                const n = op.getResult() catch |err| switch (err) {
+                    error.Unseekable => {
+                        w.mode = .streaming;
+                        return 0;
+                    },
+                    else => |e| {
+                        w.err = e;
+                        return error.WriteFailed;
+                    },
+                };
+                w.position += n;
+                return io_writer.consume(n);
+            },
+            .streaming => {
+                var storage: [max_vecs]os.iovec_const = undefined;
+                const write_buf = ev.WriteBuf.fromSlices(slices[0..buf_len], &storage);
+                const n = w.file.writeStreamingTimeout(write_buf, w.timeout) catch |err| {
+                    w.err = err;
+                    return error.WriteFailed;
+                };
+                return io_writer.consume(n);
+            },
+        }
     }
 
     fn flush(io_writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -580,231 +737,48 @@ pub const FileWriter = struct {
 
         while (io_writer.end > 0) {
             const buffered = io_writer.buffered();
-            const n = w.file.write(buffered, w.position) catch |err| {
-                w.err = err;
-                return error.WriteFailed;
-            };
 
-            if (n == 0) return error.WriteFailed;
-
-            w.position += n;
-
-            if (n < buffered.len) {
-                std.mem.copyForwards(u8, io_writer.buffer, buffered[n..]);
-                io_writer.end -= n;
-            } else {
-                io_writer.end = 0;
-            }
-        }
-    }
-};
-
-pub const PipePair = struct {
-    read: Pipe,
-    write: Pipe,
-
-    /// Close both ends of the pipe
-    pub fn close(self: PipePair) void {
-        self.read.close();
-        self.write.close();
-    }
-};
-
-pub const Pipe = struct {
-    fd: Handle,
-
-    pub const ReadError = os.fs.FileReadError || Cancelable || Timeoutable;
-    pub const WriteError = os.fs.FileWriteError || Cancelable || Timeoutable;
-    pub const PollError = os.fs.FileReadError || os.fs.FileWriteError || Cancelable || Timeoutable;
-    pub const PollEvent = ev.PipePoll.Event;
-
-    /// Create pipe from existing file descriptor
-    pub fn fromFd(fd: Handle) Pipe {
-        return .{ .fd = fd };
-    }
-
-    /// Read from pipe
-    pub fn read(self: Pipe, buffer: []u8, timeout: Timeout) ReadError!usize {
-        var storage: [1]os.iovec = undefined;
-        return self.readBuf(.fromSlice(buffer, &storage), timeout);
-    }
-
-    /// Write to pipe
-    pub fn write(self: Pipe, data: []const u8, timeout: Timeout) WriteError!usize {
-        var storage: [1]os.iovec_const = undefined;
-        return self.writeBuf(.fromSlice(data, &storage), timeout);
-    }
-
-    /// Read using ReadBuf (vectored I/O)
-    pub fn readBuf(self: Pipe, buf: ev.ReadBuf, timeout: Timeout) ReadError!usize {
-        var op = ev.FileReadStreaming.init(self.fd, buf);
-        op.pollable = true; // a pipe is always pollable (non-seekable)
-        try timedWaitForIo(&op.c, timeout);
-        return try op.getResult();
-    }
-
-    /// Write using WriteBuf (vectored I/O)
-    pub fn writeBuf(self: Pipe, buf: ev.WriteBuf, timeout: Timeout) WriteError!usize {
-        var op = ev.FileWriteStreaming.init(self.fd, buf);
-        op.pollable = true; // a pipe is always pollable (non-seekable)
-        try timedWaitForIo(&op.c, timeout);
-        return try op.getResult();
-    }
-
-    /// Poll for readiness
-    /// Waits until the pipe is ready for the specified event (read or write)
-    /// Note: Not supported on Windows (returns error.Unexpected)
-    pub fn poll(self: Pipe, event: PollEvent, timeout: Timeout) PollError!void {
-        var op = ev.PipePoll.init(self.fd, event);
-        try timedWaitForIo(&op.c, timeout);
-        return try op.getResult();
-    }
-
-    /// Close this end of the pipe
-    pub fn close(self: Pipe) void {
-        var op = ev.PipeClose.init(self.fd);
-        waitForIoUncancelable(&op.c);
-        _ = op.getResult() catch {};
-    }
-
-    /// Get a buffered reader
-    pub fn reader(self: Pipe, buffer: []u8) PipeReader {
-        return PipeReader.init(self, buffer);
-    }
-
-    /// Get a buffered writer
-    pub fn writer(self: Pipe, buffer: []u8) PipeWriter {
-        return PipeWriter.init(self, buffer);
-    }
-};
-
-pub const PipeReader = struct {
-    pipe: Pipe,
-    timeout: Timeout = .none,
-    err: ?Pipe.ReadError = null,
-    interface: std.Io.Reader,
-
-    pub fn init(pipe: Pipe, buffer: []u8) PipeReader {
-        return .{
-            .pipe = pipe,
-            .interface = .{
-                .vtable = &.{
-                    .stream = stream,
-                    .readVec = readVec,
+            switch (w.mode) {
+                .positional => {
+                    var storage: [1]os.iovec_const = undefined;
+                    var op = ev.FileWrite.init(w.file.fd, ev.WriteBuf.fromSlice(buffered, &storage), w.position);
+                    timedWaitForIo(&op.c, w.timeout) catch |err| {
+                        w.err = err;
+                        return error.WriteFailed;
+                    };
+                    const n = op.getResult() catch |err| switch (err) {
+                        error.Unseekable => {
+                            w.mode = .streaming;
+                            continue;
+                        },
+                        else => |e| {
+                            w.err = e;
+                            return error.WriteFailed;
+                        },
+                    };
+                    if (n == 0) return error.WriteFailed;
+                    w.position += n;
+                    if (n < buffered.len) {
+                        std.mem.copyForwards(u8, io_writer.buffer, buffered[n..]);
+                        io_writer.end -= n;
+                    } else {
+                        io_writer.end = 0;
+                    }
                 },
-                .buffer = buffer,
-                .seek = 0,
-                .end = 0,
-            },
-        };
-    }
-
-    pub fn setTimeout(self: *PipeReader, timeout: Timeout) void {
-        self.timeout = timeout;
-    }
-
-    fn stream(io_reader: *std.Io.Reader, io_writer: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-        const r: *PipeReader = @alignCast(@fieldParentPtr("interface", io_reader));
-        const dest = limit.slice(try io_writer.writableSliceGreedy(1));
-
-        const n = r.pipe.read(dest, r.timeout) catch |err| {
-            r.err = err;
-            return error.ReadFailed;
-        };
-
-        if (n == 0) return error.EndOfStream;
-
-        io_writer.advance(n);
-        return n;
-    }
-
-    fn readVec(io_reader: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
-        const r: *PipeReader = @alignCast(@fieldParentPtr("interface", io_reader));
-
-        var iovec_storage: [1 + max_vecs]os.iovec = undefined;
-        const dest_n, const data_size = if (builtin.os.tag == .windows)
-            try io_reader.writableVectorWsa(&iovec_storage, data)
-        else
-            try io_reader.writableVectorPosix(&iovec_storage, data);
-        if (dest_n == 0) return 0;
-
-        const buf = ev.ReadBuf{ .iovecs = iovec_storage[0..dest_n] };
-        const n = r.pipe.readBuf(buf, r.timeout) catch |err| {
-            r.err = err;
-            return error.ReadFailed;
-        };
-
-        if (n == 0) return error.EndOfStream;
-
-        if (n > data_size) {
-            io_reader.end += n - data_size;
-            return data_size;
-        }
-        return n;
-    }
-};
-
-pub const PipeWriter = struct {
-    pipe: Pipe,
-    timeout: Timeout = .none,
-    err: ?Pipe.WriteError = null,
-    interface: std.Io.Writer,
-
-    pub fn init(pipe: Pipe, buffer: []u8) PipeWriter {
-        return .{
-            .pipe = pipe,
-            .interface = .{
-                .vtable = &.{
-                    .drain = drain,
-                    .flush = flush,
+                .streaming => {
+                    var storage: [1]os.iovec_const = undefined;
+                    const n = w.file.writeStreamingTimeout(ev.WriteBuf.fromSlice(buffered, &storage), w.timeout) catch |err| {
+                        w.err = err;
+                        return error.WriteFailed;
+                    };
+                    if (n == 0) return error.WriteFailed;
+                    if (n < buffered.len) {
+                        std.mem.copyForwards(u8, io_writer.buffer, buffered[n..]);
+                        io_writer.end -= n;
+                    } else {
+                        io_writer.end = 0;
+                    }
                 },
-                .buffer = buffer,
-                .end = 0,
-            },
-        };
-    }
-
-    pub fn setTimeout(self: *PipeWriter, timeout: Timeout) void {
-        self.timeout = timeout;
-    }
-
-    fn drain(io_writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        const w: *PipeWriter = @alignCast(@fieldParentPtr("interface", io_writer));
-        const buffered = io_writer.buffered();
-
-        var splat_buf: [64]u8 = undefined;
-        var slices: [max_vecs][]const u8 = undefined;
-        const buf_len = fillBuf(&slices, buffered, data, splat, &splat_buf);
-
-        if (buf_len == 0) return 0;
-
-        var storage: [max_vecs]os.iovec_const = undefined;
-        const write_buf = ev.WriteBuf.fromSlices(slices[0..buf_len], &storage);
-        const n = w.pipe.writeBuf(write_buf, w.timeout) catch |err| {
-            w.err = err;
-            return error.WriteFailed;
-        };
-
-        return io_writer.consume(n);
-    }
-
-    fn flush(io_writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        const w: *PipeWriter = @alignCast(@fieldParentPtr("interface", io_writer));
-
-        while (io_writer.end > 0) {
-            const buffered = io_writer.buffered();
-            const n = w.pipe.write(buffered, w.timeout) catch |err| {
-                w.err = err;
-                return error.WriteFailed;
-            };
-
-            if (n == 0) return error.WriteFailed;
-
-            if (n < buffered.len) {
-                std.mem.copyForwards(u8, io_writer.buffer, buffered[n..]);
-                io_writer.end -= n;
-            } else {
-                io_writer.end = 0;
             }
         }
     }
@@ -1193,177 +1167,6 @@ test "Dir: access" {
     return error.TestExpectedError;
 }
 
-test "Pipe: basic read and write" {
-    if (builtin.os.tag == .windows and ev.backend != .iocp) return error.SkipZigTest;
-
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    const pipe = try createPipe();
-    defer pipe.close();
-
-    const write_data = "Hello, pipe!";
-    const bytes_written = try pipe.write.write(write_data, .none);
-    try std.testing.expectEqual(write_data.len, bytes_written);
-
-    var buffer: [100]u8 = undefined;
-    const bytes_read = try pipe.read.read(&buffer, .none);
-    try std.testing.expectEqualStrings(write_data, buffer[0..bytes_read]);
-}
-
-test "Pipe: reader and writer interface" {
-    if (builtin.os.tag == .windows and ev.backend != .iocp) return error.SkipZigTest;
-
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    const pipe = try createPipe();
-    defer pipe.close();
-
-    var write_buffer: [256]u8 = undefined;
-    var writer = pipe.write.writer(&write_buffer);
-
-    try writer.interface.writeAll("Line 1\n");
-    try writer.interface.writeAll("Line 2\n");
-    try writer.interface.flush();
-
-    var read_buffer: [256]u8 = undefined;
-    var reader = pipe.read.reader(&read_buffer);
-
-    const line1 = try reader.interface.takeDelimiterInclusive('\n');
-    try std.testing.expectEqualStrings("Line 1\n", line1);
-
-    const line2 = try reader.interface.takeDelimiterInclusive('\n');
-    try std.testing.expectEqualStrings("Line 2\n", line2);
-}
-
-test "Pipe: timeout on blocked read" {
-    if (builtin.os.tag == .windows and ev.backend != .iocp) return error.SkipZigTest;
-
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    const pipe = try createPipe();
-    defer pipe.close();
-
-    var buffer: [100]u8 = undefined;
-    const timeout = Timeout.fromMilliseconds(10);
-
-    const result = pipe.read.read(&buffer, timeout);
-    try std.testing.expectError(error.Timeout, result);
-}
-
-test "Pipe: poll for readability" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    const pipe = try createPipe();
-    defer pipe.close();
-
-    // Poll should timeout when no data available
-    const timeout = Timeout.fromMilliseconds(10);
-    const poll_result = pipe.read.poll(.read, timeout);
-    try std.testing.expectError(error.Timeout, poll_result);
-
-    // Write some data
-    const write_data = "poll test";
-    _ = try pipe.write.write(write_data, .none);
-
-    // Now poll should succeed immediately
-    try pipe.read.poll(.read, .none);
-
-    // And we should be able to read the data
-    var buffer: [100]u8 = undefined;
-    const bytes_read = try pipe.read.read(&buffer, .none);
-    try std.testing.expectEqualStrings(write_data, buffer[0..bytes_read]);
-}
-
-test "Pipe: poll on closed write end" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    const pipe = try createPipe();
-    defer pipe.read.close();
-
-    // Close write end
-    pipe.write.close();
-
-    // Poll should succeed immediately (EOF condition)
-    try pipe.read.poll(.read, .none);
-
-    // Read should return 0 (EOF)
-    var buffer: [100]u8 = undefined;
-    const bytes_read = try pipe.read.read(&buffer, .none);
-    try std.testing.expectEqual(0, bytes_read);
-}
-
-test "Pipe: poll on closed read end" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    const pipe = try createPipe();
-    defer pipe.write.close();
-
-    // Close read end
-    pipe.read.close();
-
-    // Poll for writability succeeds (pipe appears writable)
-    try pipe.write.poll(.write, .none);
-
-    // But actual write fails with BrokenPipe
-    const write_data = "test";
-    const result = pipe.write.write(write_data, .none);
-    try std.testing.expectError(error.BrokenPipe, result);
-}
-
-test "Pipe: half-close write end" {
-    if (builtin.os.tag == .windows and ev.backend != .iocp) return error.SkipZigTest;
-
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    const pipe = try createPipe();
-    defer pipe.read.close();
-
-    const write_data = "Data before close";
-    _ = try pipe.write.write(write_data, .none);
-
-    // Close write end
-    pipe.write.close();
-
-    // Should be able to read existing data
-    var buffer: [100]u8 = undefined;
-    const bytes_read = try pipe.read.read(&buffer, .none);
-    try std.testing.expectEqualStrings(write_data, buffer[0..bytes_read]);
-
-    // Next read should return 0 (EOF)
-    const eof_read = try pipe.read.read(&buffer, .none);
-    try std.testing.expectEqual(0, eof_read);
-}
-
-test "Pipe: half-close read end" {
-    if (builtin.os.tag == .windows and ev.backend != .iocp) return error.SkipZigTest;
-
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    const pipe = try createPipe();
-    defer pipe.write.close();
-
-    // Close read end first
-    pipe.read.close();
-
-    // Try to write - should get BrokenPipe error
-    const write_data = "Data after close";
-    const result = pipe.write.write(write_data, .none);
-    try std.testing.expectError(error.BrokenPipe, result);
-}
 
 test "Dir: resolve_beneath blocks parent escape" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
@@ -1401,67 +1204,4 @@ test "Dir: resolve_beneath blocks parent escape" {
         error.AccessDenied, error.Unsupported => {},
         else => return err,
     }
-}
-
-test "File: follow_symlinks=false rejects a symlink" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    const cwd = Dir.cwd();
-
-    var target = try cwd.createFile("test-nofollow-target", .{});
-    target.close();
-    defer cwd.deleteFile("test-nofollow-target") catch {};
-
-    cwd.symLink("test-nofollow-target", "test-nofollow-link", .{}) catch |err| switch (err) {
-        // Some filesystems / sandboxes don't allow creating symlinks.
-        error.AccessDenied => return error.SkipZigTest,
-        else => return err,
-    };
-    defer cwd.deleteFile("test-nofollow-link") catch {};
-
-    // Following the symlink (the default) opens the target.
-    var followed = try cwd.openFile("test-nofollow-link", .{});
-    followed.close();
-
-    // With follow_symlinks=false, opening the symlink itself must fail.
-    if (cwd.openFile("test-nofollow-link", .{ .follow_symlinks = false })) |file| {
-        file.close();
-        return error.TestUnexpectedResult;
-    } else |err| switch (err) {
-        error.SymLinkLoop => {},
-        else => return err,
-    }
-}
-
-test "File: blocking mode without runtime" {
-    // This test verifies that file operations work in blocking mode
-    // when called without an async runtime
-    const file_path = "test_blocking_mode.txt";
-
-    // Create and write to file (no runtime!)
-    var file = try createFile(file_path, .{ .read = true });
-    defer {
-        file.close();
-        deleteFile(file_path) catch {};
-    }
-
-    const write_data = "Blocking mode works!";
-    const bytes_written = try file.write(write_data, 0);
-    try std.testing.expectEqual(write_data.len, bytes_written);
-
-    // Read from file
-    var buffer: [100]u8 = undefined;
-    const bytes_read = try file.read(&buffer, 0);
-    try std.testing.expectEqualStrings(write_data, buffer[0..bytes_read]);
-
-    // Test file size
-    const size = try file.size();
-    try std.testing.expectEqual(write_data.len, size);
-
-    // Test file stat
-    const info = try file.stat();
-    try std.testing.expectEqual(write_data.len, info.size);
 }
