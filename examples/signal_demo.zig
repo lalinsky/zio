@@ -4,6 +4,8 @@
 const std = @import("std");
 const zio = @import("zio");
 
+pub const std_options_debug_io = zio.debug_io;
+
 /// Demonstration of graceful shutdown using signal handling.
 /// Press Ctrl+C to trigger a graceful shutdown.
 fn serverTask(shutdown: *std.atomic.Value(bool)) !void {

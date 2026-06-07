@@ -1,6 +1,9 @@
 const std = @import("std");
 const zio = @import("zio");
 
+// Use zio for std.log.* and std.debug.print
+pub const std_options_debug_io = zio.debug_io;
+
 // Maximum size of the request headers
 const MAX_REQUEST_HEADER_SIZE = 64 * 1024;
 

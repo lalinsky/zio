@@ -1,6 +1,8 @@
 const std = @import("std");
 const zio = @import("zio");
 
+pub const std_options_debug_io = zio.debug_io;
+
 // --8<-- [start:handleClient]
 fn handleClient(stream: zio.net.Stream) !void {
     defer stream.close();

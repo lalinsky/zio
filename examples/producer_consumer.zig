@@ -4,6 +4,8 @@
 const std = @import("std");
 const zio = @import("zio");
 
+pub const std_options_debug_io = zio.debug_io;
+
 fn producer(channel: *zio.Channel(i32), id: u32) zio.Cancelable!void {
     for (0..5) |i| {
         const item = @as(i32, @intCast(id * 100 + i));

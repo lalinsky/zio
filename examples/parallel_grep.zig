@@ -1,6 +1,8 @@
 const std = @import("std");
 const zio = @import("zio");
 
+pub const std_options_debug_io = zio.debug_io;
+
 const SearchResult = struct {
     file_path: []const u8,
     line_number: usize,

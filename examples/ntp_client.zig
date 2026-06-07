@@ -1,6 +1,8 @@
 const std = @import("std");
 const zio = @import("zio");
 
+pub const std_options_debug_io = zio.debug_io;
+
 // --8<-- [start:lookup]
 fn lookupHost(hostname: []const u8, port: u16) !zio.net.Address {
     const host = try zio.net.HostName.init(hostname);

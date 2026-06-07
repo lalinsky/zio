@@ -8,6 +8,8 @@
 const std = @import("std");
 const zio = @import("zio");
 
+pub const std_options_debug_io = zio.debug_io;
+
 const Io = std.Io;
 
 fn handleClient(io: Io, stream: Io.net.Stream) Io.Cancelable!void {
