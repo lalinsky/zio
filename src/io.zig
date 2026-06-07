@@ -52,6 +52,8 @@ const zio_options = @import("zio_options");
 /// the caller more than std.Io's reader/writer is prepared to handle.
 const max_iovecs_len = 8;
 
+pub const debug_io: Io = .{ .userdata = null, .vtable = &vtable };
+
 /// Read the pollable-cache state from `File.Flags`.
 ///
 /// When hacks are enabled, the `nonblocking` bool byte is overloaded:
@@ -1639,10 +1641,10 @@ fn lockStderrImpl(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.Ca
 
 fn tryLockStderrImpl(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.Cancelable!?Io.LockedStderr {
     if (!stderr_mutex.tryLock()) return null;
-    return try initLockedStderr(userdata, terminal_mode);
+    return initLockedStderr(userdata, terminal_mode);
 }
 
-fn initLockedStderr(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.Cancelable!Io.LockedStderr {
+fn initLockedStderr(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.LockedStderr {
     if (!stderr_writer_initialized) {
         const io = Io{ .userdata = userdata, .vtable = &vtable };
         const zfile = zio_fs.stderr();
@@ -1656,6 +1658,7 @@ fn initLockedStderr(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.
         }
         stderr_writer_initialized = true;
     }
+    beginShield();
     return .{
         .file_writer = &stderr_writer,
         .terminal_mode = terminal_mode orelse .no_color,
@@ -1665,6 +1668,7 @@ fn initLockedStderr(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.
 fn unlockStderrImpl(_: ?*anyopaque) void {
     if (stderr_writer.err == null) stderr_writer.interface.flush() catch {};
     stderr_writer.err = null;
+    endShield();
     stderr_mutex.unlock();
 }
 

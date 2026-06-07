@@ -343,5 +343,3 @@ test "Recursive cancel waiting on first acquisition" {
     // Should error with Canceled
     try std.testing.expectError(error.Canceled, handle.join());
 }
-
-

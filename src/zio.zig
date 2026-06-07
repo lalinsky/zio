@@ -66,6 +66,8 @@ pub const wait = @import("select.zig").wait;
 pub const SelectResult = @import("select.zig").SelectResult;
 pub const WaitResult = @import("select.zig").WaitResult;
 
+pub const debug_io = @import("io.zig").debug_io;
+
 /// Low-level coroutine library.
 pub const coro = @import("coro/root.zig");
 
