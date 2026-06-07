@@ -268,8 +268,16 @@ pub const FILE_END: DWORD = 2;
 /// in which case only streaming (positionless, zero-offset overlapped) I/O works
 /// and positional I/O is unavailable. Mirrors the POSIX lseek/ESPIPE probe: a
 /// no-op seek to the current position fails on non-seekable handles.
+///
+/// Only returns true when SetFilePointerEx fails with INVALID_FUNCTION — the
+/// canonical Windows error for "this handle type does not support seeking".
+/// Other failures (e.g. INVALID_PARAMETER, ACCESS_DENIED) are treated as
+/// seekable since the handle may still support positional I/O.
 pub fn isPollable(handle: HANDLE) bool {
-    return SetFilePointerEx(handle, 0, null, FILE_CURRENT) == FALSE;
+    if (SetFilePointerEx(handle, 0, null, FILE_CURRENT) != FALSE) {
+        return false;
+    }
+    return GetLastError() == .INVALID_FUNCTION;
 }
 
 // File time structures

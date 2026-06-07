@@ -1167,7 +1167,6 @@ test "Dir: access" {
     return error.TestExpectedError;
 }
 
-
 test "Dir: resolve_beneath blocks parent escape" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
