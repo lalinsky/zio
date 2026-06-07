@@ -179,6 +179,20 @@ pub fn setNonblocking(fd: fd_t) error{Unexpected}!void {
     }
 }
 
+/// Returns true if `fd` is not seekable (pipe, FIFO, socket, or tty), which
+/// makes it a candidate for the readiness-based poll path. Regular files and
+/// block devices are seekable and return false.
+///
+/// Uses lseek(fd, 0, SEEK_CUR): a no-op seek that returns ESPIPE on
+/// non-seekable descriptors without disturbing the file offset.
+pub fn isPollable(fd: fd_t) bool {
+    const rc = sys.lseek(fd, 0, system.SEEK.CUR);
+    return switch (errno(rc)) {
+        .SUCCESS => false,
+        else => true,
+    };
+}
+
 pub fn setCloexec(fd: fd_t) error{Unexpected}!void {
     switch (errno(system.fcntl(fd, system.F.SETFD, @as(c_int, system.FD_CLOEXEC)))) {
         .SUCCESS => {},

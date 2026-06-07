@@ -3156,6 +3156,32 @@ test "io: file streaming write advances position and appends" {
     try std.testing.expectEqualStrings("HELLO WORLD!!!", &buf);
 }
 
+test "io: streaming read/write over a pollable (pipe) fd" {
+    // A pipe is non-seekable, so streaming I/O over it cannot use positional
+    // read/write. On io_uring/iocp the backend handles it natively; on
+    // epoll/kqueue/poll the loop must route it through the readiness poll path
+    // (classifyFd -> backend.submit) rather than the thread pool.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const fds = try os_fs.pipe();
+    var read_file: Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = true } };
+    var write_file: Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = true } };
+    defer read_file.close(io);
+    defer write_file.close(io);
+
+    // Small enough to fit the pipe buffer, so the write completes without a
+    // reader draining it first.
+    try std.testing.expectEqual(5, try write_file.writeStreaming(io, "HELLO", &.{}, 1));
+
+    var buf: [5]u8 = undefined;
+    try std.testing.expectEqual(5, try read_file.readStreaming(io, &.{&buf}));
+    try std.testing.expectEqualStrings("HELLO", &buf);
+}
+
 test "io: file length/sync/setLength" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
