@@ -245,7 +245,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
     const is_new = c.state == .new;
     if (is_new) {
         c.state = .running;
-        state.active += 1;
+        state.incrActive();
     } else {
         std.debug.assert(c.state == .running);
     }
