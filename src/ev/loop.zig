@@ -447,6 +447,15 @@ pub const Loop = struct {
                 // File/dir ops that can fallback to thread pool
                 if (@hasField(BackendCapabilities, @tagName(op))) {
                     if (!@field(Backend.capabilities, @tagName(op))) {
+                        // Pollable streaming ops took the backend poll path, not
+                        // the thread pool, so they must be canceled there. The
+                        // verdict was cached on the op at submission time.
+                        if (comptime (op == .file_read_streaming or op == .file_write_streaming)) {
+                            if (completion.cast(op.toType()).pollable orelse false) {
+                                self.backend.cancel(&self.state, completion);
+                                return;
+                            }
+                        }
                         const thread_pool = self.thread_pool orelse unreachable;
                         const op_data = completion.cast(op.toType());
                         thread_pool.cancel(&op_data.internal.work);
@@ -584,6 +593,34 @@ pub const Loop = struct {
                 return;
             },
             else => {
+                // Streaming reads/writes on a pollable fd (pipe/socket/FIFO/tty)
+                // use the backend readiness poll path instead of the thread pool.
+                // Seekable fds (regular files, block devices) fall back to the pool.
+                switch (completion.op) {
+                    inline .file_read_streaming, .file_write_streaming => |op| {
+                        // Classify lazily and cache the verdict on the op, so a
+                        // reused op (or the caller) can skip re-probing.
+                        const data = completion.cast(op.toType());
+                        const pollable = data.pollable orelse blk: {
+                            const p = common.probePollable(data.handle);
+                            data.pollable = p;
+                            break :blk p;
+                        };
+                        if (comptime !@field(Backend.capabilities, @tagName(op))) {
+                            // Route pollable fds to the backend readiness/overlapped path;
+                            // seekable fds (regular files, block devices) to the thread pool.
+                            if (pollable) {
+                                self.state.inflight_io += 1;
+                                self.backend.submit(&self.state, completion);
+                            } else {
+                                self.submitFileOpToThreadPool(completion);
+                            }
+                            return;
+                        }
+                    },
+                    else => {},
+                }
+
                 // Regular backend operation
                 // Route file/dir ops to thread pool for backends without native support
                 switch (completion.op) {

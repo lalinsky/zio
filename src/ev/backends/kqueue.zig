@@ -20,8 +20,6 @@ const NetRecvMsg = @import("../completion.zig").NetRecvMsg;
 const NetSendMsg = @import("../completion.zig").NetSendMsg;
 const NetPoll = @import("../completion.zig").NetPoll;
 const PipePoll = @import("../completion.zig").PipePoll;
-const PipeRead = @import("../completion.zig").PipeRead;
-const PipeWrite = @import("../completion.zig").PipeWrite;
 const PipeClose = @import("../completion.zig").PipeClose;
 const MachPort = @import("../completion.zig").MachPort;
 const ProcessWait = @import("../completion.zig").ProcessWait;
@@ -164,8 +162,8 @@ fn getFilter(completion: *Completion) i16 {
                 .send => std.c.EVFILT.WRITE,
             };
         },
-        .pipe_read => std.c.EVFILT.READ,
-        .pipe_write => std.c.EVFILT.WRITE,
+        .file_read_streaming => std.c.EVFILT.READ,
+        .file_write_streaming => std.c.EVFILT.WRITE,
         .pipe_poll => blk: {
             const poll_data = completion.cast(PipePoll);
             break :blk switch (poll_data.event) {
@@ -191,8 +189,7 @@ fn getIdent(completion: *Completion) usize {
         .net_sendmsg => @intCast(completion.cast(NetSendMsg).handle),
         .net_poll => @intCast(completion.cast(NetPoll).handle),
         .pipe_poll => @intCast(completion.cast(PipePoll).handle),
-        .pipe_read => @intCast(completion.cast(PipeRead).handle),
-        .pipe_write => @intCast(completion.cast(PipeWrite).handle),
+        inline .file_read_streaming, .file_write_streaming => |op| @intCast(completion.cast(op.toType()).handle),
         .pipe_close => @intCast(completion.cast(PipeClose).handle),
         .process_wait => @intCast(completion.cast(ProcessWait).handle),
         .mach_port => completion.cast(MachPort).port,
@@ -330,8 +327,10 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .net_sendmsg,
         .net_poll,
         .pipe_poll,
-        .pipe_read,
-        .pipe_write,
+        // Streaming file I/O is routed here by the loop only when the fd is
+        // pollable (non-seekable); a pipe is always pollable.
+        .file_read_streaming,
+        .file_write_streaming,
         .mach_port,
         .process_wait,
         => {
@@ -358,7 +357,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
 
         // File operations are handled by Loop via thread pool
-        .file_open, .file_create, .file_close, .file_read, .file_write, .file_read_streaming, .file_write_streaming, .file_sync, .file_size, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .file_stat, .dir_open, .dir_close, .dir_read, .dir_create_dir, .dir_rename, .dir_rename_preserve, .dir_delete_file, .dir_delete_dir, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps, .dir_sym_link, .dir_read_link, .dir_hard_link, .dir_access, .dir_real_path, .dir_real_path_file, .file_real_path, .file_hard_link, .device_io_control => unreachable,
+        .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_size, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .file_stat, .dir_open, .dir_close, .dir_read, .dir_create_dir, .dir_rename, .dir_rename_preserve, .dir_delete_file, .dir_delete_dir, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps, .dir_sym_link, .dir_read_link, .dir_hard_link, .dir_access, .dir_real_path, .dir_real_path_file, .file_real_path, .file_hard_link, .device_io_control => unreachable,
         // Driven by Loop's generic read/write fallback, never reaches the backend.
         .net_send_file => unreachable,
     }
@@ -601,8 +600,8 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
             }
             return .completed;
         },
-        .pipe_read => {
-            const data = comp.cast(PipeRead);
+        inline .file_read_streaming => |op| {
+            const data = comp.cast(op.toType());
             // Check for actual errors first
             const has_error = (event.flags & EV_ERROR) != 0;
             if (has_error and event.data != 0) {
@@ -611,7 +610,7 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
             }
             // Try to read - there might still be data in the pipe buffer
             if (fs.readv(data.handle, data.buffer.iovecs)) |n| {
-                comp.setResult(.pipe_read, n);
+                comp.setResult(op, n);
                 return .completed;
             } else |err| switch (err) {
                 error.WouldBlock => {
@@ -619,7 +618,7 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
                     // If we got WouldBlock and EOF is set, that's EOF (no more data)
                     const has_eof = (event.flags & EV_EOF) != 0;
                     if (has_eof) {
-                        comp.setResult(.pipe_read, 0);
+                        comp.setResult(op, 0);
                         return .completed;
                     }
                     return .requeue;
@@ -630,8 +629,8 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
                 },
             }
         },
-        .pipe_write => {
-            const data = comp.cast(PipeWrite);
+        inline .file_write_streaming => |op| {
+            const data = comp.cast(op.toType());
             // For pipes, check for errors but don't use getSockError
             const has_error = (event.flags & EV_ERROR) != 0;
             const has_eof = (event.flags & EV_EOF) != 0;
@@ -651,7 +650,7 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
                 return .completed;
             }
             if (fs.writev(data.handle, data.buffer.iovecs)) |n| {
-                comp.setResult(.pipe_write, n);
+                comp.setResult(op, n);
                 return .completed;
             } else |err| switch (err) {
                 error.WouldBlock => return .requeue,

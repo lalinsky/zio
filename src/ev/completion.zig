@@ -121,8 +121,6 @@ pub const Op = enum {
     file_hard_link,
     pipe_poll,
     pipe_create,
-    pipe_read,
-    pipe_write,
     pipe_close,
     device_io_control,
     mach_port,
@@ -187,8 +185,6 @@ pub const Op = enum {
             .file_hard_link => FileHardLink,
             .pipe_poll => PipePoll,
             .pipe_create => PipeCreate,
-            .pipe_read => PipeRead,
-            .pipe_write => PipeWrite,
             .pipe_close => PipeClose,
             .device_io_control => DeviceIoControl,
             .mach_port => MachPort,
@@ -255,8 +251,6 @@ pub const Op = enum {
             FileHardLink => .file_hard_link,
             PipePoll => .pipe_poll,
             PipeCreate => .pipe_create,
-            PipeRead => .pipe_read,
-            PipeWrite => .pipe_write,
             PipeClose => .pipe_close,
             DeviceIoControl => .device_io_control,
             MachPort => .mach_port,
@@ -964,9 +958,18 @@ pub const NetSendMsg = struct {
     }
 };
 
+/// Result of a file open/create: the new fd plus whether it is pollable
+/// (non-seekable). The pollable verdict is determined when the backend opens the
+/// file via the thread pool (always false on backends with native open/streaming
+/// and on Windows), letting callers seed streaming ops without re-probing.
+pub const FileOpenResult = struct {
+    fd: fs.fd_t,
+    pollable: bool = false,
+};
+
 pub const FileOpen = struct {
     c: Completion,
-    result_private_do_not_touch: fs.fd_t = undefined,
+    result_private_do_not_touch: FileOpenResult = undefined,
     internal: switch (Backend.capabilities.file_open) {
         true => if (@hasDecl(Backend, "FileOpenData")) Backend.FileOpenData else struct {},
         false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
@@ -986,14 +989,14 @@ pub const FileOpen = struct {
         };
     }
 
-    pub fn getResult(self: *const FileOpen) Error!fs.fd_t {
+    pub fn getResult(self: *const FileOpen) Error!FileOpenResult {
         return self.c.getResult(.file_open);
     }
 };
 
 pub const FileCreate = struct {
     c: Completion,
-    result_private_do_not_touch: fs.fd_t = undefined,
+    result_private_do_not_touch: FileOpenResult = undefined,
     internal: switch (Backend.capabilities.file_create) {
         true => if (@hasDecl(Backend, "FileCreateData")) Backend.FileCreateData else struct {},
         false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
@@ -1013,7 +1016,7 @@ pub const FileCreate = struct {
         };
     }
 
-    pub fn getResult(self: *const FileCreate) Error!fs.fd_t {
+    pub fn getResult(self: *const FileCreate) Error!FileOpenResult {
         return self.c.getResult(.file_create);
     }
 };
@@ -1104,6 +1107,11 @@ pub const FileReadStreaming = struct {
     } = .{},
     handle: fs.fd_t,
     buffer: ReadBuf,
+    /// Whether `handle` is pollable (non-seekable). `null` until classified by
+    /// the loop on first submission; backends with a readiness path use the
+    /// poll path when true and the thread pool when false. Callers may seed a
+    /// cached value to skip re-classification, and may read it back afterwards.
+    pollable: ?bool = null,
 
     pub const Error = fs.FileReadError || Cancelable;
 
@@ -1129,6 +1137,11 @@ pub const FileWriteStreaming = struct {
     } = .{},
     handle: fs.fd_t,
     buffer: WriteBuf,
+    /// Whether `handle` is pollable (non-seekable). `null` until classified by
+    /// the loop on first submission; backends with a readiness path use the
+    /// poll path when true and the thread pool when false. Callers may seed a
+    /// cached value to skip re-classification, and may read it back afterwards.
+    pollable: ?bool = null,
 
     pub const Error = fs.FileWriteError || Cancelable;
 
@@ -1966,48 +1979,6 @@ pub const PipeCreate = struct {
 
     pub fn getResult(self: *const PipeCreate) Error![2]fs.fd_t {
         return self.c.getResult(.pipe_create);
-    }
-};
-
-pub const PipeRead = struct {
-    c: Completion,
-    result_private_do_not_touch: usize = undefined,
-    handle: fs.fd_t,
-    buffer: ReadBuf,
-
-    pub const Error = fs.FileReadError || Cancelable;
-
-    pub fn init(handle: fs.fd_t, buffer: ReadBuf) PipeRead {
-        return .{
-            .c = .init(.pipe_read),
-            .handle = handle,
-            .buffer = buffer,
-        };
-    }
-
-    pub fn getResult(self: *const PipeRead) Error!usize {
-        return self.c.getResult(.pipe_read);
-    }
-};
-
-pub const PipeWrite = struct {
-    c: Completion,
-    result_private_do_not_touch: usize = undefined,
-    handle: fs.fd_t,
-    buffer: WriteBuf,
-
-    pub const Error = fs.FileWriteError || Cancelable;
-
-    pub fn init(handle: fs.fd_t, buffer: WriteBuf) PipeWrite {
-        return .{
-            .c = .init(.pipe_write),
-            .handle = handle,
-            .buffer = buffer,
-        };
-    }
-
-    pub fn getResult(self: *const PipeWrite) Error!usize {
-        return self.c.getResult(.pipe_write);
     }
 };
 

@@ -19,8 +19,6 @@ const NetRecvMsg = @import("../completion.zig").NetRecvMsg;
 const NetSendMsg = @import("../completion.zig").NetSendMsg;
 const NetPoll = @import("../completion.zig").NetPoll;
 const PipePoll = @import("../completion.zig").PipePoll;
-const PipeRead = @import("../completion.zig").PipeRead;
-const PipeWrite = @import("../completion.zig").PipeWrite;
 const PipeClose = @import("../completion.zig").PipeClose;
 
 pub const NetHandle = net.fd_t;
@@ -149,8 +147,8 @@ fn getEvents(completion: *Completion) @FieldType(net.pollfd, "events") {
             };
         },
         // Pipe operations not supported on Windows (poll uses SOCKET, not HANDLE - Windows uses IOCP)
-        .pipe_read => if (builtin.os.tag == .windows) unreachable else net.POLL.IN,
-        .pipe_write => if (builtin.os.tag == .windows) unreachable else net.POLL.OUT,
+        .file_read_streaming => if (builtin.os.tag == .windows) unreachable else net.POLL.IN,
+        .file_write_streaming => if (builtin.os.tag == .windows) unreachable else net.POLL.OUT,
         .pipe_poll => if (builtin.os.tag == .windows) unreachable else blk: {
             const poll_data = completion.cast(PipePoll);
             break :blk switch (poll_data.event) {
@@ -173,8 +171,7 @@ fn getPollType(op: Op) PollEntryType {
         .net_recvmsg => .send_or_recv,
         .net_sendmsg => .send_or_recv,
         .net_poll => .send_or_recv,
-        .pipe_read => if (builtin.os.tag == .windows) unreachable else .send_or_recv,
-        .pipe_write => if (builtin.os.tag == .windows) unreachable else .send_or_recv,
+        .file_read_streaming, .file_write_streaming => if (builtin.os.tag == .windows) unreachable else .send_or_recv,
         .pipe_poll => if (builtin.os.tag == .windows) unreachable else .send_or_recv,
         else => unreachable,
     };
@@ -273,8 +270,7 @@ fn getHandle(completion: *Completion) NetHandle {
         .net_sendmsg => completion.cast(NetSendMsg).handle,
         .net_poll => completion.cast(NetPoll).handle,
         // Pipe handles are only compatible with NetHandle on non-Windows (Windows uses IOCP)
-        .pipe_read => if (builtin.os.tag == .windows) unreachable else completion.cast(PipeRead).handle,
-        .pipe_write => if (builtin.os.tag == .windows) unreachable else completion.cast(PipeWrite).handle,
+        inline .file_read_streaming, .file_write_streaming => |op| if (builtin.os.tag == .windows) unreachable else completion.cast(op.toType()).handle,
         .pipe_close => if (builtin.os.tag == .windows) unreachable else completion.cast(PipeClose).handle,
         .pipe_poll => if (builtin.os.tag == .windows) unreachable else completion.cast(PipePoll).handle,
         else => unreachable,
@@ -385,23 +381,15 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             c.setResult(.pipe_create, fds);
             state.markCompletedFromBackend(c);
         },
-        .pipe_read => {
+        // Streaming file I/O is routed here by the loop only when the fd is
+        // pollable (non-seekable), so it is handled exactly like pipe read/write.
+        inline .file_read_streaming, .file_write_streaming => |op| {
             if (builtin.os.tag == .windows) {
                 c.setError(error.Unexpected);
                 state.markCompletedFromBackend(c);
                 return;
             }
-            const data = c.cast(PipeRead);
-            self.addToPollQueue(state, data.handle, c);
-        },
-        .pipe_write => {
-            if (builtin.os.tag == .windows) {
-                c.setError(error.Unexpected);
-                state.markCompletedFromBackend(c);
-                return;
-            }
-            const data = c.cast(PipeWrite);
-            self.addToPollQueue(state, data.handle, c);
+            self.addToPollQueue(state, c.cast(op.toType()).handle, c);
         },
         .pipe_close => {
             if (builtin.os.tag == .windows) {
@@ -419,7 +407,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
 
         // File operations, process_wait and device_io_control are handled by Loop via thread pool
-        .file_open, .file_create, .file_close, .file_read, .file_write, .file_read_streaming, .file_write_streaming, .file_sync, .file_size, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .file_stat, .dir_open, .dir_close, .dir_read, .dir_create_dir, .dir_rename, .dir_rename_preserve, .dir_delete_file, .dir_delete_dir, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps, .dir_sym_link, .dir_read_link, .dir_hard_link, .dir_access, .dir_real_path, .dir_real_path_file, .file_real_path, .file_hard_link, .device_io_control, .process_wait => unreachable,
+        .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_size, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .file_stat, .dir_open, .dir_close, .dir_read, .dir_create_dir, .dir_rename, .dir_rename_preserve, .dir_delete_file, .dir_delete_dir, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps, .dir_sym_link, .dir_read_link, .dir_hard_link, .dir_access, .dir_real_path, .dir_real_path_file, .file_real_path, .file_hard_link, .device_io_control, .process_wait => unreachable,
         // Driven by Loop's generic read/write fallback, never reaches the backend.
         .net_send_file => unreachable,
         .mach_port => unreachable,
@@ -678,11 +666,11 @@ pub fn checkCompletion(c: *Completion, item: *const net.pollfd) CheckResult {
             return .requeue;
         },
         // Pipe operations not supported on Windows (poll uses SOCKET, not HANDLE - Windows uses IOCP)
-        .pipe_read => if (builtin.os.tag == .windows) unreachable else {
-            const data = c.cast(PipeRead);
+        inline .file_read_streaming => |op| if (builtin.os.tag == .windows) unreachable else {
+            const data = c.cast(op.toType());
             // Try to read - there might still be data in the pipe buffer
             if (fs.readv(data.handle, data.buffer.iovecs)) |n| {
-                c.setResult(.pipe_read, n);
+                c.setResult(op, n);
                 return .completed;
             } else |err| switch (err) {
                 error.WouldBlock => {
@@ -690,7 +678,7 @@ pub fn checkCompletion(c: *Completion, item: *const net.pollfd) CheckResult {
                     // If we got WouldBlock and HUP is set, that's EOF (no more data)
                     const has_hup = (item.revents & net.POLL.HUP) != 0;
                     if (has_hup) {
-                        c.setResult(.pipe_read, 0);
+                        c.setResult(op, 0);
                         return .completed;
                     }
                     return .requeue;
@@ -701,8 +689,8 @@ pub fn checkCompletion(c: *Completion, item: *const net.pollfd) CheckResult {
                 },
             }
         },
-        .pipe_write => if (builtin.os.tag == .windows) unreachable else {
-            const data = c.cast(PipeWrite);
+        inline .file_write_streaming => |op| if (builtin.os.tag == .windows) unreachable else {
+            const data = c.cast(op.toType());
             // For pipes, check for errors but don't use getSockError
             const has_error = (item.revents & net.POLL.ERR) != 0;
             const has_hup = (item.revents & net.POLL.HUP) != 0;
@@ -712,7 +700,7 @@ pub fn checkCompletion(c: *Completion, item: *const net.pollfd) CheckResult {
                 return .completed;
             }
             if (fs.writev(data.handle, data.buffer.iovecs)) |n| {
-                c.setResult(.pipe_write, n);
+                c.setResult(op, n);
                 return .completed;
             } else |err| switch (err) {
                 error.WouldBlock => return .requeue,

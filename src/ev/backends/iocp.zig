@@ -21,8 +21,8 @@ const FileRead = @import("../completion.zig").FileRead;
 const FileWrite = @import("../completion.zig").FileWrite;
 const FileSync = @import("../completion.zig").FileSync;
 const PipeCreate = @import("../completion.zig").PipeCreate;
-const PipeRead = @import("../completion.zig").PipeRead;
-const PipeWrite = @import("../completion.zig").PipeWrite;
+const FileReadStreaming = @import("../completion.zig").FileReadStreaming;
+const FileWriteStreaming = @import("../completion.zig").FileWriteStreaming;
 const PipeClose = @import("../completion.zig").PipeClose;
 const ProcessWait = @import("../completion.zig").ProcessWait;
 
@@ -145,6 +145,11 @@ const BackendCapabilities = @import("../completion.zig").BackendCapabilities;
 pub const capabilities: BackendCapabilities = .{
     .file_read = true,
     .file_write = true,
+    // Streaming (positionless) read/write uses overlapped ReadFile/WriteFile
+    // with a zero offset, but only for non-seekable handles (pipes/stdio).
+    // Loop routes pollable fds here; seekable fds go to the thread pool.
+    .file_read_streaming = false,
+    .file_write_streaming = false,
     .is_multi_threaded = true,
     .process_wait = true,
 };
@@ -477,8 +482,6 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .file_open,
         .file_create,
         .file_close,
-        .file_read_streaming,
-        .file_write_streaming,
         .file_sync,
         .file_set_size,
         .file_set_permissions,
@@ -526,17 +529,19 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             };
         },
 
-        .pipe_read => {
-            const data = c.cast(PipeRead);
-            self.submitPipeRead(state, data) catch |err| {
+        // Streaming (positionless) I/O — used for pipes and stdio. Only pollable
+        // (non-seekable) fds reach here; seekable fds go to the thread pool.
+        .file_read_streaming => {
+            const data = c.cast(FileReadStreaming);
+            self.submitFileReadStreaming(state, data) catch |err| {
                 c.setError(err);
                 state.markCompletedFromBackend(c);
             };
         },
 
-        .pipe_write => {
-            const data = c.cast(PipeWrite);
-            self.submitPipeWrite(state, data) catch |err| {
+        .file_write_streaming => {
+            const data = c.cast(FileWriteStreaming);
+            self.submitFileWriteStreaming(state, data) catch |err| {
                 c.setError(err);
                 state.markCompletedFromBackend(c);
             };
@@ -1153,10 +1158,16 @@ fn submitPipeCreate(self: *Self, state: *LoopState, data: *PipeCreate) !void {
     state.markCompletedFromBackend(&data.c);
 }
 
-fn submitPipeRead(self: *Self, state: *LoopState, data: *PipeRead) !void {
+fn submitFileReadStreaming(self: *Self, state: *LoopState, data: *FileReadStreaming) !void {
     _ = self;
 
-    // Initialize OVERLAPPED with zero offset (pipes don't have offsets)
+    if (data.buffer.iovecs.len == 0) {
+        data.c.setResult(.file_read_streaming, 0);
+        state.markCompletedFromBackend(&data.c);
+        return;
+    }
+
+    // Initialize OVERLAPPED with zero offset (streaming has no offset)
     data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
 
     // ReadFile only supports a single buffer, so we read into the first iovec
@@ -1180,7 +1191,7 @@ fn submitPipeRead(self: *Self, state: *LoopState, data: *PipeRead) !void {
             // Write end closed (BROKEN_PIPE) or EOF reached (HANDLE_EOF) -
             // this is EOF, not an error. No completion packet is queued in this
             // case, so we must complete it here.
-            data.c.setResult(.pipe_read, 0);
+            data.c.setResult(.file_read_streaming, 0);
             state.markCompletedFromBackend(&data.c);
             return;
         } else if (err != .IO_PENDING) {
@@ -1194,10 +1205,16 @@ fn submitPipeRead(self: *Self, state: *LoopState, data: *PipeRead) !void {
     // Operation will complete via IOCP (either immediate or async)
 }
 
-fn submitPipeWrite(self: *Self, state: *LoopState, data: *PipeWrite) !void {
+fn submitFileWriteStreaming(self: *Self, state: *LoopState, data: *FileWriteStreaming) !void {
     _ = self;
 
-    // Initialize OVERLAPPED with zero offset (pipes don't have offsets)
+    if (data.buffer.iovecs.len == 0) {
+        data.c.setResult(.file_write_streaming, 0);
+        state.markCompletedFromBackend(&data.c);
+        return;
+    }
+
+    // Initialize OVERLAPPED with zero offset (streaming has no offset)
     data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
 
     // WriteFile only supports a single buffer, so we write from the first iovec
@@ -1329,16 +1346,16 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
                 .file_read,
                 .file_write,
                 .file_sync,
-                .pipe_read,
-                .pipe_write,
+                .file_read_streaming,
+                .file_write_streaming,
                 => blk: {
                     // Get file handle from the completion
                     const h = switch (target.op) {
                         .file_read => target.cast(FileRead).handle,
                         .file_write => target.cast(FileWrite).handle,
                         .file_sync => target.cast(FileSync).handle,
-                        .pipe_read => target.cast(PipeRead).handle,
-                        .pipe_write => target.cast(PipeWrite).handle,
+                        .file_read_streaming => target.cast(FileReadStreaming).handle,
+                        .file_write_streaming => target.cast(FileWriteStreaming).handle,
                         else => unreachable,
                     };
                     break :blk h;
@@ -1745,8 +1762,8 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
             state.markCompletedFromBackend(c);
         },
 
-        .pipe_read => {
-            const data = c.cast(PipeRead);
+        .file_read_streaming => {
+            const data = c.cast(FileReadStreaming);
             var bytes_transferred: windows.DWORD = 0;
 
             const result = windows.GetOverlappedResult(
@@ -1758,21 +1775,21 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
 
             if (result == .FALSE) {
                 const err = windows.GetLastError();
-                // HANDLE_EOF and BROKEN_PIPE are not errors for pipe reads - they mean EOF (0 bytes)
+                // HANDLE_EOF and BROKEN_PIPE are not errors for streaming reads - they mean EOF (0 bytes)
                 if (err == .HANDLE_EOF or err == .BROKEN_PIPE) {
-                    c.setResult(.pipe_read, 0);
+                    c.setResult(.file_read_streaming, 0);
                 } else {
                     c.setError(fs.errnoToFileReadError(err));
                 }
             } else {
-                c.setResult(.pipe_read, @intCast(bytes_transferred));
+                c.setResult(.file_read_streaming, @intCast(bytes_transferred));
             }
 
             state.markCompletedFromBackend(c);
         },
 
-        .pipe_write => {
-            const data = c.cast(PipeWrite);
+        .file_write_streaming => {
+            const data = c.cast(FileWriteStreaming);
             var bytes_transferred: windows.DWORD = 0;
 
             const result = windows.GetOverlappedResult(
@@ -1786,7 +1803,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 const err = windows.GetLastError();
                 c.setError(fs.errnoToFileWriteError(@enumFromInt(@intFromEnum(err))));
             } else {
-                c.setResult(.pipe_write, @intCast(bytes_transferred));
+                c.setResult(.file_write_streaming, @intCast(bytes_transferred));
             }
 
             state.markCompletedFromBackend(c);

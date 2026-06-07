@@ -20,10 +20,13 @@ pub fn build(b: *std.Build) void {
         "How to handle resolve_beneath on platforms without kernel support: strict (error.Unsupported) or best_effort (log warning, continue)",
     ) orelse .strict;
 
+    const no_hacks = b.option(bool, "no-hacks", "Avoid unsafe performance tricks (bool smuggling, etc.)") orelse false;
+
     // Create options for backend selection
     var options = b.addOptions();
     options.addOption(?[]const u8, "backend", backend);
     options.addOption(ResolveBeneathMode, "resolve_beneath_mode", resolve_beneath_mode);
+    options.addOption(bool, "no_hacks", no_hacks);
 
     const zio = b.addModule("zio", .{
         .root_source_file = b.path("src/zio.zig"),
