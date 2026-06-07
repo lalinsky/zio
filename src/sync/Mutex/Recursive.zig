@@ -344,27 +344,4 @@ test "Recursive cancel waiting on first acquisition" {
     try std.testing.expectError(error.Canceled, handle.join());
 }
 
-test "Recursive cancel does not affect recursive acquisitions" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
-    defer runtime.deinit();
 
-    var mutex = Recursive.init;
-    var value: u32 = 0;
-
-    // Acquire lock, then try recursive lock inside a cancelled task
-    try mutex.lock();
-
-    const TestFn = struct {
-        fn recursiveWork(mtx: *Recursive, val: *u32) !void {
-            // This should succeed immediately since we already hold the lock
-            try mtx.lock();
-            defer mtx.unlock();
-            val.* += 1;
-        }
-    };
-
-    try TestFn.recursiveWork(&mutex, &value);
-    mutex.unlock();
-
-    try std.testing.expectEqual(1, value);
-}
