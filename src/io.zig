@@ -15,7 +15,6 @@ const Alignment = std.mem.Alignment;
 const runtime_mod = @import("runtime.zig");
 const Runtime = runtime_mod.Runtime;
 const getCurrentTask = runtime_mod.getCurrentTask;
-const getCurrentTaskOrNull = runtime_mod.getCurrentTaskOrNull;
 const getCurrentExecutor = runtime_mod.getCurrentExecutor;
 const beginShield = runtime_mod.beginShield;
 const endShield = runtime_mod.endShield;
@@ -1629,51 +1628,17 @@ fn processExecutablePathImpl(_: ?*anyopaque, buffer: []u8) std.process.Executabl
     return io.vtable.processExecutablePath(io.userdata, buffer);
 }
 
-const StderrOwner = union(enum) {
-    none,
-    task: *AnyTask,
-    thread: std.Thread.Id,
-};
-
-var stderr_mutex: Mutex = .init;
-var stderr_owner: StderrOwner = .none;
-var stderr_lock_count: usize = 0;
+var stderr_mutex: Mutex.Recursive = .init;
 var stderr_writer_initialized = false;
 var stderr_writer: Io.File.Writer = undefined;
 
-fn stderrIsOwner() bool {
-    return switch (stderr_owner) {
-        .task => |t| getCurrentTaskOrNull() == t,
-        .thread => |id| getCurrentTaskOrNull() == null and std.Thread.getCurrentId() == id,
-        .none => false,
-    };
-}
-
 fn lockStderrImpl(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.Cancelable!Io.LockedStderr {
-    if (stderrIsOwner()) {
-        stderr_lock_count += 1;
-        return initLockedStderr(userdata, terminal_mode);
-    }
     try stderr_mutex.lock();
-    errdefer stderr_mutex.unlock();
-    beginShield();
-    errdefer endShield();
-    stderr_owner = if (getCurrentTaskOrNull()) |task| StderrOwner{ .task = task } else StderrOwner{ .thread = std.Thread.getCurrentId() };
-    stderr_lock_count = 1;
     return initLockedStderr(userdata, terminal_mode);
 }
 
 fn tryLockStderrImpl(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.Cancelable!?Io.LockedStderr {
-    if (stderrIsOwner()) {
-        stderr_lock_count += 1;
-        return try initLockedStderr(userdata, terminal_mode);
-    }
     if (!stderr_mutex.tryLock()) return null;
-    errdefer stderr_mutex.unlock();
-    beginShield();
-    errdefer endShield();
-    stderr_owner = if (getCurrentTaskOrNull()) |task| StderrOwner{ .task = task } else StderrOwner{ .thread = std.Thread.getCurrentId() };
-    stderr_lock_count = 1;
     return try initLockedStderr(userdata, terminal_mode);
 }
 
@@ -1700,12 +1665,7 @@ fn initLockedStderr(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.
 fn unlockStderrImpl(_: ?*anyopaque) void {
     if (stderr_writer.err == null) stderr_writer.interface.flush() catch {};
     stderr_writer.err = null;
-    stderr_lock_count -= 1;
-    if (stderr_lock_count == 0) {
-        stderr_owner = .none;
-        stderr_mutex.unlock();
-        endShield();
-    }
+    stderr_mutex.unlock();
 }
 
 fn processCurrentPathImpl(_: ?*anyopaque, buffer: []u8) std.process.CurrentPathError!usize {
