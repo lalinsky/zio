@@ -650,19 +650,8 @@ test "Stack: recycle" {
     try std.testing.expect(stack.base - stack.limit == committed_len);
 }
 
-/// Panic handler that ensures coroutine stacks are fully committed before unwinding.
-/// This prevents SIGSEGV during stack trace generation when the default panic handler
-/// resets signal handlers.
-///
-/// Usage in your root file:
-///   pub const panic = zio.coro.panicHandler;
-///
-pub fn panicHandler(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
-    _ = error_return_trace;
-
+pub fn crashHandler() void {
     if (coroutines.getCurrentContext()) |ctx| {
         stackExtend(&ctx.stack_info, .full) catch {};
     }
-
-    std.debug.defaultPanic(msg, ret_addr);
 }

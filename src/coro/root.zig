@@ -31,7 +31,7 @@ pub const stackRecycle = stack.stackRecycle;
 pub const stackExtend = stack.stackExtend;
 pub const setupStackGrowth = stack.setupStackGrowth;
 pub const cleanupStackGrowth = stack.cleanupStackGrowth;
-pub const panicHandler = stack.panicHandler;
+pub const crashHandler = stack.crashHandler;
 
 pub const StackPool = @import("stack_pool.zig").StackPool;
 
