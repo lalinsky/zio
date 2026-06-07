@@ -33,6 +33,8 @@ const Waiter = @import("../common.zig").Waiter;
 
 const Mutex = @This();
 
+pub const Recursive = @import("Mutex/Recursive.zig");
+
 /// FIFO wait queue with lock state encoded in flag:
 /// - flag set = unlocked
 /// - flag clear = locked (with or without waiters)
