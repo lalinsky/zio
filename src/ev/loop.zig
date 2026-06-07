@@ -28,48 +28,23 @@ const log = @import("../common.zig").log;
 const in_safe_mode = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
 
 pub const LoopGroup = struct {
-    allocator: std.mem.Allocator = undefined,
     shared: Backend.SharedState = .{},
-
-    /// Caches whether a file descriptor is pollable (non-seekable). Streaming
-    /// reads/writes on pollable fds (pipes, sockets, FIFOs, ttys) use the
-    /// readiness poll path; seekable fds (regular files, block devices) fall
-    /// back to the thread pool. Probed lazily on the first streaming op.
-    pollable_mutex: os.Mutex = .init(),
-    pollable_fds: std.AutoHashMapUnmanaged(os.fs.fd_t, bool) = .empty,
-
-    pub fn deinit(self: *LoopGroup) void {
-        self.pollable_fds.deinit(self.allocator);
-    }
-
-    /// Returns whether `fd` should use the readiness poll path for streaming
-    /// I/O. The verdict is cached; the first call for an fd probes via lseek
-    /// and, if pollable, switches the fd to non-blocking mode (required by the
-    /// poll path). On caching failure the (correct) verdict is still returned.
-    pub fn classifyFd(self: *LoopGroup, fd: os.fs.fd_t) bool {
-        // Windows (iocp) has no readiness poll path; streaming always uses the
-        // thread pool, so nothing here is pollable.
-        if (builtin.os.tag == .windows) {
-            return false;
-        } else {
-            {
-                self.pollable_mutex.lock();
-                defer self.pollable_mutex.unlock();
-                if (self.pollable_fds.get(fd)) |v| return v;
-            }
-
-            // Probe outside the lock; lseek/fcntl are idempotent, so a concurrent
-            // probe of the same fd is harmless.
-            const pollable = os.posix.isPollable(fd);
-            if (pollable) os.posix.setNonblocking(fd) catch {};
-
-            self.pollable_mutex.lock();
-            defer self.pollable_mutex.unlock();
-            self.pollable_fds.put(self.allocator, fd, pollable) catch {};
-            return pollable;
-        }
-    }
 };
+
+/// Determine whether `handle` should use the readiness poll path for streaming
+/// I/O: pollable (non-seekable) fds probe true and are switched to non-blocking
+/// mode (required by the poll path); seekable fds (regular files, block devices)
+/// probe false and use the thread pool. Windows (iocp) has no readiness path, so
+/// nothing is pollable there.
+fn probePollable(handle: os.fs.fd_t) bool {
+    if (builtin.os.tag == .windows) {
+        return false;
+    } else {
+        const pollable = os.posix.isPollable(handle);
+        if (pollable) os.posix.setNonblocking(handle) catch {};
+        return pollable;
+    }
+}
 
 pub const RunMode = enum {
     no_wait,
@@ -299,7 +274,6 @@ pub const Loop = struct {
         if (options.loop_group) |group| {
             self.loop_group = group;
         } else {
-            self.internal_loop_group.allocator = options.allocator;
             self.loop_group = &self.internal_loop_group;
         }
 
@@ -318,9 +292,6 @@ pub const Loop = struct {
 
     pub fn deinit(self: *Loop) void {
         self.backend.deinit();
-        // External loop groups are owned (and freed) by the caller; only the
-        // internal one is ours to clean up.
-        self.internal_loop_group.deinit();
     }
 
     pub fn stop(self: *Loop) void {
@@ -492,9 +463,10 @@ pub const Loop = struct {
                 if (@hasField(BackendCapabilities, @tagName(op))) {
                     if (!@field(Backend.capabilities, @tagName(op))) {
                         // Pollable streaming ops took the backend poll path, not
-                        // the thread pool, so they must be canceled there.
+                        // the thread pool, so they must be canceled there. The
+                        // verdict was cached on the op at submission time.
                         if (comptime (op == .file_read_streaming or op == .file_write_streaming)) {
-                            if (self.loop_group.classifyFd(completion.cast(op.toType()).handle)) {
+                            if (completion.cast(op.toType()).pollable orelse false) {
                                 self.backend.cancel(&self.state, completion);
                                 return;
                             }
@@ -642,7 +614,15 @@ pub const Loop = struct {
                 switch (completion.op) {
                     inline .file_read_streaming, .file_write_streaming => |op| {
                         if (comptime !@field(Backend.capabilities, @tagName(op))) {
-                            if (self.loop_group.classifyFd(completion.cast(op.toType()).handle)) {
+                            const data = completion.cast(op.toType());
+                            // Classify lazily and cache the verdict on the op, so a
+                            // reused op (or the caller) can skip re-probing.
+                            const pollable = data.pollable orelse blk: {
+                                const p = probePollable(data.handle);
+                                data.pollable = p;
+                                break :blk p;
+                            };
+                            if (pollable) {
                                 self.state.inflight_io += 1;
                                 self.backend.submit(&self.state, completion);
                             } else {
