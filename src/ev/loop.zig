@@ -607,8 +607,8 @@ pub const Loop = struct {
                             break :blk p;
                         };
                         if (comptime !@field(Backend.capabilities, @tagName(op))) {
-                            // Non-native backend: route pollable to readiness path,
-                            // non-pollable (seekable) to thread pool.
+                            // Route pollable fds to the backend readiness/overlapped path;
+                            // seekable fds (regular files, block devices) to the thread pool.
                             if (pollable) {
                                 self.state.inflight_io += 1;
                                 self.backend.submit(&self.state, completion);
@@ -616,16 +616,6 @@ pub const Loop = struct {
                                 self.submitFileOpToThreadPool(completion);
                             }
                             return;
-                        } else if (comptime builtin.os.tag == .windows) {
-                            // IOCP: overlapped (zero-offset) streaming only works for
-                            // non-seekable handles; refuse seekable (disk) handles.
-                            if (!pollable) {
-                                completion.state = .running;
-                                self.state.active += 1;
-                                completion.setError(error.Unexpected);
-                                self.state.markCompleted(completion);
-                                return;
-                            }
                         }
                     },
                     else => {},

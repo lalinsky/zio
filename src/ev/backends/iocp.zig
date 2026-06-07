@@ -145,10 +145,11 @@ const BackendCapabilities = @import("../completion.zig").BackendCapabilities;
 pub const capabilities: BackendCapabilities = .{
     .file_read = true,
     .file_write = true,
-    // Streaming (positionless) read/write is implemented via overlapped
-    // ReadFile/WriteFile with a zero offset, used for pipes and stdio.
-    .file_read_streaming = true,
-    .file_write_streaming = true,
+    // Streaming (positionless) read/write uses overlapped ReadFile/WriteFile
+    // with a zero offset, but only for non-seekable handles (pipes/stdio).
+    // Loop routes pollable fds here; seekable fds go to the thread pool.
+    .file_read_streaming = false,
+    .file_write_streaming = false,
     .is_multi_threaded = true,
     .process_wait = true,
 };
@@ -528,8 +529,8 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             };
         },
 
-        // Streaming (positionless) I/O — used for pipes and stdio. Reaches the
-        // backend for every fd since iocp has no thread-pool streaming path.
+        // Streaming (positionless) I/O — used for pipes and stdio. Only pollable
+        // (non-seekable) fds reach here; seekable fds go to the thread pool.
         .file_read_streaming => {
             const data = c.cast(FileReadStreaming);
             self.submitFileReadStreaming(state, data) catch |err| {
@@ -1160,6 +1161,12 @@ fn submitPipeCreate(self: *Self, state: *LoopState, data: *PipeCreate) !void {
 fn submitFileReadStreaming(self: *Self, state: *LoopState, data: *FileReadStreaming) !void {
     _ = self;
 
+    if (data.buffer.iovecs.len == 0) {
+        data.c.setResult(.file_read_streaming, 0);
+        state.markCompletedFromBackend(&data.c);
+        return;
+    }
+
     // Initialize OVERLAPPED with zero offset (streaming has no offset)
     data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
 
@@ -1200,6 +1207,12 @@ fn submitFileReadStreaming(self: *Self, state: *LoopState, data: *FileReadStream
 
 fn submitFileWriteStreaming(self: *Self, state: *LoopState, data: *FileWriteStreaming) !void {
     _ = self;
+
+    if (data.buffer.iovecs.len == 0) {
+        data.c.setResult(.file_write_streaming, 0);
+        state.markCompletedFromBackend(&data.c);
+        return;
+    }
 
     // Initialize OVERLAPPED with zero offset (streaming has no offset)
     data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
