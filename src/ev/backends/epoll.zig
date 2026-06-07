@@ -317,7 +317,7 @@ fn getHandle(completion: *Completion) NetHandle {
 /// On error, completes the operation immediately with error.Unexpected.
 pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
     c.state = .running;
-    state.active += 1;
+    state.incrActive();
 
     switch (c.op) {
         .group, .timer, .async, .work => unreachable, // Managed by the loop

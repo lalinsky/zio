@@ -201,6 +201,12 @@ pub const SharedState = struct {
     refcount: usize = 0,
     iocp: windows.HANDLE = windows.INVALID_HANDLE_VALUE,
 
+    /// Multi-threaded counters: multiple loops may submit and
+    /// complete I/O on the same IOCP port, so active/inflight_io
+    /// are shared atomics rather than per-LoopState fields.
+    active: std.atomic.Value(u64) = .init(0),
+    inflight_io: std.atomic.Value(u64) = .init(0),
+
     // Extension functions loaded once globally (family-independent)
     exts: ExtensionFunctions = undefined,
 
@@ -216,6 +222,11 @@ pub const SharedState = struct {
                 0,
                 0, // Use default number of concurrent threads
             ) orelse return error.Unexpected;
+
+            // Reset shared accounting in case this SharedState is being
+            // reused after a previous teardown that left stale counters.
+            self.active.store(0, .release);
+            self.inflight_io.store(0, .release);
 
             // Load all extension functions using a temporary socket
             // Socket family/type doesn't matter - use AF_INET SOCK_STREAM
@@ -346,7 +357,7 @@ pub fn wake(self: *Self, state: *LoopState) void {
 
 pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
     c.state = .running;
-    state.active += 1;
+    state.incrActive();
 
     switch (c.op) {
         .group, .timer, .async, .work => unreachable, // Managed by the loop

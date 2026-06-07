@@ -130,10 +130,66 @@ pub const LoopState = struct {
     pub const wake_async: u32 = 2;
     pub const wake_cancel: u32 = 4;
 
+    /// Increment the inflight I/O counter. On multi-threaded backends
+    /// (IOCP) this routes to a shared atomic; on single-threaded backends
+    /// it's a simple local increment.
+    pub fn incrInflight(self: *LoopState) void {
+        if (comptime Backend.capabilities.is_multi_threaded) {
+            _ = self.loop.loop_group.shared.inflight_io.fetchAdd(1, .monotonic);
+        } else {
+            self.inflight_io += 1;
+        }
+    }
+
+    /// Decrement the inflight I/O counter.
+    pub fn decrInflight(self: *LoopState) void {
+        if (comptime Backend.capabilities.is_multi_threaded) {
+            _ = self.loop.loop_group.shared.inflight_io.fetchSub(1, .monotonic);
+        } else {
+            self.inflight_io -= 1;
+        }
+    }
+
+    /// Read the inflight I/O counter.
+    pub fn loadInflight(self: *const LoopState) usize {
+        if (comptime Backend.capabilities.is_multi_threaded) {
+            return @intCast(self.loop.loop_group.shared.inflight_io.load(.monotonic));
+        } else {
+            return self.inflight_io;
+        }
+    }
+
+    /// Increment the active (not-yet-finished) completion counter.
+    pub fn incrActive(self: *LoopState) void {
+        if (comptime Backend.capabilities.is_multi_threaded) {
+            _ = self.loop.loop_group.shared.active.fetchAdd(1, .monotonic);
+        } else {
+            self.active += 1;
+        }
+    }
+
+    /// Decrement the active (not-yet-finished) completion counter.
+    pub fn decrActive(self: *LoopState) void {
+        if (comptime Backend.capabilities.is_multi_threaded) {
+            _ = self.loop.loop_group.shared.active.fetchSub(1, .monotonic);
+        } else {
+            self.active -= 1;
+        }
+    }
+
+    /// Read the active completion counter.
+    pub fn loadActive(self: *const LoopState) usize {
+        if (comptime Backend.capabilities.is_multi_threaded) {
+            return @intCast(self.loop.loop_group.shared.active.load(.monotonic));
+        } else {
+            return self.active;
+        }
+    }
+
     /// Called by backends when an I/O operation completes.
     /// Decrements inflight_io counter and marks the completion done.
     pub fn markCompletedFromBackend(self: *LoopState, completion: *Completion) void {
-        self.inflight_io -= 1;
+        self.decrInflight();
         self.markCompleted(completion);
     }
 
@@ -167,7 +223,7 @@ pub const LoopState = struct {
         std.debug.assert(completion.state == .completed);
 
         completion.state = .dead;
-        self.active -= 1;
+        self.decrActive();
 
         // Notify group/queue owner if this completion belongs to one
         if (completion.group.owner_callback) |cb| {
@@ -198,7 +254,7 @@ pub const LoopState = struct {
         if (timer.deadline.value > 0) {
             self.timers.remove(timer);
         } else {
-            self.active += 1;
+            self.incrActive();
         }
         switch (timer.timeout) {
             .none => timer.deadline = .{ .value = std.math.maxInt(time.TimeInt) },
@@ -288,7 +344,7 @@ pub const Loop = struct {
     }
 
     pub fn done(self: *const Loop) bool {
-        return self.state.stopped or (self.state.active == 0 and self.state.completions.empty());
+        return self.state.stopped or (self.state.loadActive() == 0 and self.state.completions.empty());
     }
 
     /// Get the current monotonic timestamp
@@ -333,7 +389,7 @@ pub const Loop = struct {
             timer.c.state = .new;
             timer.c.has_result = false;
             timer.c.err = null;
-            self.state.active -= 1;
+            self.state.decrActive();
         }
     }
 
@@ -509,7 +565,7 @@ pub const Loop = struct {
         if (completion.cancel_state.load(.acquire).requested) {
             // Directly mark it as canceled
             completion.setError(error.Canceled);
-            self.state.active += 1;
+            self.state.incrActive();
             completion.state = .running;
             self.state.markCompleted(completion);
             return;
@@ -525,7 +581,7 @@ pub const Loop = struct {
                 }
 
                 group.c.state = .running;
-                self.state.active += 1;
+                self.state.incrActive();
 
                 if (group.remaining.load(.acquire) == 0) {
                     // Empty group - complete immediately
@@ -553,7 +609,7 @@ pub const Loop = struct {
             .async => {
                 const async = completion.cast(Async);
                 async.c.state = .running;
-                self.state.active += 1;
+                self.state.incrActive();
 
                 // Check if already notified before submission
                 if (checkAndSetAsyncResult(async)) {
@@ -570,7 +626,7 @@ pub const Loop = struct {
                 work.completion_fn = loopWorkComplete;
                 work.completion_context = @ptrCast(self);
                 work.c.state = .running;
-                self.state.active += 1;
+                self.state.incrActive();
                 if (self.thread_pool) |thread_pool| {
                     thread_pool.submit(work);
                 } else {
@@ -583,9 +639,9 @@ pub const Loop = struct {
             .net_send_file => {
                 const op = completion.cast(NetSendFile);
                 completion.state = .running;
-                self.state.active += 1;
+                self.state.incrActive();
                 if (comptime Backend.capabilities.net_send_file) {
-                    self.state.inflight_io += 1;
+                    self.state.incrInflight();
                     self.backend.submit(&self.state, completion);
                 } else {
                     netSendFileStart(self, op);
@@ -610,7 +666,7 @@ pub const Loop = struct {
                             // Route pollable fds to the backend readiness/overlapped path;
                             // seekable fds (regular files, block devices) to the thread pool.
                             if (pollable) {
-                                self.state.inflight_io += 1;
+                                self.state.incrInflight();
                                 self.backend.submit(&self.state, completion);
                             } else {
                                 self.submitFileOpToThreadPool(completion);
@@ -634,7 +690,7 @@ pub const Loop = struct {
                     },
                 }
 
-                self.state.inflight_io += 1;
+                self.state.incrInflight();
                 self.backend.submit(&self.state, completion);
                 return;
             },
@@ -768,14 +824,14 @@ pub const Loop = struct {
             // No thread pool - complete with error
             log.err("No thread pool available for file operation", .{});
             completion.state = .running;
-            self.state.active += 1;
+            self.state.incrActive();
             completion.setError(error.Unexpected);
             self.state.markCompleted(completion);
             return;
         };
 
         completion.state = .running;
-        self.state.active += 1;
+        self.state.incrActive();
 
         switch (completion.op) {
             inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_read_streaming, .file_write_streaming, .file_sync, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .dir_create_dir, .dir_rename, .dir_rename_preserve, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat, .dir_open, .dir_close, .dir_read, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps, .dir_sym_link, .dir_read_link, .dir_hard_link, .dir_access, .dir_real_path, .dir_real_path_file, .file_real_path, .file_hard_link, .device_io_control, .process_wait => |op| {
@@ -997,7 +1053,7 @@ pub const Loop = struct {
 
         // Skip backend poll in no_wait mode if there's nothing to retrieve.
         // This avoids syscall overhead for pure CPU-bound workloads.
-        const should_poll = wait or self.state.inflight_io > 0;
+        const should_poll = wait or self.state.loadInflight() > 0;
         const wake_flags = self.state.wake_requested.swap(0, .acq_rel);
         const timed_out = if (should_poll) try self.backend.poll(&self.state, if (wake_flags != 0) .zero else timeout) else false;
 
