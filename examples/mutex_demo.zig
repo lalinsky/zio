@@ -4,6 +4,8 @@
 const std = @import("std");
 const zio = @import("zio");
 
+pub const std_options_debug_io = zio.debug_io;
+
 const SharedData = struct {
     counter: i32 = 0,
     mutex: zio.Mutex,

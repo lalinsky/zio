@@ -7,6 +7,8 @@
 const std = @import("std");
 const zio = @import("zio");
 
+pub const std_options_debug_io = zio.debug_io;
+
 // ICMP Echo Request/Reply structures
 const IcmpHeader = extern struct {
     type: u8,
