@@ -48,8 +48,6 @@ const FileSetSize = @import("../completion.zig").FileSetSize;
 const DirOpen = @import("../completion.zig").DirOpen;
 const DirClose = @import("../completion.zig").DirClose;
 const PipePoll = @import("../completion.zig").PipePoll;
-const PipeRead = @import("../completion.zig").PipeRead;
-const PipeWrite = @import("../completion.zig").PipeWrite;
 const PipeClose = @import("../completion.zig").PipeClose;
 const ProcessWait = @import("../completion.zig").ProcessWait;
 
@@ -699,18 +697,6 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             c.setResult(.pipe_create, fds);
             state.markCompletedFromBackend(c);
         },
-        .pipe_read => {
-            const data = c.cast(PipeRead);
-            const sqe = self.getSqeOrDefer(c) orelse return;
-            sqe.prep_readv(data.handle, data.buffer.iovecs, @bitCast(@as(i64, -1)));
-            sqe.user_data = @intFromPtr(c);
-        },
-        .pipe_write => {
-            const data = c.cast(PipeWrite);
-            const sqe = self.getSqeOrDefer(c) orelse return;
-            sqe.prep_writev(data.handle, data.buffer.iovecs, @bitCast(@as(i64, -1)));
-            sqe.user_data = @intFromPtr(c);
-        },
         .pipe_close => {
             const data = c.cast(PipeClose);
             const sqe = self.getSqeOrDefer(c) orelse return;
@@ -1187,20 +1173,6 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
             }
         },
         .pipe_create => unreachable, // Handled synchronously
-        .pipe_read => {
-            if (res < 0) {
-                c.setError(fs.errnoToFileReadError(@enumFromInt(-res)));
-            } else {
-                c.setResult(.pipe_read, @intCast(res));
-            }
-        },
-        .pipe_write => {
-            if (res < 0) {
-                c.setError(fs.errnoToFileWriteError(@enumFromInt(-res)));
-            } else {
-                c.setResult(.pipe_write, @intCast(res));
-            }
-        },
         .pipe_close => {
             if (res < 0) {
                 c.setError(fs.errnoToFileCloseError(@enumFromInt(-res)));

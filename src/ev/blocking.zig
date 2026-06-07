@@ -10,8 +10,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Completion = @import("completion.zig").Completion;
 const PipeClose = @import("completion.zig").PipeClose;
-const PipeRead = @import("completion.zig").PipeRead;
-const PipeWrite = @import("completion.zig").PipeWrite;
 const NetClose = @import("completion.zig").NetClose;
 const NetShutdown = @import("completion.zig").NetShutdown;
 const NetRecv = @import("completion.zig").NetRecv;
@@ -88,8 +86,6 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
         // Pipe operations
         .pipe_create => handlePipeCreate(c),
         .pipe_close => handlePipeClose(c),
-        .pipe_read => handlePipeRead(c),
-        .pipe_write => handlePipeWrite(c),
         .pipe_poll => handlePipePoll(c),
 
         // Socket operations
@@ -193,74 +189,6 @@ fn handlePipeClose(c: *Completion) void {
         c.setResult(.pipe_close, {});
     } else |err| {
         c.setError(err);
-    }
-}
-
-/// Helper to handle pipe read operation
-fn handlePipeRead(c: *Completion) void {
-    const data = c.cast(PipeRead);
-
-    // Windows: blocking read, no poll needed
-    if (builtin.os.tag == .windows) {
-        if (os.fs.readv(data.handle, data.buffer.iovecs)) |bytes_read| {
-            c.setResult(.pipe_read, bytes_read);
-        } else |err| {
-            c.setError(err);
-        }
-        return;
-    }
-
-    // POSIX: poll+read loop to handle race if multiple threads access same pipe
-    while (true) {
-        pollForReady(data.handle, os.net.POLL.IN) catch |err| {
-            c.setError(err);
-            return;
-        };
-
-        if (os.fs.readv(data.handle, data.buffer.iovecs)) |bytes_read| {
-            c.setResult(.pipe_read, bytes_read);
-            return;
-        } else |err| switch (err) {
-            error.WouldBlock => continue, // Another thread consumed data, retry
-            else => {
-                c.setError(err);
-                return;
-            },
-        }
-    }
-}
-
-/// Helper to handle pipe write operation
-fn handlePipeWrite(c: *Completion) void {
-    const data = c.cast(PipeWrite);
-
-    // Windows: blocking write, no poll needed
-    if (builtin.os.tag == .windows) {
-        if (os.fs.writev(data.handle, data.buffer.iovecs)) |bytes_written| {
-            c.setResult(.pipe_write, bytes_written);
-        } else |err| {
-            c.setError(err);
-        }
-        return;
-    }
-
-    // POSIX: poll+write loop to handle race if multiple threads access same pipe
-    while (true) {
-        pollForReady(data.handle, os.net.POLL.OUT) catch |err| {
-            c.setError(err);
-            return;
-        };
-
-        if (os.fs.writev(data.handle, data.buffer.iovecs)) |bytes_written| {
-            c.setResult(.pipe_write, bytes_written);
-            return;
-        } else |err| switch (err) {
-            error.WouldBlock => continue, // Another thread filled buffer, retry
-            else => {
-                c.setError(err);
-                return;
-            },
-        }
     }
 }
 

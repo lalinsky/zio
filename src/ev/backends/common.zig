@@ -107,7 +107,9 @@ pub fn handleNetClose(c: *Completion) void {
 /// nothing is pollable there.
 pub fn probePollable(handle: fs.fd_t) bool {
     if (builtin.os.tag == .windows) {
-        return false;
+        // On Windows, streaming (overlapped, zero-offset) I/O only works for
+        // non-seekable handles (pipes/devices); no non-blocking mode to set.
+        return @import("../../os/windows.zig").isPollable(handle);
     } else {
         const posix = @import("../../os/posix.zig");
         const pollable = posix.isPollable(handle);
@@ -166,30 +168,75 @@ pub fn handleFileWrite(c: *Completion) void {
 }
 
 /// Helper to handle streaming file read operation (uses current file position)
+/// Block until `fd` is ready for `events` (POSIX poll). Used by the blocking
+/// streaming handlers to wait on non-blocking pollable fds without an event loop.
+fn pollForReady(fd: net.fd_t, events: i16) !void {
+    var pfd = [_]net.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
+    _ = try net.poll(&pfd, -1);
+}
+
 pub fn handleFileReadStreaming(c: *Completion) void {
+    const data = c.cast(FileReadStreaming);
+
+    // Windows: blocking read, no readiness poll available.
     if (builtin.os.tag == .windows) {
-        c.setError(error.Unexpected);
+        if (fs.readv(data.handle, data.buffer.iovecs)) |bytes_read| {
+            c.setResult(.file_read_streaming, bytes_read);
+        } else |err| {
+            c.setError(err);
+        }
         return;
     }
-    const data = c.cast(FileReadStreaming);
-    if (fs.readv(data.handle, data.buffer.iovecs)) |bytes_read| {
-        c.setResult(.file_read_streaming, bytes_read);
-    } else |err| {
-        c.setError(err);
+
+    // Pollable fds (pipes/sockets) are non-blocking: on WouldBlock, wait for
+    // readiness and retry. Seekable (blocking) fds return on the first readv.
+    while (true) {
+        if (fs.readv(data.handle, data.buffer.iovecs)) |bytes_read| {
+            c.setResult(.file_read_streaming, bytes_read);
+            return;
+        } else |err| switch (err) {
+            error.WouldBlock => pollForReady(data.handle, net.POLL.IN) catch |perr| {
+                c.setError(perr);
+                return;
+            },
+            else => {
+                c.setError(err);
+                return;
+            },
+        }
     }
 }
 
 /// Helper to handle streaming file write operation (uses current file position)
 pub fn handleFileWriteStreaming(c: *Completion) void {
+    const data = c.cast(FileWriteStreaming);
+
+    // Windows: blocking write, no readiness poll available.
     if (builtin.os.tag == .windows) {
-        c.setError(error.Unexpected);
+        if (fs.writev(data.handle, data.buffer.iovecs)) |bytes_written| {
+            c.setResult(.file_write_streaming, bytes_written);
+        } else |err| {
+            c.setError(err);
+        }
         return;
     }
-    const data = c.cast(FileWriteStreaming);
-    if (fs.writev(data.handle, data.buffer.iovecs)) |bytes_written| {
-        c.setResult(.file_write_streaming, bytes_written);
-    } else |err| {
-        c.setError(err);
+
+    // Pollable fds (pipes/sockets) are non-blocking: on WouldBlock, wait for
+    // writability and retry. Seekable (blocking) fds return on the first writev.
+    while (true) {
+        if (fs.writev(data.handle, data.buffer.iovecs)) |bytes_written| {
+            c.setResult(.file_write_streaming, bytes_written);
+            return;
+        } else |err| switch (err) {
+            error.WouldBlock => pollForReady(data.handle, net.POLL.OUT) catch |perr| {
+                c.setError(perr);
+                return;
+            },
+            else => {
+                c.setError(err);
+                return;
+            },
+        }
     }
 }
 

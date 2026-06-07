@@ -162,8 +162,8 @@ fn getFilter(completion: *Completion) i16 {
                 .send => std.c.EVFILT.WRITE,
             };
         },
-        .pipe_read, .file_read_streaming => std.c.EVFILT.READ,
-        .pipe_write, .file_write_streaming => std.c.EVFILT.WRITE,
+        .file_read_streaming => std.c.EVFILT.READ,
+        .file_write_streaming => std.c.EVFILT.WRITE,
         .pipe_poll => blk: {
             const poll_data = completion.cast(PipePoll);
             break :blk switch (poll_data.event) {
@@ -189,7 +189,7 @@ fn getIdent(completion: *Completion) usize {
         .net_sendmsg => @intCast(completion.cast(NetSendMsg).handle),
         .net_poll => @intCast(completion.cast(NetPoll).handle),
         .pipe_poll => @intCast(completion.cast(PipePoll).handle),
-        inline .pipe_read, .pipe_write, .file_read_streaming, .file_write_streaming => |op| @intCast(completion.cast(op.toType()).handle),
+        inline .file_read_streaming, .file_write_streaming => |op| @intCast(completion.cast(op.toType()).handle),
         .pipe_close => @intCast(completion.cast(PipeClose).handle),
         .process_wait => @intCast(completion.cast(ProcessWait).handle),
         .mach_port => completion.cast(MachPort).port,
@@ -327,10 +327,8 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .net_sendmsg,
         .net_poll,
         .pipe_poll,
-        .pipe_read,
-        .pipe_write,
         // Streaming file I/O is routed here by the loop only when the fd is
-        // pollable (non-seekable), so it is handled exactly like pipe read/write.
+        // pollable (non-seekable); a pipe is always pollable.
         .file_read_streaming,
         .file_write_streaming,
         .mach_port,
@@ -602,7 +600,7 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
             }
             return .completed;
         },
-        inline .pipe_read, .file_read_streaming => |op| {
+        inline .file_read_streaming => |op| {
             const data = comp.cast(op.toType());
             // Check for actual errors first
             const has_error = (event.flags & EV_ERROR) != 0;
@@ -631,7 +629,7 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
                 },
             }
         },
-        inline .pipe_write, .file_write_streaming => |op| {
+        inline .file_write_streaming => |op| {
             const data = comp.cast(op.toType());
             // For pipes, check for errors but don't use getSockError
             const has_error = (event.flags & EV_ERROR) != 0;

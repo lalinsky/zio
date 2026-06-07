@@ -142,8 +142,8 @@ fn getEvents(completion: *Completion) u32 {
                 .send => std.os.linux.EPOLL.OUT,
             };
         },
-        .pipe_read, .file_read_streaming => std.os.linux.EPOLL.IN,
-        .pipe_write, .file_write_streaming => std.os.linux.EPOLL.OUT,
+        .file_read_streaming => std.os.linux.EPOLL.IN,
+        .file_write_streaming => std.os.linux.EPOLL.OUT,
         .pipe_poll => blk: {
             const poll_data = completion.cast(PipePoll);
             break :blk switch (poll_data.event) {
@@ -167,7 +167,7 @@ fn getPollType(op: Op) PollEntryType {
         .net_recvmsg => .send_or_recv,
         .net_sendmsg => .send_or_recv,
         .net_poll => .send_or_recv,
-        .pipe_read, .pipe_write, .file_read_streaming, .file_write_streaming => .send_or_recv,
+        .file_read_streaming, .file_write_streaming => .send_or_recv,
         .pipe_poll => .send_or_recv,
         .process_wait => .send_or_recv,
         else => unreachable,
@@ -306,7 +306,7 @@ fn getHandle(completion: *Completion) NetHandle {
         .net_sendmsg => completion.cast(NetSendMsg).handle,
         .net_poll => completion.cast(NetPoll).handle,
         .pipe_poll => completion.cast(PipePoll).handle,
-        inline .pipe_read, .pipe_write, .file_read_streaming, .file_write_streaming => |op| completion.cast(op.toType()).handle,
+        inline .file_read_streaming, .file_write_streaming => |op| completion.cast(op.toType()).handle,
         .pipe_close => completion.cast(PipeClose).handle,
         .process_wait => completion.cast(ProcessWait).internal.pidfd,
         else => unreachable,
@@ -411,7 +411,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         // Streaming file I/O is routed here by the loop only when the fd is
         // pollable (non-seekable), so it is handled exactly like pipe read/write.
-        inline .pipe_read, .pipe_write, .file_read_streaming, .file_write_streaming => |op| {
+        inline .file_read_streaming, .file_write_streaming => |op| {
             self.addToPollQueue(state, c.cast(op.toType()).handle, c);
         },
         .pipe_close => {
@@ -694,7 +694,7 @@ pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) C
             // Requested events not ready yet - requeue
             return .requeue;
         },
-        inline .pipe_read, .file_read_streaming => |op| {
+        inline .file_read_streaming => |op| {
             const data = c.cast(op.toType());
             // Try to read - there might still be data in the pipe buffer
             if (fs.readv(data.handle, data.buffer.iovecs)) |n| {
@@ -717,7 +717,7 @@ pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) C
                 },
             }
         },
-        inline .pipe_write, .file_write_streaming => |op| {
+        inline .file_write_streaming => |op| {
             const data = c.cast(op.toType());
             // For pipes, check for errors but don't use getSockError
             const has_error = (event.events & std.os.linux.EPOLL.ERR) != 0;

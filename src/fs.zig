@@ -632,14 +632,16 @@ pub const Pipe = struct {
 
     /// Read using ReadBuf (vectored I/O)
     pub fn readBuf(self: Pipe, buf: ev.ReadBuf, timeout: Timeout) ReadError!usize {
-        var op = ev.PipeRead.init(self.fd, buf);
+        var op = ev.FileReadStreaming.init(self.fd, buf);
+        op.pollable = true; // a pipe is always pollable (non-seekable)
         try timedWaitForIo(&op.c, timeout);
         return try op.getResult();
     }
 
     /// Write using WriteBuf (vectored I/O)
     pub fn writeBuf(self: Pipe, buf: ev.WriteBuf, timeout: Timeout) WriteError!usize {
-        var op = ev.PipeWrite.init(self.fd, buf);
+        var op = ev.FileWriteStreaming.init(self.fd, buf);
+        op.pollable = true; // a pipe is always pollable (non-seekable)
         try timedWaitForIo(&op.c, timeout);
         return try op.getResult();
     }

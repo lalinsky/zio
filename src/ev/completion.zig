@@ -121,8 +121,6 @@ pub const Op = enum {
     file_hard_link,
     pipe_poll,
     pipe_create,
-    pipe_read,
-    pipe_write,
     pipe_close,
     device_io_control,
     mach_port,
@@ -187,8 +185,6 @@ pub const Op = enum {
             .file_hard_link => FileHardLink,
             .pipe_poll => PipePoll,
             .pipe_create => PipeCreate,
-            .pipe_read => PipeRead,
-            .pipe_write => PipeWrite,
             .pipe_close => PipeClose,
             .device_io_control => DeviceIoControl,
             .mach_port => MachPort,
@@ -255,8 +251,6 @@ pub const Op = enum {
             FileHardLink => .file_hard_link,
             PipePoll => .pipe_poll,
             PipeCreate => .pipe_create,
-            PipeRead => .pipe_read,
-            PipeWrite => .pipe_write,
             PipeClose => .pipe_close,
             DeviceIoControl => .device_io_control,
             MachPort => .mach_port,
@@ -1985,48 +1979,6 @@ pub const PipeCreate = struct {
 
     pub fn getResult(self: *const PipeCreate) Error![2]fs.fd_t {
         return self.c.getResult(.pipe_create);
-    }
-};
-
-pub const PipeRead = struct {
-    c: Completion,
-    result_private_do_not_touch: usize = undefined,
-    handle: fs.fd_t,
-    buffer: ReadBuf,
-
-    pub const Error = fs.FileReadError || Cancelable;
-
-    pub fn init(handle: fs.fd_t, buffer: ReadBuf) PipeRead {
-        return .{
-            .c = .init(.pipe_read),
-            .handle = handle,
-            .buffer = buffer,
-        };
-    }
-
-    pub fn getResult(self: *const PipeRead) Error!usize {
-        return self.c.getResult(.pipe_read);
-    }
-};
-
-pub const PipeWrite = struct {
-    c: Completion,
-    result_private_do_not_touch: usize = undefined,
-    handle: fs.fd_t,
-    buffer: WriteBuf,
-
-    pub const Error = fs.FileWriteError || Cancelable;
-
-    pub fn init(handle: fs.fd_t, buffer: WriteBuf) PipeWrite {
-        return .{
-            .c = .init(.pipe_write),
-            .handle = handle,
-            .buffer = buffer,
-        };
-    }
-
-    pub fn getResult(self: *const PipeWrite) Error!usize {
-        return self.c.getResult(.pipe_write);
     }
 };
 

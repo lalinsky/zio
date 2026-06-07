@@ -264,6 +264,14 @@ pub const FILE_BEGIN: DWORD = 0;
 pub const FILE_CURRENT: DWORD = 1;
 pub const FILE_END: DWORD = 2;
 
+/// Returns true if `handle` is not seekable (pipe, socket, character device),
+/// in which case only streaming (positionless, zero-offset overlapped) I/O works
+/// and positional I/O is unavailable. Mirrors the POSIX lseek/ESPIPE probe: a
+/// no-op seek to the current position fails on non-seekable handles.
+pub fn isPollable(handle: HANDLE) bool {
+    return SetFilePointerEx(handle, 0, null, FILE_CURRENT) == FALSE;
+}
+
 // File time structures
 pub const FILETIME = extern struct {
     dwLowDateTime: DWORD,
