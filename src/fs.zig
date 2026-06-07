@@ -150,7 +150,8 @@ pub const Dir = struct {
     pub fn openFile(self: Dir, path: []const u8, flags: os.fs.FileOpenFlags) OpenFileError!File {
         var op = ev.FileOpen.init(self.fd, path, flags);
         try waitForIo(&op.c);
-        return .fromFd((try op.getResult()).fd);
+        const result = try op.getResult();
+        return .{ .fd = result.fd, .pollable = result.pollable };
     }
 
     pub const CreateDirError = os.fs.DirCreateDirError || Cancelable;
@@ -166,7 +167,8 @@ pub const Dir = struct {
     pub fn createFile(self: Dir, path: []const u8, flags: os.fs.FileCreateFlags) CreateFileError!File {
         var op = ev.FileCreate.init(self.fd, path, flags);
         try waitForIo(&op.c);
-        return .fromFd((try op.getResult()).fd);
+        const result = try op.getResult();
+        return .{ .fd = result.fd, .pollable = result.pollable };
     }
 
     pub const DeleteDirError = os.fs.DirDeleteDirError || Cancelable;
@@ -305,6 +307,9 @@ pub const Dir = struct {
 
 pub const File = struct {
     fd: Handle,
+    /// Whether `fd` is pollable (non-seekable). Set from the open/create result;
+    /// `null` when unknown (e.g. constructed via `fromFd`).
+    pollable: ?bool = null,
 
     pub const ReadError = os.fs.FileReadError || Cancelable;
     pub const WriteError = os.fs.FileWriteError || Cancelable;
