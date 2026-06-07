@@ -99,12 +99,10 @@ pub fn handleNetClose(c: *Completion) void {
     c.setResult(.net_close, {});
 }
 
-/// Helper to handle file open operation
-/// Determine whether `handle` should use the readiness poll path for streaming
-/// I/O: pollable (non-seekable) fds probe true and are switched to non-blocking
-/// mode (required by the poll path); seekable fds (regular files, block devices)
-/// probe false and use the thread pool. Windows (iocp) has no readiness path, so
-/// nothing is pollable there.
+/// Determine whether `handle` should use the direct I/O path for streaming:
+/// pollable (non-seekable) fds return true. On POSIX, they are also switched to
+/// non-blocking mode (required by the readiness poll path). Seekable fds (regular
+/// files, block devices) return false.
 pub fn probePollable(handle: fs.fd_t) bool {
     if (builtin.os.tag == .windows) {
         // On Windows, streaming (overlapped, zero-offset) I/O only works for
@@ -112,9 +110,9 @@ pub fn probePollable(handle: fs.fd_t) bool {
         return @import("../../os/windows.zig").isPollable(handle);
     } else {
         const posix = @import("../../os/posix.zig");
-        const pollable = posix.isPollable(handle);
-        if (pollable) posix.setNonblocking(handle) catch {};
-        return pollable;
+        if (!posix.isPollable(handle)) return false;
+        posix.setNonblocking(handle) catch return false;
+        return true;
     }
 }
 

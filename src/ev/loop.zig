@@ -598,15 +598,17 @@ pub const Loop = struct {
                 // Seekable fds (regular files, block devices) fall back to the pool.
                 switch (completion.op) {
                     inline .file_read_streaming, .file_write_streaming => |op| {
+                        // Classify lazily and cache the verdict on the op, so a
+                        // reused op (or the caller) can skip re-probing.
+                        const data = completion.cast(op.toType());
+                        const pollable = data.pollable orelse blk: {
+                            const p = common.probePollable(data.handle);
+                            data.pollable = p;
+                            break :blk p;
+                        };
                         if (comptime !@field(Backend.capabilities, @tagName(op))) {
-                            const data = completion.cast(op.toType());
-                            // Classify lazily and cache the verdict on the op, so a
-                            // reused op (or the caller) can skip re-probing.
-                            const pollable = data.pollable orelse blk: {
-                                const p = common.probePollable(data.handle);
-                                data.pollable = p;
-                                break :blk p;
-                            };
+                            // Non-native backend: route pollable to readiness path,
+                            // non-pollable (seekable) to thread pool.
                             if (pollable) {
                                 self.state.inflight_io += 1;
                                 self.backend.submit(&self.state, completion);
@@ -614,6 +616,16 @@ pub const Loop = struct {
                                 self.submitFileOpToThreadPool(completion);
                             }
                             return;
+                        } else if (comptime builtin.os.tag == .windows) {
+                            // IOCP: overlapped (zero-offset) streaming only works for
+                            // non-seekable handles; refuse seekable (disk) handles.
+                            if (!pollable) {
+                                completion.state = .running;
+                                self.state.active += 1;
+                                completion.setError(error.Unexpected);
+                                self.state.markCompleted(completion);
+                                return;
+                            }
                         }
                     },
                     else => {},

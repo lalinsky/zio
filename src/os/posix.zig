@@ -196,7 +196,6 @@ pub fn isPollable(fd: fd_t) bool {
         }
     }
 }
-}
 
 pub fn setCloexec(fd: fd_t) error{Unexpected}!void {
     switch (errno(system.fcntl(fd, system.F.SETFD, @as(c_int, system.FD_CLOEXEC)))) {

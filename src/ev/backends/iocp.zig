@@ -1160,15 +1160,6 @@ fn submitPipeCreate(self: *Self, state: *LoopState, data: *PipeCreate) !void {
 fn submitFileReadStreaming(self: *Self, state: *LoopState, data: *FileReadStreaming) !void {
     _ = self;
 
-    // Streaming (overlapped, zero-offset) I/O only works for non-seekable
-    // handles (pipes, char devices); refuse seekable (disk) handles where the
-    // missing position would silently read/write from offset 0.
-    if (!(data.pollable orelse windows.isPollable(data.handle))) {
-        data.c.setError(error.Unexpected);
-        state.markCompletedFromBackend(&data.c);
-        return;
-    }
-
     // Initialize OVERLAPPED with zero offset (streaming has no offset)
     data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
 
@@ -1209,15 +1200,6 @@ fn submitFileReadStreaming(self: *Self, state: *LoopState, data: *FileReadStream
 
 fn submitFileWriteStreaming(self: *Self, state: *LoopState, data: *FileWriteStreaming) !void {
     _ = self;
-
-    // Streaming (overlapped, zero-offset) I/O only works for non-seekable
-    // handles (pipes, char devices); refuse seekable (disk) handles where the
-    // missing position would silently read/write from offset 0.
-    if (!(data.pollable orelse windows.isPollable(data.handle))) {
-        data.c.setError(error.Unexpected);
-        state.markCompletedFromBackend(&data.c);
-        return;
-    }
 
     // Initialize OVERLAPPED with zero offset (streaming has no offset)
     data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
