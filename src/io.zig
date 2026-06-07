@@ -394,6 +394,9 @@ fn fileReadStreamingImpl(
     if (count == 0) return 0;
 
     var op = ev.FileReadStreaming.init(stdIoHandleToZio(file.handle), .{ .iovecs = iovecs[0..count] });
+    // A non-blocking file is one we already classified as pollable at open time;
+    // otherwise leave it null so the loop classifies it lazily.
+    op.pollable = if (file.flags.nonblocking) true else null;
     try timedWaitForIo(&op.c, timeout);
     const n = op.getResult() catch |err| switch (err) {
         error.BrokenPipe, error.Unseekable => return error.Unexpected,
@@ -420,6 +423,7 @@ fn fileWriteStreamingImpl(
     const wbuf = ev.WriteBuf.fromSlices(slices[0..n], &iovecs);
 
     var op = ev.FileWriteStreaming.init(stdIoHandleToZio(file.handle), wbuf);
+    op.pollable = if (file.flags.nonblocking) true else null;
     try timedWaitForIo(&op.c, timeout);
     return op.getResult() catch |err| switch (err) {
         error.Unseekable => error.Unexpected,
@@ -643,6 +647,7 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
                 stdIoHandleToZio(o.file.handle),
                 .{ .iovecs = data.file_read_streaming.iovecs[0..count] },
             );
+            data.file_read_streaming.op.pollable = if (o.file.flags.nonblocking) true else null;
             return &data.file_read_streaming.op.c;
         },
         .file_write_streaming => |*o| {
@@ -658,6 +663,7 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
                 stdIoHandleToZio(o.file.handle),
                 wbuf,
             );
+            data.file_write_streaming.op.pollable = if (o.file.flags.nonblocking) true else null;
             return &data.file_write_streaming.op.c;
         },
         .device_io_control => |*o| {
@@ -1066,8 +1072,8 @@ fn dirCreateFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options:
         .mode = permissionsToZioMode(options.permissions),
     });
     try waitForIo(&op.c);
-    const fd = op.getResult() catch |err| return openErrToFileErr(err);
-    const file: Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    const result = op.getResult() catch |err| return openErrToFileErr(err);
+    const file: Io.File = .{ .handle = result.fd, .flags = .{ .nonblocking = result.pollable } };
     errdefer fileCloseImpl(null, &.{file});
     try applyOpenLock(file, options.lock, options.lock_nonblocking);
     return file;
@@ -1137,8 +1143,8 @@ fn dirOpenFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: I
         .resolve_beneath = options.resolve_beneath,
     });
     try waitForIo(&op.c);
-    const fd = op.getResult() catch |err| return openErrToFileErr(err);
-    const file: Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    const result = op.getResult() catch |err| return openErrToFileErr(err);
+    const file: Io.File = .{ .handle = result.fd, .flags = .{ .nonblocking = result.pollable } };
     errdefer fileCloseImpl(null, &.{file});
     try applyOpenLock(file, options.lock, options.lock_nonblocking);
     return file;

@@ -964,9 +964,18 @@ pub const NetSendMsg = struct {
     }
 };
 
+/// Result of a file open/create: the new fd plus whether it is pollable
+/// (non-seekable). The pollable verdict is determined when the backend opens the
+/// file via the thread pool (always false on backends with native open/streaming
+/// and on Windows), letting callers seed streaming ops without re-probing.
+pub const FileOpenResult = struct {
+    fd: fs.fd_t,
+    pollable: bool = false,
+};
+
 pub const FileOpen = struct {
     c: Completion,
-    result_private_do_not_touch: fs.fd_t = undefined,
+    result_private_do_not_touch: FileOpenResult = undefined,
     internal: switch (Backend.capabilities.file_open) {
         true => if (@hasDecl(Backend, "FileOpenData")) Backend.FileOpenData else struct {},
         false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
@@ -986,14 +995,14 @@ pub const FileOpen = struct {
         };
     }
 
-    pub fn getResult(self: *const FileOpen) Error!fs.fd_t {
+    pub fn getResult(self: *const FileOpen) Error!FileOpenResult {
         return self.c.getResult(.file_open);
     }
 };
 
 pub const FileCreate = struct {
     c: Completion,
-    result_private_do_not_touch: fs.fd_t = undefined,
+    result_private_do_not_touch: FileOpenResult = undefined,
     internal: switch (Backend.capabilities.file_create) {
         true => if (@hasDecl(Backend, "FileCreateData")) Backend.FileCreateData else struct {},
         false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
@@ -1013,7 +1022,7 @@ pub const FileCreate = struct {
         };
     }
 
-    pub fn getResult(self: *const FileCreate) Error!fs.fd_t {
+    pub fn getResult(self: *const FileCreate) Error!FileOpenResult {
         return self.c.getResult(.file_create);
     }
 };

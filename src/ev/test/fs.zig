@@ -22,7 +22,7 @@ test "File: open/close" {
     try std.testing.expectEqual(.dead, file_create.c.state);
     try std.testing.expectEqual(true, file_create.c.has_result);
 
-    const fd = try file_create.getResult();
+    const fd = (try file_create.getResult()).fd;
     if (builtin.os.tag == .windows) {
         try std.testing.expect(fd != os.windows.INVALID_HANDLE_VALUE);
     } else {
@@ -95,7 +95,7 @@ test "File: rename/delete" {
     loop.add(&file_create.c);
     try loop.run(.until_done);
     try std.testing.expectEqual(.dead, file_create.c.state);
-    const fd = try file_create.getResult();
+    const fd = (try file_create.getResult()).fd;
 
     // Write some data
     const write_data = "rename test";
@@ -124,7 +124,7 @@ test "File: rename/delete" {
     loop.add(&file_open.c);
     try loop.run(.until_done);
     try std.testing.expectEqual(.dead, file_open.c.state);
-    const fd2 = try file_open.getResult();
+    const fd2 = (try file_open.getResult()).fd;
 
     // Read and verify the data
     var read_buffer: [64]u8 = @splat(0);
@@ -174,7 +174,7 @@ test "File: read EOF" {
     var file_create = ev.FileCreate.init(cwd, "test-eof", .{ .read = true, .truncate = true, .mode = 0o664 });
     loop.add(&file_create.c);
     try loop.run(.until_done);
-    const fd = try file_create.getResult();
+    const fd = (try file_create.getResult()).fd;
 
     const write_data = "Hello";
     var write_iov: [1]os.iovec_const = undefined;
@@ -231,7 +231,7 @@ test "File: size" {
     var file_create = ev.FileCreate.init(cwd, "test-size", .{ .read = true, .truncate = true, .mode = 0o664 });
     loop.add(&file_create.c);
     try loop.run(.until_done);
-    const fd = try file_create.getResult();
+    const fd = (try file_create.getResult()).fd;
 
     // Check size of empty file
     var file_size1 = ev.FileSize.init(fd);
@@ -301,7 +301,7 @@ test "File: stat" {
     var file_create = ev.FileCreate.init(cwd, "test-stat", .{ .read = true, .truncate = true, .mode = 0o664 });
     loop.add(&file_create.c);
     try loop.run(.until_done);
-    const fd = try file_create.getResult();
+    const fd = (try file_create.getResult()).fd;
 
     // Stat empty file (by fd - path is null)
     var file_stat1 = ev.FileStat.init(fd, null, .{});
@@ -359,7 +359,7 @@ test "File: stat_path" {
     var file_create = ev.FileCreate.init(cwd, "test-stat-path", .{ .read = true, .truncate = true, .mode = 0o664 });
     loop.add(&file_create.c);
     try loop.run(.until_done);
-    const fd = try file_create.getResult();
+    const fd = (try file_create.getResult()).fd;
 
     // Write some data
     const write_data = "Hello, file stat_path test!";

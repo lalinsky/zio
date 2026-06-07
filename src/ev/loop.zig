@@ -31,21 +31,6 @@ pub const LoopGroup = struct {
     shared: Backend.SharedState = .{},
 };
 
-/// Determine whether `handle` should use the readiness poll path for streaming
-/// I/O: pollable (non-seekable) fds probe true and are switched to non-blocking
-/// mode (required by the poll path); seekable fds (regular files, block devices)
-/// probe false and use the thread pool. Windows (iocp) has no readiness path, so
-/// nothing is pollable there.
-fn probePollable(handle: os.fs.fd_t) bool {
-    if (builtin.os.tag == .windows) {
-        return false;
-    } else {
-        const pollable = os.posix.isPollable(handle);
-        if (pollable) os.posix.setNonblocking(handle) catch {};
-        return pollable;
-    }
-}
-
 pub const RunMode = enum {
     no_wait,
     once,
@@ -618,7 +603,7 @@ pub const Loop = struct {
                             // Classify lazily and cache the verdict on the op, so a
                             // reused op (or the caller) can skip re-probing.
                             const pollable = data.pollable orelse blk: {
-                                const p = probePollable(data.handle);
+                                const p = common.probePollable(data.handle);
                                 data.pollable = p;
                                 break :blk p;
                             };

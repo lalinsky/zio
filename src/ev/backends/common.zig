@@ -100,10 +100,26 @@ pub fn handleNetClose(c: *Completion) void {
 }
 
 /// Helper to handle file open operation
+/// Determine whether `handle` should use the readiness poll path for streaming
+/// I/O: pollable (non-seekable) fds probe true and are switched to non-blocking
+/// mode (required by the poll path); seekable fds (regular files, block devices)
+/// probe false and use the thread pool. Windows (iocp) has no readiness path, so
+/// nothing is pollable there.
+pub fn probePollable(handle: fs.fd_t) bool {
+    if (builtin.os.tag == .windows) {
+        return false;
+    } else {
+        const posix = @import("../../os/posix.zig");
+        const pollable = posix.isPollable(handle);
+        if (pollable) posix.setNonblocking(handle) catch {};
+        return pollable;
+    }
+}
+
 pub fn handleFileOpen(c: *Completion, allocator: std.mem.Allocator) void {
     const data = c.cast(FileOpen);
     if (fs.openat(allocator, data.dir, data.path, data.flags)) |fd| {
-        c.setResult(.file_open, fd);
+        c.setResult(.file_open, .{ .fd = fd, .pollable = probePollable(fd) });
     } else |err| {
         c.setError(err);
     }
@@ -113,7 +129,7 @@ pub fn handleFileOpen(c: *Completion, allocator: std.mem.Allocator) void {
 pub fn handleFileCreate(c: *Completion, allocator: std.mem.Allocator) void {
     const data = c.cast(FileCreate);
     if (fs.createat(allocator, data.dir, data.path, data.flags)) |fd| {
-        c.setResult(.file_create, fd);
+        c.setResult(.file_create, .{ .fd = fd, .pollable = probePollable(fd) });
     } else |err| {
         c.setError(err);
     }
@@ -244,9 +260,9 @@ pub fn fileOpenWork(work: *Work) void {
 
     // If the file was successfully opened, give the backend a chance to post-process the handle
     if (@hasDecl(@TypeOf(loop.backend), "postProcessFileHandle")) {
-        loop.backend.postProcessFileHandle(file_open.result_private_do_not_touch) catch |err| {
+        loop.backend.postProcessFileHandle(file_open.result_private_do_not_touch.fd) catch |err| {
             // Failed to post-process - close the file and set error
-            fs.close(file_open.result_private_do_not_touch) catch {};
+            fs.close(file_open.result_private_do_not_touch.fd) catch {};
             file_open.c.has_result = false;
             file_open.c.setError(err);
         };
@@ -270,9 +286,9 @@ pub fn fileCreateWork(work: *Work) void {
 
     // If the file was successfully created, give the backend a chance to post-process the handle
     if (@hasDecl(@TypeOf(loop.backend), "postProcessFileHandle")) {
-        loop.backend.postProcessFileHandle(file_create.result_private_do_not_touch) catch |err| {
+        loop.backend.postProcessFileHandle(file_create.result_private_do_not_touch.fd) catch |err| {
             // Failed to post-process - close the file and set error
-            fs.close(file_create.result_private_do_not_touch) catch {};
+            fs.close(file_create.result_private_do_not_touch.fd) catch {};
             file_create.c.has_result = false;
             file_create.c.setError(err);
         };

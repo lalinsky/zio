@@ -1009,7 +1009,7 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
             if (res < 0) {
                 c.setError(fs.errnoToFileOpenError(@enumFromInt(-res), data.flags));
             } else {
-                c.setResult(.file_open, res);
+                c.setResult(.file_open, .{ .fd = res });
             }
         },
 
@@ -1019,7 +1019,7 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
             if (res < 0) {
                 c.setError(fs.errnoToFileOpenError(@enumFromInt(-res), data.flags));
             } else {
-                c.setResult(.file_create, res);
+                c.setResult(.file_create, .{ .fd = res });
             }
         },
 
