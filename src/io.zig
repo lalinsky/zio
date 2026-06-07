@@ -12,6 +12,7 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const Alignment = std.mem.Alignment;
 
+const coro = @import("coro/root.zig");
 const runtime_mod = @import("runtime.zig");
 const Runtime = runtime_mod.Runtime;
 const getCurrentTask = runtime_mod.getCurrentTask;
@@ -233,7 +234,9 @@ fn globalIo() Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 
-fn crashHandlerImpl(_: ?*anyopaque) void {}
+fn crashHandlerImpl(_: ?*anyopaque) void {
+    coro.crashHandler();
+}
 
 fn asyncImpl(
     userdata: ?*anyopaque,
