@@ -27,6 +27,7 @@ const Group = @import("group.zig").Group;
 const groupSpawnTask = @import("group.zig").groupSpawnTask;
 const select = @import("select.zig");
 const Futex = @import("sync/Futex.zig");
+const Mutex = @import("sync/Mutex.zig");
 const time = @import("time.zig");
 const common = @import("common.zig");
 const Waiter = common.Waiter;
@@ -37,6 +38,7 @@ const waitForIoUncancelable = common.waitForIoUncancelable;
 const ev = @import("ev/root.zig");
 const os_net = @import("os/net.zig");
 const os_fs = @import("os/fs.zig");
+const zio_fs = @import("fs.zig");
 const os_posix = @import("os/posix.zig");
 const process_impl = @import("process.zig");
 const zio_net = @import("net.zig");
@@ -49,6 +51,8 @@ const zio_options = @import("zio_options");
 /// scatter/gather vector counts for netRead/netWrite so we never promise
 /// the caller more than std.Io's reader/writer is prepared to handle.
 const max_iovecs_len = 8;
+
+pub const debug_io: Io = .{ .userdata = null, .vtable = &vtable };
 
 /// Read the pollable-cache state from `File.Flags`.
 ///
@@ -1626,16 +1630,46 @@ fn processExecutablePathImpl(_: ?*anyopaque, buffer: []u8) std.process.Executabl
     return io.vtable.processExecutablePath(io.userdata, buffer);
 }
 
-fn lockStderrImpl(_: ?*anyopaque, _: ?Io.Terminal.Mode) Io.Cancelable!Io.LockedStderr {
-    @panic("lockStderr: not supported");
+var stderr_mutex: Mutex.Recursive = .init;
+var stderr_writer_initialized = false;
+var stderr_writer: Io.File.Writer = undefined;
+
+fn lockStderrImpl(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.Cancelable!Io.LockedStderr {
+    try stderr_mutex.lock();
+    return initLockedStderr(userdata, terminal_mode);
 }
 
-fn tryLockStderrImpl(_: ?*anyopaque, _: ?Io.Terminal.Mode) Io.Cancelable!?Io.LockedStderr {
-    @panic("tryLockStderr: not supported");
+fn tryLockStderrImpl(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.Cancelable!?Io.LockedStderr {
+    if (!stderr_mutex.tryLock()) return null;
+    return initLockedStderr(userdata, terminal_mode);
+}
+
+fn initLockedStderr(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.LockedStderr {
+    if (!stderr_writer_initialized) {
+        const io = Io{ .userdata = userdata, .vtable = &vtable };
+        const zfile = zio_fs.stderr();
+        var file: Io.File = .{ .handle = zfile.fd, .flags = .{ .nonblocking = false } };
+        const pollable = zfile.pollable orelse false;
+        flagsWritePollable(&file.flags, pollable);
+        if (pollable) {
+            stderr_writer = Io.File.Writer.initStreaming(file, io, &.{});
+        } else {
+            stderr_writer = Io.File.Writer.init(file, io, &.{});
+        }
+        stderr_writer_initialized = true;
+    }
+    beginShield();
+    return .{
+        .file_writer = &stderr_writer,
+        .terminal_mode = terminal_mode orelse .no_color,
+    };
 }
 
 fn unlockStderrImpl(_: ?*anyopaque) void {
-    @panic("unlockStderr: not supported");
+    if (stderr_writer.err == null) stderr_writer.interface.flush() catch {};
+    stderr_writer.err = null;
+    endShield();
+    stderr_mutex.unlock();
 }
 
 fn processCurrentPathImpl(_: ?*anyopaque, buffer: []u8) std.process.CurrentPathError!usize {
