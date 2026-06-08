@@ -1738,6 +1738,13 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                     // Whole requested range sent.
                     c.setResult(.net_send_file, data.internal.total);
                     state.markCompletedFromBackend(c);
+                } else if (c.cancel_state.load(.acquire).requested) {
+                    // Cancel was requested between this chunk completing and the
+                    // re-arm. CancelIoEx already returned NOT_FOUND (the chunk
+                    // had already completed), so we must check the flag here to
+                    // avoid issuing a new TransmitFile that no cancel will reach.
+                    c.setError(error.Canceled);
+                    state.markCompletedFromBackend(c);
                 } else if (self.armNetSendFile(data)) |armed| {
                     // File larger than the per-call cap: next chunk is in flight,
                     // so leave the op running (no completion/decrement yet). If
