@@ -17,6 +17,7 @@ const NetSendTo = @import("../completion.zig").NetSendTo;
 const NetRecvMsg = @import("../completion.zig").NetRecvMsg;
 const NetSendMsg = @import("../completion.zig").NetSendMsg;
 const NetPoll = @import("../completion.zig").NetPoll;
+const NetSendFile = @import("../completion.zig").NetSendFile;
 const FileRead = @import("../completion.zig").FileRead;
 const FileWrite = @import("../completion.zig").FileWrite;
 const FileSync = @import("../completion.zig").FileSync;
@@ -60,6 +61,13 @@ const WSAID_WSASENDMSG = windows.GUID{
 
 const WSAID_GETACCEPTEXSOCKADDRS = windows.GUID{
     .Data1 = 0xb5367df2,
+    .Data2 = 0xcbac,
+    .Data3 = 0x11cf,
+    .Data4 = .{ 0x95, 0xca, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92 },
+};
+
+const WSAID_TRANSMITFILE = windows.GUID{
+    .Data1 = 0xb5367df0,
     .Data2 = 0xcbac,
     .Data3 = 0x11cf,
     .Data4 = .{ 0x95, 0xca, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92 },
@@ -115,6 +123,16 @@ const LPFN_WSASENDMSG = *const fn (
     lpCompletionRoutine: ?windows.LPWSAOVERLAPPED_COMPLETION_ROUTINE,
 ) callconv(.winapi) c_int;
 
+const LPFN_TRANSMITFILE = *const fn (
+    hSocket: windows.SOCKET,
+    hFile: windows.HANDLE,
+    nNumberOfBytesToWrite: windows.DWORD,
+    nNumberOfBytesPerSend: windows.DWORD,
+    lpOverlapped: ?*windows.OVERLAPPED,
+    lpTransmitBuffers: ?*anyopaque,
+    dwReserved: windows.DWORD,
+) callconv(.winapi) windows.BOOL;
+
 fn loadWinsockExtension(comptime T: type, sock: windows.SOCKET, guid: windows.GUID) !T {
     var func_ptr: T = undefined;
     var bytes: windows.DWORD = 0;
@@ -152,6 +170,8 @@ pub const capabilities: BackendCapabilities = .{
     .file_write_streaming = false,
     .is_multi_threaded = true,
     .process_wait = true,
+    // Zero-copy file-to-socket transfer via the TransmitFile extension.
+    .net_send_file = true,
 };
 
 // Backend-specific data stored in Completion.internal
@@ -188,12 +208,27 @@ pub const NetSendMsgData = struct {
     control_buf: windows.WSABUF_nullable = undefined,
 };
 
+pub const NetSendFileData = struct {
+    /// Total bytes sent so far across all per-call chunks (the op result).
+    total: usize = 0,
+    /// Bytes still to send for this op, after clamping to the file size and
+    /// the caller's limit. Decremented as each chunk completes; the op is done
+    /// once it reaches zero.
+    left: usize = 0,
+};
+
+/// The maximum number of bytes a single TransmitFile call may transmit:
+/// 2,147,483,646 (DWORD max minus one), per the Win32 documentation. Larger
+/// transfers are split into multiple calls, advancing the file offset.
+const transmit_file_max: usize = 2_147_483_646;
+
 const ExtensionFunctions = struct {
     acceptex: LPFN_ACCEPTEX,
     connectex: LPFN_CONNECTEX,
     getacceptexsockaddrs: LPFN_GETACCEPTEXSOCKADDRS,
     wsarecvmsg: LPFN_WSARECVMSG,
     wsasendmsg: LPFN_WSASENDMSG,
+    transmitfile: LPFN_TRANSMITFILE,
 };
 
 pub const SharedState = struct {
@@ -239,6 +274,7 @@ pub const SharedState = struct {
                 .getacceptexsockaddrs = try loadWinsockExtension(LPFN_GETACCEPTEXSOCKADDRS, sock, WSAID_GETACCEPTEXSOCKADDRS),
                 .wsarecvmsg = try loadWinsockExtension(LPFN_WSARECVMSG, sock, WSAID_WSARECVMSG),
                 .wsasendmsg = try loadWinsockExtension(LPFN_WSASENDMSG, sock, WSAID_WSASENDMSG),
+                .transmitfile = try loadWinsockExtension(LPFN_TRANSMITFILE, sock, WSAID_TRANSMITFILE),
             };
         }
         self.refcount += 1;
@@ -522,9 +558,15 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .file_real_path,
         .file_hard_link,
         .device_io_control,
-        // Driven by Loop's generic read/write fallback, never reaches the backend.
-        .net_send_file,
         => unreachable, // These are handled by thread pool (capabilities = false)
+
+        .net_send_file => {
+            const data = c.cast(NetSendFile);
+            self.submitNetSendFile(state, data) catch |err| {
+                c.setError(err);
+                state.markCompletedFromBackend(c);
+            };
+        },
 
         .pipe_poll => {
             // Windows IOCP doesn't support poll-style waiting on file handles
@@ -981,6 +1023,75 @@ fn submitSendMsg(self: *Self, state: *LoopState, data: *NetSendMsg) !void {
     // Operation will complete via IOCP (either immediate or async)
 }
 
+fn submitNetSendFile(self: *Self, state: *LoopState, data: *NetSendFile) !void {
+    // Determine how much we can actually send. TransmitFile transmits exactly
+    // the requested byte count (it has no short-write semantics), and fails if
+    // the requested range runs past EOF, so we must clamp to the file size.
+    // GetFileSizeEx is a fast metadata query (no file-pointer I/O), so running
+    // it synchronously on the loop thread here is acceptable.
+    const file_size = fs.fileSize(data.file) catch |err| switch (err) {
+        // PermissionDenied is not part of NetSendFile's error set; fold it into
+        // AccessDenied. The remaining FileSizeError values (AccessDenied,
+        // Canceled, Unexpected) are all valid send-file errors.
+        error.PermissionDenied => return error.AccessDenied,
+        else => |e| return e,
+    };
+
+    const avail: u64 = if (data.offset >= file_size) 0 else file_size - data.offset;
+    data.internal.total = 0;
+    data.internal.left = @intCast(@min(@as(u64, data.remaining), avail));
+
+    // Offset at/past EOF or a zero-byte limit: nothing to send. Report 0, which
+    // the std sendFile path turns into EndOfStream.
+    if (data.internal.left == 0) {
+        data.c.setResult(.net_send_file, 0);
+        state.markCompletedFromBackend(&data.c);
+        return;
+    }
+
+    if (!try self.armNetSendFile(data)) {
+        data.c.setResult(.net_send_file, data.internal.total);
+        state.markCompletedFromBackend(&data.c);
+    }
+    // Otherwise the chunk is in flight and completes via IOCP.
+}
+
+/// Issue the next TransmitFile chunk for an in-progress send-file operation.
+/// Returns true if a chunk was submitted (completion will arrive via IOCP),
+/// false if there is nothing left to send.
+fn armNetSendFile(self: *Self, data: *NetSendFile) !bool {
+    if (data.internal.left == 0) return false;
+
+    const chunk: windows.DWORD = @intCast(@min(data.internal.left, transmit_file_max));
+    const file_offset = data.offset + data.internal.total;
+
+    // Reset the OVERLAPPED and point it at the current file offset.
+    data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
+    data.c.internal.overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.Offset = @truncate(file_offset);
+    data.c.internal.overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.OffsetHigh = @truncate(file_offset >> 32);
+
+    const result = self.shared_state.exts.transmitfile(
+        data.handle,
+        data.file,
+        chunk,
+        0, // nNumberOfBytesPerSend - 0 selects the default send size
+        &data.c.internal.overlapped,
+        null, // no head/tail buffers
+        0, // no flags
+    );
+
+    // Like the other overlapped socket ops: success (TRUE) or WSA_IO_PENDING
+    // both deliver an IOCP completion; any other error is reported now.
+    if (result == windows.FALSE) {
+        const err = windows.WSAGetLastError();
+        if (err != .IO_PENDING) {
+            log.err("TransmitFile failed: {}", .{err});
+            return net.errnoToSendError(err);
+        }
+    }
+    return true;
+}
+
 fn submitConnect(self: *Self, state: *LoopState, data: *NetConnect) !void {
     // Get address family from the target address
     const family: u16 = @as(*const windows.sockaddr, @ptrCast(@alignCast(data.addr))).family;
@@ -1338,6 +1449,7 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
                 .net_recvmsg,
                 .net_sendmsg,
                 .net_poll,
+                .net_send_file,
                 => blk: {
                     // Get socket handle from the completion
                     const h = switch (target.op) {
@@ -1350,6 +1462,7 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
                         .net_recvmsg => target.cast(NetRecvMsg).handle,
                         .net_sendmsg => target.cast(NetSendMsg).handle,
                         .net_poll => target.cast(NetPoll).handle,
+                        .net_send_file => target.cast(NetSendFile).handle,
                         else => unreachable,
                     };
                     break :blk @as(windows.HANDLE, @ptrCast(h));
@@ -1599,6 +1712,52 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
             }
 
             state.markCompletedFromBackend(c);
+        },
+
+        .net_send_file => {
+            const data = c.cast(NetSendFile);
+            var bytes_transferred: windows.DWORD = 0;
+            var flags: windows.DWORD = 0;
+
+            const result = windows.WSAGetOverlappedResult(
+                data.handle,
+                &data.c.internal.overlapped,
+                &bytes_transferred,
+                windows.FALSE,
+                &flags,
+            );
+
+            if (result == windows.FALSE) {
+                const err = windows.WSAGetLastError();
+                c.setError(net.errnoToSendError(err));
+                state.markCompletedFromBackend(c);
+            } else {
+                data.internal.total += bytes_transferred;
+                data.internal.left -= bytes_transferred;
+                if (data.internal.left == 0) {
+                    // Whole requested range sent.
+                    c.setResult(.net_send_file, data.internal.total);
+                    state.markCompletedFromBackend(c);
+                } else if (c.cancel_state.load(.acquire).requested) {
+                    // Cancel was requested between this chunk completing and the
+                    // re-arm. CancelIoEx already returned NOT_FOUND (the chunk
+                    // had already completed), so we must check the flag here to
+                    // avoid issuing a new TransmitFile that no cancel will reach.
+                    c.setError(error.Canceled);
+                    state.markCompletedFromBackend(c);
+                } else if (self.armNetSendFile(data)) |armed| {
+                    // File larger than the per-call cap: next chunk is in flight,
+                    // so leave the op running (no completion/decrement yet). If
+                    // there was unexpectedly nothing left, finish with the total.
+                    if (!armed) {
+                        c.setResult(.net_send_file, data.internal.total);
+                        state.markCompletedFromBackend(c);
+                    }
+                } else |err| {
+                    c.setError(err);
+                    state.markCompletedFromBackend(c);
+                }
+            }
         },
 
         .net_recvfrom => {

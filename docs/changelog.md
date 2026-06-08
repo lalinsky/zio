@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- `net.Stream.Writer.sendFile` now uses the native `TransmitFile` API on Windows,
+  doing a zero-copy file-to-socket transfer instead of the generic read/write fallback.
+
 ## [0.14.0] - 2026-06-08
 
 ### Added
