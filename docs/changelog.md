@@ -6,17 +6,36 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Implemented `sendFile` for `net.Stream.Writer` on all platforms, for now just using generic code
+  that does concurrent reads and writes. Platorm-specific improvements for Linux, FreeBSD and Windows 
+  will be added later.
+- Added support for opening/creating files with `resolve_beneath` on Linux, macOS, and FreeBSD.
+  By default, the operation will fail on platforms that don't support it. You can disable it
+  using the `resolve_beneath_mode` build option.
+- Implemented support for `renamePreserve` on macOS.
+- Implemented file locking on all platforms.
+- Added `zio.Mutex.Recursive` that works in both blocking and non-blocking contexts.
+- Added support for `pub const std_options_debug_io = zio.debug_io` in your root module,
+  for integration with `std.log`, `std.debug.print` and also the default `panic` handler.
+
+### Changed
+
 - Setting `max_threads = 0` in the thread pool options now disables the thread pool, executing
   blocking work inline on the calling thread (the same behavior as a single-threaded build).
-- `net.Stream.Writer` now implements the `std.Io.Writer` `sendFile` vtable method, so
-  `sendFile`/`sendFileAll` on a zio network stream transfer a file's contents directly to the socket
-  (std's own `net.Stream.Writer.sendFile` is unimplemented). The event-loop implementation is
-  double-buffered, overlapping the read of the next chunk with the send of the current one so both
-  complete in the same poll cycle; an io_uring `splice` fast path can be added later behind the same API.
-- `openFile` now honors the `follow_symlinks`, `path_only`, and `allow_ctty` options. Through the
-  `std.Io` interface these (along with `resolve_beneath`) previously panicked when set to a
-  non-default value. Opening with `follow_symlinks = false` fails with `error.SymLinkLoop` if the
-  final path component is a symlink (`O_NOFOLLOW`, or `FILE_FLAG_OPEN_REPARSE_POINT` on Windows).
+- Re-enabled task migration by default, so for example unlocking mutex will schedule the blocked
+  task waiting on the mutex on the same thread, avoiding cross-thread wake up.
+- Streaming file reads/writes now auto-detect the file type and use the appropriate method
+  for async operations. This only affects macOS/BSDs on Linux with the epoll backend.
+  Regular file reads/writes are still going through the thread pool, but pipes can go through
+  the event loop.
+
+### Fixed
+
+- Fixed cross-thread I/O cancelation on kqueue backend.
+- Fixed internal I/O opertion accounting on the IOCP backend that could lead to integer underflow in multi-threaded mode.
+- Fixed mapping of `ESPIPE` to `error.Unseekable` to help `std.Io.File.Reader` with mode detection.
+- Fixed macOS-specific `deleteFile` error mapping, to return `error.IsDir` when the path is a directory.
+- Fixed handling of `follow_symlinks`, `path_only`, and `allow_ctty` file open/create flags.
 
 ## [0.13.0] - 2026-05-31
 
