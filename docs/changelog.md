@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.14.0] - 2026-06-08
 
 ### Added
 
@@ -348,6 +348,7 @@ when it's beneficial for load balancing.
 
 Initial release.
 
+[0.14.0]: https://github.com/lalinsky/zio/releases/tag/v0.14.0
 [0.13.0]: https://github.com/lalinsky/zio/releases/tag/v0.13.0
 [0.12.1]: https://github.com/lalinsky/zio/releases/tag/v0.12.1
 [0.12.0]: https://github.com/lalinsky/zio/releases/tag/v0.12.0
