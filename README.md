@@ -68,8 +68,12 @@ A minimal TCP echo server, using zio's native API:
 const std = @import("std");
 const zio = @import("zio");
 
+pub const std_options_debug_io = zio.debug_io;
+
 fn handleClient(stream: zio.net.Stream) !void {
     defer stream.close();
+
+    std.log.info("Client connected from {f}", .{stream.socket.address});
 
     var read_buffer: [1024]u8 = undefined;
     var reader = stream.reader(&read_buffer);
@@ -94,6 +98,8 @@ pub fn main() !void {
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
     const server = try addr.listen(.{});
     defer server.close();
+
+    std.log.info("TCP echo server listening on {f}", .{server.socket.address});
 
     var group: zio.Group = .init;
     defer group.cancel();
