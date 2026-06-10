@@ -332,6 +332,7 @@ pub const Executor = struct {
         try self.loop.init(.{
             .allocator = self.runtime.allocator,
             .thread_pool = &self.runtime.thread_pool,
+            .loop_group = &self.runtime.loop_group,
             .defer_callbacks = false,
         });
         errdefer self.loop.deinit();
@@ -730,6 +731,7 @@ pub const Runtime = struct {
     options: RuntimeOptions,
 
     executors: std.ArrayList(*Executor) = .empty,
+    loop_group: ev.LoopGroup = .{},
     main_executor: Executor,
     next_executor_index: std.atomic.Value(usize) = .init(0),
     workers: std.ArrayList(Worker) = .empty,
