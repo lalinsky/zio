@@ -15,6 +15,7 @@ pub const backend = @import("backend.zig").backend;
 pub const Backend = @import("backend.zig").Backend;
 
 pub const Loop = @import("loop.zig").Loop;
+pub const LoopGroup = @import("loop.zig").LoopGroup;
 pub const RunMode = @import("loop.zig").RunMode;
 pub const ThreadPool = @import("thread_pool.zig").ThreadPool;
 
