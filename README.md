@@ -128,7 +128,7 @@ fn handleClient(io: Io, stream: Io.net.Stream) Io.Cancelable!void {
 
     var write_buffer: [1024]u8 = undefined;
     var writer = stream.writer(io, &write_buffer);
-z
+
     while (true) {
         const line = reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
             error.EndOfStream => break,
