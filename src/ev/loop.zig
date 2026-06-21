@@ -658,6 +658,15 @@ pub const Loop = struct {
                         // reused op (or the caller) can skip re-probing.
                         const data = completion.cast(op.toType());
                         const pollable = data.pollable orelse blk: {
+                            if (builtin.os.tag == .windows) {
+                                // A streaming op reaching the lazy path on Windows is a
+                                // handle zio did not open/classify (foreign, e.g. inherited
+                                // stdio reached via std.Io). Such handles are not associated
+                                // with our IOCP port, so the loop cannot drive them — route
+                                // to the thread pool's blocking read/write.
+                                data.pollable = false;
+                                break :blk false;
+                            }
                             const p = common.probePollable(data.handle);
                             data.pollable = p;
                             break :blk p;

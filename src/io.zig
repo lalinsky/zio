@@ -81,6 +81,24 @@ fn flagsWritePollable(flags: *Io.File.Flags, pollable: bool) void {
     @as(*u8, @ptrCast(flags)).* = if (pollable) 0x01 else 0xCC;
 }
 
+/// Whether a positional (offset-based) op on `file` cannot be served by the
+/// async backend and should be reported as `Unseekable` so the std.Io
+/// Reader/Writer falls back to streaming.
+///
+/// On Windows, IOCP-driven positional I/O only works on handles zio opened and
+/// associated with its completion port (their pollable verdict is recorded in
+/// the flags). A handle whose verdict is unknown here was not opened by us
+/// (e.g. an inherited stdio handle obtained via `std.Io.File.stdin()`); an
+/// overlapped ReadFile/WriteFile on it would block the loop thread or never
+/// complete. Reporting `Unseekable` makes the reader/writer switch to the
+/// streaming path, which routes to the thread pool's blocking I/O. This relies
+/// on the flag-smuggling tri-state, so it is disabled under `no_hacks`.
+fn positionalUnsupported(file: Io.File) bool {
+    if (comptime builtin.os.tag != .windows) return false;
+    if (zio_options.no_hacks) return false;
+    return flagsReadPollable(&file.flags) == null;
+}
+
 /// Construct a `std.Io` instance backed by `rt`.
 pub fn fromRuntime(rt: *Runtime) Io {
     return .{
@@ -1449,6 +1467,8 @@ fn fileCloseImpl(_: ?*anyopaque, files: []const Io.File) void {
 }
 
 fn fileWritePositionalImpl(_: ?*anyopaque, file: Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) Io.File.WritePositionalError!usize {
+    if (positionalUnsupported(file)) return error.Unseekable;
+
     var slices: [max_iovecs_len][]const u8 = undefined;
     var splat_buf: [64]u8 = undefined;
     const n = fillBuf(&slices, header, data, splat, &splat_buf);
@@ -1463,6 +1483,8 @@ fn fileWritePositionalImpl(_: ?*anyopaque, file: Io.File, header: []const u8, da
 }
 
 fn fileReadPositionalImpl(_: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
+    if (positionalUnsupported(file)) return error.Unseekable;
+
     var iovecs: [max_iovecs_len]os_fs.iovec = undefined;
     var count: usize = 0;
     for (data) |buf| {
