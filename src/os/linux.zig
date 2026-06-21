@@ -45,6 +45,23 @@ pub fn futex(uaddr: *const u32, futex_op: u32, val: u32, timeout: ?*const posix.
     );
 }
 
+/// epoll_pwait2(2): like epoll_wait but with a nanosecond-precision timeout.
+///
+/// `timeout` of null blocks indefinitely. Added in Linux 5.11; on older kernels
+/// the syscall returns ENOSYS. Returns the raw syscall result; the caller is
+/// responsible for checking errno.
+pub fn epoll_pwait2(epoll_fd: i32, events: [*]linux.epoll_event, maxevents: u32, timeout: ?*const linux.kernel_timespec) usize {
+    return linux.syscall6(
+        .epoll_pwait2,
+        @bitCast(@as(isize, epoll_fd)),
+        @intFromPtr(events),
+        @intCast(maxevents),
+        @intFromPtr(timeout),
+        0, // sigmask = null
+        linux.NSIG / 8,
+    );
+}
+
 /// Extended arguments for io_uring_enter2 with IORING_ENTER_EXT_ARG
 pub const io_uring_getevents_arg = extern struct {
     sigmask: u64 = 0,

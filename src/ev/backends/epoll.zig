@@ -24,6 +24,7 @@ const PipeClose = @import("../completion.zig").PipeClose;
 const ProcessWait = @import("../completion.zig").ProcessWait;
 const fs = @import("../../os/fs.zig");
 const linux = std.os.linux;
+const os_linux = @import("../../os/linux.zig");
 
 pub const NetHandle = net.fd_t;
 
@@ -71,6 +72,10 @@ waker_eventfd: i32 = -1,
 events: []std.os.linux.epoll_event,
 queue_size: u16,
 pending_changes: usize = 0,
+/// Whether epoll_pwait2 (nanosecond timeout, Linux 5.11+) is available. Set to
+/// false the first time the syscall returns ENOSYS, after which we use the
+/// millisecond epoll_wait for the rest of this loop's lifetime.
+epoll_pwait2_supported: bool = true,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
     _ = shared_state;
@@ -478,18 +483,42 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
     state.markCompletedFromBackend(target);
 }
 
-pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
-    const timeout_ms: i32 = std.math.cast(i32, timeout.toMilliseconds()) orelse std.math.maxInt(i32);
+/// Wait for events, preferring nanosecond-precision epoll_pwait2 and falling
+/// back to millisecond epoll_wait on kernels without it. Returns the number of
+/// ready events (0 on timeout or signal interruption).
+fn waitEvents(self: *Self, timeout: Duration) !usize {
+    if (self.epoll_pwait2_supported) {
+        // null timespec blocks indefinitely; the loop never asks for that
+        // (it caps at max_wait), but handle the sentinel defensively.
+        var ts: linux.kernel_timespec = undefined;
+        const ts_ptr: ?*const linux.kernel_timespec = if (timeout.value == Duration.max.value) null else blk: {
+            const ns = timeout.toNanoseconds();
+            ts = .{ .sec = @intCast(ns / 1_000_000_000), .nsec = @intCast(ns % 1_000_000_000) };
+            break :blk &ts;
+        };
+        const rc = os_linux.epoll_pwait2(self.epoll_fd, self.events.ptr, @intCast(self.events.len), ts_ptr);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => return 0, // Interrupted by signal, no events
+            .NOSYS => self.epoll_pwait2_supported = false, // Kernel < 5.11: fall back below
+            else => |err| return unexpectedError(err),
+        }
+    }
 
+    const timeout_ms: i32 = std.math.cast(i32, timeout.toMilliseconds()) orelse std.math.maxInt(i32);
+    const rc = std.os.linux.epoll_wait(self.epoll_fd, self.events.ptr, @intCast(self.events.len), timeout_ms);
+    switch (posix.errno(rc)) {
+        .SUCCESS => return @intCast(rc),
+        .INTR => return 0, // Interrupted by signal, no events
+        else => |err| return unexpectedError(err),
+    }
+}
+
+pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
     // Reset pending changes counter before poll (less aggressive)
     self.pending_changes = 0;
 
-    const rc = std.os.linux.epoll_wait(self.epoll_fd, self.events.ptr, @intCast(self.events.len), timeout_ms);
-    const n: usize = switch (posix.errno(rc)) {
-        .SUCCESS => @intCast(rc),
-        .INTR => 0, // Interrupted by signal, no events
-        else => |err| return unexpectedError(err),
-    };
+    const n = try self.waitEvents(timeout);
 
     if (n == 0) {
         return true; // Timed out
