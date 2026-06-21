@@ -79,21 +79,34 @@ pub fn createPipe() (os.fs.PipeError || Cancelable)!PipePair {
 }
 
 pub fn stdin() File {
-    const fd = os.fs.stdin();
-    const pollable = probePollable(fd);
-    return .{ .fd = fd, .pollable = pollable };
+    return stdioFile(os.fs.stdin());
 }
 
 pub fn stdout() File {
-    const fd = os.fs.stdout();
-    const pollable = probePollable(fd);
-    return .{ .fd = fd, .pollable = pollable };
+    return stdioFile(os.fs.stdout());
 }
 
 pub fn stderr() File {
-    const fd = os.fs.stderr();
-    const pollable = probePollable(fd);
-    return .{ .fd = fd, .pollable = pollable };
+    return stdioFile(os.fs.stderr());
+}
+
+/// Build a File for an inherited standard handle.
+///
+/// On Windows the std handles are not opened with FILE_FLAG_OVERLAPPED and are
+/// not associated with the IOCP port, so the event loop cannot drive them at
+/// all: both the overlapped streaming path and the positional file_read/
+/// file_write path would issue a blocking overlapped operation on the loop
+/// thread and stall every task. The only path that works is the thread pool's
+/// blocking ReadFile/WriteFile, reached by a streaming op with pollable=false.
+/// So force `pollable = false` (route to the thread pool) and `.streaming`
+/// (so the Reader/Writer issues streaming ops, never positional). This holds
+/// for consoles, inherited pipes, and file redirection alike. On POSIX the std
+/// handles behave like any other fd.
+fn stdioFile(fd: Handle) File {
+    if (builtin.os.tag == .windows) {
+        return .{ .fd = fd, .pollable = false, .preferred_mode = .streaming };
+    }
+    return .{ .fd = fd, .pollable = probePollable(fd) };
 }
 
 pub fn stat(path: []const u8) Dir.StatError!os.fs.FileStatInfo {
@@ -287,11 +300,28 @@ pub const Dir = struct {
     }
 };
 
+/// Whether the Reader/Writer issues positional (offset-based) or streaming
+/// (current-position) I/O ops. Independent of `File.pollable`, which decides
+/// event-loop vs thread-pool routing: a console, for example, is `.streaming`
+/// yet not loop-drivable.
+pub const Mode = enum {
+    /// Use positional I/O (pread/pwrite) with explicit offset.
+    positional,
+    /// Use streaming I/O (read/write) at the current file position.
+    streaming,
+};
+
 pub const File = struct {
     fd: Handle,
-    /// Whether `fd` is pollable (non-seekable). Set from the open/create result;
-    /// `null` when unknown (e.g. constructed via `fromFd`).
+    /// Whether `fd` is pollable (non-seekable) and can be driven by the event
+    /// loop for streaming I/O. Set from the open/create result; `null` when
+    /// unknown (e.g. constructed via `fromFd`). When false, streaming ops are
+    /// routed to the thread pool.
     pollable: ?bool = null,
+    /// Explicit Reader/Writer `Mode` hint. `null` means infer from `pollable`.
+    /// Set when seekability and loop-drivability disagree (e.g. a Windows
+    /// console: non-seekable, so `.streaming`, but not loop-drivable).
+    preferred_mode: ?Mode = null,
 
     pub const ReadError = os.fs.FileReadError || Cancelable;
     pub const WriteError = os.fs.FileWriteError || Cancelable;
@@ -455,18 +485,22 @@ pub const File = struct {
     }
 };
 
+/// Pick the Reader/Writer mode for a file: an explicit `preferred_mode` wins,
+/// otherwise infer from `pollable` (non-seekable -> streaming, seekable or
+/// unknown -> positional).
+pub fn resolveMode(file: File) Mode {
+    if (file.preferred_mode) |m| return m;
+    return if (file.pollable) |p|
+        if (p) .streaming else .positional
+    else
+        .positional;
+}
+
 /// File reader that implements std.Io.Reader interface.
 /// Dispatches between positional I/O (regular files) and streaming I/O
-/// (pipes, sockets, ttys) based on the File.pollable flag.
+/// (pipes, sockets, ttys) based on the File's mode.
 pub const FileReader = struct {
     pub const Error = os.fs.FileReadError || Cancelable || Timeoutable;
-
-    pub const Mode = enum {
-        /// Use positional I/O (pread/pwrite) with explicit offset.
-        positional,
-        /// Use streaming I/O (read/write) at the current file position.
-        streaming,
-    };
 
     file: File,
     mode: Mode,
@@ -476,10 +510,7 @@ pub const FileReader = struct {
     interface: std.Io.Reader,
 
     pub fn init(file: File, buffer: []u8) FileReader {
-        const mode: Mode = if (file.pollable) |p|
-            if (p) .streaming else .positional
-        else
-            .positional;
+        const mode: Mode = resolveMode(file);
         return .{
             .file = file,
             .mode = mode,
@@ -651,22 +682,19 @@ pub const FileReader = struct {
 
 /// File writer that implements std.Io.Writer interface.
 /// Dispatches between positional I/O (regular files) and streaming I/O
-/// (pipes, sockets, ttys) based on the File.pollable flag.
+/// (pipes, sockets, ttys) based on the File's mode.
 pub const FileWriter = struct {
     pub const Error = os.fs.FileWriteError || Cancelable || Timeoutable;
 
     file: File,
-    mode: FileReader.Mode,
+    mode: Mode,
     position: u64 = 0,
     timeout: Timeout = .none,
     err: ?Error = null,
     interface: std.Io.Writer,
 
     pub fn init(file: File, buffer: []u8) FileWriter {
-        const mode: FileReader.Mode = if (file.pollable) |p|
-            if (p) .streaming else .positional
-        else
-            .positional;
+        const mode: Mode = resolveMode(file);
         return .{
             .file = file,
             .mode = mode,

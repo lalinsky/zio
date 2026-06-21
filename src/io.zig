@@ -1652,9 +1652,11 @@ fn initLockedStderr(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.
         const io = Io{ .userdata = userdata, .vtable = &vtable };
         const zfile = zio_fs.stderr();
         var file: Io.File = .{ .handle = zfile.fd, .flags = .{ .nonblocking = false } };
-        const pollable = zfile.pollable orelse false;
-        flagsWritePollable(&file.flags, pollable);
-        if (pollable) {
+        // `pollable` controls routing (event loop vs thread pool); the mode
+        // (streaming vs positional) is resolved separately, since on Windows a
+        // console is streaming yet not loop-drivable.
+        flagsWritePollable(&file.flags, zfile.pollable orelse false);
+        if (zio_fs.resolveMode(zfile) == .streaming) {
             stderr_writer = Io.File.Writer.initStreaming(file, io, &.{});
         } else {
             stderr_writer = Io.File.Writer.init(file, io, &.{});
