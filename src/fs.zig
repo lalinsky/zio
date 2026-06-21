@@ -93,19 +93,18 @@ pub fn stderr() File {
 /// Build a File for an inherited standard handle.
 ///
 /// On Windows the std handles are not opened with FILE_FLAG_OVERLAPPED and are
-/// not associated with the IOCP port, so the event loop cannot drive them:
-/// force `pollable = false` to route streaming I/O to the thread pool (blocking
-/// ReadFile/WriteFile), while keeping the Reader/Writer mode tied to actual
-/// seekability (console/pipe -> streaming, file -> positional). Without this a
-/// console read would issue a blocking overlapped ReadFile on the loop thread
-/// and stall every task. On POSIX the std handles behave like any other fd.
+/// not associated with the IOCP port, so the event loop cannot drive them at
+/// all: both the overlapped streaming path and the positional file_read/
+/// file_write path would issue a blocking overlapped operation on the loop
+/// thread and stall every task. The only path that works is the thread pool's
+/// blocking ReadFile/WriteFile, reached by a streaming op with pollable=false.
+/// So force `pollable = false` (route to the thread pool) and `.streaming`
+/// (so the Reader/Writer issues streaming ops, never positional). This holds
+/// for consoles, inherited pipes, and file redirection alike. On POSIX the std
+/// handles behave like any other fd.
 fn stdioFile(fd: Handle) File {
     if (builtin.os.tag == .windows) {
-        return .{
-            .fd = fd,
-            .pollable = false,
-            .preferred_mode = if (probePollable(fd)) .streaming else .positional,
-        };
+        return .{ .fd = fd, .pollable = false, .preferred_mode = .streaming };
     }
     return .{ .fd = fd, .pollable = probePollable(fd) };
 }
@@ -489,7 +488,7 @@ pub const File = struct {
 /// Pick the Reader/Writer mode for a file: an explicit `preferred_mode` wins,
 /// otherwise infer from `pollable` (non-seekable -> streaming, seekable or
 /// unknown -> positional).
-fn resolveMode(file: File) Mode {
+pub fn resolveMode(file: File) Mode {
     if (file.preferred_mode) |m| return m;
     return if (file.pollable) |p|
         if (p) .streaming else .positional
