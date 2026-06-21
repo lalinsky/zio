@@ -79,10 +79,14 @@ pub const Duration = struct {
         return self.value *| ns_per_unit;
     }
 
+    /// Ceiling division, without the overflow of a `(value + divisor - 1)` pre-add.
+    fn ceilDiv(value: TimeInt, divisor: TimeInt) TimeInt {
+        return value / divisor + @intFromBool(value % divisor != 0);
+    }
+
     pub fn toMicroseconds(self: Duration) TimeInt {
         if (ns_per_us >= ns_per_unit) {
-            const divisor = ns_per_us / ns_per_unit;
-            return (self.value +| (divisor - 1)) / divisor;
+            return ceilDiv(self.value, ns_per_us / ns_per_unit);
         } else {
             return self.value *| (ns_per_unit / ns_per_us);
         }
@@ -90,8 +94,7 @@ pub const Duration = struct {
 
     pub fn toMilliseconds(self: Duration) TimeInt {
         if (ns_per_ms >= ns_per_unit) {
-            const divisor = ns_per_ms / ns_per_unit;
-            return (self.value +| (divisor - 1)) / divisor;
+            return ceilDiv(self.value, ns_per_ms / ns_per_unit);
         } else {
             return self.value *| (ns_per_unit / ns_per_ms);
         }
@@ -99,8 +102,7 @@ pub const Duration = struct {
 
     pub fn toSeconds(self: Duration) TimeInt {
         if (ns_per_s >= ns_per_unit) {
-            const divisor = ns_per_s / ns_per_unit;
-            return (self.value +| (divisor - 1)) / divisor;
+            return ceilDiv(self.value, ns_per_s / ns_per_unit);
         } else {
             return self.value *| (ns_per_unit / ns_per_s);
         }
@@ -108,8 +110,7 @@ pub const Duration = struct {
 
     pub fn toMinutes(self: Duration) TimeInt {
         if (ns_per_min >= ns_per_unit) {
-            const divisor = ns_per_min / ns_per_unit;
-            return (self.value +| (divisor - 1)) / divisor;
+            return ceilDiv(self.value, ns_per_min / ns_per_unit);
         } else {
             return self.value *| (ns_per_unit / ns_per_min);
         }
@@ -800,8 +801,13 @@ test "Duration: to* rounds sub-unit remainders up" {
         try std.testing.expectEqual(1, Duration.fromMilliseconds(1000).toSeconds()); // exact
     }
 
-    // Ceiling must saturate, not overflow, at the maximum value.
-    _ = Duration.max.toMilliseconds();
+    // Ceiling must be exact (and not overflow) even at the maximum value.
+    if (ns_per_ms > ns_per_unit) {
+        const divisor = ns_per_ms / ns_per_unit;
+        const v = Duration.max.value;
+        const expected = v / divisor + @intFromBool(v % divisor != 0);
+        try std.testing.expectEqual(expected, Duration.max.toMilliseconds());
+    }
 }
 
 test "Stopwatch: start, read, lap, reset" {
