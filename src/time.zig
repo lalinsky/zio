@@ -79,9 +79,14 @@ pub const Duration = struct {
         return self.value *| ns_per_unit;
     }
 
+    /// Ceiling division, without the overflow of a `(value + divisor - 1)` pre-add.
+    fn ceilDiv(value: TimeInt, divisor: TimeInt) TimeInt {
+        return value / divisor + @intFromBool(value % divisor != 0);
+    }
+
     pub fn toMicroseconds(self: Duration) TimeInt {
         if (ns_per_us >= ns_per_unit) {
-            return self.value / (ns_per_us / ns_per_unit);
+            return ceilDiv(self.value, ns_per_us / ns_per_unit);
         } else {
             return self.value *| (ns_per_unit / ns_per_us);
         }
@@ -89,7 +94,7 @@ pub const Duration = struct {
 
     pub fn toMilliseconds(self: Duration) TimeInt {
         if (ns_per_ms >= ns_per_unit) {
-            return self.value / (ns_per_ms / ns_per_unit);
+            return ceilDiv(self.value, ns_per_ms / ns_per_unit);
         } else {
             return self.value *| (ns_per_unit / ns_per_ms);
         }
@@ -97,7 +102,7 @@ pub const Duration = struct {
 
     pub fn toSeconds(self: Duration) TimeInt {
         if (ns_per_s >= ns_per_unit) {
-            return self.value / (ns_per_s / ns_per_unit);
+            return ceilDiv(self.value, ns_per_s / ns_per_unit);
         } else {
             return self.value *| (ns_per_unit / ns_per_s);
         }
@@ -105,7 +110,7 @@ pub const Duration = struct {
 
     pub fn toMinutes(self: Duration) TimeInt {
         if (ns_per_min >= ns_per_unit) {
-            return self.value / (ns_per_min / ns_per_unit);
+            return ceilDiv(self.value, ns_per_min / ns_per_unit);
         } else {
             return self.value *| (ns_per_unit / ns_per_min);
         }
@@ -765,6 +770,44 @@ test "Duration: overflow saturation" {
     // Verify non-overflowing values still work correctly
     try std.testing.expectEqual(1_000_000_000, Duration.fromSeconds(1).toNanoseconds());
     try std.testing.expectEqual(60_000_000_000, Duration.fromMinutes(1).toNanoseconds());
+}
+
+test "Duration: to* rounds sub-unit remainders up" {
+    // A non-zero duration smaller than the target unit must round up, never
+    // down to zero: a floored 0ms timeout makes timeout-based polls (epoll_wait,
+    // poll, IOCP) return immediately and busy-spin until the deadline arrives.
+    try std.testing.expectEqual(0, Duration.zero.toMilliseconds());
+
+    // toMilliseconds (only rounds when the unit is finer than a millisecond)
+    if (ns_per_ms > ns_per_unit) {
+        try std.testing.expectEqual(1, Duration.fromMicroseconds(1).toMilliseconds());
+        try std.testing.expectEqual(1, Duration.fromMicroseconds(999).toMilliseconds());
+        try std.testing.expectEqual(1, Duration.fromMicroseconds(1000).toMilliseconds()); // exact
+        try std.testing.expectEqual(2, Duration.fromMicroseconds(1001).toMilliseconds());
+    }
+    try std.testing.expectEqual(5, Duration.fromMilliseconds(5).toMilliseconds()); // exact stays exact
+
+    // toMicroseconds
+    if (ns_per_us > ns_per_unit) {
+        try std.testing.expectEqual(1, Duration.fromNanoseconds(1).toMicroseconds());
+        try std.testing.expectEqual(1, Duration.fromNanoseconds(ns_per_us - 1).toMicroseconds());
+        try std.testing.expectEqual(1, Duration.fromNanoseconds(ns_per_us).toMicroseconds()); // exact
+    }
+
+    // toSeconds
+    if (ns_per_s > ns_per_unit) {
+        try std.testing.expectEqual(1, Duration.fromMilliseconds(1).toSeconds());
+        try std.testing.expectEqual(1, Duration.fromMilliseconds(999).toSeconds());
+        try std.testing.expectEqual(1, Duration.fromMilliseconds(1000).toSeconds()); // exact
+    }
+
+    // Ceiling must be exact (and not overflow) even at the maximum value.
+    if (ns_per_ms > ns_per_unit) {
+        const divisor = ns_per_ms / ns_per_unit;
+        const v = Duration.max.value;
+        const expected = v / divisor + @intFromBool(v % divisor != 0);
+        try std.testing.expectEqual(expected, Duration.max.toMilliseconds());
+    }
 }
 
 test "Stopwatch: start, read, lap, reset" {
