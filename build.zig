@@ -60,6 +60,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "tcp-echo-server-stdio", .file = "examples/tcp_echo_server_stdio.zig" },
         .{ .name = "tcp-client", .file = "examples/tcp_client.zig" },
         .{ .name = "http-server", .file = "examples/http_server.zig" },
+        .{ .name = "http-client", .file = "examples/http_client.zig" },
         .{ .name = "mutex-demo", .file = "examples/mutex_demo.zig" },
         .{ .name = "producer-consumer", .file = "examples/producer_consumer.zig" },
         .{ .name = "parallel-grep", .file = "examples/parallel_grep.zig" },
