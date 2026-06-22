@@ -136,6 +136,11 @@ pub const Resolver = struct {
         storage: []dns.LookupResult,
         options: dns.LookupOptions,
     ) dns.ResolverError!usize {
+        // A name longer than the DNS limit is unresolvable and would overflow
+        // the canonical-name buffer (sized to net.HostName.max_len) and the
+        // cache key below, so reject it up front.
+        if (options.name.len > net.HostName.max_len) return error.UnknownHostName;
+
         const now = getCurrentTime();
         self.maybeReloadHosts(now);
         self.maybeReloadResolvConf(now);
