@@ -2222,11 +2222,13 @@ fn sendErrToSocketSendErr(err: ev.NetSendMsg.Error) Io.net.Socket.SendError {
         error.NetworkUnreachable => error.NetworkUnreachable,
         error.NetworkDown => error.NetworkDown,
         error.ConnectionResetByPeer, error.ConnectionAborted => error.ConnectionResetByPeer,
+        // std.Io has no send error for a kernel connection timeout (ETIMEDOUT);
+        // surface the dead connection as a reset, the actionable signal for callers.
+        error.ConnectionTimedOut => error.ConnectionResetByPeer,
         error.SocketNotConnected, error.BrokenPipe => error.SocketUnconnected,
         error.AccessDenied => error.AccessDenied,
         error.Canceled => error.Canceled,
         error.WouldBlock,
-        error.Timeout,
         error.FileDescriptorNotASocket,
         error.OperationNotSupported,
         error.Unexpected,
@@ -2265,7 +2267,10 @@ fn netSendImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, messages: []Io.net.
 fn recvErrToReadErr(err: ev.NetRecv.Error) Io.net.Stream.Reader.Error {
     return switch (err) {
         error.ConnectionResetByPeer => error.ConnectionResetByPeer,
-        error.Timeout => error.Timeout,
+        // ETIMEDOUT means the connection died (retransmits exhausted), not that a
+        // read deadline elapsed; std.Io.Stream.Reader has no timed-out-connection
+        // variant, so report it as a broken connection rather than a Timeout.
+        error.ConnectionTimedOut => error.ConnectionResetByPeer,
         error.SocketNotConnected, error.SocketShutdown => error.SocketUnconnected,
         error.NetworkDown => error.NetworkDown,
         error.SystemResources => error.SystemResources,
@@ -2286,6 +2291,7 @@ fn recvErrToReadErr(err: ev.NetRecv.Error) Io.net.Stream.Reader.Error {
 fn recvMsgErrToReceiveErr(err: ev.NetRecvMsg.Error) Io.net.Socket.ReceiveError {
     return switch (err) {
         error.ConnectionResetByPeer => error.ConnectionResetByPeer,
+        error.ConnectionTimedOut => error.ConnectionResetByPeer,
         error.SocketNotConnected, error.SocketShutdown, error.ConnectionAborted => error.SocketUnconnected,
         error.NetworkDown => error.NetworkDown,
         error.SystemResources => error.SystemResources,
@@ -2297,7 +2303,6 @@ fn recvMsgErrToReceiveErr(err: ev.NetRecvMsg.Error) Io.net.Socket.ReceiveError {
         error.ConnectionRefused => error.PortUnreachable,
         error.Canceled => error.Canceled,
         error.WouldBlock,
-        error.Timeout,
         error.FileDescriptorNotASocket,
         error.OperationNotSupported,
         error.Unexpected,
@@ -2388,6 +2393,7 @@ fn netReadImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, data: [][]u8) Io.ne
 fn sendErrToWriteErr(err: ev.NetSend.Error) Io.net.Stream.Writer.Error {
     return switch (err) {
         error.ConnectionResetByPeer, error.ConnectionAborted => error.ConnectionResetByPeer,
+        error.ConnectionTimedOut => error.ConnectionResetByPeer,
         error.SocketNotConnected, error.BrokenPipe => error.SocketUnconnected,
         error.NetworkUnreachable => error.NetworkUnreachable,
         error.NetworkDown => error.NetworkDown,
@@ -2395,7 +2401,6 @@ fn sendErrToWriteErr(err: ev.NetSend.Error) Io.net.Stream.Writer.Error {
         error.Canceled => error.Canceled,
         error.WouldBlock,
         error.AccessDenied,
-        error.Timeout,
         error.FileDescriptorNotASocket,
         error.MessageTooBig,
         error.OperationNotSupported,
