@@ -630,7 +630,12 @@ pub const UnixAddress = extern union {
     any: os.net.sockaddr,
     un: if (has_unix_sockets) os.net.sockaddr.un else void,
 
-    pub const max_len = 108;
+    // Derive the limit from the platform's actual sun_path size, reserving one
+    // byte for the NUL terminator that pathname sockets and format() rely on.
+    pub const max_len = if (has_unix_sockets)
+        @typeInfo(@FieldType(os.net.sockaddr.un, "path")).array.len - 1
+    else
+        0;
 
     pub fn init(path: []const u8) !UnixAddress {
         if (!has_unix_sockets) unreachable;
