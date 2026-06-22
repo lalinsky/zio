@@ -1264,6 +1264,13 @@ pub const Stream = struct {
                 return io_w.consume(n);
             }
 
+            // Lend both the writer's and the reader's buffers to the fallback
+            // loop; both are free here (any buffered bytes were flushed above).
+            // The ev layer decides how to use them (double-buffer / split /
+            // serial). If neither is usable, defer to std's read/drain fallback.
+            const bufs: [2][]u8 = .{ io_w.buffer, file_reader.interface.buffer };
+            if (bufs[0].len == 0 and bufs[1].len == 0) return error.Unimplemented;
+
             // Stream the file body directly from the current read position.
             const want = @intFromEnum(limit);
             if (want == 0) return 0;
@@ -1273,6 +1280,7 @@ pub const Stream = struct {
                 stdIoFileHandleToZio(file_reader.file.handle),
                 file_reader.pos,
                 want,
+                bufs,
             );
             waitForIo(&op.c) catch {
                 w.err = error.Canceled;

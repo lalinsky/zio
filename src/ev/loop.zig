@@ -27,6 +27,104 @@ const log = @import("../common.zig").log;
 
 const in_safe_mode = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
 
+/// How the NetSendFile fallback lays out its scratch from the (up to two)
+/// caller-provided buffers.
+const SendfileStrategy = enum {
+    /// Ping-pong between the two given buffers (read into one, send the other).
+    both,
+    /// Halve the larger buffer into two ping-pong buffers (the other is unused).
+    split,
+    /// Single buffer, serial read-then-send.
+    single,
+};
+
+/// The larger buffer must be at least this big before halving it for overlap
+/// beats just running serially over the whole thing.
+const sendfile_min_split = 64 * 1024;
+
+/// Pick a strategy from the two buffers' sizes (see `SendfileStrategy`).
+fn chooseSendfileStrategy(len0: usize, len1: usize) SendfileStrategy {
+    const small = @min(len0, len1);
+    const large = @max(len0, len1);
+    // Two buffers ping-ponging beats halving one whenever both are usable, so
+    // prefer that. Only fall back to halving the larger when the smaller is too
+    // small to be a useful second buffer (less than half the larger) *and* the
+    // larger is big enough that two halves still overlap well. An empty smaller
+    // buffer (only one buffer available) also lands here.
+    if (large >= sendfile_min_split and small < large / 2) return .split;
+    if (small > 0) return .both;
+    return .single;
+}
+
+/// Resolve the two caller buffers into the two working ping-pong buffers. A
+/// non-empty bufs[1] means double-buffering; an empty bufs[1] means serial.
+fn sendfileLayout(bufs: [2][]u8) [2][]u8 {
+    const big = if (bufs[0].len >= bufs[1].len) bufs[0] else bufs[1];
+    return switch (chooseSendfileStrategy(bufs[0].len, bufs[1].len)) {
+        .both => bufs,
+        .split => blk: {
+            const half = big.len / 2;
+            if (half == 0) break :blk .{ big, &.{} };
+            break :blk .{ big[0..half], big[half..] };
+        },
+        .single => .{ big, &.{} },
+    };
+}
+
+test chooseSendfileStrategy {
+    const S = SendfileStrategy;
+    const expectEqual = std.testing.expectEqual;
+    const k = 1024;
+
+    // Balanced (incl. equal) pairs -> use both, regardless of size.
+    try expectEqual(S.both, chooseSendfileStrategy(64 * k, 64 * k));
+    try expectEqual(S.both, chooseSendfileStrategy(1 * k, 1 * k));
+    try expectEqual(S.both, chooseSendfileStrategy(64 * k, 48 * k));
+
+    // Small second buffer, but the larger isn't big enough to bother splitting.
+    try expectEqual(S.both, chooseSendfileStrategy(32 * k, 1 * k));
+    try expectEqual(S.both, chooseSendfileStrategy(1 * k, 32 * k)); // order-independent
+
+    // Large buffer + a much smaller one -> halve the large into balanced halves.
+    try expectEqual(S.split, chooseSendfileStrategy(256 * k, 1 * k));
+    try expectEqual(S.split, chooseSendfileStrategy(1 * k, 256 * k));
+
+    // Only one buffer (other empty): split if big enough, else serial.
+    try expectEqual(S.split, chooseSendfileStrategy(256 * k, 0));
+    try expectEqual(S.single, chooseSendfileStrategy(32 * k, 0));
+    try expectEqual(S.single, chooseSendfileStrategy(0, 0));
+}
+
+test sendfileLayout {
+    const expectEqual = std.testing.expectEqual;
+    const k = 1024;
+    var a: [64 * k]u8 = undefined;
+    var b: [64 * k]u8 = undefined;
+
+    // Two balanced buffers -> returned as-is (double-buffer).
+    {
+        const r = sendfileLayout(.{ a[0 .. 32 * k], b[0 .. 32 * k] });
+        try expectEqual(32 * k, r[0].len);
+        try expectEqual(32 * k, r[1].len);
+        try std.testing.expect(r[0].ptr == a[0..].ptr);
+    }
+    // One large buffer -> two halves of it.
+    {
+        const r = sendfileLayout(.{ a[0..], &.{} });
+        try expectEqual(32 * k, r[0].len);
+        try expectEqual(32 * k, r[1].len);
+        try std.testing.expect(r[0].ptr == a[0..].ptr);
+        try std.testing.expect(r[1].ptr == a[32 * k ..].ptr);
+    }
+    // One small buffer -> serial (empty second slot).
+    {
+        var c: [4 * k]u8 = undefined;
+        const r = sendfileLayout(.{ c[0..], &.{} });
+        try expectEqual(4 * k, r[0].len);
+        try expectEqual(0, r[1].len);
+    }
+}
+
 pub const LoopGroup = struct {
     shared: Backend.SharedState = .{},
 };
@@ -923,6 +1021,10 @@ pub const Loop = struct {
     fn netSendFileStart(self: *Loop, op: *NetSendFile) void {
         op.internal = .{};
         op.internal.read_remaining = op.remaining;
+        // Lay out the working buffers from the (up to two) caller buffers. When
+        // the result's bufs[1] is empty the index flips are suppressed (see
+        // netSendFileStartRead / netSendFileOnSend), so the loop runs serially.
+        op.internal.bufs = sendfileLayout(op.bufs);
         self.netSendFileAdvance(op);
     }
 
@@ -931,7 +1033,7 @@ pub const Loop = struct {
         const idx = f.next_read;
         const want = @min(f.bufs[idx].len, f.read_remaining);
         f.reading = idx;
-        f.next_read ^= 1;
+        if (f.bufs[1].len != 0) f.next_read ^= 1;
         f.read = FileRead.init(op.file, ReadBuf.fromSlice(f.bufs[idx][0..want], &f.read_iov), op.offset);
         f.read.c.userdata = op;
         f.read.c.callback = netSendFileOnRead;
@@ -1032,7 +1134,7 @@ pub const Loop = struct {
         // Buffer fully drained; hand it back to the read side.
         f.filled[idx] = 0;
         f.sending = null;
-        f.next_send ^= 1;
+        if (f.bufs[1].len != 0) f.next_send ^= 1;
         loop.netSendFileAdvance(op);
     }
 
