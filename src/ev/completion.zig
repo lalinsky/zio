@@ -761,6 +761,12 @@ pub const NetSendFile = struct {
     offset: u64,
     /// Bytes still allowed to send (use `maxInt(usize)` for the whole file).
     remaining: usize,
+    /// Up to two scratch buffers borrowed from the caller for the generic
+    /// fallback loop. If both are non-empty the loop double-buffers (read into
+    /// one while sending the other); if only `bufs[0]` is non-empty it runs a
+    /// serial read-then-send loop. The two buffers may differ in size (e.g. the
+    /// writer's buffer and the reader's buffer). Unused by native backends.
+    bufs: [2][]u8,
 
     internal: switch (Backend.capabilities.net_send_file) {
         true => if (@hasDecl(Backend, "NetSendFileData")) Backend.NetSendFileData else struct {},
@@ -773,8 +779,9 @@ pub const NetSendFile = struct {
         send: NetSend = undefined,
         /// Two ping-pong transfer buffers (userspace equivalent of the splice
         /// pipe). One is filled by a read while the other is drained by a send.
-        /// Split 2x8K to keep the same total size as the single-buffer version.
-        bufs: [2][8 * 1024]u8 = undefined,
+        /// Derived from the caller's buffers by `netSendFileStart`; an empty
+        /// `bufs[1]` means a single-buffer serial loop.
+        bufs: [2][]u8 = .{ &.{}, &.{} },
         /// Bytes available in each buffer (0 = empty/free).
         filled: [2]usize = .{ 0, 0 },
         /// Drain cursor within the buffer currently being sent.
@@ -800,13 +807,18 @@ pub const NetSendFile = struct {
 
     pub const Error = (net.SendError || fs.FileReadError) || Cancelable;
 
-    pub fn init(handle: Backend.NetHandle, file: fs.fd_t, offset: u64, limit: usize) NetSendFile {
+    /// `bufs` are borrowed for the generic fallback loop and must outlive the
+    /// operation. Provide two non-empty buffers for double-buffering, or one
+    /// (with `bufs[1]` empty) for a serial loop. `bufs[0]` must be non-empty.
+    /// Native backends ignore `bufs`.
+    pub fn init(handle: Backend.NetHandle, file: fs.fd_t, offset: u64, limit: usize, bufs: [2][]u8) NetSendFile {
         return .{
             .c = .init(.net_send_file),
             .handle = handle,
             .file = file,
             .offset = offset,
             .remaining = limit,
+            .bufs = bufs,
         };
     }
 
