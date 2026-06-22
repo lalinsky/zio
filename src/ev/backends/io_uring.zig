@@ -1,5 +1,6 @@
 const std = @import("std");
 const linux = std.os.linux;
+const posix = @import("../../os/posix.zig");
 const net = @import("../../os/net.zig");
 const fs = @import("../../os/fs.zig");
 const linux_sys = @import("../../os/system/linux.zig");
@@ -12,11 +13,9 @@ const Queue = @import("../queue.zig").Queue;
 const Cancel = @import("../completion.zig").Cancel;
 
 // Special user_data values for internal operations
-const USER_DATA_WAKER: u64 = 0; // Waker FUTEX_WAIT operations
+const USER_DATA_WAKER: u64 = 0; // Waker eventfd multishot poll
 const USER_DATA_CANCEL: u64 = 1; // Cancel SQE operations (should be skipped)
 
-// Futex constants for io_uring FUTEX_WAIT/WAKE
-const FUTEX_BITSET_MATCH_ANY: u64 = 0xffffffff;
 const NetOpen = @import("../completion.zig").NetOpen;
 const NetConnect = @import("../completion.zig").NetConnect;
 const NetAccept = @import("../completion.zig").NetAccept;
@@ -158,6 +157,7 @@ const log = @import("../../common.zig").log;
 
 allocator: std.mem.Allocator,
 ring: linux.IoUring,
+waker_eventfd: i32,
 waker_needs_rearm: bool,
 pending: Queue(Completion) = .{},
 
@@ -171,71 +171,51 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
     var ring = try linux.IoUring.init(queue_size, flags);
     errdefer ring.deinit();
 
+    const waker_eventfd = try posix.eventfd(0, posix.EFD.CLOEXEC | posix.EFD.NONBLOCK);
+    errdefer _ = linux.close(waker_eventfd);
+
     self.* = .{
         .allocator = allocator,
         .ring = ring,
+        .waker_eventfd = waker_eventfd,
         .waker_needs_rearm = true,
     };
+
+    // Arm the multishot poll once. It stays armed across wakes, so the loop is
+    // never deaf to wake() — the SQE rides the first enter2, covering the first
+    // poll and startup. wake() just writes the eventfd.
+    _ = self.armWaker();
 }
 
 pub fn deinit(self: *Self) void {
+    _ = linux.close(self.waker_eventfd);
     self.ring.deinit();
 }
 
 pub fn wake(self: *Self, state: *LoopState) void {
-    _ = self;
-    // wake_requested is already set by Loop.wake() before calling us.
-    // Use futex2_wake to match io_uring's FUTEX_WAIT which uses FUTEX2.
-    //
-    // We use a SHARED (not PRIVATE) futex to work around a kernel bug:
-    // if a PRIVATE FUTEX_WAIT is queued while the process is still
-    // single-threaded, the kernel parks the waiter in the global futex
-    // hash. When threads are later created, the kernel installs a
-    // per-process private hash but does NOT migrate global-hash waiters
-    // into it. A subsequent PRIVATE futex2_wake consults only the
-    // per-process hash → matches 0 waiters → the io_uring wait never
-    // completes. SHARED futexes always use the global hash, so they are
-    // immune to this hash pivot.
-    // See: futex_repro.c in the repo root.
-    _ = linux.futex2_wake(
-        &state.wake_requested.raw,
-        FUTEX_BITSET_MATCH_ANY,
-        std.math.maxInt(i32),
-        .{ .size = .U32, .private = false },
-    );
+    _ = state;
+    posix.eventfd_write(self.waker_eventfd, 1) catch {};
 }
 
-fn rearmWaker(self: *Self, state: *LoopState) void {
-    if (!self.waker_needs_rearm) return;
-    const sqe = self.ring.get_sqe() catch return; // leaves waker_needs_rearm=true; fallback timeout kicks in
-    prepFutexWait(sqe, &state.wake_requested.raw, 0);
+/// Arm the multishot poll on the waker eventfd if needed. Returns false only
+/// when a rearm was needed but the SQ was full (caller must not block).
+/// Normally a no-op: the poll is armed once and the kernel keeps it armed.
+fn armWaker(self: *Self) bool {
+    if (!self.waker_needs_rearm) return true;
+    const sqe = self.ring.get_sqe() catch return false;
+    sqe.prep_poll_add(self.waker_eventfd, linux.POLL.IN);
+    sqe.len = linux.IORING_POLL_ADD_MULTI;
     sqe.user_data = USER_DATA_WAKER;
     self.waker_needs_rearm = false;
+    return true;
 }
 
-fn drainWaker(self: *Self) void {
-    // wake_requested is reset by Loop after poll returns.
-    // Just mark that we need to rearm the FUTEX_WAIT.
-    self.waker_needs_rearm = true;
-}
-
-fn prepFutexWait(sqe: *linux.io_uring_sqe, futex: *const u32, expected: u64) void {
-    sqe.* = .{
-        .opcode = .FUTEX_WAIT,
-        .flags = 0,
-        .ioprio = 0,
-        .fd = @bitCast(linux.FUTEX2_FLAGS{ .size = .U32, .private = false }),
-        .off = expected,
-        .addr = @intFromPtr(futex),
-        .len = 0,
-        .rw_flags = 0,
-        .user_data = 0,
-        .buf_index = 0,
-        .personality = 0,
-        .splice_fd_in = 0,
-        .addr3 = FUTEX_BITSET_MATCH_ANY,
-        .resv = 0,
-    };
+fn drainWaker(self: *Self, cqe: linux.io_uring_cqe) void {
+    // Clear the level-triggered readiness so the multishot poll doesn't refire.
+    _ = posix.eventfd_read(self.waker_eventfd) catch {};
+    // The multishot poll normally stays armed (F_MORE). If the kernel dropped
+    // it, mark for re-arm on the next poll.
+    if (cqe.flags & linux.IORING_CQE_F_MORE == 0) self.waker_needs_rearm = true;
 }
 
 /// Submit a completion to the backend - infallible.
@@ -763,18 +743,13 @@ fn getSqeOrDefer(self: *Self, c: *Completion) ?*linux.io_uring_sqe {
 pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
     const linux_os = @import("../../os/linux.zig");
 
-    // Flush SQ to get number of pending submissions
-    const to_submit = self.ring.flush_sq();
+    // The waker poll is normally already armed (a no-op here). It only needs
+    // re-arming in the rare case the kernel dropped the multishot; if the SQ is
+    // full then, don't block — a non-blocking enter2 drains it so the next poll
+    // can arm.
+    const effective_timeout: Duration = if (self.armWaker()) timeout else .zero;
 
-    // Setup timeout for io_uring_enter2.
-    // If the waker isn't armed (SQ was full when we last tried to rearm), we must not
-    // block indefinitely — no FUTEX_WAIT is in the ring to interrupt us from another
-    // thread. Cap to a short fallback so we re-arm on the next poll.
-    // TODO: consider a proper reserved slot strategy so the waker is never un-armed.
-    const effective_timeout = if (self.waker_needs_rearm)
-        Duration.fromMilliseconds(10)
-    else
-        timeout;
+    const to_submit = self.ring.flush_sq();
     var ts: linux.kernel_timespec = undefined;
     var arg: linux_os.io_uring_getevents_arg = .{
         .ts = if (effective_timeout.value == Duration.max.value) 0 else blk: {
@@ -806,8 +781,6 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
     const count = try self.ring.copy_cqes(&cqes, 0);
 
     if (count == 0) {
-        // Rearm waker and drain pending before returning — SQ was cleared by enter2.
-        self.rearmWaker(state);
         self.drainPending(state);
         return true; // Timed out
     }
@@ -815,7 +788,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
     for (cqes[0..count]) |cqe| {
         // Handle internal operations with special user_data values
         if (cqe.user_data == USER_DATA_WAKER) {
-            self.drainWaker();
+            self.drainWaker(cqe);
             continue;
         }
 
@@ -835,7 +808,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
             continue;
         }
 
-        // Handle EINTR by deferring to pending — resubmit after rearmWaker so the
+        // Handle EINTR by deferring to pending — resubmit after armWaker so the
         // waker always gets priority over EINTR resubmissions.
         if (cqe.res == -@as(i32, @intFromEnum(linux.E.INTR))) {
             self.pending.push(completion);
@@ -849,9 +822,6 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         state.markCompletedFromBackend(completion);
     }
 
-    // Rearm waker first (SQ was cleared by enter2, so this is guaranteed a slot),
-    // then drain pending submissions. Order matters: waker has priority.
-    self.rearmWaker(state);
     self.drainPending(state);
 
     return false; // Did not timeout, woke up due to events
