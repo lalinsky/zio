@@ -498,9 +498,9 @@ pub const AnyTask = struct {
             .closure = alloc_result.closure,
         };
 
-        // Acquire stack from pool and initialize context
+        // Acquire stack from pool and initialize context. Nothing below can
+        // fail, so the acquired stack needs no errdefer release here.
         self.coro.context.stack_info = try executor.runtime.stack_pool.acquire();
-        errdefer executor.runtime.stack_pool.release(self.coro.context.stack_info);
 
         // Copy context data into the allocation
         const context_dest = self.closure.getContextSlice(AnyTask, self);
