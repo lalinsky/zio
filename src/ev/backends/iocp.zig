@@ -257,6 +257,13 @@ pub const SharedState = struct {
                 0,
                 0, // Use default number of concurrent threads
             ) orelse return error.Unexpected;
+            // If first-loop setup below fails, close the freshly created
+            // handle so this SharedState stays reusable (refcount is still 0,
+            // so the caller's errdefer release() does not run).
+            errdefer {
+                _ = windows.CloseHandle(self.iocp);
+                self.iocp = windows.INVALID_HANDLE_VALUE;
+            }
 
             // Reset shared accounting in case this SharedState is being
             // reused after a previous teardown that left stale counters.
