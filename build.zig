@@ -72,11 +72,14 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ev-demo", .file = "examples/ev_demo.zig" },
     };
 
-    // Create examples step
+    // Create examples step. -Dexample=<name> limits it to a single example and
+    // adds a run step for it (e.g. `zig build examples -Dexample=wake-latency`).
     const examples_step = b.step("examples", "Build examples");
+    const only_example = b.option([]const u8, "example", "Build/run only this example by name");
 
     // Create example executables
     for (examples) |example| {
+        if (only_example) |name| if (!std.mem.eql(u8, name, example.name)) continue;
         const exe = b.addExecutable(.{
             .name = example.name,
             .root_module = b.createModule(.{
@@ -89,20 +92,27 @@ pub fn build(b: *std.Build) void {
 
         const install_exe = b.addInstallArtifact(exe, .{});
         examples_step.dependOn(&install_exe.step);
+
+        if (only_example != null) {
+            const run = b.addRunArtifact(exe);
+            examples_step.dependOn(&run.step);
+        }
     }
 
     // Single-threaded build of hello-world to verify single-threaded support
-    const hello_world_st = b.addExecutable(.{
-        .name = "hello-world-single-threaded",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/hello_world.zig"),
-            .target = target,
-            .optimize = optimize,
-            .single_threaded = true,
-        }),
-    });
-    hello_world_st.root_module.addImport("zio", zio);
-    examples_step.dependOn(&b.addInstallArtifact(hello_world_st, .{}).step);
+    if (only_example == null) {
+        const hello_world_st = b.addExecutable(.{
+            .name = "hello-world-single-threaded",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("examples/hello_world.zig"),
+                .target = target,
+                .optimize = optimize,
+                .single_threaded = true,
+            }),
+        });
+        hello_world_st.root_module.addImport("zio", zio);
+        examples_step.dependOn(&b.addInstallArtifact(hello_world_st, .{}).step);
+    }
 
     // Tests
     const emit_test_bin = b.option(bool, "emit-test-bin", "Build test binary without running") orelse false;
