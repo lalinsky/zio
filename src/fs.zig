@@ -18,6 +18,10 @@ const Timeout = @import("time.zig").Timeout;
 
 pub const Handle = os.fs.fd_t;
 
+/// zio's std.Io integration. Imported for `debug_io` and `zioFileToStd`; the
+/// mutual fs<->io import is fine (no comptime cycle).
+const zio_io = @import("io.zig");
+
 pub const max_vecs = switch (builtin.os.tag) {
     .windows => 1,
     else => 16,
@@ -482,6 +486,21 @@ pub const File = struct {
 
     pub fn writer(self: File, buffer: []u8) FileWriter {
         return FileWriter.init(self, buffer);
+    }
+
+    /// Wrap this file as a `std.Io.File.Reader`, for std.Io APIs that require
+    /// that exact type (e.g. `std.Io.Writer.sendFileAll`). Unlike `reader`,
+    /// which returns zio's own `FileReader`, this returns std's reader bound to
+    /// zio's `std.Io`. I/O through it still goes through zio's runtime: it
+    /// suspends on the current task's loop when called from a zio task, and runs
+    /// synchronously otherwise.
+    pub fn stdReader(self: File, buffer: []u8) std.Io.File.Reader {
+        return zio_io.zioFileToStd(self).reader(zio_io.debug_io, buffer);
+    }
+
+    /// Like `stdReader`, but returns a `std.Io.File.Writer`.
+    pub fn stdWriter(self: File, buffer: []u8) std.Io.File.Writer {
+        return zio_io.zioFileToStd(self).writer(zio_io.debug_io, buffer);
     }
 };
 
@@ -992,6 +1011,27 @@ test "File: reader and writer interface" {
 
     try std.testing.expectEqual(10, bytes_read);
     try std.testing.expectEqualStrings("xxxxxxxxxx", result[0..bytes_read]);
+}
+
+test "File: stdReader and stdWriter round-trip" {
+    var t = try TestFile.create("test_file_std_rw.txt", .{});
+    defer t.deinit();
+
+    // Write via std.Io.File.Writer (zio file -> std reader/writer).
+    var write_buffer: [256]u8 = undefined;
+    var writer = t.file.stdWriter(&write_buffer);
+    try writer.interface.writeAll("hello std.Io");
+    try writer.interface.flush();
+
+    // Reopen and read back via std.Io.File.Reader.
+    t.file.close();
+    t.file = try t.dir.openFile(t.path, .{});
+
+    var read_buffer: [256]u8 = undefined;
+    var reader = t.file.stdReader(&read_buffer);
+    var result: [32]u8 = undefined;
+    const n = try reader.interface.readSliceShort(&result);
+    try std.testing.expectEqualStrings("hello std.Io", result[0..n]);
 }
 
 test "Dir: setPermissions" {

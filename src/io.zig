@@ -81,6 +81,17 @@ fn flagsWritePollable(flags: *Io.File.Flags, pollable: bool) void {
     @as(*u8, @ptrCast(flags)).* = if (pollable) 0x01 else 0xCC;
 }
 
+/// Build a `std.Io.File` from a zio `fs.File`, carrying its pollable verdict in
+/// the (possibly hack-encoded) flags so the std Reader/Writer picks the right
+/// streaming-vs-positional path. A `null` verdict is left unknown (probed
+/// lazily). Used by `fs.File.stdReader` / `fs.File.stdWriter`.
+pub fn zioFileToStd(file: zio_fs.File) Io.File {
+    // nonblocking=false is the "unknown" encoding in both hack modes.
+    var f: Io.File = .{ .handle = file.fd, .flags = .{ .nonblocking = false } };
+    if (file.pollable) |pollable| flagsWritePollable(&f.flags, pollable);
+    return f;
+}
+
 /// Whether a positional (offset-based) op on `file` cannot be served by the
 /// async backend and should be reported as `Unseekable` so the std.Io
 /// Reader/Writer falls back to streaming.
