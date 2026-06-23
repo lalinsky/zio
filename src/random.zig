@@ -34,7 +34,7 @@ const getCurrentExecutorOrNull = runtime.getCurrentExecutorOrNull;
 /// For cryptographically secure entropy, use `randomSecure` instead.
 pub fn random(buffer: []u8) void {
     if (getCurrentExecutorOrNull()) |exec| {
-        exec.csprng.fill(buffer);
+        exec.random_state.csprng.fill(buffer);
     } else {
         os.getrandom(buffer) catch {
             const seed = time.Timestamp.now(.monotonic).toNanoseconds();
@@ -65,17 +65,21 @@ pub fn randomSecure(buffer: []u8) RandomSecureError!void {
     return result;
 }
 
-/// The per-executor non-cryptographic CSPRNG type.
-pub const Csprng = std.Random.DefaultCsprng;
+/// Per-executor random state. For now it only holds the non-secure CSPRNG, but
+/// it will later also own the opened /dev/urandom fd (io_uring) and the Windows
+/// CNG handle so the secure path can skip the thread pool.
+pub const RandomState = struct {
+    csprng: std.Random.DefaultCsprng,
+};
 
-/// Create a freshly-seeded per-executor CSPRNG from OS entropy. Called by the
-/// runtime at executor startup; not part of the public `zio` API. Each executor
-/// gets an independent seed so per-thread streams are independent. Fails if the
-/// OS cannot provide entropy rather than running with a predictable seed.
-pub fn setup() os.GetRandomError!Csprng {
-    var seed: [Csprng.secret_seed_length]u8 = undefined;
+/// Initialize per-executor random state from OS entropy. Called by the runtime
+/// at executor startup; not part of the public `zio` API. Each executor gets an
+/// independent seed so per-thread streams are independent. Fails if the OS
+/// cannot provide entropy rather than running with a predictable seed.
+pub fn setup(state: *RandomState) os.GetRandomError!void {
+    var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 = undefined;
     try os.getrandom(&seed);
-    return Csprng.init(seed);
+    state.csprng = std.Random.DefaultCsprng.init(seed);
 }
 
 const Runtime = runtime.Runtime;

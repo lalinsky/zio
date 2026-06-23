@@ -241,8 +241,8 @@ pub const Executor = struct {
     id: u6,
     loop: ev.Loop,
 
-    /// Per-executor non-secure CSPRNG, seeded at `init` from a secure source.
-    csprng: random_mod.Csprng,
+    /// Per-executor random state (non-secure CSPRNG; later the secure-path fd/handle).
+    random_state: random_mod.RandomState,
 
     ready_queue: SimpleQueue(WaitNode) = .{},
 
@@ -307,7 +307,7 @@ pub const Executor = struct {
         self.* = .{
             .id = id,
             .loop = undefined,
-            .csprng = undefined,
+            .random_state = undefined,
             .current_task = undefined,
             .runtime = runtime,
             .shutdown = ev.Async.init(),
@@ -334,8 +334,8 @@ pub const Executor = struct {
         try setupStackGrowth();
         errdefer cleanupStackGrowth();
 
-        // Seed this executor's non-secure CSPRNG from OS entropy.
-        self.csprng = try random_mod.setup();
+        // Initialize this executor's random state from OS entropy.
+        try random_mod.setup(&self.random_state);
 
         try self.loop.init(.{
             .allocator = self.runtime.allocator,
