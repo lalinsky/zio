@@ -9,6 +9,7 @@ pub const log = std.log.scoped(.zio);
 const ev = @import("ev/root.zig");
 const Timeout = @import("time.zig").Timeout;
 const Clock = @import("time.zig").Clock;
+const Timestamp = @import("time.zig").Timestamp;
 const Stopwatch = @import("time.zig").Stopwatch;
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTaskOrNull = @import("runtime.zig").getCurrentTaskOrNull;
@@ -165,7 +166,7 @@ pub const Waiter = struct {
         }
 
         const d = &self.mode.direct;
-        const task = d.task orelse return timedWaitFutex(d, expected, timeout);
+        const task = d.task orelse return timedWaitFutex(d, expected, futexTimeout(timeout, clock));
 
         var timer: ev.Timer = .initClock(timeout, clock);
         timer.c.userdata = self;
@@ -183,6 +184,23 @@ pub const Waiter = struct {
             if (current >= expected) return;
             d.notify.wait(current);
         }
+    }
+
+    /// Collapse a wall-clock (boot/real) deadline into a monotonic-relative
+    /// duration for the no-task futex fallback, which can only wait on the
+    /// monotonic clock. Without this, `timedWaitFutex` would compare an
+    /// absolute realtime timestamp (~ns since 1970) against monotonic time and
+    /// wait for decades. Best-effort: it snapshots the remaining time once and
+    /// loses suspend/step semantics.
+    ///
+    /// TODO: support boot/real natively on this path. The Linux futex can wait
+    /// against CLOCK_REALTIME (FUTEX_WAIT_BITSET | FUTEX_CLOCK_REALTIME), so a
+    /// no-task wait on a real deadline could be exact rather than converted.
+    fn futexTimeout(timeout: Timeout, clock: Clock) Timeout {
+        return switch (timeout) {
+            .none, .duration => timeout,
+            .deadline => |deadline| .{ .duration = Timestamp.now(clock).durationTo(deadline) },
+        };
     }
 
     fn timedWaitFutex(d: *Direct, expected: u32, timeout: Timeout) void {

@@ -399,7 +399,11 @@ pub const LoopState = struct {
 
     pub fn setTimer(self: *LoopState, timer: *Timer) void {
         const idx = clockIndex(timer.clock);
-        if (timer.deadline.value > 0) {
+        // `.running` means the timer is already in its heap (resetting it);
+        // anything else means it's newly activated. Don't key this off
+        // `deadline.value`, which can legitimately be 0 for an absolute
+        // deadline at/at-before the epoch and would then leak/double-fire.
+        if (timer.c.state == .running) {
             self.timers[idx].remove(timer);
         } else {
             self.incrActive();
@@ -414,7 +418,7 @@ pub const LoopState = struct {
     }
 
     pub fn clearTimer(self: *LoopState, timer: *Timer) void {
-        const was_active = timer.deadline.value > 0;
+        const was_active = timer.c.state == .running;
         if (was_active) {
             self.timers[clockIndex(timer.clock)].remove(timer);
         }
@@ -538,7 +542,7 @@ pub const Loop = struct {
     pub fn clearTimer(self: *Loop, timer: *Timer) void {
         self.state.lockTimers();
         defer self.state.unlockTimers();
-        const was_active = timer.deadline.value > 0;
+        const was_active = timer.c.state == .running;
         self.state.clearTimer(timer);
         if (was_active) {
             // Reset state so timer can be reused
