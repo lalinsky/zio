@@ -334,14 +334,8 @@ pub const Executor = struct {
         try setupStackGrowth();
         errdefer cleanupStackGrowth();
 
-        // Seed this executor's non-secure CSPRNG with an independent secure
-        // seed drawn from zio's own blocking secure RNG. Each executor draws
-        // its own seed so per-thread streams are independent. If the OS cannot
-        // provide entropy at startup, executor creation fails rather than
-        // running with a predictable seed.
-        var seed: [random_mod.Csprng.seed_len]u8 = undefined;
-        try os.getrandom(&seed);
-        self.csprng = .init(seed);
+        // Seed this executor's non-secure CSPRNG from OS entropy.
+        self.csprng = try random_mod.setup();
 
         try self.loop.init(.{
             .allocator = self.runtime.allocator,

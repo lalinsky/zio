@@ -17,42 +17,30 @@ const std = @import("std");
 
 const os = @import("os/root.zig");
 const runtime = @import("runtime.zig");
+const time = @import("time.zig");
 const common = @import("common.zig");
 const Cancelable = common.Cancelable;
 const blockInPlace = common.blockInPlace;
 const getCurrentExecutorOrNull = runtime.getCurrentExecutorOrNull;
 
-/// Per-executor non-cryptographic CSPRNG. Owned by `Executor`, seeded once at
-/// startup from a secure source. Fills are synchronous and perform no syscalls.
-/// The seed must come from a cryptographically secure source.
-pub const Csprng = struct {
-    rng: std.Random.DefaultCsprng,
-
-    /// Length of the seed expected by `init`.
-    pub const seed_len = std.Random.DefaultCsprng.secret_seed_length;
-
-    pub fn init(seed: [seed_len]u8) Csprng {
-        return .{ .rng = .init(seed) };
-    }
-
-    /// Fill `buffer` with random bytes. Never blocks; performs no syscalls.
-    pub fn fill(self: *Csprng, buffer: []u8) void {
-        self.rng.fill(buffer);
-    }
-};
-
 /// Fill `buffer` with non-cryptographic random bytes from the current
-/// executor's CSPRNG. Fast, never blocks, performs no syscalls; the CSPRNG is
-/// seeded once at executor startup. When called outside any executor, falls
-/// back to the secure syscall directly (best effort: zeros the buffer if
-/// entropy is unavailable).
+/// executor's CSPRNG (a `std.Random.DefaultCsprng` seeded once at executor
+/// startup). Fast, never blocks, performs no syscalls.
+///
+/// Outside an executor there is no seeded CSPRNG, so we read the OS directly;
+/// if that somehow fails we fall back to an ad-hoc PRNG seeded from the
+/// monotonic clock (always available) so we never hand back predictable zeros.
 ///
 /// For cryptographically secure entropy, use `randomSecure` instead.
 pub fn random(buffer: []u8) void {
     if (getCurrentExecutorOrNull()) |exec| {
         exec.csprng.fill(buffer);
     } else {
-        os.getrandom(buffer) catch @memset(buffer, 0);
+        os.getrandom(buffer) catch {
+            const seed = time.Timestamp.now(.monotonic).toNanoseconds();
+            var prng = std.Random.DefaultPrng.init(seed);
+            prng.fill(buffer);
+        };
     }
 }
 
@@ -75,6 +63,19 @@ pub fn randomSecure(buffer: []u8) RandomSecureError!void {
         }
     }.run, .{ buffer, &result });
     return result;
+}
+
+/// The per-executor non-cryptographic CSPRNG type.
+pub const Csprng = std.Random.DefaultCsprng;
+
+/// Create a freshly-seeded per-executor CSPRNG from OS entropy. Called by the
+/// runtime at executor startup; not part of the public `zio` API. Each executor
+/// gets an independent seed so per-thread streams are independent. Fails if the
+/// OS cannot provide entropy rather than running with a predictable seed.
+pub fn setup() os.GetRandomError!Csprng {
+    var seed: [Csprng.secret_seed_length]u8 = undefined;
+    try os.getrandom(&seed);
+    return Csprng.init(seed);
 }
 
 const Runtime = runtime.Runtime;
