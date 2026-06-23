@@ -1267,7 +1267,10 @@ pub const GetRandomError = @import("base.zig").GetRandomError;
 // Go/Rust/Chromium/BoringSSL use). It reads from the per-CPU AES-CTR-DRBG and
 // always returns TRUE. A future improvement is the async IOCP path through
 // \Device\CNG (IOCTL_KSEC_GEN_RANDOM); for now we run this on the thread pool.
-pub extern "bcryptprimitives" fn ProcessPrng(pbData: [*]u8, cbData: SIZE_T) callconv(.winapi) BOOL;
+// Returns a Win32 BOOL; declared as the ABI-identical c_int so the result can
+// be compared directly (std's BOOL is a distinct Bool(c_int) type). ProcessPrng
+// is documented to always return TRUE.
+pub extern "bcryptprimitives" fn ProcessPrng(pbData: [*]u8, cbData: SIZE_T) callconv(.winapi) c_int;
 
 /// Fill `buffer` with cryptographically secure random bytes from the OS.
 /// Blocking primitive; async callers run it on a thread-pool worker.
