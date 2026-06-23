@@ -872,8 +872,13 @@ pub const Loop = struct {
     };
 
     fn checkTimers(self: *Loop) TimerCheckResult {
+        const native_wall = Backend.capabilities.native_wall_timers;
+
         var fired = false;
         var next_timeout: ?Duration = null;
+        // Earliest pending absolute deadline per heap; only the boot/real
+        // entries are used, and only when the backend arms them natively.
+        var wall_deadline: [wall_clock_count]?u64 = .{ null, null, null };
 
         // Advance the scan once and refresh the awake snapshot; this also
         // invalidates the lazily-cached boot/real values for this scan.
@@ -901,14 +906,20 @@ pub const Loop = struct {
                 while (self.state.timers[idx].peek()) |timer| {
                     const now_clock = self.state.nowFor(clock);
                     if (timer.deadline.value > now_clock.value) {
-                        var remaining = now_clock.durationTo(timer.deadline);
-                        // boot/real can't be tracked by the awake poll clock, so
-                        // bound the wait to re-evaluate them across suspend/steps.
-                        if (clock != .awake and remaining.value > self.wall_clock_cap.value) {
-                            remaining = self.wall_clock_cap;
-                        }
-                        if (next_timeout == null or remaining.value < next_timeout.?.value) {
-                            next_timeout = remaining;
+                        if (native_wall and clock != .awake) {
+                            // Backend arms this clock natively; record its
+                            // earliest deadline instead of folding into the poll.
+                            wall_deadline[idx] = timer.deadline.value;
+                        } else {
+                            var remaining = now_clock.durationTo(timer.deadline);
+                            // boot/real can't be tracked by the awake poll clock,
+                            // so bound the wait to re-evaluate across suspend/steps.
+                            if (clock != .awake and remaining.value > self.wall_clock_cap.value) {
+                                remaining = self.wall_clock_cap;
+                            }
+                            if (next_timeout == null or remaining.value < next_timeout.?.value) {
+                                next_timeout = remaining;
+                            }
                         }
                         break;
                     }
@@ -929,6 +940,11 @@ pub const Loop = struct {
                 // If we didn't fill the batch, we're done with this domain
                 if (batch_count < batch.len) break;
             }
+        }
+
+        // Hand the boot/real minimums to the backend's native wall-clock timers.
+        if (comptime native_wall) {
+            self.backend.syncWallTimers(wall_deadline[1], wall_deadline[2]);
         }
 
         return .{ .next_timeout = next_timeout, .fired = fired };

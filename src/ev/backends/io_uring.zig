@@ -15,6 +15,8 @@ const Cancel = @import("../completion.zig").Cancel;
 // Special user_data values for internal operations
 const USER_DATA_WAKER: u64 = 0; // Waker eventfd multishot poll
 const USER_DATA_CANCEL: u64 = 1; // Cancel SQE operations (should be skipped)
+const USER_DATA_WALL_BOOT: u64 = 2; // boot-clock (CLOCK_BOOTTIME) timeout
+const USER_DATA_WALL_REAL: u64 = 3; // real-clock (CLOCK_REALTIME) timeout
 
 const NetOpen = @import("../completion.zig").NetOpen;
 const NetConnect = @import("../completion.zig").NetConnect;
@@ -74,6 +76,7 @@ pub const capabilities: BackendCapabilities = .{
     .dir_open = true,
     .dir_close = true,
     .process_wait = true,
+    .native_wall_timers = true,
 };
 
 pub const SharedState = struct {};
@@ -160,6 +163,17 @@ ring: linux.IoUring,
 waker_eventfd: i32,
 waker_needs_rearm: bool,
 pending: Queue(Completion) = .{},
+/// Currently-armed absolute deadline (ns, in the clock's epoch) for the
+/// boot/real wall-clock timeout SQEs, or null if disarmed. Indexed by
+/// `wallIndex` (0 = boot, 1 = real).
+wall_armed: [2]?u64 = .{ null, null },
+/// Backing storage for the wall timeout `kernel_timespec`s; must outlive the
+/// SQE until the next `io_uring_enter2` reads it.
+wall_ts: [2]linux.kernel_timespec = undefined,
+/// Set when a wall-timer (re)arm couldn't get an SQE because the SQ was full.
+/// Like `waker_needs_rearm`, this forces the next poll not to block so the SQ
+/// drains and the arm retries on the following scan.
+wall_needs_rearm: bool = false,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
     _ = shared_state;
@@ -740,6 +754,51 @@ fn getSqeOrDefer(self: *Self, c: *Completion) ?*linux.io_uring_sqe {
     };
 }
 
+/// Arm/update/disarm the native boot and real wall-clock timeout SQEs to the
+/// given absolute deadlines (ns in each clock's epoch; null = none). Called by
+/// the loop when the boot/real timer-heap minimums change; the SQEs ride the
+/// next `io_uring_enter2`.
+pub fn syncWallTimers(self: *Self, boot: ?u64, real: ?u64) void {
+    self.wall_needs_rearm = false;
+    self.armWall(0, USER_DATA_WALL_BOOT, linux.IORING_TIMEOUT_BOOTTIME, boot);
+    self.armWall(1, USER_DATA_WALL_REAL, linux.IORING_TIMEOUT_REALTIME, real);
+}
+
+fn armWall(self: *Self, idx: usize, sentinel: u64, clock_flag: u32, deadline: ?u64) void {
+    if (self.wall_armed[idx] == deadline) return; // unchanged (incl. both null)
+
+    // Remove the existing timeout (if any) before re-arming. The removed
+    // timeout's CQE and the remove op's CQE are both ignored in poll(). If the
+    // SQ is full, flag a rearm so poll() drains it and we retry next scan,
+    // leaving wall_armed unchanged so the old timeout stays valid meanwhile.
+    if (self.wall_armed[idx] != null) {
+        const sqe = self.ring.get_sqe() catch {
+            self.wall_needs_rearm = true;
+            return;
+        };
+        sqe.prep_timeout_remove(sentinel, 0);
+        sqe.user_data = USER_DATA_CANCEL;
+    }
+
+    if (deadline) |d| {
+        const sqe = self.ring.get_sqe() catch {
+            // Remove was queued (or nothing was armed), but we can't arm the
+            // new timeout now. Forget it and retry next scan after the drain.
+            self.wall_armed[idx] = null;
+            self.wall_needs_rearm = true;
+            return;
+        };
+        self.wall_ts[idx] = .{
+            .sec = @intCast(d / time.ns_per_s),
+            .nsec = @intCast(d % time.ns_per_s),
+        };
+        sqe.prep_timeout(&self.wall_ts[idx], 0, linux.IORING_TIMEOUT_ABS | clock_flag);
+        sqe.user_data = sentinel;
+    }
+
+    self.wall_armed[idx] = deadline;
+}
+
 pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
     const linux_os = @import("../../os/linux.zig");
 
@@ -747,7 +806,9 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
     // re-arming in the rare case the kernel dropped the multishot; if the SQ is
     // full then, don't block — a non-blocking enter2 drains it so the next poll
     // can arm.
-    const effective_timeout: Duration = if (self.armWaker()) timeout else .zero;
+    // Don't block if a critical internal SQE (waker or a wall timer) still
+    // needs arming — a zero-timeout enter2 drains the SQ so the next scan can.
+    const effective_timeout: Duration = if (self.armWaker() and !self.wall_needs_rearm) timeout else .zero;
 
     const to_submit = self.ring.flush_sq();
     var ts: linux.kernel_timespec = undefined;
@@ -785,6 +846,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         return true; // Timed out
     }
 
+    var wall_fired = false;
     for (cqes[0..count]) |cqe| {
         // Handle internal operations with special user_data values
         if (cqe.user_data == USER_DATA_WAKER) {
@@ -794,6 +856,18 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
 
         if (cqe.user_data == USER_DATA_CANCEL) {
             // Cancel SQE completion - just skip it
+            continue;
+        }
+
+        // Wall-clock (boot/real) timeout. A fire (-ETIME) means a boot/real
+        // timer is due, so report a timeout below to re-run checkTimers; the
+        // kernel auto-removed the one-shot, so forget our armed deadline. A
+        // -ECANCELED is from re-arming and is simply ignored.
+        if (cqe.user_data == USER_DATA_WALL_BOOT or cqe.user_data == USER_DATA_WALL_REAL) {
+            if (cqe.res == -@as(i32, @intFromEnum(linux.E.TIME))) {
+                wall_fired = true;
+                self.wall_armed[if (cqe.user_data == USER_DATA_WALL_BOOT) 0 else 1] = null;
+            }
             continue;
         }
 
@@ -824,7 +898,9 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
 
     self.drainPending(state);
 
-    return false; // Did not timeout, woke up due to events
+    // A fired wall timer is reported as a timeout so the loop re-runs
+    // checkTimers and fires the due boot/real timers.
+    return wall_fired;
 }
 
 fn drainPending(self: *Self, state: *LoopState) void {

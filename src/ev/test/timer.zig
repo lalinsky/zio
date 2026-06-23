@@ -139,7 +139,7 @@ test "timer with explicit deadline" {
     std.log.info("deadline timer: expected=100ms, actual={f}", .{elapsed});
 }
 
-test "timer on boot clock fires (duration, fallback path)" {
+test "timer on boot clock fires (duration)" {
     var loop: Loop = undefined;
     try loop.init(.{});
     defer loop.deinit();
@@ -158,7 +158,7 @@ test "timer on boot clock fires (duration, fallback path)" {
     std.log.info("boot timer: expected=100ms, actual={f}", .{elapsed});
 }
 
-test "timer on real clock fires (absolute deadline, fallback path)" {
+test "timer on real clock fires (absolute deadline)" {
     var loop: Loop = undefined;
     try loop.init(.{});
     defer loop.deinit();

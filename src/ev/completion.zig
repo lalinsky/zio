@@ -59,6 +59,10 @@ pub const BackendCapabilities = struct {
     /// When true, completions submitted to one loop in a group may be completed
     /// on another loop's thread. Timer operations are protected by a mutex.
     is_multi_threaded: bool = false,
+    /// When true, the backend arms boot/real (wall-clock) timers natively via
+    /// `syncWallTimers`, so the loop must not fold them into the poll timeout.
+    /// When false, the loop falls back to the capped poll-timeout re-evaluation.
+    native_wall_timers: bool = false,
 
     pub fn supportsNonBlockingFileIo(comptime self: BackendCapabilities) bool {
         return self.file_read or self.file_write or self.file_read_streaming or self.file_write_streaming;
