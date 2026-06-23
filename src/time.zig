@@ -439,20 +439,25 @@ pub const Timeout = union(enum) {
     duration: Duration,
     deadline: Timestamp,
 
-    /// Convert a `std.Io.Timeout` into the zio equivalent.
-    ///
-    /// Deadlines are resolved against the monotonic clock regardless of the
-    /// deadline's `Clock` tag; the zio loop only exposes a single internal
-    /// clock. This matches `nowImpl` returning a monotonic `Io.Timestamp`.
+    /// Convert a `std.Io.Timeout` into the zio equivalent. The value is kept
+    /// clockless here — a duration stays a duration and a deadline stays an
+    /// absolute deadline (in its clock's epoch). The clock itself travels
+    /// separately on the `ev.Timer`, which compares the deadline against `now`
+    /// in that same clock, so no cross-epoch conversion is needed.
     pub fn fromStd(t: std.Io.Timeout) Timeout {
         return switch (t) {
             .none => .none,
             .duration => |d| fromSignedNanoseconds(d.raw.nanoseconds),
-            .deadline => |d| blk: {
-                const now_ns: i96 = @intCast(Timestamp.now(.monotonic).toNanoseconds());
-                break :blk fromSignedNanoseconds(d.raw.nanoseconds - now_ns);
-            },
+            .deadline => |d| .{ .deadline = .fromNanoseconds(clampNanos(d.raw.nanoseconds)) },
         };
+    }
+
+    /// Clamp a (possibly wider, possibly negative) nanosecond count into the
+    /// unsigned `TimeInt` range used by `Duration`/`Timestamp`.
+    fn clampNanos(ns: i96) TimeInt {
+        if (ns <= 0) return 0;
+        if (ns > std.math.maxInt(TimeInt)) return std.math.maxInt(TimeInt);
+        return @intCast(ns);
     }
 
     fn fromSignedNanoseconds(ns: i96) Timeout {

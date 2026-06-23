@@ -1800,9 +1800,13 @@ fn zioClock(clock: Io.Clock) time.Clock {
 }
 
 fn sleepImpl(_: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
-    if (timeout == .none) return;
+    const clock: Io.Clock = switch (timeout) {
+        .none => return,
+        .duration => |d| d.clock,
+        .deadline => |d| d.clock,
+    };
     var waiter: Waiter = .init();
-    try waiter.timedWait(1, time.Timeout.fromStd(timeout), .allow_cancel);
+    try waiter.timedWaitClock(1, time.Timeout.fromStd(timeout), zioClock(clock), .allow_cancel);
 }
 
 fn randomImpl(_: ?*anyopaque, buffer: []u8) void {
@@ -2779,6 +2783,35 @@ test "io: sleep with duration returns after delay" {
 
     var sw = time.Stopwatch.start();
     try io.sleep(.fromMilliseconds(20), .awake);
+    try std.testing.expect(sw.read().toMilliseconds() >= 20);
+}
+
+test "io: sleep honors boot and real clocks" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    for ([_]Io.Clock{ .boot, .real }) |clock| {
+        var sw = time.Stopwatch.start();
+        try io.sleep(.fromMilliseconds(20), clock);
+        try std.testing.expect(sw.read().toMilliseconds() >= 20);
+    }
+}
+
+test "io: sleep until an absolute realtime deadline" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    // A deadline carries the realtime epoch (ns since 1970); fromStd must keep
+    // it as an absolute deadline rather than mixing it with the monotonic clock.
+    const deadline: Io.Clock.Timestamp = .fromNow(io, .{
+        .raw = .fromMilliseconds(20),
+        .clock = .real,
+    });
+
+    var sw = time.Stopwatch.start();
+    try deadline.wait(io);
     try std.testing.expect(sw.read().toMilliseconds() >= 20);
 }
 

@@ -8,6 +8,7 @@ pub const log = std.log.scoped(.zio);
 
 const ev = @import("ev/root.zig");
 const Timeout = @import("time.zig").Timeout;
+const Clock = @import("time.zig").Clock;
 const Stopwatch = @import("time.zig").Stopwatch;
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTaskOrNull = @import("runtime.zig").getCurrentTaskOrNull;
@@ -152,6 +153,13 @@ pub const Waiter = struct {
     /// (e.g., by trying to remove from a wait queue).
     /// Only valid for direct waiters.
     pub fn timedWait(self: *Waiter, expected: u32, timeout: Timeout, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+        return self.timedWaitClock(expected, timeout, .awake, cancel_mode);
+    }
+
+    /// Like `timedWait`, but the timeout is measured against `clock`. The
+    /// no-task futex fallback only supports the monotonic (`awake`) clock, so
+    /// boot/real timeouts there degrade to awake semantics.
+    pub fn timedWaitClock(self: *Waiter, expected: u32, timeout: Timeout, clock: Clock, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         if (timeout == .none) {
             return self.wait(expected, cancel_mode);
         }
@@ -159,7 +167,7 @@ pub const Waiter = struct {
         const d = &self.mode.direct;
         const task = d.task orelse return timedWaitFutex(d, expected, timeout);
 
-        var timer: ev.Timer = .init(timeout);
+        var timer: ev.Timer = .initClock(timeout, clock);
         timer.c.userdata = self;
         timer.c.callback = callback;
 
