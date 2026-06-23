@@ -34,7 +34,7 @@ const dns = @import("dns/root.zig");
 
 const select = @import("select.zig");
 const Waiter = @import("common.zig").Waiter;
-const blockInPlace = @import("common.zig").blockInPlace;
+const random_mod = @import("random.zig");
 
 const mod = @This();
 
@@ -241,6 +241,9 @@ pub const Executor = struct {
     id: u6,
     loop: ev.Loop,
 
+    /// Per-executor non-secure CSPRNG, seeded at `init` from a secure source.
+    csprng: random_mod.Csprng,
+
     ready_queue: SimpleQueue(WaitNode) = .{},
 
     // Tracks tasks run since last event loop tick.
@@ -304,6 +307,7 @@ pub const Executor = struct {
         self.* = .{
             .id = id,
             .loop = undefined,
+            .csprng = undefined,
             .current_task = undefined,
             .runtime = runtime,
             .shutdown = ev.Async.init(),
@@ -330,20 +334,20 @@ pub const Executor = struct {
         try setupStackGrowth();
         errdefer cleanupStackGrowth();
 
-        // Seed this loop's non-secure CSPRNG with an independent secure seed
-        // drawn from zio's own blocking secure RNG. Each loop draws its own
-        // seed so per-thread streams are independent. If the OS cannot provide
-        // entropy at startup, executor creation fails rather than running with
-        // a predictable seed.
-        var random_seed: [ev.Random.seed_len]u8 = undefined;
-        try os.getrandom(&random_seed);
+        // Seed this executor's non-secure CSPRNG with an independent secure
+        // seed drawn from zio's own blocking secure RNG. Each executor draws
+        // its own seed so per-thread streams are independent. If the OS cannot
+        // provide entropy at startup, executor creation fails rather than
+        // running with a predictable seed.
+        var seed: [random_mod.Csprng.seed_len]u8 = undefined;
+        try os.getrandom(&seed);
+        self.csprng = .init(seed);
 
         try self.loop.init(.{
             .allocator = self.runtime.allocator,
             .thread_pool = &self.runtime.thread_pool,
             .loop_group = &self.runtime.loop_group,
             .defer_callbacks = false,
-            .random_seed = random_seed,
         });
         errdefer self.loop.deinit();
 
@@ -730,103 +734,6 @@ pub fn now() Timestamp {
 pub fn sleep(duration: Duration) Cancelable!void {
     var waiter: Waiter = .init();
     try waiter.timedWait(1, .{ .duration = duration }, .allow_cancel);
-}
-
-/// Fill `buffer` with non-cryptographic random bytes from the current
-/// executor's per-loop CSPRNG. Fast, never blocks, performs no syscalls; the
-/// CSPRNG is seeded once at executor startup. When called outside any executor,
-/// falls back to the blocking global source.
-///
-/// For cryptographically secure entropy, use `randomSecure` instead.
-pub fn random(buffer: []u8) void {
-    if (getCurrentExecutorOrNull()) |exec| {
-        exec.loop.random.fill(buffer);
-    } else {
-        // No loop means no per-loop CSPRNG; that fast path is purely an
-        // async-only optimization. Fall back to the secure syscall directly
-        // (blocking is fine here — there is no event loop to stall). Best
-        // effort: zero the buffer if entropy is somehow unavailable.
-        os.getrandom(buffer) catch @memset(buffer, 0);
-    }
-}
-
-pub const RandomSecureError = error{EntropyUnavailable} || Cancelable;
-
-/// Fill `buffer` with cryptographically secure entropy obtained fresh from the
-/// OS on every call. Unlike `random`, this never relies on cached process
-/// state. The blocking syscall is delegated to a thread-pool worker so the
-/// event loop is not blocked; when called outside a task it runs inline.
-///
-/// Future per-backend optimizations can skip the thread pool entirely: async
-/// reads from /dev/urandom on io_uring, and \Device\CNG via IOCP on Windows.
-pub fn randomSecure(buffer: []u8) RandomSecureError!void {
-    // Result lives on our stack, defaulted to Canceled, so that if the work is
-    // canceled before it runs we surface cancellation instead of a bogus value.
-    var result: RandomSecureError!void = error.Canceled;
-    blockInPlace(struct {
-        fn run(buf: []u8, out: *RandomSecureError!void) void {
-            out.* = os.getrandom(buf);
-        }
-    }.run, .{ buffer, &result });
-    return result;
-}
-
-test "random: fills buffer with varying bytes" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
-    defer runtime.deinit();
-
-    var buf: [64]u8 = @splat(0);
-    random(&buf);
-    // Probabilistically asserts we actually filled the buffer.
-    var nonzero: usize = 0;
-    for (buf) |b| if (b != 0) {
-        nonzero += 1;
-    };
-    try std.testing.expect(nonzero > 32);
-}
-
-test "random: successive calls produce different output" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
-    defer runtime.deinit();
-
-    var a: [64]u8 = undefined;
-    var b: [64]u8 = undefined;
-    random(&a);
-    random(&b);
-    try std.testing.expect(!std.mem.eql(u8, &a, &b));
-}
-
-test "randomSecure: fills buffer with varying bytes" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
-    defer runtime.deinit();
-
-    var buf: [64]u8 = @splat(0);
-    try randomSecure(&buf);
-    var nonzero: usize = 0;
-    for (buf) |b| if (b != 0) {
-        nonzero += 1;
-    };
-    try std.testing.expect(nonzero > 32);
-}
-
-test "randomSecure: works inside a spawned task (thread pool path)" {
-    const runtime = try Runtime.init(std.testing.allocator, .{});
-    defer runtime.deinit();
-
-    const Task = struct {
-        fn run() anyerror!void {
-            var buf: [64]u8 = @splat(0);
-            try randomSecure(&buf);
-            var nonzero: usize = 0;
-            for (buf) |b| if (b != 0) {
-                nonzero += 1;
-            };
-            try std.testing.expect(nonzero > 32);
-        }
-    };
-
-    var handle = try spawn(Task.run, .{});
-    try handle.join();
 }
 
 // Runtime - orchestrator for one or more Executors

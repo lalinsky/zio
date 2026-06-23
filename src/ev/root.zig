@@ -18,7 +18,6 @@ pub const Loop = @import("loop.zig").Loop;
 pub const LoopGroup = @import("loop.zig").LoopGroup;
 pub const RunMode = @import("loop.zig").RunMode;
 pub const ThreadPool = @import("thread_pool.zig").ThreadPool;
-pub const Random = @import("random.zig").Random;
 
 pub const ReadBuf = @import("buf.zig").ReadBuf;
 pub const WriteBuf = @import("buf.zig").WriteBuf;
