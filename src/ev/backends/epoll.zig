@@ -549,6 +549,24 @@ fn getHandle(completion: *Completion) NetHandle {
     };
 }
 
+/// Finish a completion that the optimistic syscall already satisfied, but via
+/// the loop's deferred completion queue instead of running its callback inline.
+///
+/// `submit` must never re-enter the submitter. The generic NetSendFile fallback
+/// (loop.zig) re-submits a NetSend from inside its own send callback, expecting
+/// the child to complete asynchronously like every other backend's net ops do.
+/// Completing inline there would re-enter `netSendFileAdvance` and finish the
+/// parent transfer twice. The syscall has already happened; only the completion
+/// notification is parked here and drained from `processCompletions`, off the
+/// submit call stack. `decrInflight` balances the `incrInflight` the loop did
+/// before calling `submit` (processCompletions runs `markCompleted`, which does
+/// not touch the inflight counter).
+fn completeDeferred(self: *Self, state: *LoopState, c: *Completion) void {
+    _ = self;
+    state.decrInflight();
+    state.work_completions.push(c);
+}
+
 /// Submit a completion to the backend - infallible.
 /// On error, completes the operation immediately with error.Unexpected.
 pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
@@ -638,12 +656,15 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(NetSend);
             if (net.send(data.handle, data.buffer.iovecs, data.flags)) |n| {
                 c.setResult(.net_send, n);
-                state.markCompletedFromBackend(c);
+                // Defer, never complete inline: the NetSendFile fallback
+                // re-submits a send from inside its own send callback, and an
+                // inline completion would re-enter and finish the transfer twice.
+                self.completeDeferred(state, c);
             } else |err| switch (err) {
                 error.WouldBlock => self.addToPollQueue(state, data.handle, c),
                 else => {
                     c.setError(err);
-                    state.markCompletedFromBackend(c);
+                    self.completeDeferred(state, c);
                 },
             }
         },
