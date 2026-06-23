@@ -2724,7 +2724,7 @@ test "io: cpu-time clocks are monotonic" {
     // Note: we only assert monotonicity. We can't assert the clock advances by
     // a given amount, since some platforms (Windows) account CPU time in coarse
     // scheduler ticks that may not register a short burst at all.
-    inline for (.{ Io.Clock.cpu_process, Io.Clock.cpu_thread }) |clock| {
+    for ([_]Io.Clock{ .cpu_process, .cpu_thread }) |clock| {
         _ = Io.Clock.resolution(clock, io) catch |err| {
             if (err == error.ClockUnavailable) continue;
             return err;
