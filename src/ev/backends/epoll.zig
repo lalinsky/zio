@@ -3,6 +3,7 @@ const posix = @import("../../os/posix.zig");
 const net = @import("../../os/net.zig");
 const time = @import("../../os/time.zig");
 const Duration = @import("../../time.zig").Duration;
+const Clock = @import("../../time.zig").Clock;
 const common = @import("common.zig");
 
 const unexpectedError = @import("../../os/base.zig").unexpectedError;
@@ -32,6 +33,7 @@ const BackendCapabilities = @import("../completion.zig").BackendCapabilities;
 
 pub const capabilities: BackendCapabilities = .{
     .process_wait = true,
+    .native_wall_timers = true,
 };
 
 pub const SharedState = struct {};
@@ -69,6 +71,11 @@ allocator: std.mem.Allocator,
 poll_queue: std.AutoHashMapUnmanaged(NetHandle, PollEntry) = .empty,
 epoll_fd: i32 = -1,
 waker_eventfd: i32 = -1,
+/// timerfds for the boot/real wall-clock timers (index 0 = boot, 1 = real),
+/// armed by `syncWallTimers`. `wall_armed[i]` is the currently-armed absolute
+/// deadline (ns in that clock's epoch) for dedup, or null if disarmed.
+wall_timerfd: [2]i32 = .{ -1, -1 },
+wall_armed: [2]?u64 = .{ null, null },
 events: []std.os.linux.epoll_event,
 queue_size: u16,
 pending_changes: usize = 0,
@@ -111,6 +118,34 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
     errdefer allocator.free(self.events);
 
     try self.poll_queue.ensureTotalCapacity(self.allocator, queue_size);
+
+    // Boot/real wall-clock timers: a persistent timerfd each, registered for
+    // readiness now and armed absolutely by syncWallTimers.
+    self.wall_timerfd[0] = try addWallTimerfd(epoll_fd, .BOOTTIME);
+    errdefer closeWallTimerfd(epoll_fd, self.wall_timerfd[0]);
+    self.wall_timerfd[1] = try addWallTimerfd(epoll_fd, .REALTIME);
+    errdefer closeWallTimerfd(epoll_fd, self.wall_timerfd[1]);
+}
+
+/// Create a timerfd on `clockid` and register it with `epoll_fd` for readiness.
+fn addWallTimerfd(epoll_fd: i32, clockid: linux.timerfd_clockid_t) !i32 {
+    const rc = linux.timerfd_create(clockid, .{ .CLOEXEC = true, .NONBLOCK = true });
+    const fd: i32 = switch (posix.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        else => |err| return unexpectedError(err),
+    };
+    errdefer _ = linux.close(fd);
+    var event: linux.epoll_event = .{ .events = linux.EPOLL.IN, .data = .{ .fd = fd } };
+    switch (posix.errno(linux.epoll_ctl(epoll_fd, linux.EPOLL.CTL_ADD, fd, &event))) {
+        .SUCCESS => return fd,
+        else => |err| return unexpectedError(err),
+    }
+}
+
+fn closeWallTimerfd(epoll_fd: i32, fd: i32) void {
+    if (fd == -1) return;
+    _ = linux.epoll_ctl(epoll_fd, linux.EPOLL.CTL_DEL, fd, null);
+    _ = linux.close(fd);
 }
 
 pub fn deinit(self: *Self) void {
@@ -118,6 +153,8 @@ pub fn deinit(self: *Self) void {
         _ = std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_DEL, self.waker_eventfd, null);
         _ = std.os.linux.close(self.waker_eventfd);
     }
+    closeWallTimerfd(self.epoll_fd, self.wall_timerfd[0]);
+    closeWallTimerfd(self.epoll_fd, self.wall_timerfd[1]);
     self.poll_queue.deinit(self.allocator);
     self.allocator.free(self.events);
     if (self.epoll_fd != -1) {
@@ -128,6 +165,37 @@ pub fn deinit(self: *Self) void {
 pub fn wake(self: *Self, state: *LoopState) void {
     _ = state;
     posix.eventfd_write(self.waker_eventfd, 1) catch {};
+}
+
+/// Arm/update/disarm the given wall clock's timerfd to an absolute deadline (ns
+/// in that clock's epoch; null = disarm). Returns false only if it couldn't arm
+/// a pending deadline, so the loop folds that clock into the capped poll timeout.
+pub fn syncWallTimer(self: *Self, clock: Clock, deadline: ?u64) bool {
+    const idx: usize = switch (clock) {
+        .boot => 0,
+        .real => 1,
+        else => unreachable,
+    };
+    if (self.wall_armed[idx] == deadline) return true; // unchanged (incl. both null)
+    // A zero it_value disarms; otherwise an absolute one-shot. checkTimers only
+    // ever passes future deadlines, so 0 never means "fire now".
+    var its: linux.itimerspec = .{
+        .it_interval = .{ .sec = 0, .nsec = 0 },
+        .it_value = .{ .sec = 0, .nsec = 0 },
+    };
+    if (deadline) |d| {
+        its.it_value = .{ .sec = @intCast(d / time.ns_per_s), .nsec = @intCast(d % time.ns_per_s) };
+    }
+    switch (posix.errno(linux.timerfd_settime(self.wall_timerfd[idx], .{ .ABSTIME = true }, &its, null))) {
+        .SUCCESS => {
+            self.wall_armed[idx] = deadline;
+            return true;
+        },
+        else => |err| {
+            log.err("timerfd_settime failed: {}", .{err});
+            return false;
+        },
+    }
 }
 
 fn getEvents(completion: *Completion) u32 {
@@ -524,12 +592,22 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         return true; // Timed out
     }
 
+    var wall_fired = false;
     for (self.events[0..n]) |event| {
         const fd = event.data.fd;
 
         // Check if this is the async wakeup fd
         if (fd == self.waker_eventfd) {
             _ = posix.eventfd_read(self.waker_eventfd) catch {};
+            continue;
+        }
+
+        // A boot/real wall timer fired: drain the expiration count and report a
+        // timeout so the loop re-runs checkTimers and fires the due timers.
+        if (fd == self.wall_timerfd[0] or fd == self.wall_timerfd[1]) {
+            var buf: u64 = undefined;
+            _ = std.os.linux.read(fd, std.mem.asBytes(&buf), @sizeOf(u64));
+            wall_fired = true;
             continue;
         }
 
@@ -556,7 +634,9 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         }
     }
 
-    return false; // Did not timeout, woke up due to events
+    // A fired wall timer is reported as a timeout so the loop re-runs
+    // checkTimers and fires the due boot/real timers.
+    return wall_fired;
 }
 
 const CheckResult = enum { completed, requeue };
