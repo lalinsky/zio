@@ -1260,3 +1260,18 @@ fn utf8ToWide(allocator: std.mem.Allocator, utf8: []const u8) PathToWideError![:
 
     return wide;
 }
+
+pub const GetRandomError = @import("base.zig").GetRandomError;
+
+// ProcessPrng is the modern, documented system CSPRNG entry point (the same one
+// Go/Rust/Chromium/BoringSSL use). It reads from the per-CPU AES-CTR-DRBG and
+// always returns TRUE. A future improvement is the async IOCP path through
+// \Device\CNG (IOCTL_KSEC_GEN_RANDOM); for now we run this on the thread pool.
+pub extern "bcryptprimitives" fn ProcessPrng(pbData: [*]u8, cbData: SIZE_T) callconv(.winapi) BOOL;
+
+/// Fill `buffer` with cryptographically secure random bytes from the OS.
+/// Blocking primitive; async callers run it on a thread-pool worker.
+pub fn getrandom(buffer: []u8) GetRandomError!void {
+    if (buffer.len == 0) return;
+    if (ProcessPrng(buffer.ptr, buffer.len) == 0) return error.EntropyUnavailable;
+}

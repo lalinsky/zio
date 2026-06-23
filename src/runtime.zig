@@ -34,6 +34,7 @@ const dns = @import("dns/root.zig");
 
 const select = @import("select.zig");
 const Waiter = @import("common.zig").Waiter;
+const blockInPlace = @import("common.zig").blockInPlace;
 
 const mod = @This();
 
@@ -742,8 +743,33 @@ pub fn random(buffer: []u8) void {
     if (getCurrentExecutorOrNull()) |exec| {
         exec.loop.random.fill(buffer);
     } else {
-        std.Io.Threaded.global_single_threaded.io().random(buffer);
+        // No loop means no per-loop CSPRNG; that fast path is purely an
+        // async-only optimization. Fall back to the secure syscall directly
+        // (blocking is fine here — there is no event loop to stall). Best
+        // effort: zero the buffer if entropy is somehow unavailable.
+        os.getrandom(buffer) catch @memset(buffer, 0);
     }
+}
+
+pub const RandomSecureError = error{EntropyUnavailable} || Cancelable;
+
+/// Fill `buffer` with cryptographically secure entropy obtained fresh from the
+/// OS on every call. Unlike `random`, this never relies on cached process
+/// state. The blocking syscall is delegated to a thread-pool worker so the
+/// event loop is not blocked; when called outside a task it runs inline.
+///
+/// Future per-backend optimizations can skip the thread pool entirely: async
+/// reads from /dev/urandom on io_uring, and \Device\CNG via IOCP on Windows.
+pub fn randomSecure(buffer: []u8) RandomSecureError!void {
+    // Result lives on our stack, defaulted to Canceled, so that if the work is
+    // canceled before it runs we surface cancellation instead of a bogus value.
+    var result: RandomSecureError!void = error.Canceled;
+    blockInPlace(struct {
+        fn run(buf: []u8, out: *RandomSecureError!void) void {
+            out.* = os.getrandom(buf);
+        }
+    }.run, .{ buffer, &result });
+    return result;
 }
 
 test "random: fills buffer with varying bytes" {
@@ -769,6 +795,39 @@ test "random: successive calls produce different output" {
     random(&a);
     random(&b);
     try std.testing.expect(!std.mem.eql(u8, &a, &b));
+}
+
+test "randomSecure: fills buffer with varying bytes" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buf: [64]u8 = @splat(0);
+    try randomSecure(&buf);
+    var nonzero: usize = 0;
+    for (buf) |b| if (b != 0) {
+        nonzero += 1;
+    };
+    try std.testing.expect(nonzero > 32);
+}
+
+test "randomSecure: works inside a spawned task (thread pool path)" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const Task = struct {
+        fn run() anyerror!void {
+            var buf: [64]u8 = @splat(0);
+            try randomSecure(&buf);
+            var nonzero: usize = 0;
+            for (buf) |b| if (b != 0) {
+                nonzero += 1;
+            };
+            try std.testing.expect(nonzero > 32);
+        }
+    };
+
+    var handle = try spawn(Task.run, .{});
+    try handle.join();
 }
 
 // Runtime - orchestrator for one or more Executors

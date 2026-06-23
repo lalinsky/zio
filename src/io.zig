@@ -1807,8 +1807,7 @@ fn randomImpl(_: ?*anyopaque, buffer: []u8) void {
 }
 
 fn randomSecureImpl(_: ?*anyopaque, buffer: []u8) Io.RandomSecureError!void {
-    const io = globalIo();
-    return io.vtable.randomSecure(io.userdata, buffer);
+    return runtime_mod.randomSecure(buffer);
 }
 
 fn stdIoIpToZio(addr: Io.net.IpAddress) zio_net.IpAddress {
