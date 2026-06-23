@@ -2338,6 +2338,9 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
         const per_wave = 12;
         const total = 8 * 1024;
         const chunk = 2048;
+        // Finite per-op ceiling so a lost wakeup becomes error.Timeout (counted
+        // in sh.errors -> failed assertion) instead of a stuck test process.
+        const io_timeout = Timeout.fromMilliseconds(5_000);
 
         const Shared = struct {
             conns: std.atomic.Value(u32) = .init(0),
@@ -2356,12 +2359,12 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
             defer stream.close();
             var buf: [chunk]u8 = undefined;
             while (true) {
-                const n = stream.read(&buf, .none) catch {
+                const n = stream.read(&buf, io_timeout) catch {
                     _ = sh.errors.fetchAdd(1, .monotonic);
                     return;
                 };
                 if (n == 0) return; // peer closed its send side
-                stream.writeAll(buf[0..n], .none) catch {
+                stream.writeAll(buf[0..n], io_timeout) catch {
                     _ = sh.errors.fetchAdd(1, .monotonic);
                     return;
                 };
@@ -2406,7 +2409,7 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
             while (sent < total) {
                 const this = @min(chunk, total - sent);
                 for (0..this) |i| buf[i] = pat(id, sent + i);
-                stream.writeAll(buf[0..this], .none) catch {
+                stream.writeAll(buf[0..this], io_timeout) catch {
                     _ = sh.errors.fetchAdd(1, .monotonic);
                     return;
                 };
@@ -2421,7 +2424,7 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
                 const want = @min(chunk, total - got);
                 var off: usize = 0;
                 while (off < want) {
-                    const n = stream.read(buf[off..want], .none) catch {
+                    const n = stream.read(buf[off..want], io_timeout) catch {
                         _ = sh.errors.fetchAdd(1, .monotonic);
                         return;
                     };
@@ -2447,7 +2450,7 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
                 _ = sh.errors.fetchAdd(1, .monotonic);
                 return;
             };
-            const stream = addr.connect(.{}) catch {
+            const stream = addr.connect(.{ .timeout = io_timeout }) catch {
                 _ = sh.errors.fetchAdd(1, .monotonic);
                 return;
             };
@@ -2477,8 +2480,13 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
     var port_ch = Channel(u16).init(&port_buf);
 
     var server_group: Group = .init;
-    defer server_group.wait() catch {}; // drains the acceptor and its handlers
     try server_group.spawn(H.server, .{ &port_ch, &sh });
+    // Signal the acceptor to stop *before* draining it, so an early return from
+    // any `try` below can't leave it looping forever.
+    defer {
+        sh.done.store(true, .release);
+        server_group.wait() catch {};
+    }
 
     const port = try port_ch.receive();
     try std.testing.expect(port != 0);
@@ -2492,8 +2500,6 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
         }
         try clients.wait();
     }
-
-    sh.done.store(true, .release); // let the acceptor fall out of its loop
 
     try std.testing.expectEqual(@as(u32, 0), sh.errors.load(.monotonic));
     try std.testing.expectEqual(@as(u32, H.waves * H.per_wave), sh.conns.load(.monotonic));

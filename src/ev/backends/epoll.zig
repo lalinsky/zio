@@ -65,47 +65,44 @@ const persist_events: u32 = linux.EPOLL.IN | linux.EPOLL.OUT | linux.EPOLL.ET;
 const reg_shard_count = 64; // power of two
 
 const RegShard = struct {
-    mutex: os.Mutex = .{},
+    mutex: os.Mutex = .init(),
     // fd -> bitmask of loop ids that have this socket registered in their epoll.
     map: std.AutoHashMapUnmanaged(NetHandle, u64) = .empty,
 };
 
 pub const SharedState = struct {
-    mutex: os.Mutex = .{},
-    refcount: usize = 0,
-    next_loop_id: u32 = 0,
+    mutex: os.Mutex = .init(),
+    /// Bit i set => loop id i is currently live. Ids are handed out from the
+    /// free (zero) bits and returned on release, so a group that churns loops
+    /// recycles ids instead of climbing past the 64-id budget.
+    used_mask: u64 = 0,
     allocator: std.mem.Allocator = undefined,
     shards: [reg_shard_count]RegShard = [_]RegShard{.{}} ** reg_shard_count,
 
-    /// Register a loop with the group. Returns a small stable id (0..63) used as
-    /// the loop's bit in the per-fd registration masks. Ids are recycled once the
-    /// group empties out (refcount back to zero), matching the executor lifetime.
+    /// Register a loop with the group. Returns a small id (0..63) used as the
+    /// loop's bit in the per-fd registration masks; the id is recycled once the
+    /// loop releases it.
     pub fn acquire(self: *SharedState, allocator: std.mem.Allocator) u6 {
         self.mutex.lock();
         defer self.mutex.unlock();
-        if (self.refcount == 0) {
-            self.allocator = allocator;
-            self.next_loop_id = 0;
-        }
-        const id = self.next_loop_id;
-        std.debug.assert(id < 64); // at most 64 executors share a group
-        self.next_loop_id += 1;
-        self.refcount += 1;
-        return @intCast(id);
+        if (self.used_mask == 0) self.allocator = allocator; // first loop in
+        const free = ~self.used_mask;
+        std.debug.assert(free != 0); // at most 64 executors share a group
+        const id: u6 = @intCast(@ctz(free));
+        self.used_mask |= @as(u64, 1) << id;
+        return id;
     }
 
-    pub fn release(self: *SharedState) void {
+    pub fn release(self: *SharedState, loop_bit: u64) void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        std.debug.assert(self.refcount > 0);
-        self.refcount -= 1;
-        if (self.refcount == 0) {
+        self.used_mask &= ~loop_bit;
+        if (self.used_mask == 0) {
             // Last loop is gone; nobody can touch the shards now. Free them.
             for (&self.shards) |*shard| {
                 shard.map.deinit(self.allocator);
                 shard.map = .empty;
             }
-            self.next_loop_id = 0;
         }
     }
 
@@ -162,7 +159,7 @@ epoll_pwait2_supported: bool = true,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
     const loop_id = shared_state.acquire(allocator);
-    errdefer shared_state.release();
+    errdefer shared_state.release(@as(u64, 1) << loop_id);
 
     const rc = std.os.linux.epoll_create1(std.os.linux.EPOLL.CLOEXEC);
     const epoll_fd: i32 = switch (posix.errno(rc)) {
@@ -210,7 +207,7 @@ pub fn deinit(self: *Self) void {
     if (self.epoll_fd != -1) {
         _ = std.os.linux.close(self.epoll_fd);
     }
-    self.shared.release();
+    self.shared.release(self.loop_bit);
 }
 
 pub fn wake(self: *Self, state: *LoopState) void {
