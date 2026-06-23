@@ -505,6 +505,11 @@ pub const Work = struct {
     completion_context: ?*anyopaque = null,
     state: std.atomic.Value(State) = std.atomic.Value(State).init(.pending),
 
+    /// Optional token enabling cancellation of blocking syscalls made by `func`.
+    /// When set, the worker binds it (`enter`/`exit`) around `func`, and
+    /// `ThreadPool.cancel` signals it to interrupt an in-progress syscall.
+    cancel_token: ?*os.syscall_cancel.Token = null,
+
     pub const Error = error{NoThreadPool} || Cancelable;
 
     pub const State = enum(u8) {

@@ -61,6 +61,10 @@ pub const ThreadPool = struct {
         };
         errdefer self.deinit();
 
+        // Install the process-global SIGURG handler used to interrupt cancelable
+        // blocking syscalls. Refcounted; paired with deinit's uninstall.
+        os.syscall_cancel.installHandler();
+
         try self.workers.ensureTotalCapacity(allocator, max_threads);
 
         for (0..min_threads) |_| {
@@ -124,6 +128,9 @@ pub const ThreadPool = struct {
         }
 
         self.workers.deinit(self.allocator);
+
+        // Pair with the install in init (refcounted; restores on the last pool).
+        os.syscall_cancel.uninstallHandler();
     }
 
     pub fn stop(self: *ThreadPool) void {
@@ -139,7 +146,9 @@ pub const ThreadPool = struct {
                 std.debug.assert(state == .canceled);
                 work.c.setError(error.Canceled);
             } else {
+                if (work.cancel_token) |token| token.enter();
                 work.func(work);
+                if (work.cancel_token) |token| token.exit();
                 work.c.setResult(.work, {});
                 work.state.store(.completed, .release);
             }
@@ -169,7 +178,12 @@ pub const ThreadPool = struct {
     pub fn cancel(self: *ThreadPool, work: *Work) void {
         // Try to transition from pending to canceled atomically
         if (work.state.cmpxchgStrong(.pending, .canceled, .acq_rel, .acquire)) |_| {
-            // Already running or completed - worker will call completion_fn
+            // Already running or completed - worker will call completion_fn.
+            // If it is running and blocked in a cancelable syscall, interrupt it;
+            // the caller drives resend-with-backoff while awaiting completion.
+            if (work.cancel_token) |token| {
+                if (token.cancel()) _ = token.signal();
+            }
             return;
         }
 
@@ -231,7 +245,9 @@ pub const ThreadPool = struct {
                 work.c.setError(error.Canceled);
             } else {
                 // We successfully claimed it, execute the work
+                if (work.cancel_token) |token| token.enter();
                 work.func(work);
+                if (work.cancel_token) |token| token.exit();
                 work.c.setResult(.work, {});
                 work.state.store(.completed, .release);
             }

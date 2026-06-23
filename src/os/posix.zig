@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const unexpectedError = @import("base.zig").unexpectedError;
+const syscall_cancel = @import("syscall_cancel.zig");
 
 pub const system = switch (builtin.os.tag) {
     .linux => std.os.linux,
@@ -324,18 +325,29 @@ pub const GetRandomError = @import("base.zig").GetRandomError;
 /// This is the raw, *blocking* primitive: it makes the syscall on the calling
 /// thread. Async callers run it on a thread-pool worker so the event loop is
 /// never blocked.
-pub fn getrandom(buffer: []u8) GetRandomError!void {
+///
+/// When run on a thread-pool worker bound to a cancellation token, the blocking
+/// syscall is cancelable: a `SIGURG` interrupt makes it return `error.Canceled`.
+/// In any other context no token is bound, so cancellation can never occur.
+pub fn getrandom(buffer: []u8) (GetRandomError || syscall_cancel.Cancelable)!void {
     switch (builtin.os.tag) {
         .linux => {
+            const sc = try syscall_cancel.Syscall.begin();
             var i: usize = 0;
             while (i < buffer.len) {
                 const rc = system.getrandom(buffer[i..].ptr, buffer.len - i, 0);
                 switch (errno(rc)) {
                     .SUCCESS => i += rc,
-                    .INTR => continue,
-                    else => return error.EntropyUnavailable,
+                    // EINTR is either a cancellation request (→ Canceled) or a
+                    // spurious wake; checkCancel decides and finalizes the token.
+                    .INTR => {
+                        try sc.checkCancel();
+                        continue;
+                    },
+                    else => return sc.fail(error.EntropyUnavailable),
                 }
             }
+            sc.finish();
         },
         else => {
             // BSD / macOS: arc4random_buf is the platform-recommended CSPRNG

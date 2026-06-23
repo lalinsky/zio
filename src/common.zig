@@ -9,6 +9,7 @@ pub const log = std.log.scoped(.zio);
 const ev = @import("ev/root.zig");
 const Timeout = @import("time.zig").Timeout;
 const Stopwatch = @import("time.zig").Stopwatch;
+const Duration = @import("time.zig").Duration;
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTaskOrNull = @import("runtime.zig").getCurrentTaskOrNull;
 const AnyTask = @import("task.zig").AnyTask;
@@ -379,13 +380,18 @@ pub fn blockInPlace(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) meta
     const Context = struct {
         args: Args,
         result: Result = undefined,
+        // Distinct from the waiter's signal count: the resend timer below also
+        // signals the waiter, so we need an unambiguous "work finished" flag.
+        done: std.atomic.Value(bool) = .init(false),
 
         fn workFn(work: *ev.Work) void {
             const ctx: *@This() = @ptrCast(@alignCast(work.userdata.?));
             ctx.result = @call(.auto, func, ctx.args);
         }
 
-        fn completionFn(completion_ctx: ?*anyopaque, _: *ev.Work) void {
+        fn completionFn(completion_ctx: ?*anyopaque, work: *ev.Work) void {
+            const ctx: *@This() = @ptrCast(@alignCast(work.userdata.?));
+            ctx.done.store(true, .release);
             const waiter: *Waiter = @ptrCast(@alignCast(completion_ctx.?));
             waiter.signal();
         }
@@ -399,18 +405,36 @@ pub fn blockInPlace(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) meta
         return @call(.auto, func, args);
     };
 
+    var token: os.syscall_cancel.Token = .{};
     var work = ev.Work.init(Context.workFn, &ctx);
     work.completion_fn = Context.completionFn;
     work.completion_context = &waiter;
+    work.cancel_token = &token;
 
     const thread_pool = task.getThreadPool();
     thread_pool.submit(&work);
 
     waiter.wait(1, .allow_cancel) catch {
-        // Try to cancel the work, but must wait for completion either way
-        // since context is stack-allocated
+        // The task was canceled. Ask the pool to cancel the work: if it is still
+        // queued it is dropped, and if it is running a cancelable syscall it is
+        // interrupted with a first SIGURG. We must still wait for completion
+        // (ctx/work live on our stack), so we drive resend-with-backoff until the
+        // worker acknowledges. The wait is a cooperative `timedWait` (parks the
+        // coroutine on an executor timer), so resending never blocks the thread.
         thread_pool.cancel(&work);
-        waiter.wait(1, .no_cancel);
+
+        var backoff = Duration.fromMicroseconds(1);
+        const cap = Duration.fromMilliseconds(1);
+        while (!ctx.done.load(.acquire)) {
+            waiter.timedWait(1, .{ .duration = backoff }, .no_cancel);
+            // Resend if the worker is still blocked in the canceled syscall (the
+            // first signal can be lost in the start()→syscall window). Once it
+            // acknowledges, `signal()` returns false and we just park until done.
+            backoff = if (token.signal())
+                .{ .value = @min(backoff.value *| 2, cap.value) }
+            else
+                cap;
+        }
     };
 
     return ctx.result;
@@ -430,4 +454,51 @@ test "blockInPlace: basic computation" {
 
     const result = blockInPlace(double, .{21});
     try std.testing.expectEqual(42, result);
+}
+
+test "blockInPlace: cancellation interrupts a blocking syscall on the worker" {
+    if (!os.syscall_cancel.enabled) return;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    // A worker function that blocks in a cancelable read on an empty pipe. When
+    // the owning task is canceled, the read must be interrupted via SIGURG and
+    // return error.Canceled — which blockInPlace surfaces as its result.
+    const worker = struct {
+        fn cancelableRead(fd: std.c.fd_t) error{ Canceled, Unexpected }!void {
+            const sc = try os.syscall_cancel.Syscall.begin();
+            var buf: [1]u8 = undefined;
+            while (true) {
+                const rc = std.c.read(fd, &buf, buf.len);
+                if (rc >= 0) return sc.fail(error.Unexpected);
+                switch (std.posix.errno(rc)) {
+                    .INTR => {
+                        try sc.checkCancel();
+                        continue;
+                    },
+                    else => return sc.fail(error.Unexpected),
+                }
+            }
+        }
+
+        fn call(read_fd: std.c.fd_t) !void {
+            const result = blockInPlace(cancelableRead, .{read_fd});
+            try std.testing.expectError(error.Canceled, result);
+        }
+    };
+
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(0, std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    var handle = try rt.spawn(worker.call, .{fds[0]});
+
+    // Let the worker reach the blocking read, then cancel the task.
+    try rt.sleep(.fromMilliseconds(20));
+    handle.cancel();
+
+    // The worker catches the cancellation and returns normally, so join succeeds.
+    try handle.join();
 }
