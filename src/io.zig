@@ -2708,7 +2708,10 @@ test "io: clockResolution reports a granularity for every clock" {
     const io = rt.io();
 
     for ([_]Io.Clock{ .real, .awake, .boot, .cpu_process, .cpu_thread }) |clock| {
-        const res = try Io.Clock.resolution(clock, io);
+        const res = Io.Clock.resolution(clock, io) catch |err| {
+            if (err == error.ClockUnavailable) continue;
+            return err;
+        };
         try std.testing.expect(res.nanoseconds > 0);
     }
 }
@@ -2722,6 +2725,11 @@ test "io: cpu-time clocks are monotonic" {
     // a given amount, since some platforms (Windows) account CPU time in coarse
     // scheduler ticks that may not register a short burst at all.
     inline for (.{ Io.Clock.cpu_process, Io.Clock.cpu_thread }) |clock| {
+        _ = Io.Clock.resolution(clock, io) catch |err| {
+            if (err == error.ClockUnavailable) continue;
+            return err;
+        };
+
         const before = Io.Timestamp.now(io, clock);
 
         var x: u64 = 0;

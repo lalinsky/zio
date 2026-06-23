@@ -83,6 +83,12 @@ pub fn now(clock: Clock) Timestamp {
                 .SUCCESS => {
                     return .fromTimespec(tp);
                 },
+                .INVAL => {
+                    // Some platforms advertise PROCESS_CPUTIME_ID / THREAD_CPUTIME_ID
+                    // in clockid_t but don't support them at runtime.
+                    if (clock == .cpu_process or clock == .cpu_thread) return .zero;
+                    std.debug.panic("now: call to clock_gettime failed: INVAL", .{});
+                },
                 else => |err| {
                     std.debug.panic("now: call to clock_gettime failed: {}", .{err});
                 },
@@ -122,6 +128,12 @@ pub fn resolution(clock: Clock) ?Duration {
             switch (std.posix.errno(rc)) {
                 .SUCCESS => {
                     return Duration.fromNanoseconds(timespecToNanos(tp));
+                },
+                .INVAL => {
+                    // Some platforms advertise PROCESS_CPUTIME_ID / THREAD_CPUTIME_ID
+                    // in clockid_t but don't support them at runtime.
+                    if (clock == .cpu_process or clock == .cpu_thread) return null;
+                    std.debug.panic("resolution: call to clock_getres failed: INVAL", .{});
                 },
                 else => |err| {
                     std.debug.panic("resolution: call to clock_getres failed: {}", .{err});
