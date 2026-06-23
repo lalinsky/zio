@@ -14,6 +14,7 @@ const Alignment = std.mem.Alignment;
 
 const coro = @import("coro/root.zig");
 const runtime_mod = @import("runtime.zig");
+const random_mod = @import("random.zig");
 const Runtime = runtime_mod.Runtime;
 const getCurrentTask = runtime_mod.getCurrentTask;
 const getCurrentExecutor = runtime_mod.getCurrentExecutor;
@@ -1803,13 +1804,11 @@ fn sleepImpl(_: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
 }
 
 fn randomImpl(_: ?*anyopaque, buffer: []u8) void {
-    const io = globalIo();
-    io.vtable.random(io.userdata, buffer);
+    random_mod.random(buffer);
 }
 
 fn randomSecureImpl(_: ?*anyopaque, buffer: []u8) Io.RandomSecureError!void {
-    const io = globalIo();
-    return io.vtable.randomSecure(io.userdata, buffer);
+    return random_mod.randomSecure(buffer);
 }
 
 fn stdIoIpToZio(addr: Io.net.IpAddress) zio_net.IpAddress {

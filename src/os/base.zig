@@ -17,6 +17,11 @@ pub const unexpected_error_tracing = builtin.mode == .Debug and switch (builtin.
     else => false,
 };
 
+/// Error returned by the OS secure-entropy primitive (`getrandom`). Mirrors
+/// the failure mode of `std.Io.RandomSecureError` minus cancellation, which is
+/// layered on by the async wrapper.
+pub const GetRandomError = error{EntropyUnavailable};
+
 pub fn unexpectedError(err: anytype) error{Unexpected} {
     if (unexpected_error_tracing) {
         std.debug.print(

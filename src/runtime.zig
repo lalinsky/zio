@@ -34,6 +34,7 @@ const dns = @import("dns/root.zig");
 
 const select = @import("select.zig");
 const Waiter = @import("common.zig").Waiter;
+const random_mod = @import("random.zig");
 
 const mod = @This();
 
@@ -240,6 +241,9 @@ pub const Executor = struct {
     id: u6,
     loop: ev.Loop,
 
+    /// Per-executor random state (non-secure CSPRNG; later the secure-path fd/handle).
+    random_state: random_mod.RandomState,
+
     ready_queue: SimpleQueue(WaitNode) = .{},
 
     // Tracks tasks run since last event loop tick.
@@ -303,6 +307,7 @@ pub const Executor = struct {
         self.* = .{
             .id = id,
             .loop = undefined,
+            .random_state = undefined,
             .current_task = undefined,
             .runtime = runtime,
             .shutdown = ev.Async.init(),
@@ -328,6 +333,9 @@ pub const Executor = struct {
 
         try setupStackGrowth();
         errdefer cleanupStackGrowth();
+
+        // Initialize this executor's random state from OS entropy.
+        try random_mod.setup(&self.random_state);
 
         try self.loop.init(.{
             .allocator = self.runtime.allocator,

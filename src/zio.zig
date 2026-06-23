@@ -15,6 +15,10 @@ pub const spawnBlocking = runtime.spawnBlocking;
 pub const yield = runtime.yield;
 pub const sleep = runtime.sleep;
 pub const now = runtime.now;
+
+pub const random = @import("random.zig").random;
+pub const randomSecure = @import("random.zig").randomSecure;
+pub const RandomSecureError = @import("random.zig").RandomSecureError;
 pub const beginShield = runtime.beginShield;
 pub const endShield = runtime.endShield;
 pub const checkCancel = runtime.checkCancel;
@@ -80,4 +84,5 @@ pub const os = @import("os/root.zig");
 test {
     std.testing.refAllDecls(@This());
     _ = @import("io.zig");
+    _ = @import("random.zig");
 }

@@ -316,3 +316,36 @@ pub const EFD = @import("eventfd.zig").EFD;
 pub const eventfd = @import("eventfd.zig").eventfd;
 pub const eventfd_read = @import("eventfd.zig").eventfd_read;
 pub const eventfd_write = @import("eventfd.zig").eventfd_write;
+
+pub const GetRandomError = @import("base.zig").GetRandomError;
+
+/// Fill `buffer` with cryptographically secure random bytes from the OS.
+///
+/// This is the raw, *blocking* primitive: it makes the syscall on the calling
+/// thread. Async callers run it on a thread-pool worker so the event loop is
+/// never blocked.
+pub fn getrandom(buffer: []u8) GetRandomError!void {
+    switch (builtin.os.tag) {
+        .linux => {
+            var i: usize = 0;
+            while (i < buffer.len) {
+                const rc = system.getrandom(buffer[i..].ptr, buffer.len - i, 0);
+                switch (errno(rc)) {
+                    .SUCCESS => i += rc,
+                    .INTR => continue,
+                    else => return error.EntropyUnavailable,
+                }
+            }
+        },
+        else => {
+            // BSD / macOS: arc4random_buf is the platform-recommended CSPRNG
+            // (kernel-seeded via getentropy) and cannot fail. This is the same
+            // source std.Io.Threaded uses when libc is linked.
+            if (@hasDecl(system, "arc4random_buf")) {
+                system.arc4random_buf(buffer.ptr, buffer.len);
+            } else {
+                return error.EntropyUnavailable;
+            }
+        },
+    }
+}
