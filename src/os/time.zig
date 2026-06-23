@@ -10,11 +10,38 @@ const Timestamp = time.Timestamp;
 pub const TimeInt = time.TimeInt;
 pub const ns_per_s = time.ns_per_s;
 
+const is_darwin = switch (builtin.os.tag) {
+    .macos, .ios, .tvos, .watchos, .visionos, .driverkit => true,
+    else => false,
+};
+
+/// Map our logical clock to the OS clock id, or null if this platform's
+/// `clockid_t` does not expose it (only the CPU-time clocks can be missing,
+/// e.g. on SerenityOS).
+///
+/// `awake` excludes time the system is suspended, `boot` includes it. Only
+/// Linux and Darwin expose distinct clocks for this; elsewhere both fall back
+/// to `MONOTONIC` (suspend behavior is then platform-defined), which
+/// `std.Io.Clock` explicitly permits.
+fn posixClockId(clock: Clock) ?posix.system.clockid_t {
+    const CLOCK = posix.system.CLOCK;
+    return switch (clock) {
+        .real => CLOCK.REALTIME,
+        .awake => if (is_darwin) CLOCK.UPTIME_RAW else CLOCK.MONOTONIC,
+        .boot => switch (builtin.os.tag) {
+            .linux => CLOCK.BOOTTIME,
+            else => if (is_darwin) CLOCK.MONOTONIC_RAW else CLOCK.MONOTONIC,
+        },
+        .cpu_process => if (@hasField(posix.system.clockid_t, "PROCESS_CPUTIME_ID")) .PROCESS_CPUTIME_ID else null,
+        .cpu_thread => if (@hasField(posix.system.clockid_t, "THREAD_CPUTIME_ID")) .THREAD_CPUTIME_ID else null,
+    };
+}
+
 pub fn now(clock: Clock) Timestamp {
     switch (builtin.os.tag) {
         .windows => {
             switch (clock) {
-                .monotonic => {
+                .awake, .boot => {
                     // QPC on Windows doesn't fail on >= XP/2000 and includes time suspended.
                     const qpc = w.QueryPerformanceCounter();
                     const qpf = w.QueryPerformanceFrequency();
@@ -32,7 +59,7 @@ pub fn now(clock: Clock) Timestamp {
                     const result = (@as(u96, qpc) * scale) >> 32;
                     return Timestamp.fromNanoseconds(@truncate(result));
                 },
-                .realtime => {
+                .real => {
                     // RtlGetSystemTimePrecise() has a granularity of 100 nanoseconds
                     // and uses the NTFS/Windows epoch, which is 1601-01-01.
                     // Convert to Unix epoch (1970-01-01) by subtracting the difference.
@@ -41,13 +68,13 @@ pub fn now(clock: Clock) Timestamp {
                     const epoch_diff_ticks = 11644473600 * (time.ns_per_s / 100);
                     return Timestamp.fromNanoseconds(@intCast((ticks - epoch_diff_ticks) * 100));
                 },
+                .cpu_process, .cpu_thread => return Timestamp.fromNanoseconds(windowsCpuTimeNs(clock) orelse 0),
             }
         },
         else => {
-            const clock_id = switch (clock) {
-                .monotonic => posix.system.CLOCK.MONOTONIC,
-                .realtime => posix.system.CLOCK.REALTIME,
-            };
+            // An unsupported CPU-time clock reports zero, matching the
+            // `std.Io.Clock` contract.
+            const clock_id = posixClockId(clock) orelse return .zero;
             // TODO: use our posix layer, not std.posix
             // https://codeberg.org/ziglang/zig/pulls/35506
             var tp: std.posix.system.timespec = undefined;
@@ -66,13 +93,13 @@ pub fn now(clock: Clock) Timestamp {
 }
 
 /// Returns the granularity of the given clock, i.e. the smallest interval the
-/// clock can distinguish. The two clocks zio exposes are always supported, so
-/// this never reports an unavailable clock.
-pub fn resolution(clock: Clock) Duration {
+/// clock can distinguish. Null if the platform does not support the clock
+/// (only the CPU-time clocks can be unsupported).
+pub fn resolution(clock: Clock) ?Duration {
     switch (builtin.os.tag) {
         .windows => {
             switch (clock) {
-                .monotonic => {
+                .awake, .boot => {
                     // QPC ticks at QueryPerformanceFrequency() Hz; one tick is
                     // the granularity. Clamp to at least 1ns for the unlikely
                     // case of a sub-nanosecond frequency.
@@ -80,26 +107,21 @@ pub fn resolution(clock: Clock) Duration {
                     const ns = @max(time.ns_per_s / qpf, 1);
                     return Duration.fromNanoseconds(ns);
                 },
-                .realtime => {
-                    // RtlGetSystemTimePrecise() reports time in 100ns ticks.
-                    return Duration.fromNanoseconds(100);
-                },
+                // RtlGetSystemTimePrecise(), and GetProcess/ThreadTimes, all
+                // report in 100ns ticks; there is no API for the true (coarser)
+                // scheduler granularity of the CPU-time clocks.
+                .real, .cpu_process, .cpu_thread => return Duration.fromNanoseconds(100),
             }
         },
         else => {
-            const clock_id = switch (clock) {
-                .monotonic => posix.system.CLOCK.MONOTONIC,
-                .realtime => posix.system.CLOCK.REALTIME,
-            };
+            const clock_id = posixClockId(clock) orelse return null;
             // TODO: use our posix layer, not std.posix
             // https://codeberg.org/ziglang/zig/pulls/35506
             var tp: std.posix.system.timespec = undefined;
             const rc = std.posix.system.clock_getres(clock_id, &tp);
             switch (std.posix.errno(rc)) {
                 .SUCCESS => {
-                    const ns = @as(u64, @intCast(@max(tp.sec, 0))) * time.ns_per_s +
-                        @as(u64, @intCast(@max(tp.nsec, 0)));
-                    return Duration.fromNanoseconds(ns);
+                    return Duration.fromNanoseconds(timespecToNanos(tp));
                 },
                 else => |err| {
                     std.debug.panic("resolution: call to clock_getres failed: {}", .{err});
@@ -108,6 +130,30 @@ pub fn resolution(clock: Clock) Duration {
         },
     }
     unreachable;
+}
+
+fn timespecToNanos(tp: std.posix.system.timespec) u64 {
+    return @as(u64, @intCast(@max(tp.sec, 0))) * time.ns_per_s +
+        @as(u64, @intCast(@max(tp.nsec, 0)));
+}
+
+/// CPU time (user + kernel) consumed so far on the given CPU-time clock, in
+/// nanoseconds. Null if the GetProcess/ThreadTimes call fails. Windows only.
+fn windowsCpuTimeNs(clock: Clock) ?u64 {
+    var creation: w.FILETIME = undefined;
+    var exit: w.FILETIME = undefined;
+    var kernel: w.FILETIME = undefined;
+    var user: w.FILETIME = undefined;
+    const ok = switch (clock) {
+        .cpu_process => w.GetProcessTimes(w.GetCurrentProcess(), &creation, &exit, &kernel, &user),
+        .cpu_thread => w.GetThreadTimes(w.GetCurrentThread(), &creation, &exit, &kernel, &user),
+        else => unreachable,
+    };
+    if (ok == .FALSE) return null;
+    // FILETIME counts 100-nanosecond ticks.
+    const kernel_ticks = @as(u64, kernel.dwHighDateTime) << 32 | kernel.dwLowDateTime;
+    const user_ticks = @as(u64, user.dwHighDateTime) << 32 | user.dwLowDateTime;
+    return (kernel_ticks + user_ticks) * 100;
 }
 
 pub fn sleep(duration: Duration) void {

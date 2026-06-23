@@ -664,6 +664,22 @@ pub fn QueryPerformanceFrequency() u64 {
     return @bitCast(result);
 }
 
+pub extern "kernel32" fn GetProcessTimes(
+    hProcess: HANDLE,
+    lpCreationTime: *FILETIME,
+    lpExitTime: *FILETIME,
+    lpKernelTime: *FILETIME,
+    lpUserTime: *FILETIME,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn GetThreadTimes(
+    hThread: HANDLE,
+    lpCreationTime: *FILETIME,
+    lpExitTime: *FILETIME,
+    lpKernelTime: *FILETIME,
+    lpUserTime: *FILETIME,
+) callconv(.winapi) BOOL;
+
 // Error handling
 pub extern "kernel32" fn GetLastError() callconv(.winapi) Win32Error;
 
