@@ -58,6 +58,26 @@ pub const Clock = enum(u8) {
     /// Alias for the wall clock.
     pub const realtime = Clock.real;
 
+    /// Map a `std.Io.Clock` to the zio clock.
+    pub fn fromStd(clock: std.Io.Clock) Clock {
+        return switch (clock) {
+            .real => .real,
+            .awake => .awake,
+            .boot => .boot,
+            .cpu_process => .cpu_process,
+            .cpu_thread => .cpu_thread,
+        };
+    }
+
+    /// The clock a `std.Io.Timeout` is measured against (`awake` if none).
+    pub fn fromStdTimeout(t: std.Io.Timeout) Clock {
+        return switch (t) {
+            .none => .awake,
+            .duration => |d| fromStd(d.clock),
+            .deadline => |d| fromStd(d.clock),
+        };
+    }
+
     /// Granularity of the clock, i.e. the smallest interval it can distinguish.
     /// Null if the platform does not support the clock (only the CPU-time
     /// clocks can be unsupported).

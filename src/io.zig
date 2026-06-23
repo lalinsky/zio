@@ -379,7 +379,7 @@ fn checkCancelImpl(_: ?*anyopaque) Io.Cancelable!void {
 }
 
 fn futexWaitImpl(_: ?*anyopaque, ptr: *const u32, expected: u32, timeout: Io.Timeout) Io.Cancelable!void {
-    Futex.timedWait(ptr, expected, time.Timeout.fromStd(timeout)) catch |err| switch (err) {
+    Futex.timedWaitClock(ptr, expected, .fromStd(timeout), .fromStdTimeout(timeout)) catch |err| switch (err) {
         error.Timeout => return,
         error.Canceled => return error.Canceled,
     };
@@ -1780,33 +1780,19 @@ fn progressParentFileImpl(_: ?*anyopaque) std.Progress.ParentFileError!Io.File {
 }
 
 fn nowImpl(_: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
-    const ts = time.Timestamp.now(zioClock(clock));
+    const ts = time.Timestamp.now(.fromStd(clock));
     return .{ .nanoseconds = @intCast(ts.toNanoseconds()) };
 }
 
 fn clockResolutionImpl(_: ?*anyopaque, clock: Io.Clock) Io.Clock.ResolutionError!Io.Duration {
-    const res = time.Clock.resolution(zioClock(clock)) orelse return error.ClockUnavailable;
+    const res = time.Clock.resolution(.fromStd(clock)) orelse return error.ClockUnavailable;
     return .{ .nanoseconds = @intCast(res.toNanoseconds()) };
 }
 
-fn zioClock(clock: Io.Clock) time.Clock {
-    return switch (clock) {
-        .real => .real,
-        .awake => .awake,
-        .boot => .boot,
-        .cpu_process => .cpu_process,
-        .cpu_thread => .cpu_thread,
-    };
-}
-
 fn sleepImpl(_: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
-    const clock: Io.Clock = switch (timeout) {
-        .none => return,
-        .duration => |d| d.clock,
-        .deadline => |d| d.clock,
-    };
+    if (timeout == .none) return;
     var waiter: Waiter = .init();
-    try waiter.timedWaitClock(1, time.Timeout.fromStd(timeout), zioClock(clock), .allow_cancel);
+    try waiter.timedWaitClock(1, .fromStd(timeout), .fromStdTimeout(timeout), .allow_cancel);
 }
 
 fn randomImpl(_: ?*anyopaque, buffer: []u8) void {
