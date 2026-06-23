@@ -1791,10 +1791,13 @@ fn nowImpl(_: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
 }
 
 fn clockResolutionImpl(_: ?*anyopaque, clock: Io.Clock) Io.Clock.ResolutionError!Io.Duration {
-    return switch (clock) {
-        .real, .awake, .boot => .{ .nanoseconds = 1 },
-        .cpu_process, .cpu_thread => error.ClockUnavailable,
+    const res = switch (clock) {
+        .real => time.Clock.resolution(.realtime),
+        .awake, .boot => time.Clock.resolution(.monotonic),
+        // zio does not expose CPU-time clocks yet; see `nowImpl`.
+        .cpu_process, .cpu_thread => return error.ClockUnavailable,
     };
+    return .{ .nanoseconds = @intCast(res.toNanoseconds()) };
 }
 
 fn sleepImpl(_: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {

@@ -65,6 +65,51 @@ pub fn now(clock: Clock) Timestamp {
     unreachable;
 }
 
+/// Returns the granularity of the given clock, i.e. the smallest interval the
+/// clock can distinguish. The two clocks zio exposes are always supported, so
+/// this never reports an unavailable clock.
+pub fn resolution(clock: Clock) Duration {
+    switch (builtin.os.tag) {
+        .windows => {
+            switch (clock) {
+                .monotonic => {
+                    // QPC ticks at QueryPerformanceFrequency() Hz; one tick is
+                    // the granularity. Clamp to at least 1ns for the unlikely
+                    // case of a sub-nanosecond frequency.
+                    const qpf = w.QueryPerformanceFrequency();
+                    const ns = @max(time.ns_per_s / qpf, 1);
+                    return Duration.fromNanoseconds(ns);
+                },
+                .realtime => {
+                    // RtlGetSystemTimePrecise() reports time in 100ns ticks.
+                    return Duration.fromNanoseconds(100);
+                },
+            }
+        },
+        else => {
+            const clock_id = switch (clock) {
+                .monotonic => posix.system.CLOCK.MONOTONIC,
+                .realtime => posix.system.CLOCK.REALTIME,
+            };
+            // TODO: use our posix layer, not std.posix
+            // https://codeberg.org/ziglang/zig/pulls/35506
+            var tp: std.posix.system.timespec = undefined;
+            const rc = std.posix.system.clock_getres(clock_id, &tp);
+            switch (std.posix.errno(rc)) {
+                .SUCCESS => {
+                    const ns = @as(u64, @intCast(@max(tp.sec, 0))) * time.ns_per_s +
+                        @as(u64, @intCast(@max(tp.nsec, 0)));
+                    return Duration.fromNanoseconds(ns);
+                },
+                else => |err| {
+                    std.debug.panic("resolution: call to clock_getres failed: {}", .{err});
+                },
+            }
+        },
+    }
+    unreachable;
+}
+
 pub fn sleep(duration: Duration) void {
     if (duration.value == 0) return;
     switch (builtin.os.tag) {

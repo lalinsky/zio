@@ -38,6 +38,11 @@ const ns_per_unit: TimeInt = switch (time_unit) {
 pub const Clock = enum {
     monotonic,
     realtime,
+
+    /// Granularity of the clock, i.e. the smallest interval it can distinguish.
+    pub fn resolution(comptime clock: Clock) Duration {
+        return os.time.resolution(clock);
+    }
 };
 
 /// A duration of time.
