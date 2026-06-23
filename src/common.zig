@@ -304,12 +304,17 @@ pub fn waitForIoUncancelable(c: *ev.Completion) void {
 /// If the timeout expires before the I/O completes, returns `error.Timeout`.
 /// If the timeout is `.none`, waits indefinitely (just calls `waitForIo`).
 pub fn timedWaitForIo(c: *ev.Completion, timeout: Timeout) (Timeoutable || Cancelable)!void {
+    return timedWaitForIoClock(c, timeout, .awake);
+}
+
+/// Like `timedWaitForIo`, but the timeout is measured against `clock`.
+pub fn timedWaitForIoClock(c: *ev.Completion, timeout: Timeout, clock: Clock) (Timeoutable || Cancelable)!void {
     if (timeout == .none) {
         return waitForIo(c);
     }
 
     var group = ev.Group.init(.race);
-    var timer = ev.Timer.init(timeout);
+    var timer = ev.Timer.initClock(timeout, clock);
 
     group.add(c);
     group.add(&timer.c);
