@@ -330,14 +330,13 @@ pub const Executor = struct {
         try setupStackGrowth();
         errdefer cleanupStackGrowth();
 
-        // Seed this loop's non-secure CSPRNG with an independent secure seed.
-        // Step 1 sources entropy from std's blocking global backend; a later
-        // step swaps this for zio's own blocking secure RNG. Each loop draws
-        // its own seed so per-thread streams are independent.
+        // Seed this loop's non-secure CSPRNG with an independent secure seed
+        // drawn from zio's own blocking secure RNG. Each loop draws its own
+        // seed so per-thread streams are independent. If the OS cannot provide
+        // entropy at startup, executor creation fails rather than running with
+        // a predictable seed.
         var random_seed: [ev.Random.seed_len]u8 = undefined;
-        std.Io.Threaded.global_single_threaded.io().randomSecure(&random_seed) catch {
-            std.Io.Threaded.fallbackSeed(self, &random_seed);
-        };
+        try os.getrandom(&random_seed);
 
         try self.loop.init(.{
             .allocator = self.runtime.allocator,
