@@ -35,9 +35,32 @@ const ns_per_unit: TimeInt = switch (time_unit) {
     .milliseconds => ns_per_ms,
 };
 
+/// Mirrors the clocks of `std.Io.Clock`. The wall-clock variants are always
+/// available; the CPU-time variants measure CPU consumed (user + kernel) and
+/// may be unsupported on some platforms.
 pub const Clock = enum {
-    monotonic,
-    realtime,
+    /// Excludes time the system is suspended (Linux `CLOCK_MONOTONIC`).
+    awake,
+    /// Includes time the system is suspended (Linux `CLOCK_BOOTTIME`).
+    boot,
+    /// Wall-clock time since the Unix epoch.
+    real,
+    /// CPU time consumed by the whole process.
+    cpu_process,
+    /// CPU time consumed by the calling thread.
+    cpu_thread,
+
+    /// Alias for the default monotonic clock.
+    pub const monotonic = Clock.awake;
+    /// Alias for the wall clock.
+    pub const realtime = Clock.real;
+
+    /// Granularity of the clock, i.e. the smallest interval it can distinguish.
+    /// Null if the platform does not support the clock (only the CPU-time
+    /// clocks can be unsupported).
+    pub fn resolution(clock: Clock) ?Duration {
+        return os.time.resolution(clock);
+    }
 };
 
 /// A duration of time.
@@ -319,7 +342,7 @@ pub const Timestamp = struct {
 
     pub const zero: Timestamp = .{ .value = 0 };
 
-    pub fn now(comptime clock: Clock) Timestamp {
+    pub fn now(clock: Clock) Timestamp {
         return os.time.now(clock);
     }
 

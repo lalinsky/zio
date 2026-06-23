@@ -1780,20 +1780,22 @@ fn progressParentFileImpl(_: ?*anyopaque) std.Progress.ParentFileError!Io.File {
 }
 
 fn nowImpl(_: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
-    const ts = switch (clock) {
-        .real => time.Timestamp.now(.realtime),
-        .awake, .boot => time.Timestamp.now(.monotonic),
-        // zio does not expose CPU-time clocks yet. Callers should check
-        // `clockResolution` (returns `ClockUnavailable`) before relying on these.
-        .cpu_process, .cpu_thread => return .{ .nanoseconds = 0 },
-    };
+    const ts = time.Timestamp.now(zioClock(clock));
     return .{ .nanoseconds = @intCast(ts.toNanoseconds()) };
 }
 
 fn clockResolutionImpl(_: ?*anyopaque, clock: Io.Clock) Io.Clock.ResolutionError!Io.Duration {
+    const res = time.Clock.resolution(zioClock(clock)) orelse return error.ClockUnavailable;
+    return .{ .nanoseconds = @intCast(res.toNanoseconds()) };
+}
+
+fn zioClock(clock: Io.Clock) time.Clock {
     return switch (clock) {
-        .real, .awake, .boot => .{ .nanoseconds = 1 },
-        .cpu_process, .cpu_thread => error.ClockUnavailable,
+        .real => .real,
+        .awake => .awake,
+        .boot => .boot,
+        .cpu_process => .cpu_process,
+        .cpu_thread => .cpu_thread,
     };
 }
 
@@ -2700,16 +2702,43 @@ test "io: now returns monotonically increasing awake timestamps" {
     try std.testing.expect(b.nanoseconds >= a.nanoseconds + 5 * std.time.ns_per_ms);
 }
 
-test "io: clockResolution reports availability per clock" {
+test "io: clockResolution reports a granularity for every clock" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const io = rt.io();
 
-    const res_awake = try Io.Clock.resolution(.awake, io);
-    try std.testing.expect(res_awake.nanoseconds > 0);
+    for ([_]Io.Clock{ .real, .awake, .boot, .cpu_process, .cpu_thread }) |clock| {
+        const res = Io.Clock.resolution(clock, io) catch |err| {
+            if (err == error.ClockUnavailable) continue;
+            return err;
+        };
+        try std.testing.expect(res.nanoseconds > 0);
+    }
+}
 
-    try std.testing.expectError(error.ClockUnavailable, Io.Clock.resolution(.cpu_process, io));
-    try std.testing.expectError(error.ClockUnavailable, Io.Clock.resolution(.cpu_thread, io));
+test "io: cpu-time clocks are monotonic" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    // Note: we only assert monotonicity. We can't assert the clock advances by
+    // a given amount, since some platforms (Windows) account CPU time in coarse
+    // scheduler ticks that may not register a short burst at all.
+    for ([_]Io.Clock{ .cpu_process, .cpu_thread }) |clock| {
+        _ = Io.Clock.resolution(clock, io) catch |err| {
+            if (err == error.ClockUnavailable) continue;
+            return err;
+        };
+
+        const before = Io.Timestamp.now(io, clock);
+
+        var x: u64 = 0;
+        for (0..2_000_000) |i| x +%= i *% 2654435761;
+        std.mem.doNotOptimizeAway(x);
+
+        const after = Io.Timestamp.now(io, clock);
+        try std.testing.expect(after.nanoseconds >= before.nanoseconds);
+    }
 }
 
 test "io: random fills buffer with varying bytes" {
