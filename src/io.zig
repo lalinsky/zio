@@ -35,6 +35,7 @@ const common = @import("common.zig");
 const Waiter = common.Waiter;
 const waitForIo = common.waitForIo;
 const timedWaitForIo = common.timedWaitForIo;
+const timedWaitForIoClock = common.timedWaitForIoClock;
 const waitForIoUncancelable = common.waitForIoUncancelable;
 
 const ev = @import("ev/root.zig");
@@ -379,7 +380,7 @@ fn checkCancelImpl(_: ?*anyopaque) Io.Cancelable!void {
 }
 
 fn futexWaitImpl(_: ?*anyopaque, ptr: *const u32, expected: u32, timeout: Io.Timeout) Io.Cancelable!void {
-    Futex.timedWait(ptr, expected, time.Timeout.fromStd(timeout)) catch |err| switch (err) {
+    Futex.timedWaitClock(ptr, expected, .fromStd(timeout), .fromStdTimeout(timeout)) catch |err| switch (err) {
         error.Timeout => return,
         error.Canceled => return error.Canceled,
     };
@@ -396,16 +397,16 @@ fn futexWakeImpl(_: ?*anyopaque, ptr: *const u32, max_waiters: u32) void {
 }
 
 fn operateImpl(_: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
-    return operateInner(operation, .none) catch |err| switch (err) {
+    return operateInner(operation, .none, .awake) catch |err| switch (err) {
         error.Canceled => error.Canceled,
         error.Timeout => unreachable,
     };
 }
 
-fn operateInner(operation: Io.Operation, timeout: time.Timeout) (Io.Cancelable || common.Timeoutable)!Io.Operation.Result {
+fn operateInner(operation: Io.Operation, timeout: time.Timeout, clock: time.Clock) (Io.Cancelable || common.Timeoutable)!Io.Operation.Result {
     switch (operation) {
         .file_read_streaming => |*o| return .{ .file_read_streaming = result: {
-            const n = fileReadStreamingImpl(o.file, o.data, timeout) catch |err| switch (err) {
+            const n = fileReadStreamingImpl(o.file, o.data, timeout, clock) catch |err| switch (err) {
                 error.Canceled => |e| return e,
                 error.Timeout => |e| return e,
                 else => |e| break :result e,
@@ -413,7 +414,7 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout) (Io.Cancelable |
             break :result n;
         } },
         .file_write_streaming => |*o| return .{ .file_write_streaming = result: {
-            const n = fileWriteStreamingImpl(o.file, o.header, o.data, o.splat, timeout) catch |err| switch (err) {
+            const n = fileWriteStreamingImpl(o.file, o.header, o.data, o.splat, timeout, clock) catch |err| switch (err) {
                 error.Canceled => |e| return e,
                 error.Timeout => |e| return e,
                 else => |e| break :result e,
@@ -425,11 +426,11 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout) (Io.Cancelable |
                 ev.DeviceIoControl.init(stdIoHandleToZio(o.file.handle), o.code, o.in, o.out)
             else
                 ev.DeviceIoControl.init(stdIoHandleToZio(o.file.handle), o.code, o.arg);
-            try timedWaitForIo(&op.c, timeout);
+            try timedWaitForIoClock(&op.c, timeout, clock);
             break :result try op.getResult();
         } },
         .net_receive => |*o| return .{ .net_receive = result: {
-            netReceiveImpl(o.socket_handle, &o.message_buffer[0], o.data_buffer, o.flags, timeout) catch |err| switch (err) {
+            netReceiveImpl(o.socket_handle, &o.message_buffer[0], o.data_buffer, o.flags, timeout, clock) catch |err| switch (err) {
                 error.Canceled => |e| return e,
                 error.Timeout => |e| return e,
                 else => |e| break :result .{ e, 0 },
@@ -445,6 +446,7 @@ fn fileReadStreamingImpl(
     file: Io.File,
     data: []const []u8,
     timeout: time.Timeout,
+    clock: time.Clock,
 ) (Io.Operation.FileReadStreaming.Error || Io.Cancelable || common.Timeoutable)!usize {
     var iovecs: [max_iovecs_len]os_fs.iovec = undefined;
     var count: usize = 0;
@@ -459,7 +461,7 @@ fn fileReadStreamingImpl(
 
     var op = ev.FileReadStreaming.init(stdIoHandleToZio(file.handle), .{ .iovecs = iovecs[0..count] });
     op.pollable = flagsReadPollable(&file.flags);
-    try timedWaitForIo(&op.c, timeout);
+    try timedWaitForIoClock(&op.c, timeout, clock);
     const n = op.getResult() catch |err| switch (err) {
         error.BrokenPipe, error.Unseekable => return error.Unexpected,
         else => |e| return e,
@@ -475,6 +477,7 @@ fn fileWriteStreamingImpl(
     data: []const []const u8,
     splat: usize,
     timeout: time.Timeout,
+    clock: time.Clock,
 ) (Io.Operation.FileWriteStreaming.Error || Io.Cancelable || common.Timeoutable)!usize {
     var slices: [max_iovecs_len][]const u8 = undefined;
     var splat_buf: [64]u8 = undefined;
@@ -486,7 +489,7 @@ fn fileWriteStreamingImpl(
 
     var op = ev.FileWriteStreaming.init(stdIoHandleToZio(file.handle), wbuf);
     op.pollable = flagsReadPollable(&file.flags);
-    try timedWaitForIo(&op.c, timeout);
+    try timedWaitForIoClock(&op.c, timeout, clock);
     return op.getResult() catch |err| switch (err) {
         error.Unseekable => error.Unexpected,
         else => |e| e,
@@ -589,7 +592,7 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
         const storage = &batch.storage[only.toIndex()];
         const operation = storage.submission.operation;
 
-        const result = try operateInner(operation, time.Timeout.fromStd(timeout));
+        const result = try operateInner(operation, .fromStd(timeout), .fromStdTimeout(timeout));
 
         batch.submitted = .empty;
         storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = result } };
@@ -672,7 +675,7 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
         if (batch.completed.head != .none or batch.pending.head == .none) return;
 
         // Wait for ready_count to become non-zero
-        Futex.timedWait(&state.ready_count.raw, 0, .fromStd(timeout)) catch |err| switch (err) {
+        Futex.timedWaitClock(&state.ready_count.raw, 0, .fromStd(timeout), .fromStdTimeout(timeout)) catch |err| switch (err) {
             error.Timeout => {
                 // Drain one more time before returning timeout
                 batchDrainReady(batch, state);
@@ -1780,29 +1783,19 @@ fn progressParentFileImpl(_: ?*anyopaque) std.Progress.ParentFileError!Io.File {
 }
 
 fn nowImpl(_: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
-    const ts = time.Timestamp.now(zioClock(clock));
+    const ts = time.Timestamp.now(.fromStd(clock));
     return .{ .nanoseconds = @intCast(ts.toNanoseconds()) };
 }
 
 fn clockResolutionImpl(_: ?*anyopaque, clock: Io.Clock) Io.Clock.ResolutionError!Io.Duration {
-    const res = time.Clock.resolution(zioClock(clock)) orelse return error.ClockUnavailable;
+    const res = time.Clock.resolution(.fromStd(clock)) orelse return error.ClockUnavailable;
     return .{ .nanoseconds = @intCast(res.toNanoseconds()) };
-}
-
-fn zioClock(clock: Io.Clock) time.Clock {
-    return switch (clock) {
-        .real => .real,
-        .awake => .awake,
-        .boot => .boot,
-        .cpu_process => .cpu_process,
-        .cpu_thread => .cpu_thread,
-    };
 }
 
 fn sleepImpl(_: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
     if (timeout == .none) return;
     var waiter: Waiter = .init();
-    try waiter.timedWait(1, time.Timeout.fromStd(timeout), .allow_cancel);
+    try waiter.timedWaitClock(1, .fromStd(timeout), .fromStdTimeout(timeout), .allow_cancel);
 }
 
 fn randomImpl(_: ?*anyopaque, buffer: []u8) void {
@@ -2342,6 +2335,7 @@ fn netReceiveImpl(
     data_buffer: []u8,
     flags: Io.net.ReceiveFlags,
     timeout: time.Timeout,
+    clock: time.Clock,
 ) (Io.net.Socket.ReceiveError || common.Timeoutable)!void {
     const zio_flags: os_net.RecvFlags = .{
         .peek = flags.peek,
@@ -2360,7 +2354,7 @@ fn netReceiveImpl(
         &addr_len,
         if (has_control) message.control else null,
     );
-    try timedWaitForIo(&op.c, timeout);
+    try timedWaitForIoClock(&op.c, timeout, clock);
     const result = op.getResult() catch |err| return recvMsgErrToReceiveErr(err);
     message.* = .{
         .from = zioIpToStdIo(storage.ip),
@@ -2779,6 +2773,35 @@ test "io: sleep with duration returns after delay" {
 
     var sw = time.Stopwatch.start();
     try io.sleep(.fromMilliseconds(20), .awake);
+    try std.testing.expect(sw.read().toMilliseconds() >= 20);
+}
+
+test "io: sleep honors boot and real clocks" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    for ([_]Io.Clock{ .boot, .real }) |clock| {
+        var sw = time.Stopwatch.start();
+        try io.sleep(.fromMilliseconds(20), clock);
+        try std.testing.expect(sw.read().toMilliseconds() >= 20);
+    }
+}
+
+test "io: sleep until an absolute realtime deadline" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    // A deadline carries the realtime epoch (ns since 1970); fromStd must keep
+    // it as an absolute deadline rather than mixing it with the monotonic clock.
+    const deadline: Io.Clock.Timestamp = .fromNow(io, .{
+        .raw = .fromMilliseconds(20),
+        .clock = .real,
+    });
+
+    var sw = time.Stopwatch.start();
+    try deadline.wait(io);
     try std.testing.expect(sw.read().toMilliseconds() >= 20);
 }
 

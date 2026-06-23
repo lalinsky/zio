@@ -36,6 +36,7 @@ const Cancelable = @import("../common.zig").Cancelable;
 const Timeoutable = @import("../common.zig").Timeoutable;
 const Waiter = @import("../common.zig").Waiter;
 const Timeout = @import("../time.zig").Timeout;
+const Clock = @import("../time.zig").Clock;
 const SimpleQueue = @import("../utils/simple_queue.zig").SimpleQueue;
 const AutoCancel = @import("../autocancel.zig").AutoCancel;
 const os = @import("../os/root.zig");
@@ -131,6 +132,11 @@ const FutexWaiter = struct {
 
 /// Like `wait`, but also returns `error.Timeout` if the timeout elapses.
 pub fn timedWait(ptr: *const u32, expect: u32, timeout: Timeout) (Timeoutable || Cancelable)!void {
+    return timedWaitClock(ptr, expect, timeout, .awake);
+}
+
+/// Like `timedWait`, but the timeout is measured against `clock`.
+pub fn timedWaitClock(ptr: *const u32, expect: u32, timeout: Timeout, clock: Clock) (Timeoutable || Cancelable)!void {
     // Fast path: check if value already changed
     if (@atomicLoad(u32, ptr, .acquire) != expect) {
         return;
@@ -160,7 +166,7 @@ pub fn timedWait(ptr: *const u32, expect: u32, timeout: Timeout) (Timeoutable ||
     bucket.mutex.unlock();
 
     // Wait for signal or timeout, handling spurious wakeups internally
-    futex_waiter.waiter.timedWait(1, timeout, .allow_cancel) catch |err| {
+    futex_waiter.waiter.timedWaitClock(1, timeout, clock, .allow_cancel) catch |err| {
         // On cancellation, try to remove from queue
         const was_in_queue = removeFromBucket(bucket, &futex_waiter);
         if (!was_in_queue) {

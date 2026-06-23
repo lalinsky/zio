@@ -8,6 +8,8 @@ pub const log = std.log.scoped(.zio);
 
 const ev = @import("ev/root.zig");
 const Timeout = @import("time.zig").Timeout;
+const Clock = @import("time.zig").Clock;
+const Timestamp = @import("time.zig").Timestamp;
 const Stopwatch = @import("time.zig").Stopwatch;
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTaskOrNull = @import("runtime.zig").getCurrentTaskOrNull;
@@ -152,14 +154,21 @@ pub const Waiter = struct {
     /// (e.g., by trying to remove from a wait queue).
     /// Only valid for direct waiters.
     pub fn timedWait(self: *Waiter, expected: u32, timeout: Timeout, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+        return self.timedWaitClock(expected, timeout, .awake, cancel_mode);
+    }
+
+    /// Like `timedWait`, but the timeout is measured against `clock`. The
+    /// no-task futex fallback only supports the monotonic (`awake`) clock, so
+    /// boot/real timeouts there degrade to awake semantics.
+    pub fn timedWaitClock(self: *Waiter, expected: u32, timeout: Timeout, clock: Clock, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         if (timeout == .none) {
             return self.wait(expected, cancel_mode);
         }
 
         const d = &self.mode.direct;
-        const task = d.task orelse return timedWaitFutex(d, expected, timeout);
+        const task = d.task orelse return timedWaitFutex(d, expected, futexTimeout(timeout, clock));
 
-        var timer: ev.Timer = .init(timeout);
+        var timer: ev.Timer = .initClock(timeout, clock);
         timer.c.userdata = self;
         timer.c.callback = callback;
 
@@ -175,6 +184,23 @@ pub const Waiter = struct {
             if (current >= expected) return;
             d.notify.wait(current);
         }
+    }
+
+    /// Collapse a wall-clock (boot/real) deadline into a monotonic-relative
+    /// duration for the no-task futex fallback, which can only wait on the
+    /// monotonic clock. Without this, `timedWaitFutex` would compare an
+    /// absolute realtime timestamp (~ns since 1970) against monotonic time and
+    /// wait for decades. Best-effort: it snapshots the remaining time once and
+    /// loses suspend/step semantics.
+    ///
+    /// TODO: support boot/real natively on this path. The Linux futex can wait
+    /// against CLOCK_REALTIME (FUTEX_WAIT_BITSET | FUTEX_CLOCK_REALTIME), so a
+    /// no-task wait on a real deadline could be exact rather than converted.
+    fn futexTimeout(timeout: Timeout, clock: Clock) Timeout {
+        return switch (timeout) {
+            .none, .duration => timeout,
+            .deadline => |deadline| .{ .duration = Timestamp.now(clock).durationTo(deadline) },
+        };
     }
 
     fn timedWaitFutex(d: *Direct, expected: u32, timeout: Timeout) void {
@@ -296,12 +322,17 @@ pub fn waitForIoUncancelable(c: *ev.Completion) void {
 /// If the timeout expires before the I/O completes, returns `error.Timeout`.
 /// If the timeout is `.none`, waits indefinitely (just calls `waitForIo`).
 pub fn timedWaitForIo(c: *ev.Completion, timeout: Timeout) (Timeoutable || Cancelable)!void {
+    return timedWaitForIoClock(c, timeout, .awake);
+}
+
+/// Like `timedWaitForIo`, but the timeout is measured against `clock`.
+pub fn timedWaitForIoClock(c: *ev.Completion, timeout: Timeout, clock: Clock) (Timeoutable || Cancelable)!void {
     if (timeout == .none) {
         return waitForIo(c);
     }
 
     var group = ev.Group.init(.race);
-    var timer = ev.Timer.init(timeout);
+    var timer = ev.Timer.initClock(timeout, clock);
 
     group.add(c);
     group.add(&timer.c);

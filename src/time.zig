@@ -38,22 +38,45 @@ const ns_per_unit: TimeInt = switch (time_unit) {
 /// Mirrors the clocks of `std.Io.Clock`. The wall-clock variants are always
 /// available; the CPU-time variants measure CPU consumed (user + kernel) and
 /// may be unsupported on some platforms.
-pub const Clock = enum {
+/// The wall-clock variants are ordered first with contiguous values so they
+/// can index per-clock timer heaps directly via `@intFromEnum`; the CPU-time
+/// variants follow.
+pub const Clock = enum(u8) {
     /// Excludes time the system is suspended (Linux `CLOCK_MONOTONIC`).
-    awake,
+    awake = 0,
     /// Includes time the system is suspended (Linux `CLOCK_BOOTTIME`).
-    boot,
+    boot = 1,
     /// Wall-clock time since the Unix epoch.
-    real,
+    real = 2,
     /// CPU time consumed by the whole process.
-    cpu_process,
+    cpu_process = 3,
     /// CPU time consumed by the calling thread.
-    cpu_thread,
+    cpu_thread = 4,
 
     /// Alias for the default monotonic clock.
     pub const monotonic = Clock.awake;
     /// Alias for the wall clock.
     pub const realtime = Clock.real;
+
+    /// Map a `std.Io.Clock` to the zio clock.
+    pub fn fromStd(clock: std.Io.Clock) Clock {
+        return switch (clock) {
+            .real => .real,
+            .awake => .awake,
+            .boot => .boot,
+            .cpu_process => .cpu_process,
+            .cpu_thread => .cpu_thread,
+        };
+    }
+
+    /// The clock a `std.Io.Timeout` is measured against (`awake` if none).
+    pub fn fromStdTimeout(t: std.Io.Timeout) Clock {
+        return switch (t) {
+            .none => .awake,
+            .duration => |d| fromStd(d.clock),
+            .deadline => |d| fromStd(d.clock),
+        };
+    }
 
     /// Granularity of the clock, i.e. the smallest interval it can distinguish.
     /// Null if the platform does not support the clock (only the CPU-time
@@ -436,20 +459,25 @@ pub const Timeout = union(enum) {
     duration: Duration,
     deadline: Timestamp,
 
-    /// Convert a `std.Io.Timeout` into the zio equivalent.
-    ///
-    /// Deadlines are resolved against the monotonic clock regardless of the
-    /// deadline's `Clock` tag; the zio loop only exposes a single internal
-    /// clock. This matches `nowImpl` returning a monotonic `Io.Timestamp`.
+    /// Convert a `std.Io.Timeout` into the zio equivalent. The value is kept
+    /// clockless here — a duration stays a duration and a deadline stays an
+    /// absolute deadline (in its clock's epoch). The clock itself travels
+    /// separately on the `ev.Timer`, which compares the deadline against `now`
+    /// in that same clock, so no cross-epoch conversion is needed.
     pub fn fromStd(t: std.Io.Timeout) Timeout {
         return switch (t) {
             .none => .none,
             .duration => |d| fromSignedNanoseconds(d.raw.nanoseconds),
-            .deadline => |d| blk: {
-                const now_ns: i96 = @intCast(Timestamp.now(.monotonic).toNanoseconds());
-                break :blk fromSignedNanoseconds(d.raw.nanoseconds - now_ns);
-            },
+            .deadline => |d| .{ .deadline = .fromNanoseconds(clampNanos(d.raw.nanoseconds)) },
         };
+    }
+
+    /// Clamp a (possibly wider, possibly negative) nanosecond count into the
+    /// unsigned `TimeInt` range used by `Duration`/`Timestamp`.
+    fn clampNanos(ns: i96) TimeInt {
+        if (ns <= 0) return 0;
+        if (ns > std.math.maxInt(TimeInt)) return std.math.maxInt(TimeInt);
+        return @intCast(ns);
     }
 
     fn fromSignedNanoseconds(ns: i96) Timeout {
