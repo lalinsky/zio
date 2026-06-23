@@ -9,6 +9,7 @@ const Async = @import("completion.zig").Async;
 const Duration = @import("../time.zig").Duration;
 const Timestamp = @import("../time.zig").Timestamp;
 const Timeout = @import("../time.zig").Timeout;
+const Clock = @import("../time.zig").Clock;
 const Queue = @import("queue.zig").Queue;
 const Heap = @import("heap.zig").Heap;
 const Work = @import("completion.zig").Work;
@@ -141,6 +142,22 @@ fn timerDeadlineLess(_: void, a: *Timer, b: *Timer) bool {
 
 const TimerHeap = Heap(Timer, void, timerDeadlineLess);
 
+/// Timers are kept in one heap per wall-clock domain, since their deadlines
+/// live in different epochs and can only be compared within a clock. The
+/// CPU-time clocks are not valid for timers. `Clock` numbers the wall clocks
+/// 0..wall_clock_count contiguously, so the enum value is the heap index.
+const wall_clock_count = 3;
+
+fn clockIndex(clock: Clock) usize {
+    const idx = @intFromEnum(clock);
+    if (idx >= wall_clock_count) @panic("timers cannot use CPU-time clocks");
+    return idx;
+}
+
+fn indexClock(index: usize) Clock {
+    return @enumFromInt(index);
+}
+
 pub fn SimpleStack(comptime T: type) type {
     return struct {
         head: ?*T = null,
@@ -203,8 +220,19 @@ pub const LoopState = struct {
 
     wake_requested: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
-    now: Timestamp = .zero,
-    timers: TimerHeap = .{ .context = {} },
+    /// Cached "now" per wall clock, indexed by `clockIndex`. `awake` is
+    /// refreshed eagerly once per scan (`updateNow`); `boot`/`real` are
+    /// refreshed lazily on first use within a scan and cached for the rest of
+    /// it. `tick` is a monotonically increasing scan counter; `now_tick[i]`
+    /// records the scan that `now[i]` was last filled, so a mismatch refreshes.
+    tick: u64 = 0,
+    now: [wall_clock_count]Timestamp = .{ .zero, .zero, .zero },
+    now_tick: [wall_clock_count]u64 = .{ 0, 0, 0 },
+    timers: [wall_clock_count]TimerHeap = .{
+        .{ .context = {} },
+        .{ .context = {} },
+        .{ .context = {} },
+    },
     // TODO: Linked timers optimization
     // Instead of mutex-protected cross-thread timer cancellation, link timers to their
     // associated operations. When an operation completes, its linked timer is cleared
@@ -217,6 +245,9 @@ pub const LoopState = struct {
     //   - On timer fire: cancel linked operation (same thread, direct)
     // The cross-thread cancel mechanism remains for general cancellation (task migration,
     // external cancellation), but timeouts become zero-overhead pointer unlinking.
+    /// Protects all timer heaps and the cached `now` values. A single lock is
+    /// enough: it's local to the loop and effectively uncontended, only ever
+    /// held for O(log n) heap ops with callbacks run outside it.
     timer_mutex: os.Mutex = .init(),
 
     async_handles: Queue(Completion) = .{},
@@ -336,8 +367,26 @@ pub const LoopState = struct {
         completion.state = .running;
     }
 
+    /// Advance the scan counter and refresh the awake snapshot. Bumping `tick`
+    /// invalidates the lazily-cached boot/real values for the new scan.
     pub fn updateNow(self: *LoopState) void {
-        self.now = time.now(.monotonic);
+        self.tick +%= 1;
+        self.now[0] = time.now(.monotonic);
+        self.now_tick[0] = self.tick;
+    }
+
+    /// Current time on the given clock, indexed by `clockIndex`. `awake` is a
+    /// cache hit (primed eagerly by `updateNow`); `boot`/`real` are read fresh
+    /// at most once per scan (cheap VDSO `clock_gettime`) and cached. Reading
+    /// them per scan rather than per iteration is what lets the poll cap bound
+    /// oversleep across suspend/steps.
+    fn nowFor(self: *LoopState, clock: Clock) Timestamp {
+        const idx = clockIndex(clock);
+        if (self.now_tick[idx] != self.tick) {
+            self.now[idx] = time.now(clock);
+            self.now_tick[idx] = self.tick;
+        }
+        return self.now[idx];
     }
 
     pub fn lockTimers(self: *LoopState) void {
@@ -349,24 +398,25 @@ pub const LoopState = struct {
     }
 
     pub fn setTimer(self: *LoopState, timer: *Timer) void {
+        const idx = clockIndex(timer.clock);
         if (timer.deadline.value > 0) {
-            self.timers.remove(timer);
+            self.timers[idx].remove(timer);
         } else {
             self.incrActive();
         }
         switch (timer.timeout) {
             .none => timer.deadline = .{ .value = std.math.maxInt(time.TimeInt) },
-            .duration => |d| timer.deadline = self.now.addDuration(d),
+            .duration => |d| timer.deadline = self.nowFor(timer.clock).addDuration(d),
             .deadline => |ts| timer.deadline = ts,
         }
         timer.c.state = .running;
-        self.timers.insert(timer);
+        self.timers[idx].insert(timer);
     }
 
     pub fn clearTimer(self: *LoopState, timer: *Timer) void {
         const was_active = timer.deadline.value > 0;
         if (was_active) {
-            self.timers.remove(timer);
+            self.timers[clockIndex(timer.clock)].remove(timer);
         }
         timer.deadline = .zero;
     }
@@ -383,6 +433,12 @@ pub const Loop = struct {
     internal_loop_group: LoopGroup = .{},
 
     max_wait: Duration = .fromSeconds(60),
+    /// Upper bound on the poll wait while a boot/real timer is pending on a
+    /// backend without native wall-clock timers. The poll clock (`awake`)
+    /// can't track suspend or wall-clock steps, so we re-evaluate boot/real
+    /// deadlines at least this often; this bounds how late such a timer can
+    /// fire after a suspend/step. Unused once a backend arms them natively.
+    wall_clock_cap: Duration = .fromSeconds(10),
     defer_callbacks: bool = true,
 
     /// Cross-thread cancel queue (lock-free MPSC)
@@ -447,7 +503,7 @@ pub const Loop = struct {
 
     /// Get the current monotonic timestamp
     pub fn now(self: *const Loop) Timestamp {
-        return self.state.now;
+        return self.state.now[0];
     }
 
     /// Wake up the loop from another thread (thread-safe)
@@ -470,6 +526,8 @@ pub const Loop = struct {
     pub fn setTimer(self: *Loop, timer: *Timer, timeout: Timeout) void {
         self.state.lockTimers();
         defer self.state.unlockTimers();
+        // Advance the scan so this timer's deadline is computed against a fresh
+        // `now` in its own clock (via `nowFor` in `setTimer`).
         self.state.updateNow();
         timer.c.loop = self;
         timer.timeout = timeout;
@@ -813,35 +871,60 @@ pub const Loop = struct {
         var fired = false;
         var next_timeout: ?Duration = null;
 
-        // Process fired timers in batches to avoid holding the lock during callbacks.
-        // This prevents deadlock when callbacks try to set/clear timers.
-        while (true) {
-            var batch: [4]*Timer = undefined;
-            var batch_count: usize = 0;
+        // Advance the scan once and refresh the awake snapshot; this also
+        // invalidates the lazily-cached boot/real values for this scan.
+        self.state.lockTimers();
+        self.state.updateNow();
+        self.state.unlockTimers();
 
-            self.state.lockTimers();
-            self.state.updateNow();
-            while (self.state.timers.peek()) |timer| {
-                if (timer.deadline.value > self.state.now.value) {
-                    next_timeout = self.state.now.durationTo(timer.deadline);
-                    break;
+        // Each wall-clock domain has its own heap, compared against `now` in
+        // that clock. The earliest remaining across all domains becomes the
+        // poll timeout; `tick`'s caller caps it at `max_wait`, which bounds how
+        // far a boot/real timer can oversleep after a suspend or clock step
+        // (the re-read of `now(clock)` on the next scan corrects it).
+        for (0..wall_clock_count) |idx| {
+            const clock = indexClock(idx);
+
+            // Process fired timers in batches to avoid holding the lock during
+            // callbacks. This prevents deadlock when callbacks set/clear timers.
+            while (true) {
+                var batch: [4]*Timer = undefined;
+                var batch_count: usize = 0;
+
+                self.state.lockTimers();
+                // `nowFor` is read inside the loop, so an empty heap reads no
+                // clock at all; for boot/real the first read fills the cache.
+                while (self.state.timers[idx].peek()) |timer| {
+                    const now_clock = self.state.nowFor(clock);
+                    if (timer.deadline.value > now_clock.value) {
+                        var remaining = now_clock.durationTo(timer.deadline);
+                        // boot/real can't be tracked by the awake poll clock, so
+                        // bound the wait to re-evaluate them across suspend/steps.
+                        if (clock != .awake and remaining.value > self.wall_clock_cap.value) {
+                            remaining = self.wall_clock_cap;
+                        }
+                        if (next_timeout == null or remaining.value < next_timeout.?.value) {
+                            next_timeout = remaining;
+                        }
+                        break;
+                    }
+                    timer.c.setResult(.timer, {});
+                    self.state.clearTimer(timer);
+                    batch[batch_count] = timer;
+                    batch_count += 1;
+                    if (batch_count >= batch.len) break;
                 }
-                timer.c.setResult(.timer, {});
-                self.state.clearTimer(timer);
-                batch[batch_count] = timer;
-                batch_count += 1;
-                if (batch_count >= batch.len) break;
-            }
-            self.state.unlockTimers();
+                self.state.unlockTimers();
 
-            // Mark completions outside the lock
-            for (batch[0..batch_count]) |timer| {
-                self.state.markCompleted(&timer.c);
-                fired = true;
-            }
+                // Mark completions outside the lock
+                for (batch[0..batch_count]) |timer| {
+                    self.state.markCompleted(&timer.c);
+                    fired = true;
+                }
 
-            // If we didn't fill the batch, we're done
-            if (batch_count < batch.len) break;
+                // If we didn't fill the batch, we're done with this domain
+                if (batch_count < batch.len) break;
+            }
         }
 
         return .{ .next_timeout = next_timeout, .fired = fired };

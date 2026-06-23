@@ -38,17 +38,20 @@ const ns_per_unit: TimeInt = switch (time_unit) {
 /// Mirrors the clocks of `std.Io.Clock`. The wall-clock variants are always
 /// available; the CPU-time variants measure CPU consumed (user + kernel) and
 /// may be unsupported on some platforms.
-pub const Clock = enum {
+/// The wall-clock variants are ordered first with contiguous values so they
+/// can index per-clock timer heaps directly via `@intFromEnum`; the CPU-time
+/// variants follow.
+pub const Clock = enum(u8) {
     /// Excludes time the system is suspended (Linux `CLOCK_MONOTONIC`).
-    awake,
+    awake = 0,
     /// Includes time the system is suspended (Linux `CLOCK_BOOTTIME`).
-    boot,
+    boot = 1,
     /// Wall-clock time since the Unix epoch.
-    real,
+    real = 2,
     /// CPU time consumed by the whole process.
-    cpu_process,
+    cpu_process = 3,
     /// CPU time consumed by the calling thread.
-    cpu_thread,
+    cpu_thread = 4,
 
     /// Alias for the default monotonic clock.
     pub const monotonic = Clock.awake;

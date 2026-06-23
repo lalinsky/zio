@@ -138,3 +138,44 @@ test "timer with explicit deadline" {
     try std.testing.expect(elapsed.toMilliseconds() <= 250);
     std.log.info("deadline timer: expected=100ms, actual={f}", .{elapsed});
 }
+
+test "timer on boot clock fires (duration, fallback path)" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    var timer: Timer = .initClock(.{ .duration = .zero }, .boot);
+    loop.setTimer(&timer, .{ .duration = .fromMilliseconds(100) });
+    try std.testing.expectEqual(.running, timer.c.state);
+
+    var wall_timer = time.Stopwatch.start();
+    try loop.run(.until_done);
+    const elapsed = wall_timer.read();
+
+    try std.testing.expectEqual(.dead, timer.c.state);
+    try std.testing.expect(elapsed.toMilliseconds() >= 90);
+    try std.testing.expect(elapsed.toMilliseconds() <= 250);
+    std.log.info("boot timer: expected=100ms, actual={f}", .{elapsed});
+}
+
+test "timer on real clock fires (absolute deadline, fallback path)" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    // Absolute realtime deadline 100ms in the future. The deadline lives in the
+    // realtime epoch (ns since 1970), so it must be compared against now(real),
+    // not the monotonic clock.
+    const deadline = time.Timestamp.now(.real).addDuration(.fromMilliseconds(100));
+    var timer: Timer = .initClock(.{ .deadline = deadline }, .real);
+
+    var wall_timer = time.Stopwatch.start();
+    loop.add(&timer.c);
+    try loop.run(.until_done);
+    const elapsed = wall_timer.read();
+
+    try std.testing.expectEqual(.dead, timer.c.state);
+    try std.testing.expect(elapsed.toMilliseconds() >= 90);
+    try std.testing.expect(elapsed.toMilliseconds() <= 250);
+    std.log.info("real timer: expected=100ms, actual={f}", .{elapsed});
+}

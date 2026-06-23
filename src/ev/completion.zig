@@ -12,6 +12,7 @@ const net = @import("../os/net.zig");
 const fs = @import("../os/fs.zig");
 const Timestamp = @import("../time.zig").Timestamp;
 const Timeout = @import("../time.zig").Timeout;
+const Clock = @import("../time.zig").Clock;
 
 pub const BackendCapabilities = struct {
     file_read: bool = false,
@@ -446,6 +447,10 @@ pub const Timer = struct {
     c: Completion,
     result_private_do_not_touch: void = {},
     timeout: Timeout,
+    /// Clock the `timeout`/`deadline` is measured against. Only the wall-clock
+    /// clocks are valid for a timer; the CPU-time clocks are rejected when the
+    /// timer is set. Defaults to `.awake` (monotonic), the historical behavior.
+    clock: Clock = .awake,
     deadline: Timestamp = .zero,
     heap: HeapNode(Timer) = .{},
 
@@ -455,6 +460,14 @@ pub const Timer = struct {
         return .{
             .c = .init(.timer),
             .timeout = timeout,
+        };
+    }
+
+    pub fn initClock(timeout: Timeout, clock: Clock) Timer {
+        return .{
+            .c = .init(.timer),
+            .timeout = timeout,
+            .clock = clock,
         };
     }
 
