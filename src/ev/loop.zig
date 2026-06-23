@@ -11,6 +11,7 @@ const Timestamp = @import("../time.zig").Timestamp;
 const Timeout = @import("../time.zig").Timeout;
 const Queue = @import("queue.zig").Queue;
 const Heap = @import("heap.zig").Heap;
+const Random = @import("random.zig").Random;
 const Work = @import("completion.zig").Work;
 const FileRead = @import("completion.zig").FileRead;
 const NetSend = @import("completion.zig").NetSend;
@@ -385,6 +386,9 @@ pub const Loop = struct {
     max_wait: Duration = .fromSeconds(60),
     defer_callbacks: bool = true,
 
+    /// Per-loop non-cryptographic CSPRNG, seeded at `init` from `Options.random_seed`.
+    random: Random,
+
     /// Cross-thread cancel queue (lock-free MPSC)
     cancel_queue: std.atomic.Value(?*Completion) = std.atomic.Value(?*Completion).init(null),
 
@@ -398,6 +402,11 @@ pub const Loop = struct {
         loop_group: ?*LoopGroup = null,
         queue_size: u16 = default_queue_size,
         defer_callbacks: bool = true,
+        /// Seed for the per-loop non-secure CSPRNG. Must come from a
+        /// cryptographically secure source; callers that fill random bytes via
+        /// this loop are responsible for providing real entropy. Defaults to
+        /// zeros for loops that never call `random` (e.g. tests).
+        random_seed: [Random.seed_len]u8 = @splat(0),
     };
 
     pub fn init(self: *Loop, options: Options) !void {
@@ -408,6 +417,7 @@ pub const Loop = struct {
             .thread_pool = options.thread_pool,
             .loop_group = undefined,
             .defer_callbacks = options.defer_callbacks,
+            .random = .init(options.random_seed),
         };
 
         if (options.loop_group) |group| {

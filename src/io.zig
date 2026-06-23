@@ -1803,8 +1803,7 @@ fn sleepImpl(_: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
 }
 
 fn randomImpl(_: ?*anyopaque, buffer: []u8) void {
-    const io = globalIo();
-    io.vtable.random(io.userdata, buffer);
+    runtime_mod.random(buffer);
 }
 
 fn randomSecureImpl(_: ?*anyopaque, buffer: []u8) Io.RandomSecureError!void {

@@ -329,11 +329,21 @@ pub const Executor = struct {
         try setupStackGrowth();
         errdefer cleanupStackGrowth();
 
+        // Seed this loop's non-secure CSPRNG with an independent secure seed.
+        // Step 1 sources entropy from std's blocking global backend; a later
+        // step swaps this for zio's own blocking secure RNG. Each loop draws
+        // its own seed so per-thread streams are independent.
+        var random_seed: [ev.Random.seed_len]u8 = undefined;
+        std.Io.Threaded.global_single_threaded.io().randomSecure(&random_seed) catch {
+            std.Io.Threaded.fallbackSeed(self, &random_seed);
+        };
+
         try self.loop.init(.{
             .allocator = self.runtime.allocator,
             .thread_pool = &self.runtime.thread_pool,
             .loop_group = &self.runtime.loop_group,
             .defer_callbacks = false,
+            .random_seed = random_seed,
         });
         errdefer self.loop.deinit();
 
@@ -720,6 +730,45 @@ pub fn now() Timestamp {
 pub fn sleep(duration: Duration) Cancelable!void {
     var waiter: Waiter = .init();
     try waiter.timedWait(1, .{ .duration = duration }, .allow_cancel);
+}
+
+/// Fill `buffer` with non-cryptographic random bytes from the current
+/// executor's per-loop CSPRNG. Fast, never blocks, performs no syscalls; the
+/// CSPRNG is seeded once at executor startup. When called outside any executor,
+/// falls back to the blocking global source.
+///
+/// For cryptographically secure entropy, use `randomSecure` instead.
+pub fn random(buffer: []u8) void {
+    if (getCurrentExecutorOrNull()) |exec| {
+        exec.loop.random.fill(buffer);
+    } else {
+        std.Io.Threaded.global_single_threaded.io().random(buffer);
+    }
+}
+
+test "random: fills buffer with varying bytes" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var buf: [64]u8 = @splat(0);
+    random(&buf);
+    // Probabilistically asserts we actually filled the buffer.
+    var nonzero: usize = 0;
+    for (buf) |b| if (b != 0) {
+        nonzero += 1;
+    };
+    try std.testing.expect(nonzero > 32);
+}
+
+test "random: successive calls produce different output" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var a: [64]u8 = undefined;
+    var b: [64]u8 = undefined;
+    random(&a);
+    random(&b);
+    try std.testing.expect(!std.mem.eql(u8, &a, &b));
 }
 
 // Runtime - orchestrator for one or more Executors
