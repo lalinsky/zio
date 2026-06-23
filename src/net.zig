@@ -2312,3 +2312,190 @@ test "Stream.Reader/Writer.fromStd" {
     try std.testing.expectEqual(stdIoHandleToZio(stream.socket.handle), reader.handle);
     try std.testing.expectEqual(stdIoHandleToZio(stream.socket.handle), writer.handle);
 }
+
+// Multi-executor socket stress: drives exactly the cross-loop situations that a
+// per-loop readiness backend gets wrong, with byte-level verification, on a
+// runtime with several executors (task migration on):
+//
+//   * concurrent full-duplex - each connection's reader and writer run as
+//     separate tasks that land on different executors, so recv and send for the
+//     same fd are in flight on different loops at once;
+//   * migration mid-connection - each echo handler spawns+joins a tiny task
+//     every round, bouncing it across executors, so one socket's reads/writes
+//     move between loops over the connection's life;
+//   * fd reuse across loops - many short connections in waves, so closed fd
+//     numbers get reused by new sockets on different loops.
+//
+// A lost wakeup (the failure mode of a per-loop backend on a fd whose loop
+// changed) would hang the test; std.testing.allocator also fails it on any leak,
+// which exercises the shared registration table's teardown.
+test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reuse)" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const H = struct {
+        const executors = 3;
+        const waves = 5;
+        const per_wave = 12;
+        const total = 8 * 1024;
+        const chunk = 2048;
+
+        const Shared = struct {
+            conns: std.atomic.Value(u32) = .init(0),
+            verified: std.atomic.Value(u32) = .init(0),
+            errors: std.atomic.Value(u32) = .init(0),
+            done: std.atomic.Value(bool) = .init(false),
+        };
+
+        fn pat(id: usize, i: usize) u8 {
+            return @truncate(id *% 31 +% i);
+        }
+
+        fn nudge() void {}
+
+        fn handler(stream: Stream, sh: *Shared) void {
+            defer stream.close();
+            var buf: [chunk]u8 = undefined;
+            while (true) {
+                const n = stream.read(&buf, .none) catch {
+                    _ = sh.errors.fetchAdd(1, .monotonic);
+                    return;
+                };
+                if (n == 0) return; // peer closed its send side
+                stream.writeAll(buf[0..n], .none) catch {
+                    _ = sh.errors.fetchAdd(1, .monotonic);
+                    return;
+                };
+                // Spawning round-robins to another executor; joining wakes us
+                // from there, migrating this handler (and the socket's next op)
+                // to a different loop.
+                var h = runtime_mod.spawn(nudge, .{}) catch return;
+                h.join();
+            }
+        }
+
+        fn server(port_ch: *Channel(u16), sh: *Shared) void {
+            const addr = IpAddress.parseIp4("127.0.0.1", 0) catch {
+                _ = sh.errors.fetchAdd(1, .monotonic);
+                port_ch.send(0) catch {};
+                return;
+            };
+            const srv = addr.listen(.{ .reuse_address = true }) catch {
+                _ = sh.errors.fetchAdd(1, .monotonic);
+                port_ch.send(0) catch {};
+                return;
+            };
+            defer srv.close();
+            port_ch.send(srv.socket.address.ip.getPort()) catch return;
+
+            var handlers: Group = .init;
+            defer handlers.wait() catch {};
+            while (!sh.done.load(.acquire)) {
+                const stream = srv.accept(.{ .timeout = Timeout.fromMilliseconds(50) }) catch |err| {
+                    if (err == error.Timeout) continue; // re-check the done flag
+                    break;
+                };
+                handlers.spawn(handler, .{ stream, sh }) catch {
+                    stream.close();
+                };
+            }
+        }
+
+        fn writer(stream: Stream, id: usize, sh: *Shared) void {
+            var buf: [chunk]u8 = undefined;
+            var sent: usize = 0;
+            while (sent < total) {
+                const this = @min(chunk, total - sent);
+                for (0..this) |i| buf[i] = pat(id, sent + i);
+                stream.writeAll(buf[0..this], .none) catch {
+                    _ = sh.errors.fetchAdd(1, .monotonic);
+                    return;
+                };
+                sent += this;
+            }
+        }
+
+        fn reader(stream: Stream, id: usize, sh: *Shared) void {
+            var buf: [chunk]u8 = undefined;
+            var got: usize = 0;
+            while (got < total) {
+                const want = @min(chunk, total - got);
+                var off: usize = 0;
+                while (off < want) {
+                    const n = stream.read(buf[off..want], .none) catch {
+                        _ = sh.errors.fetchAdd(1, .monotonic);
+                        return;
+                    };
+                    if (n == 0) {
+                        _ = sh.errors.fetchAdd(1, .monotonic); // premature EOF
+                        return;
+                    }
+                    for (0..n) |k| {
+                        if (buf[off + k] != pat(id, got + off + k)) {
+                            _ = sh.errors.fetchAdd(1, .monotonic);
+                            return;
+                        }
+                    }
+                    off += n;
+                }
+                got += want;
+            }
+            _ = sh.verified.fetchAdd(1, .monotonic);
+        }
+
+        fn client(port: u16, id: usize, sh: *Shared) void {
+            const addr = IpAddress.parseIp4("127.0.0.1", port) catch {
+                _ = sh.errors.fetchAdd(1, .monotonic);
+                return;
+            };
+            const stream = addr.connect(.{}) catch {
+                _ = sh.errors.fetchAdd(1, .monotonic);
+                return;
+            };
+            defer stream.close();
+
+            // Reader and writer on the same fd, on (likely) different executors.
+            var dup: Group = .init;
+            dup.spawn(writer, .{ stream, id, sh }) catch {
+                _ = sh.errors.fetchAdd(1, .monotonic);
+                return;
+            };
+            dup.spawn(reader, .{ stream, id, sh }) catch {
+                _ = sh.errors.fetchAdd(1, .monotonic);
+                dup.wait() catch {};
+                return;
+            };
+            dup.wait() catch {};
+            _ = sh.conns.fetchAdd(1, .monotonic);
+        }
+    };
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(H.executors) });
+    defer runtime.deinit();
+
+    var sh: H.Shared = .{};
+    var port_buf: [1]u16 = undefined;
+    var port_ch = Channel(u16).init(&port_buf);
+
+    var server_group: Group = .init;
+    defer server_group.wait() catch {}; // drains the acceptor and its handlers
+    try server_group.spawn(H.server, .{ &port_ch, &sh });
+
+    const port = try port_ch.receive();
+    try std.testing.expect(port != 0);
+
+    var id: usize = 0;
+    for (0..H.waves) |_| {
+        var clients: Group = .init;
+        for (0..H.per_wave) |_| {
+            try clients.spawn(H.client, .{ port, id, &sh });
+            id += 1;
+        }
+        try clients.wait();
+    }
+
+    sh.done.store(true, .release); // let the acceptor fall out of its loop
+
+    try std.testing.expectEqual(@as(u32, 0), sh.errors.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, H.waves * H.per_wave), sh.conns.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, H.waves * H.per_wave), sh.verified.load(.monotonic));
+}
