@@ -398,7 +398,9 @@ fn parkSocket(self: *Self, state: *LoopState, fd: NetHandle, c: *Completion) voi
         shard.mutex.unlock();
         log.err("Failed to add to poll registry: OutOfMemory", .{});
         c.setError(error.Unexpected);
-        state.markCompletedFromBackend(c);
+        // Defer like the success path: a net_send reached from the NetSendFile
+        // fallback must not complete inline inside the submit chain.
+        self.completeDeferred(state, c);
         return;
     };
     if (!gop.found_existing) gop.value_ptr.* = .{};
@@ -417,7 +419,7 @@ fn parkSocket(self: *Self, state: *LoopState, fd: NetHandle, c: *Completion) voi
             shard.mutex.unlock();
             log.err("Failed to register socket with epoll", .{});
             c.setError(error.Unexpected);
-            state.markCompletedFromBackend(c);
+            self.completeDeferred(state, c);
             return;
         };
         self.pending_changes += 1;
@@ -528,17 +530,30 @@ fn drainDir(self: *Self, state: *LoopState, fd: NetHandle, dir: Dir, event: *con
 /// Closing removes the fd from every epoll instance at the kernel level; this
 /// clears the software bookkeeping (so a reused fd number starts clean) and
 /// best-effort DELs it from the owner loops' epolls.
-fn unregisterSocket(self: *Self, fd: NetHandle) void {
+fn unregisterSocket(self: *Self, state: *LoopState, fd: NetHandle) void {
     const shard = self.shared.shardFor(fd);
     shard.mutex.lock();
     const kv = shard.map.fetchRemove(fd);
     shard.mutex.unlock();
 
     if (kv) |entry| {
-        const reg = entry.value;
+        var reg = entry.value;
         if (reg.owner_in) |o| _ = std.os.linux.epoll_ctl(o.epoll_fd, std.os.linux.EPOLL.CTL_DEL, fd, null);
         if (reg.owner_out) |o| {
             if (o != reg.owner_in) _ = std.os.linux.epoll_ctl(o.epoll_fd, std.os.linux.EPOLL.CTL_DEL, fd, null);
+        }
+        // Complete any ops still parked when the fd was closed (a close racing a
+        // pending op on another loop). Outside the shard lock; cross-loop
+        // completion is safe under multi_threaded, and deferring keeps it off the
+        // close's submit call stack. Without this they would be orphaned - the
+        // fiber would hang and the group accounting would never balance.
+        while (reg.waiters_in.pop()) |c| {
+            c.setError(error.Canceled);
+            self.completeDeferred(state, c);
+        }
+        while (reg.waiters_out.pop()) |c| {
+            c.setError(error.Canceled);
+            self.completeDeferred(state, c);
         }
     }
 }
@@ -704,7 +719,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .net_close => {
             const data = c.cast(NetClose);
-            self.unregisterSocket(data.handle);
+            self.unregisterSocket(state, data.handle);
             common.handleNetClose(c);
             state.markCompletedFromBackend(c);
         },
