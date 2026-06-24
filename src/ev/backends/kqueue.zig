@@ -180,11 +180,13 @@ fn armWall(self: *Self, idx: usize, ident: usize, deadline: ?u64) bool {
     if (self.wall_armed[idx] == deadline) return true; // unchanged (incl. both null)
     // reserveChange only fails on OOM: the change buffer grows and is reused
     // across polls (clearRetainingCapacity), so there's no "full" condition like
-    // io_uring's fixed SQ ring. On OOM report failure so the loop folds this
-    // clock into the capped poll timeout, and retry next scan.
+    // io_uring's fixed SQ ring. On OOM while arming a pending deadline, report
+    // failure so the loop folds this clock into the capped poll timeout and
+    // retries next scan. A failed disarm has no pending deadline to fold, so
+    // report success and let the stale one-shot wake harmlessly / retry later.
     const change = self.reserveChange() catch {
         log.err("kqueue: failed to reserve change buffer slot for wall timer", .{});
-        return false;
+        return deadline == null;
     };
     if (deadline) |d| {
         var fflags: u32 = std.c.NOTE.NSECONDS;
