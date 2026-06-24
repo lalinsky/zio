@@ -34,71 +34,104 @@ const BackendCapabilities = @import("../completion.zig").BackendCapabilities;
 
 pub const capabilities: BackendCapabilities = .{
     .process_wait = true,
+    // A socket fd is registered in exactly one loop's epoll (per direction), but
+    // the fiber that owns the operation can be on a different executor (task
+    // migration / cross-loop full-duplex). The registering loop completes the
+    // operation when its epoll fires, even though the completion was submitted on
+    // another loop, so the group's active/inflight accounting must be shared.
+    .is_multi_threaded = true,
 };
 
-// Persistent edge-triggered interest used for sockets. Both IN and OUT are armed
-// once for the socket's lifetime, so the backend never issues epoll_ctl(MOD) when
-// a socket switches between reading and writing, and never disarms on completion.
-// Edge-triggered is safe because submit() always tries the syscall first (draining
-// to EAGAIN) before it ever waits in epoll, so no readiness edge can be missed.
-const persist_events: u32 = linux.EPOLL.IN | linux.EPOLL.OUT | linux.EPOLL.ET;
-
-// --- Shared socket registration table -------------------------------------
+// --- Shared socket poll registry -------------------------------------------
 //
 // epoll interest is per-loop: an fd registered in loop A's epoll only produces
 // events on A's thread. zio runs one loop per executor and migrates fibers
-// between executors, so the *same* socket fd can be used from different loops
-// over its lifetime (migration), and a reader and a writer on one socket can
-// live on different loops at once (concurrent full-duplex). To keep the fd
-// registered (no per-op epoll_ctl) without leaving stale state behind, the loops
-// in a group share one table that records, per fd, which loops currently have it
-// registered in their epoll. A loop adds the fd to its own epoll the first time
-// it sees an operation for it and records its bit; on close the whole entry is
-// dropped (the kernel removes a closed fd from every epoll instance). The table
-// is sharded by fd to keep the common path off a single global lock.
+// between them, so a socket fd can be driven from different loops over its life,
+// and a reader and a writer can sit on different loops at once.
 //
-// Only true sockets (the net_* operations) go through this table. Other pollable
-// fds (pidfd for process_wait, pipes, streaming files) are closed through paths
-// that do not run net_close, so they stay on the original one-shot level-triggered
-// path where each operation arms and disarms its own interest.
+// The loops in a group share one table, keyed by fd, recording per direction
+// which loop owns the epoll registration plus the queue of completions waiting
+// on that (fd, direction). Lazy, single registration:
+//
+//   * submit does the optimistic syscall on whatever loop it lands on; on success
+//     it never touches the table (lock-free fast path).
+//   * on WouldBlock it looks up (fd, dir): if a loop already owns it, the
+//     completion is just parked as a waiter (no epoll_ctl); otherwise the current
+//     loop becomes the owner and registers fd in its own epoll.
+//   * when the owner's epoll fires it drains the waiters - completing each, even
+//     those submitted on other loops, via the shared accounting above.
+//
+// This registers the fd on the few loops that actually poll it (one per
+// direction) rather than on every loop a migrating fd visits, and delegating the
+// completion to the loop that already has it registered avoids an extra
+// registration syscall on the parking loop.
+//
+// Only true sockets (the net_* operations) use this table. Other pollable fds
+// (pidfd for process_wait, pipes, streaming files) are closed through paths that
+// do not run net_close, so they stay on the original one-shot level-triggered
+// per-loop path.
 
 const reg_shard_count = 64; // power of two
 
+const Dir = enum(u1) { in = 0, out = 1 };
+
+/// Per-fd registration state, shared across the loops in a group.
+const FdReg = struct {
+    /// Loop whose epoll has fd registered for read / write (null = not yet).
+    owner_in: ?*Self = null,
+    owner_out: ?*Self = null,
+    /// Completions parked waiting for readability / writability.
+    waiters_in: Queue(Completion) = .{},
+    waiters_out: Queue(Completion) = .{},
+    /// Readiness latch. Set when an edge fires with no waiter parked yet (a
+    /// "wasted" edge), so the next op to park sees it and re-checks instead of
+    /// waiting for an edge that edge-triggered epoll will not repeat. This closes
+    /// the race where data arrives between an op's optimistic syscall returning
+    /// EAGAIN and that op enqueuing as a waiter.
+    ready_in: bool = false,
+    ready_out: bool = false,
+
+    fn empty(self: *const FdReg) bool {
+        return self.owner_in == null and self.owner_out == null and
+            self.waiters_in.empty() and self.waiters_out.empty();
+    }
+};
+
 const RegShard = struct {
     mutex: os.Mutex = .init(),
-    // fd -> bitmask of loop ids that have this socket registered in their epoll.
-    map: std.AutoHashMapUnmanaged(NetHandle, u64) = .empty,
+    map: std.AutoHashMapUnmanaged(NetHandle, FdReg) = .empty,
 };
 
 pub const SharedState = struct {
     mutex: os.Mutex = .init(),
-    /// Bit i set => loop id i is currently live. Ids are handed out from the
-    /// free (zero) bits and returned on release, so a group that churns loops
-    /// recycles ids instead of climbing past the 64-id budget.
-    used_mask: u64 = 0,
+    refcount: usize = 0,
     allocator: std.mem.Allocator = undefined,
+
+    /// Multi-threaded counters: a completion submitted on one loop may be
+    /// finished by the loop that owns the fd registration, so active/inflight_io
+    /// are shared atomics rather than per-LoopState fields.
+    active: std.atomic.Value(u64) = .init(0),
+    inflight_io: std.atomic.Value(u64) = .init(0),
+
     shards: [reg_shard_count]RegShard = [_]RegShard{.{}} ** reg_shard_count,
 
-    /// Register a loop with the group. Returns a small id (0..63) used as the
-    /// loop's bit in the per-fd registration masks; the id is recycled once the
-    /// loop releases it.
-    pub fn acquire(self: *SharedState, allocator: std.mem.Allocator) u6 {
+    pub fn acquire(self: *SharedState, allocator: std.mem.Allocator) void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        if (self.used_mask == 0) self.allocator = allocator; // first loop in
-        const free = ~self.used_mask;
-        std.debug.assert(free != 0); // at most 64 executors share a group
-        const id: u6 = @intCast(@ctz(free));
-        self.used_mask |= @as(u64, 1) << id;
-        return id;
+        if (self.refcount == 0) {
+            self.allocator = allocator;
+            self.active.store(0, .release);
+            self.inflight_io.store(0, .release);
+        }
+        self.refcount += 1;
     }
 
-    pub fn release(self: *SharedState, loop_bit: u64) void {
+    pub fn release(self: *SharedState) void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        self.used_mask &= ~loop_bit;
-        if (self.used_mask == 0) {
-            // Last loop is gone; nobody can touch the shards now. Free them.
+        std.debug.assert(self.refcount > 0);
+        self.refcount -= 1;
+        if (self.refcount == 0) {
             for (&self.shards) |*shard| {
                 shard.map.deinit(self.allocator);
                 shard.map = .empty;
@@ -142,24 +175,22 @@ const Self = @This();
 const log = @import("../../common.zig").log;
 
 allocator: std.mem.Allocator,
+/// Per-loop one-shot table for NON-socket pollable fds (pidfd, pipes, streaming
+/// files). Sockets do not use this; they go through the shared registry.
 poll_queue: std.AutoHashMapUnmanaged(NetHandle, PollEntry) = .empty,
 epoll_fd: i32 = -1,
 waker_eventfd: i32 = -1,
 events: []std.os.linux.epoll_event,
 queue_size: u16,
 pending_changes: usize = 0,
-/// Shared per-group socket registration table (see SharedState above).
+/// Shared per-group socket registry (see SharedState above).
 shared: *SharedState = undefined,
-/// This loop's bit in the per-fd registration masks.
-loop_bit: u64 = 0,
-/// Whether epoll_pwait2 (nanosecond timeout, Linux 5.11+) is available. Set to
-/// false the first time the syscall returns ENOSYS, after which we use the
-/// millisecond epoll_wait for the rest of this loop's lifetime.
+/// Whether epoll_pwait2 (nanosecond timeout, Linux 5.11+) is available.
 epoll_pwait2_supported: bool = true,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
-    const loop_id = shared_state.acquire(allocator);
-    errdefer shared_state.release(@as(u64, 1) << loop_id);
+    shared_state.acquire(allocator);
+    errdefer shared_state.release();
 
     const rc = std.os.linux.epoll_create1(std.os.linux.EPOLL.CLOEXEC);
     const epoll_fd: i32 = switch (posix.errno(rc)) {
@@ -171,7 +202,6 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
     const waker_eventfd = try posix.eventfd(0, posix.EFD.CLOEXEC | posix.EFD.NONBLOCK);
     errdefer _ = std.os.linux.close(waker_eventfd);
 
-    // Register eventfd with epoll
     var event: std.os.linux.epoll_event = .{
         .events = std.os.linux.EPOLL.IN,
         .data = .{ .fd = waker_eventfd },
@@ -188,7 +218,6 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
         .events = undefined,
         .queue_size = queue_size,
         .shared = shared_state,
-        .loop_bit = @as(u64, 1) << loop_id,
     };
 
     self.events = try allocator.alloc(std.os.linux.epoll_event, queue_size);
@@ -207,7 +236,7 @@ pub fn deinit(self: *Self) void {
     if (self.epoll_fd != -1) {
         _ = std.os.linux.close(self.epoll_fd);
     }
-    self.shared.release(self.loop_bit);
+    self.shared.release();
 }
 
 pub fn wake(self: *Self, state: *LoopState) void {
@@ -248,15 +277,6 @@ fn getEvents(completion: *Completion) u32 {
 
 fn getPollType(op: Op) PollEntryType {
     return switch (op) {
-        .net_accept => .accept,
-        .net_connect => .connect,
-        .net_recv => .send_or_recv,
-        .net_send => .send_or_recv,
-        .net_recvfrom => .send_or_recv,
-        .net_sendto => .send_or_recv,
-        .net_recvmsg => .send_or_recv,
-        .net_sendmsg => .send_or_recv,
-        .net_poll => .send_or_recv,
         .file_read_streaming, .file_write_streaming => .send_or_recv,
         .pipe_poll => .send_or_recv,
         .process_wait => .send_or_recv,
@@ -264,10 +284,9 @@ fn getPollType(op: Op) PollEntryType {
     };
 }
 
-/// Whether an operation runs against a real socket fd, i.e. one whose only close
-/// path is the net_close handler. These take the persistent edge-triggered,
-/// shared-registry path. Everything else (pidfd, pipes, streaming files) is
-/// closed elsewhere and stays on the one-shot level-triggered path.
+/// Whether an operation runs against a real socket fd (closed only via
+/// net_close). These use the shared registry; everything else uses the per-loop
+/// one-shot path.
 fn isSocketOp(op: Op) bool {
     return switch (op) {
         .net_connect,
@@ -284,113 +303,248 @@ fn isSocketOp(op: Op) bool {
     };
 }
 
-/// Ensure this loop's epoll has `fd` registered (persistent, edge-triggered),
-/// adding it at most once per (loop, fd) for the fd's lifetime. The shared
-/// registry records which loops have registered the fd so the ADD is skipped on
-/// subsequent operations.
-fn ensureRegistered(self: *Self, fd: NetHandle) !void {
-    const shard = self.shared.shardFor(fd);
-    shard.mutex.lock();
-    defer shard.mutex.unlock();
-
-    const gop = try shard.map.getOrPut(self.shared.allocator, fd);
-    if (!gop.found_existing) gop.value_ptr.* = 0;
-
-    if (gop.value_ptr.* & self.loop_bit != 0) return; // already registered here
-
-    var event = std.os.linux.epoll_event{
-        .data = .{ .fd = fd },
-        .events = persist_events,
-    };
-    const rc = std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_ADD, fd, &event);
-    switch (posix.errno(rc)) {
-        // SUCCESS: freshly registered. EXIST: already in this epoll (e.g. the
-        // registry lost track across a teardown) - either way it is now armed.
-        .SUCCESS, .EXIST => {},
-        else => |err| {
-            if (gop.value_ptr.* == 0) _ = shard.map.remove(fd);
-            return unexpectedError(err);
+/// Direction (read/write interest) a socket op waits on.
+fn dirOf(c: *Completion) Dir {
+    return switch (c.op) {
+        .net_accept, .net_recv, .net_recvfrom, .net_recvmsg => .in,
+        .net_connect, .net_send, .net_sendto, .net_sendmsg => .out,
+        .net_poll => switch (c.cast(NetPoll).event) {
+            .recv => .in,
+            .send => .out,
         },
-    }
-    gop.value_ptr.* |= self.loop_bit;
+        else => unreachable,
+    };
 }
 
-/// Drop the shared-registry entry for a socket fd that is about to be closed.
-/// Closing the fd removes it from every epoll instance at the kernel level, so
-/// this only clears the software bookkeeping for all loops at once.
+// --- Shared registry helpers (caller must hold the fd's shard mutex) --------
+
+fn ownerPtr(reg: *FdReg, dir: Dir) *?*Self {
+    return switch (dir) {
+        .in => &reg.owner_in,
+        .out => &reg.owner_out,
+    };
+}
+
+fn waitersPtr(reg: *FdReg, dir: Dir) *Queue(Completion) {
+    return switch (dir) {
+        .in => &reg.waiters_in,
+        .out => &reg.waiters_out,
+    };
+}
+
+fn readyPtr(reg: *FdReg, dir: Dir) *bool {
+    return switch (dir) {
+        .in => &reg.ready_in,
+        .out => &reg.ready_out,
+    };
+}
+
+/// (Re)arm this loop's epoll interest for fd to cover every direction it owns.
+/// Held under the shard mutex. The mask is edge-triggered; combined with the
+/// optimistic syscall in submit (which drains to EAGAIN), no edge is missed.
+fn armRegistration(self: *Self, reg: *FdReg, fd: NetHandle) !void {
+    var mask: u32 = std.os.linux.EPOLL.ET;
+    var count: u8 = 0;
+    if (reg.owner_in == self) {
+        mask |= std.os.linux.EPOLL.IN;
+        count += 1;
+    }
+    if (reg.owner_out == self) {
+        mask |= std.os.linux.EPOLL.OUT;
+        count += 1;
+    }
+    std.debug.assert(count >= 1);
+
+    var event = std.os.linux.epoll_event{ .data = .{ .fd = fd }, .events = mask };
+    // More than one direction owned by us => fd was already in our epoll => MOD.
+    const first_op: u32 = if (count > 1) std.os.linux.EPOLL.CTL_MOD else std.os.linux.EPOLL.CTL_ADD;
+    switch (posix.errno(std.os.linux.epoll_ctl(self.epoll_fd, first_op, fd, &event))) {
+        .SUCCESS => {},
+        .EXIST => {
+            // Already present; switch to MOD.
+            switch (posix.errno(std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_MOD, fd, &event))) {
+                .SUCCESS => {},
+                else => |err| return unexpectedError(err),
+            }
+        },
+        .NOENT => {
+            // Not present; switch to ADD.
+            switch (posix.errno(std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_ADD, fd, &event))) {
+                .SUCCESS => {},
+                else => |err| return unexpectedError(err),
+            }
+        },
+        else => |err| return unexpectedError(err),
+    }
+}
+
+/// Park a socket completion that returned WouldBlock: become the owner of
+/// (fd, dir) and register if nobody else does, otherwise just enqueue as a waiter.
+fn parkSocket(self: *Self, state: *LoopState, fd: NetHandle, c: *Completion) void {
+    if (self.pending_changes >= self.queue_size) {
+        _ = self.poll(state, .zero) catch {
+            log.err("Failed to do no-wait poll during parkSocket", .{});
+        };
+    }
+
+    c.prev = null;
+    c.next = null;
+    const dir = dirOf(c);
+
+    const shard = self.shared.shardFor(fd);
+    shard.mutex.lock();
+
+    const gop = shard.map.getOrPut(self.shared.allocator, fd) catch {
+        shard.mutex.unlock();
+        log.err("Failed to add to poll registry: OutOfMemory", .{});
+        c.setError(error.Unexpected);
+        state.markCompletedFromBackend(c);
+        return;
+    };
+    if (!gop.found_existing) gop.value_ptr.* = .{};
+    const reg = gop.value_ptr;
+
+    const owner = ownerPtr(reg, dir);
+    if (owner.* == null) {
+        // First to poll this (fd, dir): become the owner and register locally.
+        // The edge-triggered ADD reports current readiness, so a freshly-arrived
+        // byte between the optimistic syscall and here is not lost - no latch
+        // check needed on this path.
+        owner.* = self;
+        self.armRegistration(reg, fd) catch {
+            owner.* = null;
+            if (reg.empty()) _ = shard.map.remove(fd);
+            shard.mutex.unlock();
+            log.err("Failed to register socket with epoll", .{});
+            c.setError(error.Unexpected);
+            state.markCompletedFromBackend(c);
+            return;
+        };
+        self.pending_changes += 1;
+        waitersPtr(reg, dir).push(c);
+        shard.mutex.unlock();
+        return;
+    }
+
+    // Already registered (possibly by another loop). If an edge fired since the
+    // last drain with nobody waiting, the readiness was latched: re-check the
+    // syscall now rather than park for an edge edge-triggered epoll won't repeat.
+    // net_connect always takes the fresh-ADD path above in practice, so its
+    // re-check (which can't distinguish success from failure without the real
+    // event) is skipped here.
+    const ready = readyPtr(reg, dir);
+    if (ready.* and c.op != .net_connect) {
+        ready.* = false;
+        shard.mutex.unlock();
+        var ev = std.os.linux.epoll_event{
+            .data = .{ .fd = fd },
+            .events = switch (dir) {
+                .in => std.os.linux.EPOLL.IN,
+                .out => std.os.linux.EPOLL.OUT,
+            },
+        };
+        switch (checkCompletion(c, &ev)) {
+            .completed => self.completeDeferred(state, c),
+            .requeue => {
+                // Latch was stale: park for the next real edge.
+                c.prev = null;
+                c.next = null;
+                shard.mutex.lock();
+                if (shard.map.getPtr(fd)) |r| {
+                    waitersPtr(r, dir).push(c);
+                    shard.mutex.unlock();
+                } else {
+                    shard.mutex.unlock();
+                    c.setError(error.Canceled);
+                    self.completeDeferred(state, c);
+                }
+            },
+        }
+        return;
+    }
+
+    waitersPtr(reg, dir).push(c);
+    shard.mutex.unlock();
+}
+
+/// Drain waiters for one direction of an owned socket. Pops one waiter at a time
+/// under the lock and runs its syscall outside the lock (completing a waiter can
+/// resume a fiber that submits another op on this fd, which re-locks the shard).
+fn drainDir(self: *Self, state: *LoopState, fd: NetHandle, dir: Dir, event: *const std.os.linux.epoll_event) void {
+    const shard = self.shared.shardFor(fd);
+    var drained_any = false;
+    while (true) {
+        shard.mutex.lock();
+        const reg = shard.map.getPtr(fd) orelse {
+            shard.mutex.unlock();
+            return;
+        };
+        if (ownerPtr(reg, dir).* != self) {
+            shard.mutex.unlock();
+            return;
+        }
+        const c = waitersPtr(reg, dir).pop() orelse {
+            // Edge fired with no waiter to consume it. If this is a genuinely
+            // wasted edge (we hadn't already drained one), latch the readiness so
+            // the next op to park re-checks instead of waiting for an edge that
+            // won't repeat. If we did drain at least one, any leftover data is
+            // taken by the next op's optimistic syscall, so no latch is needed.
+            if (!drained_any) readyPtr(reg, dir).* = true;
+            shard.mutex.unlock();
+            return;
+        };
+        shard.mutex.unlock();
+
+        // A concurrent cancel may have already finished this completion.
+        if (c.state == .completed or c.state == .dead) continue;
+
+        switch (checkCompletion(c, event)) {
+            .completed => {
+                state.markCompletedFromBackend(c);
+                drained_any = true;
+            },
+            .requeue => {
+                // Confirmed not ready (EAGAIN): clear the latch and re-park. The
+                // edge-triggered registration delivers the next readiness edge.
+                c.prev = null;
+                c.next = null;
+                shard.mutex.lock();
+                if (shard.map.getPtr(fd)) |r| {
+                    readyPtr(r, dir).* = false;
+                    waitersPtr(r, dir).push(c);
+                    shard.mutex.unlock();
+                } else {
+                    shard.mutex.unlock();
+                    c.setError(error.Canceled);
+                    state.markCompletedFromBackend(c);
+                }
+                return;
+            },
+        }
+    }
+}
+
+/// Tear down the shared registration for a socket fd that is about to be closed.
+/// Closing removes the fd from every epoll instance at the kernel level; this
+/// clears the software bookkeeping (so a reused fd number starts clean) and
+/// best-effort DELs it from the owner loops' epolls.
 fn unregisterSocket(self: *Self, fd: NetHandle) void {
     const shard = self.shared.shardFor(fd);
     shard.mutex.lock();
-    _ = shard.map.remove(fd);
+    const kv = shard.map.fetchRemove(fd);
     shard.mutex.unlock();
 
-    // Drop this loop's local poll entry if present. Other loops keep no
-    // lingering entry for an idle socket (entries are dropped when their
-    // completion list empties), so there is nothing to clean up there.
-    if (self.poll_queue.fetchRemove(fd)) |_| {
-        _ = std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_DEL, fd, null);
+    if (kv) |entry| {
+        const reg = entry.value;
+        if (reg.owner_in) |o| _ = std.os.linux.epoll_ctl(o.epoll_fd, std.os.linux.EPOLL.CTL_DEL, fd, null);
+        if (reg.owner_out) |o| {
+            if (o != reg.owner_in) _ = std.os.linux.epoll_ctl(o.epoll_fd, std.os.linux.EPOLL.CTL_DEL, fd, null);
+        }
     }
 }
 
-/// Add a completion to the poll queue, dispatching to the socket (persistent,
-/// edge-triggered) or one-shot (level-triggered) path. If queuing fails, the
-/// completion is finished with error.Unexpected.
-fn addToPollQueue(self: *Self, state: *LoopState, fd: NetHandle, completion: *Completion) void {
-    if (isSocketOp(completion.op)) {
-        self.addSocketToPollQueue(state, fd, completion);
-    } else {
-        self.addOneShotToPollQueue(state, fd, completion);
-    }
-}
+// --- Non-socket one-shot path (pidfd / pipe / streaming file) ---------------
 
-/// Persistent edge-triggered path for sockets. The fd stays registered in this
-/// loop's epoll for its lifetime; per-operation we only attach the completion to
-/// the (possibly newly created) local entry.
-fn addSocketToPollQueue(self: *Self, state: *LoopState, fd: NetHandle, completion: *Completion) void {
-    if (self.pending_changes >= self.queue_size) {
-        _ = self.poll(state, .zero) catch {
-            log.err("Failed to do no-wait poll during addToPollQueue", .{});
-        };
-    }
-    self.pending_changes += 1;
-
-    completion.prev = null;
-    completion.next = null;
-
-    const gop = self.poll_queue.getOrPut(self.allocator, fd) catch {
-        log.err("Failed to add to poll queue: OutOfMemory", .{});
-        completion.setError(error.Unexpected);
-        state.markCompletedFromBackend(completion);
-        return;
-    };
-
-    if (gop.found_existing) {
-        // A completion for this fd is already pending on this loop, so the fd is
-        // already registered here. Just attach; no epoll_ctl needed.
-        gop.value_ptr.completions.push(completion);
-        return;
-    }
-
-    // First pending op for this fd on this loop: make sure it is registered.
-    self.ensureRegistered(fd) catch {
-        log.err("Failed to register socket with epoll", .{});
-        _ = self.poll_queue.remove(fd);
-        completion.setError(error.Unexpected);
-        state.markCompletedFromBackend(completion);
-        return;
-    };
-
-    gop.value_ptr.* = .{
-        .completions = .{},
-        .type = .send_or_recv,
-        .events = persist_events,
-    };
-    gop.value_ptr.completions.push(completion);
-}
-
-/// Original one-shot level-triggered path, used for non-socket pollable fds
-/// (pidfd, pipes, streaming files). Each operation arms its interest and the
-/// last completion to drain disarms it.
 fn addOneShotToPollQueue(self: *Self, state: *LoopState, fd: NetHandle, completion: *Completion) void {
     if (self.pending_changes >= self.queue_size) {
         _ = self.poll(state, .zero) catch {
@@ -460,55 +614,23 @@ fn addOneShotToPollQueue(self: *Self, state: *LoopState, fd: NetHandle, completi
     entry.completions.push(completion);
 }
 
-fn removeFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !void {
-    if (isSocketOp(completion.op)) {
-        self.removeSocketFromPollQueue(fd, completion);
-        return;
-    }
-    return self.removeOneShotFromPollQueue(fd, completion);
-}
-
-/// Socket path: detach the completion. The fd stays registered (persistent,
-/// edge-triggered); when no completion is left we drop the local entry but keep
-/// the epoll registration for the next operation. Removing the entry when empty
-/// is what keeps the registry honest: an idle socket never has a stale local
-/// entry, so a closed-and-reused fd number can never be mistaken for registered.
-fn removeSocketFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) void {
-    const entry = self.poll_queue.getPtr(fd) orelse return;
-    _ = entry.completions.remove(completion);
-    if (entry.completions.head == null) {
-        _ = self.poll_queue.remove(fd);
-    }
-}
-
-/// One-shot path: detach the completion and disarm interest, exactly as upstream.
 fn removeOneShotFromPollQueue(self: *Self, fd: NetHandle, completion: *Completion) !void {
     const entry = self.poll_queue.getPtr(fd) orelse return;
 
     _ = entry.completions.remove(completion);
 
     if (entry.completions.head == null) {
-        // No more completions - remove from epoll and poll queue
         const del_rc = std.os.linux.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_DEL, fd, null);
         const err = posix.errno(del_rc);
-
-        // Always remove from poll_queue when list is empty to avoid stale entries
-        // (fd will be auto-removed from epoll when closed anyway)
         const was_removed = self.poll_queue.remove(fd);
         std.debug.assert(was_removed);
-
         switch (err) {
-            .SUCCESS, .NOENT, .BADF => {
-                // SUCCESS: successfully removed
-                // NOENT: fd was not registered (already removed or never added) - safe to proceed
-                // BADF: fd was closed (and auto-removed from epoll) - safe to proceed
-            },
+            .SUCCESS, .NOENT, .BADF => {},
             else => return unexpectedError(err),
         }
         return;
     }
 
-    // Recalculate events from remaining completions
     var new_events: u32 = 0;
     var iter: ?*Completion = entry.completions.head;
     while (iter) |c| : (iter = c.next) {
@@ -549,18 +671,11 @@ fn getHandle(completion: *Completion) NetHandle {
     };
 }
 
-/// Finish a completion that the optimistic syscall already satisfied, but via
-/// the loop's deferred completion queue instead of running its callback inline.
-///
-/// `submit` must never re-enter the submitter. The generic NetSendFile fallback
-/// (loop.zig) re-submits a NetSend from inside its own send callback, expecting
-/// the child to complete asynchronously like every other backend's net ops do.
-/// Completing inline there would re-enter `netSendFileAdvance` and finish the
-/// parent transfer twice. The syscall has already happened; only the completion
-/// notification is parked here and drained from `processCompletions`, off the
-/// submit call stack. `decrInflight` balances the `incrInflight` the loop did
-/// before calling `submit` (processCompletions runs `markCompleted`, which does
-/// not touch the inflight counter).
+/// Finish an optimistically-satisfied op via the loop's deferred completion
+/// queue rather than inline, so submit never re-enters the submitter. The
+/// generic NetSendFile fallback (loop.zig) re-submits a NetSend from inside its
+/// own send callback; completing inline there would re-enter and finish the
+/// transfer twice. The syscall already happened; only the notification is parked.
 fn completeDeferred(self: *Self, state: *LoopState, c: *Completion) void {
     _ = self;
     state.decrInflight();
@@ -568,7 +683,6 @@ fn completeDeferred(self: *Self, state: *LoopState, c: *Completion) void {
 }
 
 /// Submit a completion to the backend - infallible.
-/// On error, completes the operation immediately with error.Unexpected.
 pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
     c.state = .running;
     state.incrActive();
@@ -576,7 +690,6 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
     switch (c.op) {
         .group, .timer, .async, .work => unreachable, // Managed by the loop
 
-        // Synchronous operations - complete immediately
         .net_open => {
             common.handleNetOpen(c);
             state.markCompletedFromBackend(c);
@@ -591,8 +704,6 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .net_close => {
             const data = c.cast(NetClose);
-            // Tear down the persistent registration before the fd is closed, so a
-            // future socket that reuses this fd number starts clean on every loop.
             self.unregisterSocket(data.handle);
             common.handleNetClose(c);
             state.markCompletedFromBackend(c);
@@ -602,18 +713,14 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             state.markCompletedFromBackend(c);
         },
 
-        // Connect - try connect() first, register with epoll only on WouldBlock.
+        // Connect - try connect() first, park only on WouldBlock.
         .net_connect => {
             const data = c.cast(NetConnect);
             if (net.connect(data.handle, data.addr, data.addr_len)) |_| {
-                // Connected immediately (e.g., localhost)
                 c.setResult(.net_connect, {});
                 state.markCompletedFromBackend(c);
             } else |err| switch (err) {
-                error.WouldBlock, error.ConnectionPending => {
-                    // Queue for completion - addToPollQueue handles errors
-                    self.addToPollQueue(state, data.handle, c);
-                },
+                error.WouldBlock, error.ConnectionPending => self.parkSocket(state, data.handle, c),
                 else => {
                     c.setError(err);
                     state.markCompletedFromBackend(c);
@@ -621,18 +728,16 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             }
         },
 
-        // Streaming socket ops try the syscall first (optimistic, like
-        // net_connect) and only register with epoll on WouldBlock. This both
-        // avoids an arm/disarm when the socket is already ready and, together
-        // with the persistent edge-triggered registration, drains the socket to
-        // EAGAIN before we ever wait - which is what makes edge-triggered safe.
+        // Optimistic syscall first; park on WouldBlock. The optimistic syscall
+        // also drains the socket to EAGAIN, which is what makes the persistent
+        // edge-triggered registration safe.
         .net_accept => {
             const data = c.cast(NetAccept);
             if (net.accept(data.handle, data.addr, data.addr_len, data.flags)) |handle| {
                 c.setResult(.net_accept, handle);
                 state.markCompletedFromBackend(c);
             } else |err| switch (err) {
-                error.WouldBlock => self.addToPollQueue(state, data.handle, c),
+                error.WouldBlock => self.parkSocket(state, data.handle, c),
                 else => {
                     c.setError(err);
                     state.markCompletedFromBackend(c);
@@ -645,7 +750,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 c.setResult(.net_recv, n);
                 state.markCompletedFromBackend(c);
             } else |err| switch (err) {
-                error.WouldBlock => self.addToPollQueue(state, data.handle, c),
+                error.WouldBlock => self.parkSocket(state, data.handle, c),
                 else => {
                     c.setError(err);
                     state.markCompletedFromBackend(c);
@@ -656,12 +761,11 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(NetSend);
             if (net.send(data.handle, data.buffer.iovecs, data.flags)) |n| {
                 c.setResult(.net_send, n);
-                // Defer, never complete inline: the NetSendFile fallback
-                // re-submits a send from inside its own send callback, and an
-                // inline completion would re-enter and finish the transfer twice.
+                // Defer, never inline: the NetSendFile fallback re-submits a send
+                // from inside its send callback; inline completion would re-enter.
                 self.completeDeferred(state, c);
             } else |err| switch (err) {
-                error.WouldBlock => self.addToPollQueue(state, data.handle, c),
+                error.WouldBlock => self.parkSocket(state, data.handle, c),
                 else => {
                     c.setError(err);
                     self.completeDeferred(state, c);
@@ -674,7 +778,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 c.setResult(.net_recvfrom, n);
                 state.markCompletedFromBackend(c);
             } else |err| switch (err) {
-                error.WouldBlock => self.addToPollQueue(state, data.handle, c),
+                error.WouldBlock => self.parkSocket(state, data.handle, c),
                 else => {
                     c.setError(err);
                     state.markCompletedFromBackend(c);
@@ -685,12 +789,12 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(NetSendTo);
             if (net.sendto(data.handle, data.buffer.iovecs, data.flags, data.addr, data.addr_len)) |n| {
                 c.setResult(.net_sendto, n);
-                state.markCompletedFromBackend(c);
+                self.completeDeferred(state, c);
             } else |err| switch (err) {
-                error.WouldBlock => self.addToPollQueue(state, data.handle, c),
+                error.WouldBlock => self.parkSocket(state, data.handle, c),
                 else => {
                     c.setError(err);
-                    state.markCompletedFromBackend(c);
+                    self.completeDeferred(state, c);
                 },
             }
         },
@@ -700,7 +804,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 c.setResult(.net_recvmsg, result);
                 state.markCompletedFromBackend(c);
             } else |err| switch (err) {
-                error.WouldBlock => self.addToPollQueue(state, data.handle, c),
+                error.WouldBlock => self.parkSocket(state, data.handle, c),
                 else => {
                     c.setError(err);
                     state.markCompletedFromBackend(c);
@@ -711,23 +815,20 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(NetSendMsg);
             if (net.sendmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control)) |n| {
                 c.setResult(.net_sendmsg, n);
-                state.markCompletedFromBackend(c);
+                self.completeDeferred(state, c);
             } else |err| switch (err) {
-                error.WouldBlock => self.addToPollQueue(state, data.handle, c),
+                error.WouldBlock => self.parkSocket(state, data.handle, c),
                 else => {
                     c.setError(err);
-                    state.markCompletedFromBackend(c);
+                    self.completeDeferred(state, c);
                 },
             }
         },
         .net_poll => {
             const data = c.cast(NetPoll);
-            // net_poll has no I/O to drain, so unlike recv/send it cannot rely on
-            // the edge-triggered registration re-arming: a socket that is already
-            // (and continuously) ready never produces a fresh edge, so waiting for
-            // one would hang. Probe current readiness with a 0-timeout poll() -
-            // the same "try first, wait only on not-ready" shape as the streaming
-            // ops - and register for an edge only when it is not ready yet.
+            // net_poll has no I/O to drain, so it cannot rely on the edge-triggered
+            // registration re-arming on an already-ready socket. Probe readiness
+            // with a 0-timeout poll() and park only when not ready.
             const want: i16 = switch (data.event) {
                 .recv => linux.POLL.IN,
                 .send => linux.POLL.OUT,
@@ -740,12 +841,12 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 c.setResult(.net_poll, {});
                 state.markCompletedFromBackend(c);
             } else {
-                self.addToPollQueue(state, data.handle, c);
+                self.parkSocket(state, data.handle, c);
             }
         },
         .pipe_poll => {
             const data = c.cast(PipePoll);
-            self.addToPollQueue(state, data.handle, c);
+            self.addOneShotToPollQueue(state, data.handle, c);
         },
         .pipe_create => {
             const fds = fs.pipe() catch |err| {
@@ -756,10 +857,8 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             c.setResult(.pipe_create, fds);
             state.markCompletedFromBackend(c);
         },
-        // Streaming file I/O is routed here by the loop only when the fd is
-        // pollable (non-seekable), so it is handled exactly like pipe read/write.
         inline .file_read_streaming, .file_write_streaming => |op| {
-            self.addToPollQueue(state, c.cast(op.toType()).handle, c);
+            self.addOneShotToPollQueue(state, c.cast(op.toType()).handle, c);
         },
         .pipe_close => {
             const data = c.cast(PipeClose);
@@ -772,12 +871,11 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .process_wait => {
             const data = c.cast(ProcessWait);
-            // Create pidfd for polling
             const rc = linux.pidfd_open(data.handle, 0);
             switch (posix.errno(rc)) {
                 .SUCCESS => {
                     data.internal.pidfd = @intCast(rc);
-                    self.addToPollQueue(state, data.internal.pidfd, c);
+                    self.addOneShotToPollQueue(state, data.internal.pidfd, c);
                 },
                 .SRCH => {
                     c.setError(error.ProcessNotFound);
@@ -794,44 +892,51 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             }
         },
 
-        // File operations are handled by Loop via thread pool
         .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_size, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .file_stat, .dir_open, .dir_close, .dir_read, .dir_create_dir, .dir_rename, .dir_rename_preserve, .dir_delete_file, .dir_delete_dir, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps, .dir_sym_link, .dir_read_link, .dir_hard_link, .dir_access, .dir_real_path, .dir_real_path_file, .file_real_path, .file_hard_link, .device_io_control => unreachable,
-        // Driven by Loop's generic read/write fallback, never reaches the backend.
         .net_send_file => unreachable,
         .mach_port => unreachable,
     }
 }
 
 /// Cancel a completion - infallible.
-/// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
 pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
-    // Try to remove from queue
     const fd = getHandle(target);
-    self.removeFromPollQueue(fd, target) catch |err| {
-        // Removal from epoll failed, but completion was already removed from
-        // the poll queue linked list. Log the error but continue to complete
-        // the target to avoid leaving it stuck in running state.
+
+    if (isSocketOp(target.op)) {
+        // Try to pull the completion out of its shared waiter queue. If it is
+        // still there we own the cancel; if not, the owner loop already popped it
+        // to complete it, so we leave it to complete naturally (cancel is
+        // best-effort, and the loop's cancel_state coordinates the outcome).
+        const dir = dirOf(target);
+        const shard = self.shared.shardFor(fd);
+        shard.mutex.lock();
+        var removed = false;
+        if (shard.map.getPtr(fd)) |reg| {
+            removed = waitersPtr(reg, dir).remove(target);
+        }
+        shard.mutex.unlock();
+        if (removed) {
+            target.setError(error.Canceled);
+            state.markCompletedFromBackend(target);
+        }
+        return;
+    }
+
+    self.removeOneShotFromPollQueue(fd, target) catch |err| {
         log.err("Failed to remove completion from poll queue during cancel: {}", .{err});
     };
 
-    // Close pidfd if this is a process_wait (it won't go through completion path)
     if (target.op == .process_wait) {
         const data = target.cast(ProcessWait);
         _ = linux.close(@intCast(data.internal.pidfd));
     }
 
-    // Always complete target with error.Canceled
     target.setError(error.Canceled);
     state.markCompletedFromBackend(target);
 }
 
-/// Wait for events, preferring nanosecond-precision epoll_pwait2 and falling
-/// back to millisecond epoll_wait on kernels without it. Returns the number of
-/// ready events (0 on timeout or signal interruption).
 fn waitEvents(self: *Self, timeout: Duration) !usize {
     if (self.epoll_pwait2_supported) {
-        // null timespec blocks indefinitely; the loop never asks for that
-        // (it caps at max_wait), but handle the sentinel defensively.
         var ts: linux.kernel_timespec = undefined;
         const ts_ptr: ?*const linux.kernel_timespec = if (timeout.value == Duration.max.value) null else blk: {
             const ns = timeout.toNanoseconds();
@@ -841,8 +946,8 @@ fn waitEvents(self: *Self, timeout: Duration) !usize {
         const rc = os_linux.epoll_pwait2(self.epoll_fd, self.events.ptr, @intCast(self.events.len), ts_ptr);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
-            .INTR => return 0, // Interrupted by signal, no events
-            .NOSYS => self.epoll_pwait2_supported = false, // Kernel < 5.11: fall back below
+            .INTR => return 0,
+            .NOSYS => self.epoll_pwait2_supported = false,
             else => |err| return unexpectedError(err),
         }
     }
@@ -851,59 +956,54 @@ fn waitEvents(self: *Self, timeout: Duration) !usize {
     const rc = std.os.linux.epoll_wait(self.epoll_fd, self.events.ptr, @intCast(self.events.len), timeout_ms);
     switch (posix.errno(rc)) {
         .SUCCESS => return @intCast(rc),
-        .INTR => return 0, // Interrupted by signal, no events
+        .INTR => return 0,
         else => |err| return unexpectedError(err),
     }
 }
 
 pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
-    // Reset pending changes counter before poll (less aggressive)
     self.pending_changes = 0;
 
     const n = try self.waitEvents(timeout);
-
-    if (n == 0) {
-        return true; // Timed out
-    }
+    if (n == 0) return true; // Timed out
 
     for (self.events[0..n]) |event| {
         const fd = event.data.fd;
 
-        // Check if this is the async wakeup fd
         if (fd == self.waker_eventfd) {
             _ = posix.eventfd_read(self.waker_eventfd) catch {};
             continue;
         }
 
-        // A persistent socket registration can outlive its local entry (e.g. the
-        // fiber migrated to another loop, or the last op already drained). Such
-        // edges have no waiter here and are simply ignored - edge-triggered means
-        // the data stays in the socket buffer and the next operation's optimistic
-        // syscall picks it up.
-        const entry = self.poll_queue.get(fd) orelse continue;
-
-        var iter: ?*Completion = entry.completions.head;
-        while (iter) |completion| {
-            iter = completion.next;
-
-            // Skip if already completed (can happen with cancellations)
-            if (completion.state == .completed or completion.state == .dead) {
-                continue;
+        // Non-socket pollable fds live in the per-loop one-shot table.
+        if (self.poll_queue.get(fd)) |entry| {
+            var iter: ?*Completion = entry.completions.head;
+            while (iter) |completion| {
+                iter = completion.next;
+                if (completion.state == .completed or completion.state == .dead) continue;
+                switch (checkCompletion(completion, &event)) {
+                    .completed => {
+                        try self.removeOneShotFromPollQueue(fd, completion);
+                        state.markCompletedFromBackend(completion);
+                    },
+                    .requeue => {},
+                }
             }
-
-            switch (checkCompletion(completion, &event)) {
-                .completed => {
-                    try self.removeFromPollQueue(fd, completion);
-                    state.markCompletedFromBackend(completion);
-                },
-                .requeue => {
-                    // Spurious wakeup - keep in poll queue
-                },
-            }
+            continue;
         }
+
+        // Otherwise it is a socket: drain the directions we own. An edge with no
+        // owned waiter (e.g. the fd's reader migrated, or it already drained) is
+        // ignored - edge-triggered means the data stays buffered and the next
+        // op's optimistic syscall picks it up.
+        const e = event.events;
+        if (e & (std.os.linux.EPOLL.IN | std.os.linux.EPOLL.ERR | std.os.linux.EPOLL.HUP) != 0)
+            self.drainDir(state, fd, .in, &event);
+        if (e & (std.os.linux.EPOLL.OUT | std.os.linux.EPOLL.ERR | std.os.linux.EPOLL.HUP) != 0)
+            self.drainDir(state, fd, .out, &event);
     }
 
-    return false; // Did not timeout, woke up due to events
+    return false;
 }
 
 const CheckResult = enum { completed, requeue };
@@ -914,7 +1014,7 @@ fn handleEpollError(event: *const std.os.linux.epoll_event, comptime errnoToErro
     if (!has_error and !has_hup) return null;
 
     const sock_err = net.getSockError(event.data.fd) catch return error.Unexpected;
-    if (sock_err == 0) return null; // No actual error, caller should retry operation
+    if (sock_err == 0) return null;
     return errnoToError(@enumFromInt(sock_err));
 }
 
@@ -1048,38 +1148,27 @@ pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) C
             }
         },
         .net_poll => {
-            // For poll operations, we want to know when the socket is "ready"
-            // This includes error conditions (EPOLLERR, EPOLLHUP) because they
-            // indicate the socket is ready to return an error on the next I/O
             const has_error = (event.events & std.os.linux.EPOLL.ERR) != 0;
             const has_hup = (event.events & std.os.linux.EPOLL.HUP) != 0;
-
             if (has_error or has_hup) {
-                // Socket has error or hangup - it's "ready"
                 c.setResult(.net_poll, {});
                 return .completed;
             }
-
-            // Check if the requested events are actually ready
             const requested_events = getEvents(c);
             const ready_events = event.events & requested_events;
             if (ready_events != 0) {
                 c.setResult(.net_poll, {});
                 return .completed;
             }
-            // Requested events not ready yet - requeue
             return .requeue;
         },
         inline .file_read_streaming => |op| {
             const data = c.cast(op.toType());
-            // Try to read - there might still be data in the pipe buffer
             if (fs.readv(data.handle, data.buffer.iovecs)) |n| {
                 c.setResult(op, n);
                 return .completed;
             } else |err| switch (err) {
                 error.WouldBlock => {
-                    // For pipes, HUP means the write end is closed
-                    // If we got WouldBlock and HUP is set, that's EOF (no more data)
                     const has_hup = (event.events & std.os.linux.EPOLL.HUP) != 0;
                     if (has_hup) {
                         c.setResult(op, 0);
@@ -1095,11 +1184,9 @@ pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) C
         },
         inline .file_write_streaming => |op| {
             const data = c.cast(op.toType());
-            // For pipes, check for errors but don't use getSockError
             const has_error = (event.events & std.os.linux.EPOLL.ERR) != 0;
             const has_hup = (event.events & std.os.linux.EPOLL.HUP) != 0;
             if (has_error or has_hup) {
-                // Pipe error or read end closed
                 c.setError(error.BrokenPipe);
                 return .completed;
             }
@@ -1114,31 +1201,24 @@ pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) C
                 },
             }
         },
-        .pipe_close => unreachable, // Handled synchronously in submit
-        .pipe_create => unreachable, // Handled synchronously in submit
+        .pipe_close => unreachable,
+        .pipe_create => unreachable,
         .pipe_poll => {
-            // For poll operations, we want to know when the fd is "ready"
             const has_error = (event.events & std.os.linux.EPOLL.ERR) != 0;
             const has_hup = (event.events & std.os.linux.EPOLL.HUP) != 0;
-
             if (has_error or has_hup) {
-                // Stream has error or hangup - it's "ready"
                 c.setResult(.pipe_poll, {});
                 return .completed;
             }
-
-            // Check if the requested events are actually ready
             const requested_events = getEvents(c);
             const ready_events = event.events & requested_events;
             if (ready_events != 0) {
                 c.setResult(.pipe_poll, {});
                 return .completed;
             }
-            // Requested events not ready yet - requeue
             return .requeue;
         },
         .process_wait => {
-            // pidfd is readable - process has exited, get the status
             const data = c.cast(ProcessWait);
             defer _ = linux.close(@intCast(data.internal.pidfd));
 
@@ -1146,8 +1226,6 @@ pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) C
             const wait_rc = linux.waitid(.PIDFD, @intCast(data.internal.pidfd), &siginfo, linux.W.EXITED, null);
             switch (posix.errno(wait_rc)) {
                 .SUCCESS => {
-                    // Extract exit status from siginfo
-                    // With waitid(), si_status contains the value directly (not encoded like waitpid)
                     const si_status = siginfo.fields.common.second.sigchld.status;
                     const si_code = siginfo.code;
                     const CLD_EXITED = 1;
