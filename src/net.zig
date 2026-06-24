@@ -806,7 +806,14 @@ pub const Address = extern union {
     pub fn fromPosix(addr: *const os.net.sockaddr, len: os.net.socklen_t) Address {
         if (len < @sizeOf(@FieldType(os.net.sockaddr, "family"))) return .{ .ip = .unspecified(0) };
         switch (addr.family) {
-            os.net.AF.INET, os.net.AF.INET6 => return .{ .ip = .initPosix(addr, len) },
+            os.net.AF.INET => {
+                if (len < @sizeOf(os.net.sockaddr.in)) return .{ .ip = .unspecified(0) };
+                return .{ .ip = .initPosix(addr, len) };
+            },
+            os.net.AF.INET6 => {
+                if (len < @sizeOf(os.net.sockaddr.in6)) return .{ .ip = .unspecified(0) };
+                return .{ .ip = .initPosix(addr, len) };
+            },
             os.net.AF.UNIX => {
                 if (!has_unix_sockets) unreachable;
                 const path_off = @offsetOf(os.net.sockaddr.un, "path");
