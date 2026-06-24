@@ -876,9 +876,11 @@ pub const Loop = struct {
 
         var fired = false;
         var next_timeout: ?Duration = null;
-        // Earliest pending absolute deadline per heap; only the boot/real
-        // entries are used, and only when the backend arms them natively.
+        // For native boot/real clocks: the earliest pending absolute deadline to
+        // hand the backend, plus its capped remaining (computed during the scan
+        // under the lock) to fold into the poll timeout if the backend can't arm.
         var wall_deadline: [wall_clock_count]?u64 = .{ null, null, null };
+        var wall_remaining: [wall_clock_count]Duration = .{ .zero, .zero, .zero };
 
         // Advance the scan once and refresh the awake snapshot; this also
         // invalidates the lazily-cached boot/real values for this scan.
@@ -908,8 +910,14 @@ pub const Loop = struct {
                     if (timer.deadline.value > now_clock.value) {
                         if (native_wall and clock != .awake) {
                             // Backend arms this clock natively; record its
-                            // earliest deadline instead of folding into the poll.
+                            // earliest deadline, plus a capped remaining to fold
+                            // only if the backend later reports it couldn't arm.
                             wall_deadline[idx] = timer.deadline.value;
+                            var remaining = now_clock.durationTo(timer.deadline);
+                            if (remaining.value > self.wall_clock_cap.value) {
+                                remaining = self.wall_clock_cap;
+                            }
+                            wall_remaining[idx] = remaining;
                         } else {
                             var remaining = now_clock.durationTo(timer.deadline);
                             // boot/real can't be tracked by the awake poll clock,
@@ -942,9 +950,19 @@ pub const Loop = struct {
             }
         }
 
-        // Hand the boot/real minimums to the backend's native wall-clock timers.
+        // Hand each boot/real minimum to the backend's native wall-clock timer.
+        // syncWallTimer returns false only when it couldn't arm a pending
+        // deadline (e.g. SQ full); then fold that clock's capped remaining into
+        // the poll timeout so it's still re-evaluated within the cap.
         if (comptime native_wall) {
-            self.backend.syncWallTimers(wall_deadline[1], wall_deadline[2]);
+            for ([_]usize{ 1, 2 }) |idx| {
+                const clock = indexClock(idx);
+                if (self.backend.syncWallTimer(clock, wall_deadline[idx])) continue;
+                const remaining = wall_remaining[idx];
+                if (next_timeout == null or remaining.value < next_timeout.?.value) {
+                    next_timeout = remaining;
+                }
+            }
         }
 
         return .{ .next_timeout = next_timeout, .fired = fired };

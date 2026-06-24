@@ -6,17 +6,40 @@ const fs = @import("../../os/fs.zig");
 const linux_sys = @import("../../os/system/linux.zig");
 const time = @import("../../os/time.zig");
 const Duration = @import("../../time.zig").Duration;
+const Clock = @import("../../time.zig").Clock;
 const common = @import("common.zig");
 const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
 const Queue = @import("../queue.zig").Queue;
 const Cancel = @import("../completion.zig").Cancel;
 
-// Special user_data values for internal operations
-const USER_DATA_WAKER: u64 = 0; // Waker eventfd multishot poll
-const USER_DATA_CANCEL: u64 = 1; // Cancel SQE operations (should be skipped)
-const USER_DATA_WALL_BOOT: u64 = 2; // boot-clock (CLOCK_BOOTTIME) timeout
-const USER_DATA_WALL_REAL: u64 = 3; // real-clock (CLOCK_REALTIME) timeout
+// user_data encoding. A *Completion pointer is aligned, so its low bit is 0;
+// internal ops set the low bit and pack a kind (bits 1-2) plus, for the wall
+// timers, a generation counter (bits 3+) so a stale timeout CQE that arrives
+// after a re-arm can be told apart from the current one and ignored.
+const UD_SPECIAL: u64 = 1;
+
+const SpecialKind = enum(u2) { waker = 0, cancel = 1, wall_boot = 2, wall_real = 3 };
+
+fn specialUd(kind: SpecialKind, generation: u32) u64 {
+    return UD_SPECIAL | (@as(u64, @intFromEnum(kind)) << 1) | (@as(u64, generation) << 3);
+}
+
+fn udIsSpecial(ud: u64) bool {
+    return ud & UD_SPECIAL != 0;
+}
+
+fn udKind(ud: u64) SpecialKind {
+    return @enumFromInt(@as(u2, @truncate(ud >> 1)));
+}
+
+fn udGeneration(ud: u64) u32 {
+    return @truncate(ud >> 3);
+}
+
+fn wallKind(idx: usize) SpecialKind {
+    return if (idx == 0) .wall_boot else .wall_real;
+}
 
 const NetOpen = @import("../completion.zig").NetOpen;
 const NetConnect = @import("../completion.zig").NetConnect;
@@ -167,13 +190,12 @@ pending: Queue(Completion) = .{},
 /// boot/real wall-clock timeout SQEs, or null if disarmed. Indexed by
 /// `wallIndex` (0 = boot, 1 = real).
 wall_armed: [2]?u64 = .{ null, null },
+/// Generation of each wall timer's current SQE, encoded in its user_data and
+/// bumped on every (re)arm, so a stale timeout CQE is ignored.
+wall_generation: [2]u32 = .{ 0, 0 },
 /// Backing storage for the wall timeout `kernel_timespec`s; must outlive the
 /// SQE until the next `io_uring_enter2` reads it.
 wall_ts: [2]linux.kernel_timespec = undefined,
-/// Set when a wall-timer (re)arm couldn't get an SQE because the SQ was full.
-/// Like `waker_needs_rearm`, this forces the next poll not to block so the SQ
-/// drains and the arm retries on the following scan.
-wall_needs_rearm: bool = false,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
     _ = shared_state;
@@ -219,7 +241,7 @@ fn armWaker(self: *Self) bool {
     const sqe = self.ring.get_sqe() catch return false;
     sqe.prep_poll_add(self.waker_eventfd, linux.POLL.IN);
     sqe.len = linux.IORING_POLL_ADD_MULTI;
-    sqe.user_data = USER_DATA_WAKER;
+    sqe.user_data = specialUd(.waker, 0);
     self.waker_needs_rearm = false;
     return true;
 }
@@ -735,7 +757,7 @@ pub fn cancel(self: *Self, _: *LoopState, target: *Completion) void {
                 return;
             };
             sqe.prep_cancel(@intFromPtr(target), 0);
-            sqe.user_data = USER_DATA_CANCEL;
+            sqe.user_data = specialUd(.cancel, 0);
         },
         .completed, .dead => {
             // Target already completed (has result) or fully finished (callback called).
@@ -758,45 +780,43 @@ fn getSqeOrDefer(self: *Self, c: *Completion) ?*linux.io_uring_sqe {
 /// given absolute deadlines (ns in each clock's epoch; null = none). Called by
 /// the loop when the boot/real timer-heap minimums change; the SQEs ride the
 /// next `io_uring_enter2`.
-pub fn syncWallTimers(self: *Self, boot: ?u64, real: ?u64) void {
-    self.wall_needs_rearm = false;
-    self.armWall(0, USER_DATA_WALL_BOOT, linux.IORING_TIMEOUT_BOOTTIME, boot);
-    self.armWall(1, USER_DATA_WALL_REAL, linux.IORING_TIMEOUT_REALTIME, real);
-}
+pub fn syncWallTimer(self: *Self, clock: Clock, deadline: ?u64) bool {
+    const idx: usize, const clock_flag: u32 = switch (clock) {
+        .boot => .{ 0, linux.IORING_TIMEOUT_BOOTTIME },
+        .real => .{ 1, linux.IORING_TIMEOUT_REALTIME },
+        else => unreachable,
+    };
 
-fn armWall(self: *Self, idx: usize, sentinel: u64, clock_flag: u32, deadline: ?u64) void {
-    if (self.wall_armed[idx] == deadline) return; // unchanged (incl. both null)
+    if (self.wall_armed[idx] == deadline) return true; // unchanged (incl. both null)
 
     // Remove the existing timeout (if any) before re-arming. The removed
     // timeout's CQE and the remove op's CQE are both ignored in poll(). If the
-    // SQ is full, flag a rearm so poll() drains it and we retry next scan,
-    // leaving wall_armed unchanged so the old timeout stays valid meanwhile.
+    // SQ is full, leave wall_armed unchanged (old timeout stays valid) and
+    // report failure so the loop folds this clock into the capped poll timeout.
     if (self.wall_armed[idx] != null) {
-        const sqe = self.ring.get_sqe() catch {
-            self.wall_needs_rearm = true;
-            return;
-        };
-        sqe.prep_timeout_remove(sentinel, 0);
-        sqe.user_data = USER_DATA_CANCEL;
+        const sqe = self.ring.get_sqe() catch return false;
+        sqe.prep_timeout_remove(specialUd(wallKind(idx), self.wall_generation[idx]), 0);
+        sqe.user_data = specialUd(.cancel, 0);
     }
 
     if (deadline) |d| {
         const sqe = self.ring.get_sqe() catch {
-            // Remove was queued (or nothing was armed), but we can't arm the
-            // new timeout now. Forget it and retry next scan after the drain.
+            // Remove was queued but we can't arm the new timeout now. Forget it
+            // (the next scan re-arms) and report failure so the loop folds.
             self.wall_armed[idx] = null;
-            self.wall_needs_rearm = true;
-            return;
+            return false;
         };
+        self.wall_generation[idx] +%= 1;
         self.wall_ts[idx] = .{
             .sec = @intCast(d / time.ns_per_s),
             .nsec = @intCast(d % time.ns_per_s),
         };
         sqe.prep_timeout(&self.wall_ts[idx], 0, linux.IORING_TIMEOUT_ABS | clock_flag);
-        sqe.user_data = sentinel;
+        sqe.user_data = specialUd(wallKind(idx), self.wall_generation[idx]);
     }
 
     self.wall_armed[idx] = deadline;
+    return true;
 }
 
 pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
@@ -808,7 +828,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
     // can arm.
     // Don't block if a critical internal SQE (waker or a wall timer) still
     // needs arming — a zero-timeout enter2 drains the SQ so the next scan can.
-    const effective_timeout: Duration = if (self.armWaker() and !self.wall_needs_rearm) timeout else .zero;
+    const effective_timeout: Duration = if (self.armWaker()) timeout else .zero;
 
     const to_submit = self.ring.flush_sq();
     var ts: linux.kernel_timespec = undefined;
@@ -848,25 +868,26 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
 
     var wall_fired = false;
     for (cqes[0..count]) |cqe| {
-        // Handle internal operations with special user_data values
-        if (cqe.user_data == USER_DATA_WAKER) {
-            self.drainWaker(cqe);
-            continue;
-        }
-
-        if (cqe.user_data == USER_DATA_CANCEL) {
-            // Cancel SQE completion - just skip it
-            continue;
-        }
-
-        // Wall-clock (boot/real) timeout. A fire (-ETIME) means a boot/real
-        // timer is due, so report a timeout below to re-run checkTimers; the
-        // kernel auto-removed the one-shot, so forget our armed deadline. A
-        // -ECANCELED is from re-arming and is simply ignored.
-        if (cqe.user_data == USER_DATA_WALL_BOOT or cqe.user_data == USER_DATA_WALL_REAL) {
-            if (cqe.res == -@as(i32, @intFromEnum(linux.E.TIME))) {
-                wall_fired = true;
-                self.wall_armed[if (cqe.user_data == USER_DATA_WALL_BOOT) 0 else 1] = null;
+        // Internal ops carry the special low bit; completions are pointers.
+        if (udIsSpecial(cqe.user_data)) {
+            switch (udKind(cqe.user_data)) {
+                .waker => self.drainWaker(cqe),
+                .cancel => {}, // cancel/remove op completion — skip
+                // Wall-clock (boot/real) timeout. A fire (-ETIME) of the current
+                // generation means the timer is due: report a timeout below to
+                // re-run checkTimers, and forget the armed deadline (the kernel
+                // auto-removed the one-shot). A stale generation or -ECANCELED
+                // (from re-arming) is ignored.
+                .wall_boot, .wall_real => {
+                    const idx: usize = if (udKind(cqe.user_data) == .wall_boot) 0 else 1;
+                    if (cqe.res == -@as(i32, @intFromEnum(linux.E.TIME)) and
+                        udGeneration(cqe.user_data) == self.wall_generation[idx] and
+                        self.wall_armed[idx] != null)
+                    {
+                        wall_fired = true;
+                        self.wall_armed[idx] = null;
+                    }
+                },
             }
             continue;
         }
