@@ -2083,7 +2083,8 @@ test "getSockAddrLen: unix pathname includes NUL terminator" {
     const addr = try UnixAddress.init(path);
     // Pathname sockets are NUL-terminated, so the length covers the string plus
     // the terminating NUL.
-    try std.testing.expectEqual(path_off + path.len + 1, getSockAddrLen(&addr.any));
+    const expected: os.net.socklen_t = @intCast(path_off + path.len + 1);
+    try std.testing.expectEqual(expected, getSockAddrLen(&addr.any));
 }
 
 test "getSockAddrLen: unix abstract has no trailing padding" {
@@ -2098,7 +2099,8 @@ test "getSockAddrLen: unix abstract has no trailing padding" {
     const name = "\x00zio-test-abstract";
 
     const addr = try UnixAddress.init(name);
-    try std.testing.expectEqual(path_off + name.len, getSockAddrLen(&addr.any));
+    const expected: os.net.socklen_t = @intCast(path_off + name.len);
+    try std.testing.expectEqual(expected, getSockAddrLen(&addr.any));
 }
 
 test "UnixAddress: format" {
