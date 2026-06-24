@@ -792,40 +792,33 @@ pub const Address = extern union {
         };
     }
 
-    /// Convert sockaddr to IpAddress from raw bytes.
-    /// This properly handles IPv4 and IPv6 addresses without alignment issues.
-    fn fromStorageIp(data: []const u8) IpAddress {
-        const sockaddr: *align(1) const os.net.sockaddr = @ptrCast(data.ptr);
-        return switch (sockaddr.family) {
-            os.net.AF.INET => blk: {
-                var addr: IpAddress = .{ .in = undefined };
-                @memcpy(std.mem.asBytes(&addr.in), data[0..@sizeOf(std.net.Ip4Address)]);
-                break :blk addr;
-            },
-            os.net.AF.INET6 => blk: {
-                var addr: IpAddress = .{ .in6 = undefined };
-                @memcpy(std.mem.asBytes(&addr.in6), data[0..@sizeOf(std.net.Ip6Address)]);
-                break :blk addr;
-            },
-            else => unreachable,
-        };
-    }
-
-    /// Convert sockaddr to Address from raw bytes.
-    /// This properly handles IPv4, IPv6, and Unix socket addresses without alignment issues.
-    fn fromStorage(data: []const u8) Address {
-        const sockaddr: *align(1) const os.net.sockaddr = @ptrCast(data.ptr);
-        return switch (sockaddr.family) {
-            os.net.AF.INET, os.net.AF.INET6 => .{ .ip = fromStorageIp(data) },
-            os.net.AF.UNIX => blk: {
+    /// Build an Address from a raw OS sockaddr and the length the kernel
+    /// reported, as returned by accept(), recvfrom(), recvmsg(), etc. This is
+    /// the single path for turning kernel-provided address bytes into an
+    /// Address.
+    ///
+    /// For Unix sockets it zero-fills the name buffer and copies only the bytes
+    /// the kernel actually wrote, so the trailing padding is always well-defined
+    /// and later format()/getSockAddrLen() never read uninitialized memory. A
+    /// length too short to even hold the address family means the kernel didn't
+    /// provide an address (e.g. recvmsg on a connected socket); report that as
+    /// an unspecified address rather than reading garbage.
+    pub fn fromPosix(addr: *const os.net.sockaddr, len: os.net.socklen_t) Address {
+        if (len < @sizeOf(@FieldType(os.net.sockaddr, "family"))) return .{ .ip = .unspecified(0) };
+        switch (addr.family) {
+            os.net.AF.INET, os.net.AF.INET6 => return .{ .ip = .initPosix(addr, len) },
+            os.net.AF.UNIX => {
                 if (!has_unix_sockets) unreachable;
-                var addr: Address = .{ .unix = .{ .un = undefined } };
-                const copy_len = @min(data.len, @sizeOf(os.net.sockaddr.un));
-                @memcpy(std.mem.asBytes(&addr.unix.un)[0..copy_len], data[0..copy_len]);
-                break :blk addr;
+                const path_off = @offsetOf(os.net.sockaddr.un, "path");
+                var result: Address = .{ .unix = .{ .un = .{ .family = os.net.AF.UNIX, .path = @splat(0) } } };
+                const total: usize = @intCast(len);
+                const name_len = if (total > path_off) @min(total - path_off, result.unix.un.path.len) else 0;
+                const src: *align(1) const os.net.sockaddr.un = @ptrCast(addr);
+                @memcpy(result.unix.un.path[0..name_len], src.path[0..name_len]);
+                return result;
             },
             else => unreachable,
-        };
+        }
     }
 
     pub const ConnectOptions = struct {
@@ -1041,13 +1034,13 @@ pub const Socket = struct {
     /// Receives a datagram from the socket, returning the sender's address and bytes read.
     /// Used for UDP and other datagram-based protocols.
     pub fn receiveFrom(self: Socket, buf: []u8, timeout: Timeout) !ReceiveFromResult {
-        var storage: [1]os.iovec = undefined;
-        var result: ReceiveFromResult = undefined;
-        var peer_addr_len: os.net.socklen_t = @sizeOf(@TypeOf(result.from));
-        var op = ev.NetRecvFrom.init(self.handle, .fromSlice(buf, &storage), .{}, &result.from.any, &peer_addr_len);
+        var iovecs: [1]os.iovec = undefined;
+        var peer_addr: Address = undefined;
+        var peer_addr_len: os.net.socklen_t = @sizeOf(Address);
+        var op = ev.NetRecvFrom.init(self.handle, .fromSlice(buf, &iovecs), .{}, &peer_addr.any, &peer_addr_len);
         try timedWaitForIo(&op.c, timeout);
-        result.len = try op.getResult();
-        return result;
+        const len = try op.getResult();
+        return .{ .from = .fromPosix(&peer_addr.any, peer_addr_len), .len = len };
     }
 
     /// Sends a datagram to the specified address.
@@ -1069,14 +1062,16 @@ pub const Socket = struct {
         control: ?[]u8,
         timeout: Timeout,
     ) !ReceiveMsgResult {
-        var result: ReceiveMsgResult = undefined;
+        var peer_addr: Address = undefined;
         var addr_len: os.net.socklen_t = @sizeOf(Address);
-        var op = ev.NetRecvMsg.init(self.handle, buf, .{}, &result.from.any, &addr_len, control);
+        var op = ev.NetRecvMsg.init(self.handle, buf, .{}, &peer_addr.any, &addr_len, control);
         try timedWaitForIo(&op.c, timeout);
         const os_result = try op.getResult();
-        result.len = os_result.len;
-        result.flags = os_result.flags;
-        return result;
+        return .{
+            .from = .fromPosix(&peer_addr.any, addr_len),
+            .len = os_result.len,
+            .flags = os_result.flags,
+        };
     }
 
     /// Sends a message with optional destination address and ancillary data (control messages).
@@ -1118,7 +1113,7 @@ pub const Server = struct {
         var op = ev.NetAccept.init(self.socket.handle, &peer_addr.any, &peer_addr_len);
         try timedWaitForIo(&op.c, options.timeout);
         const handle = try op.getResult();
-        return .{ .socket = .{ .handle = handle, .address = peer_addr } };
+        return .{ .socket = .{ .handle = handle, .address = .fromPosix(&peer_addr.any, peer_addr_len) } };
     }
 
     pub fn shutdown(self: Server, how: ShutdownHow) !void {
