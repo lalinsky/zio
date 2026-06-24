@@ -149,7 +149,12 @@ const TimerHeap = Heap(Timer, void, timerDeadlineLess);
 const wall_clock_count = 3;
 
 fn clockIndex(clock: Clock) usize {
-    const idx = @intFromEnum(clock);
+    // Where the platform has no distinct suspend-inclusive clock, `.boot` and
+    // `.awake` are the same clock, so boot timers share the awake heap (index 0)
+    // and are driven by the uncapped awake poll timeout instead of a separate
+    // capped/native path.
+    const c: Clock = if (clock == .boot and !time.boot_distinct_from_awake) .awake else clock;
+    const idx = @intFromEnum(c);
     if (idx >= wall_clock_count) @panic("timers cannot use CPU-time clocks");
     return idx;
 }
@@ -955,7 +960,11 @@ pub const Loop = struct {
         // deadline (e.g. SQ full); then fold that clock's capped remaining into
         // the poll timeout so it's still re-evaluated within the cap.
         if (comptime native_wall) {
-            for ([_]usize{ 1, 2 }) |idx| {
+            // Always arm real; arm boot only where it is a distinct clock —
+            // otherwise boot timers live in the awake heap and are never handed
+            // to the backend (e.g. Windows/IOCP has no boot-clock timer).
+            const wall_idxs = comptime if (time.boot_distinct_from_awake) [_]usize{ 1, 2 } else [_]usize{2};
+            for (wall_idxs) |idx| {
                 const clock = indexClock(idx);
                 if (self.backend.syncWallTimer(clock, wall_deadline[idx])) continue;
                 const remaining = wall_remaining[idx];
