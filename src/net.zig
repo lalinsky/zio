@@ -197,9 +197,40 @@ fn getSockAddrLen(addr: *const os.net.sockaddr) os.net.socklen_t {
     return switch (addr.family) {
         os.net.AF.INET => @sizeOf(os.net.sockaddr.in),
         os.net.AF.INET6 => @sizeOf(os.net.sockaddr.in6),
-        os.net.AF.UNIX => @sizeOf(os.net.sockaddr.un),
+        os.net.AF.UNIX => if (has_unix_sockets) getUnixSockAddrLen(@ptrCast(addr)) else unreachable,
         else => unreachable,
     };
+}
+
+/// Compute the address length to pass to bind()/connect() for a Unix socket.
+///
+/// The kernel derives the socket name from this length, so it must cover
+/// exactly the meaningful bytes. Using the full struct size folds the trailing
+/// zero padding into the name. For pathname sockets that's harmless (the kernel
+/// stops at the NUL terminator), but abstract sockets (Linux) — whose name
+/// starts with a NUL byte and is matched verbatim — would gain a tail of NUL
+/// bytes, which breaks interoperability with every other peer.
+///
+/// We follow the same convention as Go and the Linux unix(7) man page:
+///   - pathname socket: offsetof(path) + strlen(path) + 1  (NUL terminated)
+///   - abstract socket: offsetof(path) + name length       (no terminator)
+///
+/// `UnixAddress` doesn't store the original name length, so for abstract
+/// sockets we recover it by trimming the trailing NUL padding that init() left
+/// behind. This can't represent an abstract name that intentionally ends in NUL
+/// bytes, but such names don't occur in practice.
+fn getUnixSockAddrLen(un: *const os.net.sockaddr.un) os.net.socklen_t {
+    const path_off = @offsetOf(os.net.sockaddr.un, "path");
+    // The abstract namespace is Linux-only: only there does a leading NUL select
+    // an abstract (or unnamed/autobind) name whose length must exclude the
+    // trailing NUL padding. Everywhere else a name is always a pathname.
+    if (builtin.os.tag == .linux and un.path[0] == 0) {
+        var len = un.path.len;
+        while (len > 0 and un.path[len - 1] == 0) len -= 1;
+        return @intCast(path_off + len);
+    }
+    // Pathname socket: NUL-terminated string; the terminator is part of the length.
+    return @intCast(path_off + std.mem.sliceTo(&un.path, 0).len + 1);
 }
 
 pub const IpAddress = extern union {
@@ -660,7 +691,20 @@ pub const UnixAddress = extern union {
     pub fn format(self: UnixAddress, w: *std.Io.Writer) std.Io.Writer.Error!void {
         if (!has_unix_sockets) unreachable;
         switch (self.any.family) {
-            os.net.AF.UNIX => try w.writeAll(std.mem.sliceTo(&self.un.path, 0)),
+            os.net.AF.UNIX => {
+                // Abstract sockets (Linux) start with a NUL byte, so sliceTo()
+                // would stop immediately and print nothing. Render the leading
+                // NUL as '@' (the ss(8)/Go convention) and emit the rest of the
+                // name, which has no terminator — see getUnixSockAddrLen().
+                if (builtin.os.tag == .linux and self.un.path[0] == 0) {
+                    var len = self.un.path.len;
+                    while (len > 0 and self.un.path[len - 1] == 0) len -= 1;
+                    try w.writeByte('@');
+                    if (len > 1) try w.writeAll(self.un.path[1..len]);
+                } else {
+                    try w.writeAll(std.mem.sliceTo(&self.un.path, 0));
+                }
+            },
             else => unreachable,
         }
     }
@@ -2030,6 +2074,51 @@ test "UnixAddress: init" {
     try std.testing.expectEqual(os.net.AF.UNIX, addr.any.family);
 }
 
+test "getSockAddrLen: unix pathname includes NUL terminator" {
+    if (!has_unix_sockets) return error.SkipZigTest;
+
+    const path_off = @offsetOf(os.net.sockaddr.un, "path");
+    const path = "/tmp/zio-test.sock";
+
+    const addr = try UnixAddress.init(path);
+    // Pathname sockets are NUL-terminated, so the length covers the string plus
+    // the terminating NUL.
+    try std.testing.expectEqual(path_off + path.len + 1, getSockAddrLen(&addr.any));
+}
+
+test "getSockAddrLen: unix abstract has no trailing padding" {
+    if (!has_unix_sockets) return error.SkipZigTest;
+    // The abstract namespace is a Linux-specific extension.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const path_off = @offsetOf(os.net.sockaddr.un, "path");
+    // Abstract names start with a NUL byte and are matched verbatim. The length
+    // must cover exactly the name (leading NUL + the bytes after it) with no
+    // terminator and no trailing zero padding.
+    const name = "\x00zio-test-abstract";
+
+    const addr = try UnixAddress.init(name);
+    try std.testing.expectEqual(path_off + name.len, getSockAddrLen(&addr.any));
+}
+
+test "UnixAddress: format" {
+    if (!has_unix_sockets) return error.SkipZigTest;
+
+    var buf: [64]u8 = undefined;
+
+    // Pathname socket prints the path as-is.
+    {
+        const addr = try UnixAddress.init("/tmp/zio-test.sock");
+        try std.testing.expectEqualStrings("/tmp/zio-test.sock", try std.fmt.bufPrint(&buf, "{f}", .{addr}));
+    }
+
+    // Abstract socket renders its leading NUL as '@' (Linux only).
+    if (builtin.os.tag == .linux) {
+        const addr = try UnixAddress.init("\x00zio-test-abstract");
+        try std.testing.expectEqualStrings("@zio-test-abstract", try std.fmt.bufPrint(&buf, "{f}", .{addr}));
+    }
+}
+
 pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
     const Test = struct {
         pub fn serverFn(server: Server) !void {
@@ -2158,6 +2247,18 @@ test "UnixAddress: listen/accept/connect/read/write" {
 
     var write_buffer: [32]u8 = undefined;
     const addr = try UnixAddress.init(path);
+    try checkListen(addr, UnixAddress.ListenOptions{}, &write_buffer);
+}
+
+test "UnixAddress: listen/accept/connect/read/write abstract" {
+    if (!has_unix_sockets) return error.SkipZigTest;
+    // The abstract namespace is a Linux-specific extension.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    // No filesystem entry to clean up: abstract sockets vanish when the last
+    // reference is closed. The leading NUL selects the abstract namespace.
+    var write_buffer: [32]u8 = undefined;
+    const addr = try UnixAddress.init("\x00zio-test-abstract-stream");
     try checkListen(addr, UnixAddress.ListenOptions{}, &write_buffer);
 }
 
