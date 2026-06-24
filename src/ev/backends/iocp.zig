@@ -4,6 +4,8 @@ const windows = @import("../../os/windows.zig");
 const net = @import("../../os/net.zig");
 const fs = @import("../../os/fs.zig");
 const Duration = @import("../../time.zig").Duration;
+const Clock = @import("../../time.zig").Clock;
+const time = @import("../../os/time.zig");
 const common = @import("common.zig");
 const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
@@ -172,6 +174,9 @@ pub const capabilities: BackendCapabilities = .{
     .process_wait = true,
     // Zero-copy file-to-socket transfer via the TransmitFile extension.
     .net_send_file = true,
+    // Boot/real deadlines are armed via per-loop waitable timers whose
+    // completion-routine APC fires during the alertable poll wait.
+    .native_wall_timers = true,
 };
 
 // Backend-specific data stored in Completion.internal
@@ -323,6 +328,17 @@ entries: []windows.OVERLAPPED_ENTRY,
 queue_size: u16,
 thread_handle: windows.HANDLE,
 
+// Native real (wall-clock) timer. Windows has no boot clock distinct from the
+// awake clock (both are QPC), so boot timers ride the awake poll timeout and
+// only `.real` is armed natively. This one-shot waitable timer's completion
+// routine sets `real_fired` via an APC delivered during the alertable poll;
+// `real_armed` tracks the armed absolute deadline so syncWallTimer can skip
+// redundant re-arms. Both are touched only on the loop thread (the APC also
+// runs there), so no synchronization is needed.
+real_timer: windows.HANDLE = windows.INVALID_HANDLE_VALUE,
+real_armed: ?u64 = null,
+real_fired: bool = false,
+
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
     // Acquire reference to shared state (creates IOCP handle if first loop)
     try shared_state.acquire();
@@ -346,7 +362,7 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
     if (dup_result == .FALSE) {
         return error.Unexpected;
     }
-    errdefer windows.CloseHandle(thread_handle);
+    errdefer _ = windows.CloseHandle(thread_handle);
 
     self.* = .{
         .allocator = allocator,
@@ -355,9 +371,23 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
         .queue_size = queue_size,
         .thread_handle = thread_handle,
     };
+
+    // Create the per-loop real (wall-clock) waitable timer. Prefer the
+    // high-resolution variant (Windows 10 1803+) and fall back to a coarse timer
+    // when the flag is rejected on older systems.
+    self.real_timer = windows.CreateWaitableTimerExW(null, null, windows.CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, windows.TIMER_ALL_ACCESS) orelse
+        windows.CreateWaitableTimerExW(null, null, 0, windows.TIMER_ALL_ACCESS) orelse
+        return error.Unexpected;
 }
 
 pub fn deinit(self: *Self) void {
+    // Cancel and close the real-clock waitable timer. Closing an armed timer
+    // implicitly cancels it; CancelWaitableTimer first keeps it explicit.
+    if (self.real_timer != windows.INVALID_HANDLE_VALUE) {
+        _ = windows.CancelWaitableTimer(self.real_timer);
+        _ = windows.CloseHandle(self.real_timer);
+    }
+
     // Close thread handle
     _ = windows.CloseHandle(self.thread_handle);
 
@@ -385,6 +415,18 @@ pub fn postProcessFileHandle(self: *Self, handle: fs.fd_t) !void {
 fn wakeAPC(dwParam: windows.ULONG_PTR) callconv(.winapi) void {
     _ = dwParam;
     // No-op - just waking up the thread
+}
+
+// Completion routine for the real (wall-clock) waitable timer. Delivered as an
+// APC on the loop thread during the alertable poll wait; the arg is a pointer to
+// the `real_fired` flag, which poll consumes to report a timeout.
+fn wallTimerAPC(arg: ?*anyopaque, low: windows.DWORD, high: windows.DWORD) callconv(.winapi) void {
+    _ = low;
+    _ = high;
+    if (arg) |p| {
+        const fired: *bool = @ptrCast(@alignCast(p));
+        fired.* = true;
+    }
 }
 
 pub fn wake(self: *Self, state: *LoopState) void {
@@ -2021,6 +2063,54 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
     }
 }
 
+/// 100-ns ticks between the Windows epoch (1601-01-01) and the Unix epoch
+/// (1970-01-01); used to map a `.real` deadline to an absolute FILETIME.
+const filetime_epoch_diff_ticks: u64 = 11644473600 * (time.ns_per_s / 100);
+
+/// Arm/update/disarm the real (wall-clock) waitable timer to an absolute
+/// deadline (Unix ns; null = disarm). Returns false only if it couldn't arm a
+/// pending deadline, so the loop folds real into the capped poll timeout.
+/// SetWaitableTimer on an already-armed timer resets it, so a re-arm needs no
+/// explicit cancel. Boot is never passed here — on Windows it shares the awake
+/// heap (see `boot_distinct_from_awake`).
+pub fn syncWallTimer(self: *Self, clock: Clock, deadline: ?u64) bool {
+    std.debug.assert(clock == .real);
+    if (self.real_armed == deadline) return true; // unchanged (incl. both null)
+
+    if (deadline) |d| {
+        // A positive LARGE_INTEGER due time (100-ns units) is an absolute
+        // FILETIME: map the Unix-ns deadline so the kernel re-evaluates it
+        // across system-clock steps, matching the .real epoch.
+        const due: windows.LARGE_INTEGER = @intCast(d / 100 + filetime_epoch_diff_ticks);
+        if (windows.SetWaitableTimer(self.real_timer, &due, 0, wallTimerAPC, &self.real_fired, windows.FALSE) == windows.FALSE) {
+            log.err("SetWaitableTimer failed: {}", .{windows.GetLastError()});
+            // Couldn't arm: forget so the next scan retries, and report failure
+            // so the loop folds real into the capped poll timeout.
+            self.real_armed = null;
+            return false;
+        }
+    } else {
+        // Disarm. A failed cancel leaves the old one-shot armed; its APC would
+        // wake one extra poll harmlessly, so we still report success.
+        if (windows.CancelWaitableTimer(self.real_timer) == windows.FALSE) {
+            log.err("CancelWaitableTimer failed: {}", .{windows.GetLastError()});
+        }
+    }
+    self.real_armed = deadline;
+    return true;
+}
+
+/// Drain the real-timer fire flag set by `wallTimerAPC`. Returns true if the
+/// timer fired, which poll reports as a timeout so the loop re-runs checkTimers.
+/// A fired one-shot is gone, so clear `real_armed` to force a re-arm for the
+/// next deadline on the following scan.
+fn consumeWallFired(self: *Self) bool {
+    if (!self.real_fired) return false;
+    self.real_fired = false;
+    self.real_armed = null;
+    return true;
+}
+
 pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
     const timeout_ms: u32 = std.math.cast(u32, timeout.toMilliseconds()) orelse std.math.maxInt(u32);
 
@@ -2039,11 +2129,15 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         switch (err) {
             .WAIT_TIMEOUT => {
                 log.debug("poll() timed out", .{});
+                _ = self.consumeWallFired();
                 return true; // Timed out
             },
             WAIT_IO_COMPLETION => {
+                // Woken by an APC: either wake() or a wall-timer fire. Report a
+                // timeout only when a boot/real timer actually fired so the loop
+                // re-runs checkTimers; a bare wake() returns false.
                 log.debug("poll() woken by APC", .{});
-                return false; // Woken by APC (wake() call)
+                return self.consumeWallFired();
             },
             else => {
                 log.err("GetQueuedCompletionStatusEx failed: {}", .{err});
@@ -2057,5 +2151,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         self.processCompletion(state, &entry);
     }
 
-    return false; // Did not timeout
+    // Completions preempt APC delivery, so a pending wall-timer APC may not have
+    // run yet; consume whatever did fire and report it as a timeout.
+    return self.consumeWallFired();
 }

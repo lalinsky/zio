@@ -369,6 +369,40 @@ pub extern "kernel32" fn QueueUserAPC(
     dwData: ULONG_PTR,
 ) callconv(.winapi) DWORD;
 
+// Waitable timer functions. The completion routine is delivered as a user-mode
+// APC to the thread that armed the timer, so it runs while that thread sits in
+// an alertable wait (e.g. GetQueuedCompletionStatusEx with fAlertable=TRUE).
+pub const PTIMERAPCROUTINE = *const fn (
+    lpArgToCompletionRoutine: ?*anyopaque,
+    dwTimerLowValue: DWORD,
+    dwTimerHighValue: DWORD,
+) callconv(.winapi) void;
+
+/// High-resolution timer flag for CreateWaitableTimerExW (Windows 10 1803+).
+pub const CREATE_WAITABLE_TIMER_HIGH_RESOLUTION: DWORD = 0x00000002;
+/// Full access rights for a waitable timer object.
+pub const TIMER_ALL_ACCESS: DWORD = 0x1F0003;
+
+pub extern "kernel32" fn CreateWaitableTimerExW(
+    lpTimerAttributes: ?*SECURITY_ATTRIBUTES,
+    lpTimerName: ?LPCWSTR,
+    dwFlags: DWORD,
+    dwDesiredAccess: DWORD,
+) callconv(.winapi) ?HANDLE;
+
+pub extern "kernel32" fn SetWaitableTimer(
+    hTimer: HANDLE,
+    lpDueTime: *const LARGE_INTEGER,
+    lPeriod: i32,
+    pfnCompletionRoutine: ?PTIMERAPCROUTINE,
+    lpArgToCompletionRoutine: ?*anyopaque,
+    fResume: BOOL,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn CancelWaitableTimer(
+    hTimer: HANDLE,
+) callconv(.winapi) BOOL;
+
 pub extern "kernel32" fn Sleep(
     dwMilliseconds: DWORD,
 ) callconv(.winapi) void;

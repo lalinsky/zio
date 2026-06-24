@@ -15,6 +15,19 @@ const is_darwin = switch (builtin.os.tag) {
     else => false,
 };
 
+/// Whether `now(.boot)` and `now(.awake)` resolve to different underlying
+/// clocks. Derived from the same mapping `now()` uses, so it can't drift from
+/// it: on Windows both clocks read QPC; elsewhere both go through `clock_gettime`
+/// and differ only when `posixClockId` maps them to different ids — Linux
+/// (BOOTTIME vs MONOTONIC) and Darwin (MONOTONIC_RAW vs UPTIME_RAW). When false
+/// (the BSDs, etc.) the values are identical, so the loop keeps boot timers in
+/// the awake heap: there is no suspend difference to observe, and they need
+/// neither a separate heap nor the poll-timeout cap.
+pub const boot_distinct_from_awake = switch (builtin.os.tag) {
+    .windows => false,
+    else => posixClockId(.boot) != posixClockId(.awake),
+};
+
 /// Map our logical clock to the OS clock id, or null if this platform's
 /// `clockid_t` does not expose it (only the CPU-time clocks can be missing,
 /// e.g. on SerenityOS).
