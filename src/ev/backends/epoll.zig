@@ -193,7 +193,9 @@ pub fn syncWallTimer(self: *Self, clock: Clock, deadline: ?u64) bool {
         },
         else => |err| {
             log.err("timerfd_settime failed: {}", .{err});
-            return false;
+            // Only signal failure when a pending deadline couldn't be armed; a
+            // failed disarm has no pending deadline to fold into the poll cap.
+            return deadline == null;
         },
     }
 }
