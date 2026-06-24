@@ -490,12 +490,20 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
             continue;
         }
 
-        // A boot/real wall timer fired (EV_ONESHOT, so the kernel removed it):
-        // forget the armed deadline and report a timeout below so the loop
-        // re-runs checkTimers and fires the due timers.
+        // A boot/real wall timer event. Forget the armed deadline in both the
+        // fired and the failed-registration case: on a successful one-shot fire
+        // the kernel already removed it (EV_ONESHOT), and on EV_ERROR the ADD
+        // never stuck, so the stored deadline is stale either way — clearing it
+        // lets syncWallTimer re-queue the ADD on the next scan.
         if (event.filter == std.c.EVFILT.TIMER) {
             if (event.ident == WALL_BOOT_IDENT) self.wall_armed[0] = null;
             if (event.ident == WALL_REAL_IDENT) self.wall_armed[1] = null;
+            // EV_ERROR surfaces a changelist (ADD/DELETE) failure with errno in
+            // event.data; no timer actually fired, so don't report a timeout.
+            if (event.flags & EV_ERROR != 0) {
+                log.err("kqueue: EVFILT_TIMER registration failed (ident={}): errno {}", .{ event.ident, event.data });
+                continue;
+            }
             wall_fired = true;
             continue;
         }
