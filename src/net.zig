@@ -197,9 +197,40 @@ fn getSockAddrLen(addr: *const os.net.sockaddr) os.net.socklen_t {
     return switch (addr.family) {
         os.net.AF.INET => @sizeOf(os.net.sockaddr.in),
         os.net.AF.INET6 => @sizeOf(os.net.sockaddr.in6),
-        os.net.AF.UNIX => @sizeOf(os.net.sockaddr.un),
+        os.net.AF.UNIX => if (has_unix_sockets) getUnixSockAddrLen(@ptrCast(addr)) else unreachable,
         else => unreachable,
     };
+}
+
+/// Compute the address length to pass to bind()/connect() for a Unix socket.
+///
+/// The kernel derives the socket name from this length, so it must cover
+/// exactly the meaningful bytes. Using the full struct size folds the trailing
+/// zero padding into the name. For pathname sockets that's harmless (the kernel
+/// stops at the NUL terminator), but abstract sockets (Linux) — whose name
+/// starts with a NUL byte and is matched verbatim — would gain a tail of NUL
+/// bytes, which breaks interoperability with every other peer.
+///
+/// We follow the same convention as Go and the Linux unix(7) man page:
+///   - pathname socket: offsetof(path) + strlen(path) + 1  (NUL terminated)
+///   - abstract socket: offsetof(path) + name length       (no terminator)
+///
+/// `UnixAddress` doesn't store the original name length, so for abstract
+/// sockets we recover it by trimming the trailing NUL padding that init() left
+/// behind. This can't represent an abstract name that intentionally ends in NUL
+/// bytes, but such names don't occur in practice.
+fn getUnixSockAddrLen(un: *const os.net.sockaddr.un) os.net.socklen_t {
+    const path_off = @offsetOf(os.net.sockaddr.un, "path");
+    // The abstract namespace is Linux-only: only there does a leading NUL select
+    // an abstract (or unnamed/autobind) name whose length must exclude the
+    // trailing NUL padding. Everywhere else a name is always a pathname.
+    if (builtin.os.tag == .linux and un.path[0] == 0) {
+        var len = un.path.len;
+        while (len > 0 and un.path[len - 1] == 0) len -= 1;
+        return @intCast(path_off + len);
+    }
+    // Pathname socket: NUL-terminated string; the terminator is part of the length.
+    return @intCast(path_off + std.mem.sliceTo(&un.path, 0).len + 1);
 }
 
 pub const IpAddress = extern union {
@@ -660,7 +691,20 @@ pub const UnixAddress = extern union {
     pub fn format(self: UnixAddress, w: *std.Io.Writer) std.Io.Writer.Error!void {
         if (!has_unix_sockets) unreachable;
         switch (self.any.family) {
-            os.net.AF.UNIX => try w.writeAll(std.mem.sliceTo(&self.un.path, 0)),
+            os.net.AF.UNIX => {
+                // Abstract sockets (Linux) start with a NUL byte, so sliceTo()
+                // would stop immediately and print nothing. Render the leading
+                // NUL as '@' (the ss(8)/Go convention) and emit the rest of the
+                // name, which has no terminator — see getUnixSockAddrLen().
+                if (builtin.os.tag == .linux and self.un.path[0] == 0) {
+                    var len = self.un.path.len;
+                    while (len > 0 and self.un.path[len - 1] == 0) len -= 1;
+                    try w.writeByte('@');
+                    if (len > 1) try w.writeAll(self.un.path[1..len]);
+                } else {
+                    try w.writeAll(std.mem.sliceTo(&self.un.path, 0));
+                }
+            },
             else => unreachable,
         }
     }
@@ -748,40 +792,40 @@ pub const Address = extern union {
         };
     }
 
-    /// Convert sockaddr to IpAddress from raw bytes.
-    /// This properly handles IPv4 and IPv6 addresses without alignment issues.
-    fn fromStorageIp(data: []const u8) IpAddress {
-        const sockaddr: *align(1) const os.net.sockaddr = @ptrCast(data.ptr);
-        return switch (sockaddr.family) {
-            os.net.AF.INET => blk: {
-                var addr: IpAddress = .{ .in = undefined };
-                @memcpy(std.mem.asBytes(&addr.in), data[0..@sizeOf(std.net.Ip4Address)]);
-                break :blk addr;
+    /// Build an Address from a raw OS sockaddr and the length the kernel
+    /// reported, as returned by accept(), recvfrom(), recvmsg(), etc. This is
+    /// the single path for turning kernel-provided address bytes into an
+    /// Address.
+    ///
+    /// For Unix sockets it zero-fills the name buffer and copies only the bytes
+    /// the kernel actually wrote, so the trailing padding is always well-defined
+    /// and later format()/getSockAddrLen() never read uninitialized memory. A
+    /// length too short to even hold the address family means the kernel didn't
+    /// provide an address (e.g. recvmsg on a connected socket); report that as
+    /// an unspecified address rather than reading garbage.
+    pub fn fromPosix(addr: *const os.net.sockaddr, len: os.net.socklen_t) Address {
+        if (len < @sizeOf(@FieldType(os.net.sockaddr, "family"))) return .{ .ip = .unspecified(0) };
+        switch (addr.family) {
+            os.net.AF.INET => {
+                if (len < @sizeOf(os.net.sockaddr.in)) return .{ .ip = .unspecified(0) };
+                return .{ .ip = .initPosix(addr, len) };
             },
-            os.net.AF.INET6 => blk: {
-                var addr: IpAddress = .{ .in6 = undefined };
-                @memcpy(std.mem.asBytes(&addr.in6), data[0..@sizeOf(std.net.Ip6Address)]);
-                break :blk addr;
+            os.net.AF.INET6 => {
+                if (len < @sizeOf(os.net.sockaddr.in6)) return .{ .ip = .unspecified(0) };
+                return .{ .ip = .initPosix(addr, len) };
             },
-            else => unreachable,
-        };
-    }
-
-    /// Convert sockaddr to Address from raw bytes.
-    /// This properly handles IPv4, IPv6, and Unix socket addresses without alignment issues.
-    fn fromStorage(data: []const u8) Address {
-        const sockaddr: *align(1) const os.net.sockaddr = @ptrCast(data.ptr);
-        return switch (sockaddr.family) {
-            os.net.AF.INET, os.net.AF.INET6 => .{ .ip = fromStorageIp(data) },
-            os.net.AF.UNIX => blk: {
+            os.net.AF.UNIX => {
                 if (!has_unix_sockets) unreachable;
-                var addr: Address = .{ .unix = .{ .un = undefined } };
-                const copy_len = @min(data.len, @sizeOf(os.net.sockaddr.un));
-                @memcpy(std.mem.asBytes(&addr.unix.un)[0..copy_len], data[0..copy_len]);
-                break :blk addr;
+                const path_off = @offsetOf(os.net.sockaddr.un, "path");
+                var result: Address = .{ .unix = .{ .un = .{ .family = os.net.AF.UNIX, .path = @splat(0) } } };
+                const total: usize = @intCast(len);
+                const name_len = if (total > path_off) @min(total - path_off, result.unix.un.path.len) else 0;
+                const src: *align(1) const os.net.sockaddr.un = @ptrCast(addr);
+                @memcpy(result.unix.un.path[0..name_len], src.path[0..name_len]);
+                return result;
             },
             else => unreachable,
-        };
+        }
     }
 
     pub const ConnectOptions = struct {
@@ -997,13 +1041,13 @@ pub const Socket = struct {
     /// Receives a datagram from the socket, returning the sender's address and bytes read.
     /// Used for UDP and other datagram-based protocols.
     pub fn receiveFrom(self: Socket, buf: []u8, timeout: Timeout) !ReceiveFromResult {
-        var storage: [1]os.iovec = undefined;
-        var result: ReceiveFromResult = undefined;
-        var peer_addr_len: os.net.socklen_t = @sizeOf(@TypeOf(result.from));
-        var op = ev.NetRecvFrom.init(self.handle, .fromSlice(buf, &storage), .{}, &result.from.any, &peer_addr_len);
+        var iovecs: [1]os.iovec = undefined;
+        var peer_addr: Address = undefined;
+        var peer_addr_len: os.net.socklen_t = @sizeOf(Address);
+        var op = ev.NetRecvFrom.init(self.handle, .fromSlice(buf, &iovecs), .{}, &peer_addr.any, &peer_addr_len);
         try timedWaitForIo(&op.c, timeout);
-        result.len = try op.getResult();
-        return result;
+        const len = try op.getResult();
+        return .{ .from = .fromPosix(&peer_addr.any, peer_addr_len), .len = len };
     }
 
     /// Sends a datagram to the specified address.
@@ -1025,14 +1069,16 @@ pub const Socket = struct {
         control: ?[]u8,
         timeout: Timeout,
     ) !ReceiveMsgResult {
-        var result: ReceiveMsgResult = undefined;
+        var peer_addr: Address = undefined;
         var addr_len: os.net.socklen_t = @sizeOf(Address);
-        var op = ev.NetRecvMsg.init(self.handle, buf, .{}, &result.from.any, &addr_len, control);
+        var op = ev.NetRecvMsg.init(self.handle, buf, .{}, &peer_addr.any, &addr_len, control);
         try timedWaitForIo(&op.c, timeout);
         const os_result = try op.getResult();
-        result.len = os_result.len;
-        result.flags = os_result.flags;
-        return result;
+        return .{
+            .from = .fromPosix(&peer_addr.any, addr_len),
+            .len = os_result.len,
+            .flags = os_result.flags,
+        };
     }
 
     /// Sends a message with optional destination address and ancillary data (control messages).
@@ -1074,7 +1120,7 @@ pub const Server = struct {
         var op = ev.NetAccept.init(self.socket.handle, &peer_addr.any, &peer_addr_len);
         try timedWaitForIo(&op.c, options.timeout);
         const handle = try op.getResult();
-        return .{ .socket = .{ .handle = handle, .address = peer_addr } };
+        return .{ .socket = .{ .handle = handle, .address = .fromPosix(&peer_addr.any, peer_addr_len) } };
     }
 
     pub fn shutdown(self: Server, how: ShutdownHow) !void {
@@ -2030,6 +2076,53 @@ test "UnixAddress: init" {
     try std.testing.expectEqual(os.net.AF.UNIX, addr.any.family);
 }
 
+test "getSockAddrLen: unix pathname includes NUL terminator" {
+    if (!has_unix_sockets) return error.SkipZigTest;
+
+    const path_off = @offsetOf(os.net.sockaddr.un, "path");
+    const path = "/tmp/zio-test.sock";
+
+    const addr = try UnixAddress.init(path);
+    // Pathname sockets are NUL-terminated, so the length covers the string plus
+    // the terminating NUL.
+    const expected: os.net.socklen_t = @intCast(path_off + path.len + 1);
+    try std.testing.expectEqual(expected, getSockAddrLen(&addr.any));
+}
+
+test "getSockAddrLen: unix abstract has no trailing padding" {
+    if (!has_unix_sockets) return error.SkipZigTest;
+    // The abstract namespace is a Linux-specific extension.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const path_off = @offsetOf(os.net.sockaddr.un, "path");
+    // Abstract names start with a NUL byte and are matched verbatim. The length
+    // must cover exactly the name (leading NUL + the bytes after it) with no
+    // terminator and no trailing zero padding.
+    const name = "\x00zio-test-abstract";
+
+    const addr = try UnixAddress.init(name);
+    const expected: os.net.socklen_t = @intCast(path_off + name.len);
+    try std.testing.expectEqual(expected, getSockAddrLen(&addr.any));
+}
+
+test "UnixAddress: format" {
+    if (!has_unix_sockets) return error.SkipZigTest;
+
+    var buf: [64]u8 = undefined;
+
+    // Pathname socket prints the path as-is.
+    {
+        const addr = try UnixAddress.init("/tmp/zio-test.sock");
+        try std.testing.expectEqualStrings("/tmp/zio-test.sock", try std.fmt.bufPrint(&buf, "{f}", .{addr}));
+    }
+
+    // Abstract socket renders its leading NUL as '@' (Linux only).
+    if (builtin.os.tag == .linux) {
+        const addr = try UnixAddress.init("\x00zio-test-abstract");
+        try std.testing.expectEqualStrings("@zio-test-abstract", try std.fmt.bufPrint(&buf, "{f}", .{addr}));
+    }
+}
+
 pub fn checkListen(addr: anytype, options: anytype, write_buffer: []u8) !void {
     const Test = struct {
         pub fn serverFn(server: Server) !void {
@@ -2158,6 +2251,18 @@ test "UnixAddress: listen/accept/connect/read/write" {
 
     var write_buffer: [32]u8 = undefined;
     const addr = try UnixAddress.init(path);
+    try checkListen(addr, UnixAddress.ListenOptions{}, &write_buffer);
+}
+
+test "UnixAddress: listen/accept/connect/read/write abstract" {
+    if (!has_unix_sockets) return error.SkipZigTest;
+    // The abstract namespace is a Linux-specific extension.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    // No filesystem entry to clean up: abstract sockets vanish when the last
+    // reference is closed. The leading NUL selects the abstract namespace.
+    var write_buffer: [32]u8 = undefined;
+    const addr = try UnixAddress.init("\x00zio-test-abstract-stream");
     try checkListen(addr, UnixAddress.ListenOptions{}, &write_buffer);
 }
 
