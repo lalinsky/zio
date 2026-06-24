@@ -872,8 +872,15 @@ pub const Loop = struct {
     };
 
     fn checkTimers(self: *Loop) TimerCheckResult {
+        const native_wall = Backend.capabilities.native_wall_timers;
+
         var fired = false;
         var next_timeout: ?Duration = null;
+        // For native boot/real clocks: the earliest pending absolute deadline to
+        // hand the backend, plus its capped remaining (computed during the scan
+        // under the lock) to fold into the poll timeout if the backend can't arm.
+        var wall_deadline: [wall_clock_count]?u64 = .{ null, null, null };
+        var wall_remaining: [wall_clock_count]Duration = .{ .zero, .zero, .zero };
 
         // Advance the scan once and refresh the awake snapshot; this also
         // invalidates the lazily-cached boot/real values for this scan.
@@ -901,14 +908,26 @@ pub const Loop = struct {
                 while (self.state.timers[idx].peek()) |timer| {
                     const now_clock = self.state.nowFor(clock);
                     if (timer.deadline.value > now_clock.value) {
-                        var remaining = now_clock.durationTo(timer.deadline);
-                        // boot/real can't be tracked by the awake poll clock, so
-                        // bound the wait to re-evaluate them across suspend/steps.
-                        if (clock != .awake and remaining.value > self.wall_clock_cap.value) {
-                            remaining = self.wall_clock_cap;
-                        }
-                        if (next_timeout == null or remaining.value < next_timeout.?.value) {
-                            next_timeout = remaining;
+                        if (native_wall and clock != .awake) {
+                            // Backend arms this clock natively; record its
+                            // earliest deadline, plus a capped remaining to fold
+                            // only if the backend later reports it couldn't arm.
+                            wall_deadline[idx] = timer.deadline.value;
+                            var remaining = now_clock.durationTo(timer.deadline);
+                            if (remaining.value > self.wall_clock_cap.value) {
+                                remaining = self.wall_clock_cap;
+                            }
+                            wall_remaining[idx] = remaining;
+                        } else {
+                            var remaining = now_clock.durationTo(timer.deadline);
+                            // boot/real can't be tracked by the awake poll clock,
+                            // so bound the wait to re-evaluate across suspend/steps.
+                            if (clock != .awake and remaining.value > self.wall_clock_cap.value) {
+                                remaining = self.wall_clock_cap;
+                            }
+                            if (next_timeout == null or remaining.value < next_timeout.?.value) {
+                                next_timeout = remaining;
+                            }
                         }
                         break;
                     }
@@ -928,6 +947,21 @@ pub const Loop = struct {
 
                 // If we didn't fill the batch, we're done with this domain
                 if (batch_count < batch.len) break;
+            }
+        }
+
+        // Hand each boot/real minimum to the backend's native wall-clock timer.
+        // syncWallTimer returns false only when it couldn't arm a pending
+        // deadline (e.g. SQ full); then fold that clock's capped remaining into
+        // the poll timeout so it's still re-evaluated within the cap.
+        if (comptime native_wall) {
+            for ([_]usize{ 1, 2 }) |idx| {
+                const clock = indexClock(idx);
+                if (self.backend.syncWallTimer(clock, wall_deadline[idx])) continue;
+                const remaining = wall_remaining[idx];
+                if (next_timeout == null or remaining.value < next_timeout.?.value) {
+                    next_timeout = remaining;
+                }
             }
         }
 
