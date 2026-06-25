@@ -332,22 +332,24 @@ pub const GetRandomError = @import("base.zig").GetRandomError;
 pub fn getrandom(buffer: []u8) (GetRandomError || syscall_cancel.Cancelable)!void {
     switch (builtin.os.tag) {
         .linux => {
-            const sc = try syscall_cancel.Syscall.begin();
             var i: usize = 0;
             while (i < buffer.len) {
+                const sc = try syscall_cancel.Syscall.begin();
                 const rc = system.getrandom(buffer[i..].ptr, buffer.len - i, 0);
                 switch (errno(rc)) {
-                    .SUCCESS => i += rc,
-                    // EINTR is either a cancellation request (→ Canceled) or a
-                    // spurious wake; checkCancel decides and finalizes the token.
+                    .SUCCESS => {
+                        sc.finish();
+                        i += rc;
+                    },
+                    // EINTR: finish the region (blocked→idle or blocked_canceling→canceled)
+                    // and retry. If the token was canceled, the next begin() surfaces it.
                     .INTR => {
-                        try sc.checkCancel();
+                        sc.finish();
                         continue;
                     },
                     else => return sc.fail(error.EntropyUnavailable),
                 }
             }
-            sc.finish();
         },
         else => {
             // BSD / macOS: arc4random_buf is the platform-recommended CSPRNG

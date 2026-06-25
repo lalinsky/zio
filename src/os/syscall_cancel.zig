@@ -24,6 +24,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const posix = @import("posix.zig");
+const thread = @import("thread.zig");
 const time = @import("time.zig");
 const Duration = @import("../time.zig").Duration;
 
@@ -202,7 +203,11 @@ pub const Syscall = struct {
 
 const sig = if (enabled) std.c.SIG.URG else {};
 
-var install_count: std.atomic.Value(usize) = .init(0);
+// A mutex serializes the entire (count-check + prev_action-read/write + sigaction)
+// critical section so that concurrent install/uninstall calls cannot corrupt
+// prev_action or double-install/uninstall the handler.
+var install_mutex: thread.Mutex = .init();
+var install_count: usize = 0;
 var prev_action: posix.Sigaction = undefined;
 
 /// Install the process-global no-op `SIGURG` handler (refcounted; safe to call
@@ -211,19 +216,29 @@ var prev_action: posix.Sigaction = undefined;
 /// *without* `SA_RESTART`.
 pub fn installHandler() void {
     if (!enabled) return;
-    if (install_count.fetchAdd(1, .acq_rel) != 0) return;
+    install_mutex.lock();
+    defer install_mutex.unlock();
+    if (install_count != 0) {
+        install_count += 1;
+        return;
+    }
     var act: posix.Sigaction = .{
         .handler = .{ .handler = noopHandler },
         .mask = posix.sigemptyset(),
         .flags = 0, // no SA_RESTART: interrupted syscalls must return EINTR
     };
     posix.sigaction(posix.SIG.URG, &act, &prev_action);
+    install_count = 1;
 }
 
 /// Restore the previous `SIGURG` disposition once the last user uninstalls.
 pub fn uninstallHandler() void {
     if (!enabled) return;
-    if (install_count.fetchSub(1, .acq_rel) != 1) return;
+    install_mutex.lock();
+    defer install_mutex.unlock();
+    std.debug.assert(install_count > 0);
+    install_count -= 1;
+    if (install_count != 0) return;
     posix.sigaction(posix.SIG.URG, &prev_action, null);
 }
 
@@ -249,6 +264,7 @@ test "syscall_cancel: signal interrupts a blocking read" {
         token: *Token,
         read_fd: std.c.fd_t,
         result: anyerror!void = undefined,
+        ready: std.atomic.Value(bool) = .init(false),
 
         fn run(self: *@This()) void {
             self.token.enter();
@@ -256,6 +272,8 @@ test "syscall_cancel: signal interrupts a blocking read" {
 
             self.result = blk: {
                 const sc = Syscall.begin() catch |e| break :blk e;
+                // Signal that we are inside the cancelable region, just before read().
+                self.ready.store(true, .release);
                 var buf: [1]u8 = undefined;
                 while (true) {
                     const rc = std.c.read(self.read_fd, &buf, buf.len);
@@ -273,17 +291,16 @@ test "syscall_cancel: signal interrupts a blocking read" {
     };
 
     var w: Worker = .{ .token = &token, .read_fd = fds[0] };
-    const thread = try std.Thread.spawn(.{}, Worker.run, .{&w});
+    const t = try std.Thread.spawn(.{}, Worker.run, .{&w});
 
-    // Give the worker time to reach the blocking read, then cancel once and drive
-    // the resend loop until it acks. If the worker hadn't blocked yet, `cancel()`
-    // returns false and the cancellation surfaces at `begin()`/`checkCancel()`
-    // instead — either way the result is `error.Canceled`.
-    time.sleep(Duration.fromMilliseconds(50));
+    // Wait until the worker has entered the cancelable region (after begin() but
+    // before read()), then cancel. The first signal may land in the tiny
+    // begin()→read() gap, so drive the resend loop until the worker acks.
+    while (!w.ready.load(.acquire)) time.sleep(Duration.fromMicroseconds(1));
     if (token.cancel()) {
         while (token.signal()) time.sleep(Duration.fromMilliseconds(1));
     }
 
-    thread.join();
+    t.join();
     try std.testing.expectError(error.Canceled, w.result);
 }
