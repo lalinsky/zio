@@ -575,6 +575,9 @@ pub const AnyTask = struct {
 /// Bindings nest and shadow: the most recent `set` for a key wins until cleared,
 /// and `clear` may interleave bindings in any order (not just LIFO). All access
 /// is from the owning task only, so it needs no locking.
+///
+/// `scoped(value, func, args)` is a convenience that binds for the duration of a
+/// single call without a caller-managed node; see below.
 pub fn TaskLocal(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -636,11 +639,26 @@ pub fn TaskLocal(comptime T: type) type {
             var cur = task.tls_head;
             while (cur) |n| : (cur = n.next) {
                 if (n.key == key) {
-                    const node: *Node = @fieldParentPtr("base", n);
+                    // `base` is at offset 0 of a `Node`, so the node is really
+                    // Node-aligned even though the chain is typed `*TaskLocalNode`
+                    // (lower alignment on 32-bit targets).
+                    const node: *Node = @alignCast(@fieldParentPtr("base", n));
                     return &node.value;
                 }
             }
             return null;
+        }
+
+        /// Bind `value` for the dynamic extent of `func(args...)`, then restore
+        /// the previous state — the `defer`-free convenience over `set`/`clear`.
+        /// The node lives on the stack, so this allocates nothing, and `func` is
+        /// invoked via `@call` (any comptime-known callable, no fn-pointer
+        /// indirection). Returns whatever `func` returns.
+        pub fn scoped(self: *Self, value: T, func: anytype, args: anytype) @TypeOf(@call(.auto, func, args)) {
+            var node: Node = .unset;
+            self.set(&node, value);
+            defer self.clear(&node);
+            return @call(.auto, func, args);
         }
     };
 }
@@ -871,6 +889,34 @@ test "TaskLocal: bindings are isolated per task and survive yielding" {
     defer h2.cancel();
     try h1.join();
     try h2.join();
+}
+
+test "TaskLocal: scoped binds for the call and restores after" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const S = struct {
+        var tl: TaskLocal(u32) = .{};
+
+        fn inner(addend: u32) u32 {
+            return tl.get().?.* + addend;
+        }
+
+        fn run() !void {
+            try std.testing.expect(tl.get() == null);
+
+            // Value is visible inside the call and the return value flows back.
+            const r = tl.scoped(40, inner, .{2});
+            try std.testing.expectEqual(@as(u32, 42), r);
+
+            // Binding is gone once scoped returns.
+            try std.testing.expect(tl.get() == null);
+        }
+    };
+
+    var h = try rt.spawn(S.run, .{});
+    defer h.cancel();
+    try h.join();
 }
 
 test "TaskLocal: a node is reusable after clear" {
