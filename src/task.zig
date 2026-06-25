@@ -560,8 +560,8 @@ pub const AnyTask = struct {
 ///     var node: @TypeOf(trace_id).Node = .unset;
 ///     trace_id.set(&node, 42);
 ///     defer trace_id.clear(&node);
-///     // trace_id.get() returns *u64 (== 42) here and in any callee,
-///     // across yields and executor migration.
+///     // trace_id.get() returns 42 here and in any callee, across yields
+///     // and executor migration.
 /// }
 /// ```
 ///
@@ -631,9 +631,12 @@ pub fn TaskLocal(comptime T: type) type {
             b.* = .{}; // back to .unset
         }
 
-        /// Pointer to the value bound in the current task (the innermost active
-        /// binding), or null if unbound or called outside a task.
-        pub fn get(self: *Self) ?*T {
+        /// The value bound in the current task (the innermost active binding),
+        /// or null if unbound or called outside a task. Returns a copy — for
+        /// mutable per-task state, bind a pointer (`TaskLocal(*T)`) and mutate
+        /// through it, so the lifetime of the mutable storage is yours and not
+        /// tied to the node.
+        pub fn get(self: *Self) ?T {
             const task = runtime.getCurrentTaskOrNull() orelse return null;
             const key: ?*const anyopaque = self;
             var cur = task.tls_head;
@@ -643,7 +646,7 @@ pub fn TaskLocal(comptime T: type) type {
                     // Node-aligned even though the chain is typed `*TaskLocalNode`
                     // (lower alignment on 32-bit targets).
                     const node: *Node = @alignCast(@fieldParentPtr("base", n));
-                    return &node.value;
+                    return node.value;
                 }
             }
             return null;
@@ -777,7 +780,7 @@ pub const TaskPool = struct {
     }
 };
 
-test "TaskLocal: set/get/clear and mutation within a task" {
+test "TaskLocal: set/get/clear returns the bound value" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
@@ -791,11 +794,35 @@ test "TaskLocal: set/get/clear and mutation within a task" {
             tl.set(&node, 123);
             defer tl.clear(&node);
 
-            try std.testing.expectEqual(@as(u64, 123), tl.get().?.*);
+            try std.testing.expectEqual(@as(u64, 123), tl.get().?);
+        }
+    };
 
-            // Mutation through the returned pointer is visible to later reads.
-            tl.get().?.* = 456;
-            try std.testing.expectEqual(@as(u64, 456), tl.get().?.*);
+    var h = try rt.spawn(S.run, .{});
+    defer h.cancel();
+    try h.join();
+}
+
+test "TaskLocal: mutable per-task state via a bound pointer" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const S = struct {
+        var counter: TaskLocal(*u64) = .{};
+
+        fn bump() void {
+            counter.get().?.* += 1;
+        }
+
+        fn run() !void {
+            var n: u64 = 0;
+            var node: @TypeOf(counter).Node = .unset;
+            counter.set(&node, &n);
+            defer counter.clear(&node);
+
+            bump();
+            bump();
+            try std.testing.expectEqual(@as(u64, 2), n);
         }
     };
 
@@ -815,17 +842,17 @@ test "TaskLocal: nested bindings shadow and restore" {
             var outer: @TypeOf(tl).Node = .unset;
             tl.set(&outer, 1);
             defer tl.clear(&outer);
-            try std.testing.expectEqual(@as(u32, 1), tl.get().?.*);
+            try std.testing.expectEqual(@as(u32, 1), tl.get().?);
 
             {
                 var inner: @TypeOf(tl).Node = .unset;
                 tl.set(&inner, 2);
                 defer tl.clear(&inner);
-                try std.testing.expectEqual(@as(u32, 2), tl.get().?.*);
+                try std.testing.expectEqual(@as(u32, 2), tl.get().?);
             }
 
             // Inner cleared: the outer binding is visible again.
-            try std.testing.expectEqual(@as(u32, 1), tl.get().?.*);
+            try std.testing.expectEqual(@as(u32, 1), tl.get().?);
         }
     };
 
@@ -851,7 +878,7 @@ test "TaskLocal: non-LIFO clear unlinks a middle node" {
             // Clear the older (non-head) binding first.
             a.clear(&na);
             try std.testing.expect(a.get() == null);
-            try std.testing.expectEqual(@as(u32, 20), b.get().?.*);
+            try std.testing.expectEqual(@as(u32, 20), b.get().?);
 
             b.clear(&nb);
             try std.testing.expect(b.get() == null);
@@ -879,7 +906,7 @@ test "TaskLocal: bindings are isolated per task and survive yielding" {
             // chain were shared/global this would observe the other task's value.
             try r.sleep(.fromMilliseconds(5));
 
-            try std.testing.expectEqual(id, tl.get().?.*);
+            try std.testing.expectEqual(id, tl.get().?);
         }
     };
 
@@ -899,7 +926,7 @@ test "TaskLocal: scoped binds for the call and restores after" {
         var tl: TaskLocal(u32) = .{};
 
         fn inner(addend: u32) u32 {
-            return tl.get().?.* + addend;
+            return tl.get().? + addend;
         }
 
         fn run() !void {
@@ -930,14 +957,14 @@ test "TaskLocal: a node is reusable after clear" {
             var node: @TypeOf(tl).Node = .unset;
 
             tl.set(&node, 1);
-            try std.testing.expectEqual(@as(u32, 1), tl.get().?.*);
+            try std.testing.expectEqual(@as(u32, 1), tl.get().?);
             tl.clear(&node);
             try std.testing.expect(tl.get() == null);
 
             // clear() returned the node to .unset, so it can be set again.
             tl.set(&node, 2);
             defer tl.clear(&node);
-            try std.testing.expectEqual(@as(u32, 2), tl.get().?.*);
+            try std.testing.expectEqual(@as(u32, 2), tl.get().?);
         }
     };
 
@@ -961,7 +988,7 @@ test "TaskLocal: unbound key reads back null" {
 
             // A different instance is a different key, even of the same type.
             try std.testing.expect(other.get() == null);
-            try std.testing.expectEqual(@as(u8, 7), bound.get().?.*);
+            try std.testing.expectEqual(@as(u8, 7), bound.get().?);
         }
     };
 
