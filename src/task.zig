@@ -154,6 +154,27 @@ pub const CanceledStatus = packed struct(u32) {
 // Kind of cancellation
 pub const CancelKind = enum { user, auto };
 
+/// Intrusive node for a single task-local binding (see `TaskLocal`).
+///
+/// The storage for a node is provided by the caller — on the stack for a scoped
+/// binding, embedded in a longer-lived struct, or heap-allocated — so a binding
+/// lives exactly as long as its node. A node must stay alive and unmoved while
+/// linked (between `set` and `clear`).
+///
+/// Nodes form a per-task doubly-linked stack rooted at `AnyTask.tls_head`. It is
+/// only ever touched by the owning task itself, so no synchronization is needed,
+/// and because the node records its `owner` it unlinks correctly regardless of
+/// which executor currently runs the task (tasks keep their identity across
+/// migration).
+pub const TaskLocalNode = struct {
+    /// The `TaskLocal` instance this binding belongs to (its address is the key).
+    key: *const anyopaque = undefined,
+    /// The task whose chain this node is linked into.
+    owner: *AnyTask = undefined,
+    prev: ?*TaskLocalNode = null,
+    next: ?*TaskLocalNode = null,
+};
+
 pub const AnyTask = struct {
     awaitable: Awaitable,
     coro: Coroutine,
@@ -171,6 +192,10 @@ pub const AnyTask = struct {
     closure: Closure,
 
     runtime: *Runtime,
+
+    /// Head of this task's intrusive task-local binding chain (see `TaskLocal`).
+    /// Only ever accessed by the task itself, so it needs no synchronization.
+    tls_head: ?*TaskLocalNode = null,
 
     /// Task state and park token, packed into a single byte for atomic operations.
     ///
@@ -457,6 +482,13 @@ pub const AnyTask = struct {
         // Run the task's function
         self.closure.call(AnyTask, self);
 
+        // Every task-local binding must be cleared before the task body returns;
+        // a leftover node points into storage that is about to die. Catch the
+        // missing `clear` here, at the task that leaked it.
+        if (std.debug.runtime_safety) {
+            std.debug.assert(self.tls_head == null);
+        }
+
         // Re-fetch executor — task may have migrated during execution
         executor = getCurrentExecutor();
         executor.pending_cleanup = .{ .finish = self };
@@ -511,6 +543,105 @@ pub const AnyTask = struct {
         return self;
     }
 };
+
+/// Task-local storage: a per-task binding for a value of type `T`, keyed by the
+/// address of the `TaskLocal` instance itself. The analogue of a thread-local,
+/// but scoped to a task and carried across task migration.
+///
+/// Declare an instance at container scope and bind it for as long as the
+/// caller-provided node lives:
+///
+/// ```zig
+/// var trace_id: zio.TaskLocal(u64) = .{};
+///
+/// fn handler() void {
+///     var node: @TypeOf(trace_id).Node = undefined;
+///     trace_id.set(&node, 42);
+///     defer trace_id.clear(&node);
+///     // trace_id.get() returns *u64 (== 42) here and in any callee,
+///     // across yields and executor migration.
+/// }
+/// ```
+///
+/// Because the node storage is caller-owned, the binding lives exactly as long
+/// as that storage: put the node on the stack for a scoped binding, or embed it
+/// in a longer-lived struct (or heap-allocate it) to keep the binding for the
+/// task's lifetime. The node must not move while linked and must be `clear`ed
+/// before its storage dies — the usual acquire/`defer`-release discipline. In
+/// safety builds a task that returns with a binding still live trips an assert.
+///
+/// Bindings nest and shadow: the most recent `set` for a key wins until cleared,
+/// and `clear` may interleave bindings in any order (not just LIFO). All access
+/// is from the owning task only, so it needs no locking.
+pub fn TaskLocal(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        /// The instance's address is its key, so the type must not be zero-sized
+        /// (distinct zero-sized vars can share an address). This marker gives each
+        /// declared instance a distinct address; it is otherwise unused.
+        _key_marker: u8 = 0,
+
+        /// Caller-provided storage for one binding. Declare it `undefined`; it is
+        /// fully initialized by `set`.
+        pub const Node = struct {
+            base: TaskLocalNode,
+            value: T,
+        };
+
+        /// Bind `value` in the current task using caller-provided `node` storage.
+        /// Visible to `get` until `clear(node)`. `node` must stay alive and
+        /// unmoved until then. Panics if called outside a task.
+        pub fn set(self: *Self, node: *Node, value: T) void {
+            const task = runtime.getCurrentTask();
+
+            if (std.debug.runtime_safety) {
+                // The same node must not already be linked (a double `set`).
+                var cur = task.tls_head;
+                while (cur) |n| : (cur = n.next) std.debug.assert(n != &node.base);
+            }
+
+            node.value = value;
+            node.base = .{
+                .key = self,
+                .owner = task,
+                .prev = null,
+                .next = task.tls_head,
+            };
+            if (task.tls_head) |h| h.prev = &node.base;
+            task.tls_head = &node.base;
+        }
+
+        /// Remove a binding established with `set`. May be interleaved with other
+        /// bindings in any order.
+        pub fn clear(self: *Self, node: *Node) void {
+            const b = &node.base;
+            if (std.debug.runtime_safety) {
+                std.debug.assert(b.key == @as(*const anyopaque, self)); // node belongs to this TaskLocal
+                std.debug.assert(b.owner == runtime.getCurrentTask()); // same task
+            }
+            if (b.prev) |p| p.next = b.next else b.owner.tls_head = b.next;
+            if (b.next) |n| n.prev = b.prev;
+            // Poison so a double `clear` or use-after-clear trips the asserts above.
+            b.* = .{};
+        }
+
+        /// Pointer to the value bound in the current task (the innermost active
+        /// binding), or null if unbound or called outside a task.
+        pub fn get(self: *Self) ?*T {
+            const task = runtime.getCurrentTaskOrNull() orelse return null;
+            const key: *const anyopaque = self;
+            var cur = task.tls_head;
+            while (cur) |n| : (cur = n.next) {
+                if (n.key == key) {
+                    const node: *Node = @fieldParentPtr("base", n);
+                    return &node.value;
+                }
+            }
+            return null;
+        }
+    };
+}
 
 const getNextExecutor = @import("runtime.zig").getNextExecutor;
 
@@ -625,3 +756,141 @@ pub const TaskPool = struct {
         }
     }
 };
+
+test "TaskLocal: set/get/clear and mutation within a task" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const S = struct {
+        var tl: TaskLocal(u64) = .{};
+
+        fn run() !void {
+            try std.testing.expect(tl.get() == null);
+
+            var node: @TypeOf(tl).Node = undefined;
+            tl.set(&node, 123);
+            defer tl.clear(&node);
+
+            try std.testing.expectEqual(@as(u64, 123), tl.get().?.*);
+
+            // Mutation through the returned pointer is visible to later reads.
+            tl.get().?.* = 456;
+            try std.testing.expectEqual(@as(u64, 456), tl.get().?.*);
+        }
+    };
+
+    var h = try rt.spawn(S.run, .{});
+    defer h.cancel();
+    try h.join();
+}
+
+test "TaskLocal: nested bindings shadow and restore" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const S = struct {
+        var tl: TaskLocal(u32) = .{};
+
+        fn run() !void {
+            var outer: @TypeOf(tl).Node = undefined;
+            tl.set(&outer, 1);
+            defer tl.clear(&outer);
+            try std.testing.expectEqual(@as(u32, 1), tl.get().?.*);
+
+            {
+                var inner: @TypeOf(tl).Node = undefined;
+                tl.set(&inner, 2);
+                defer tl.clear(&inner);
+                try std.testing.expectEqual(@as(u32, 2), tl.get().?.*);
+            }
+
+            // Inner cleared: the outer binding is visible again.
+            try std.testing.expectEqual(@as(u32, 1), tl.get().?.*);
+        }
+    };
+
+    var h = try rt.spawn(S.run, .{});
+    defer h.cancel();
+    try h.join();
+}
+
+test "TaskLocal: non-LIFO clear unlinks a middle node" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const S = struct {
+        var a: TaskLocal(u32) = .{};
+        var b: TaskLocal(u32) = .{};
+
+        fn run() !void {
+            var na: @TypeOf(a).Node = undefined;
+            var nb: @TypeOf(b).Node = undefined;
+            a.set(&na, 10);
+            b.set(&nb, 20);
+
+            // Clear the older (non-head) binding first.
+            a.clear(&na);
+            try std.testing.expect(a.get() == null);
+            try std.testing.expectEqual(@as(u32, 20), b.get().?.*);
+
+            b.clear(&nb);
+            try std.testing.expect(b.get() == null);
+        }
+    };
+
+    var h = try rt.spawn(S.run, .{});
+    defer h.cancel();
+    try h.join();
+}
+
+test "TaskLocal: bindings are isolated per task and survive yielding" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const S = struct {
+        var tl: TaskLocal(u32) = .{};
+
+        fn run(r: *Runtime, id: u32) !void {
+            var node: @TypeOf(tl).Node = undefined;
+            tl.set(&node, id);
+            defer tl.clear(&node);
+
+            // Yield so both tasks have a live binding at the same time; if the
+            // chain were shared/global this would observe the other task's value.
+            try r.sleep(.fromMilliseconds(5));
+
+            try std.testing.expectEqual(id, tl.get().?.*);
+        }
+    };
+
+    var h1 = try rt.spawn(S.run, .{ rt, 1 });
+    defer h1.cancel();
+    var h2 = try rt.spawn(S.run, .{ rt, 2 });
+    defer h2.cancel();
+    try h1.join();
+    try h2.join();
+}
+
+test "TaskLocal: unbound key reads back null" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const S = struct {
+        var bound: TaskLocal(u8) = .{};
+        var other: TaskLocal(u8) = .{};
+
+        fn run() !void {
+            var node: @TypeOf(bound).Node = undefined;
+            bound.set(&node, 7);
+            defer bound.clear(&node);
+
+            // A different instance is a different key, even of the same type.
+            try std.testing.expect(other.get() == null);
+            try std.testing.expectEqual(@as(u8, 7), bound.get().?.*);
+        }
+    };
+
+    var h = try rt.spawn(S.run, .{});
+    defer h.cancel();
+    try h.join();
+}
