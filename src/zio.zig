@@ -85,4 +85,5 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("io.zig");
     _ = @import("random.zig");
+    _ = @import("os/syscall_cancel.zig");
 }
