@@ -654,7 +654,7 @@ pub fn TaskLocal(comptime T: type) type {
         /// The node lives on the stack, so this allocates nothing, and `func` is
         /// invoked via `@call` (any comptime-known callable, no fn-pointer
         /// indirection). Returns whatever `func` returns.
-        pub fn scoped(self: *Self, value: T, func: anytype, args: anytype) @TypeOf(@call(.auto, func, args)) {
+        pub fn scoped(self: *Self, value: T, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) @TypeOf(@call(.auto, func, args)) {
             var node: Node = .unset;
             self.set(&node, value);
             defer self.clear(&node);
