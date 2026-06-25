@@ -794,7 +794,7 @@ test "TaskLocal: set/get/clear returns the bound value" {
             tl.set(&node, 123);
             defer tl.clear(&node);
 
-            try std.testing.expectEqual(@as(u64, 123), tl.get().?);
+            try std.testing.expectEqual(123, tl.get().?);
         }
     };
 
@@ -822,7 +822,7 @@ test "TaskLocal: mutable per-task state via a bound pointer" {
 
             bump();
             bump();
-            try std.testing.expectEqual(@as(u64, 2), n);
+            try std.testing.expectEqual(2, n);
         }
     };
 
@@ -842,17 +842,17 @@ test "TaskLocal: nested bindings shadow and restore" {
             var outer: @TypeOf(tl).Node = .unset;
             tl.set(&outer, 1);
             defer tl.clear(&outer);
-            try std.testing.expectEqual(@as(u32, 1), tl.get().?);
+            try std.testing.expectEqual(1, tl.get().?);
 
             {
                 var inner: @TypeOf(tl).Node = .unset;
                 tl.set(&inner, 2);
                 defer tl.clear(&inner);
-                try std.testing.expectEqual(@as(u32, 2), tl.get().?);
+                try std.testing.expectEqual(2, tl.get().?);
             }
 
             // Inner cleared: the outer binding is visible again.
-            try std.testing.expectEqual(@as(u32, 1), tl.get().?);
+            try std.testing.expectEqual(1, tl.get().?);
         }
     };
 
@@ -878,7 +878,7 @@ test "TaskLocal: non-LIFO clear unlinks a middle node" {
             // Clear the older (non-head) binding first.
             a.clear(&na);
             try std.testing.expect(a.get() == null);
-            try std.testing.expectEqual(@as(u32, 20), b.get().?);
+            try std.testing.expectEqual(20, b.get().?);
 
             b.clear(&nb);
             try std.testing.expect(b.get() == null);
@@ -934,7 +934,7 @@ test "TaskLocal: scoped binds for the call and restores after" {
 
             // Value is visible inside the call and the return value flows back.
             const r = tl.scoped(40, inner, .{2});
-            try std.testing.expectEqual(@as(u32, 42), r);
+            try std.testing.expectEqual(42, r);
 
             // Binding is gone once scoped returns.
             try std.testing.expect(tl.get() == null);
@@ -957,14 +957,14 @@ test "TaskLocal: a node is reusable after clear" {
             var node: @TypeOf(tl).Node = .unset;
 
             tl.set(&node, 1);
-            try std.testing.expectEqual(@as(u32, 1), tl.get().?);
+            try std.testing.expectEqual(1, tl.get().?);
             tl.clear(&node);
             try std.testing.expect(tl.get() == null);
 
             // clear() returned the node to .unset, so it can be set again.
             tl.set(&node, 2);
             defer tl.clear(&node);
-            try std.testing.expectEqual(@as(u32, 2), tl.get().?);
+            try std.testing.expectEqual(2, tl.get().?);
         }
     };
 
@@ -988,7 +988,7 @@ test "TaskLocal: unbound key reads back null" {
 
             // A different instance is a different key, even of the same type.
             try std.testing.expect(other.get() == null);
-            try std.testing.expectEqual(@as(u8, 7), bound.get().?);
+            try std.testing.expectEqual(7, bound.get().?);
         }
     };
 
