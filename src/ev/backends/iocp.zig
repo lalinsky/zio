@@ -744,7 +744,7 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
 
     // Store accept_socket so we can retrieve it later (needed for both success and error cases)
     data.result_private_do_not_touch = accept_socket;
-    dbg.rec(.acc_submit, 0, @intFromPtr(&data.c.internal.overlapped), @intFromPtr(accept_socket), @intFromPtr(&data.c));
+    dbg.rec(.acc_submit, 0, @intFromPtr(&data.c.internal.overlapped), @intFromPtr(accept_socket), @intFromPtr(state.loop));
     dbg.rec(.io_submit, @intFromEnum(data.c.op), @intFromPtr(&data.c.internal.overlapped), if (result != windows.FALSE) 1 else 0, @intFromPtr(&data.c));
 
     // When AcceptEx succeeds (result == TRUE) OR returns WSA_IO_PENDING,
@@ -1623,7 +1623,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
     // Use @fieldParentPtr again to get from CompletionData to Completion
     const c: *Completion = @fieldParentPtr("internal", completion_data);
 
-    dbg.rec(.pc_entry, @intFromEnum(c.op), @intFromPtr(overlapped), @intFromPtr(c), 0);
+    dbg.rec(.pc_entry, @intFromEnum(c.op), @intFromPtr(overlapped), @intFromPtr(c), @intFromPtr(state.loop));
     // Per-packet result snapshot (reliable even if the OVERLAPPED struct was reused),
     // plus the OVERLAPPED struct's own fields (may be stale/overwritten by reuse).
     dbg.rec(.pc_detail, @intFromEnum(c.op), @intFromPtr(overlapped), entry.Internal, entry.dwNumberOfBytesTransferred);
