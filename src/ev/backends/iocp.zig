@@ -716,17 +716,12 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
     const accept_socket = try net.socket(@enumFromInt(family), .stream, .ip, data.flags);
     errdefer net.close(accept_socket);
 
-    // Associate the accept socket with IOCP
-    const iocp_result = windows.CreateIoCompletionPort(
-        @ptrCast(accept_socket),
-        self.shared_state.iocp,
-        0,
-        0,
-    ) orelse return error.Unexpected;
-
-    if (iocp_result != self.shared_state.iocp) {
-        return error.Unexpected;
-    }
+    // FIX (#530): do NOT associate the accept socket with the IOCP here. AcceptEx
+    // touches both the listening socket and the accept socket; if both are
+    // associated with the same port, the single AcceptEx completion is queued
+    // TWICE (once per association), and the duplicate packet is serviced against
+    // the reused accept op -> double-close UAF. The accepted socket inherits the
+    // listener's IOCP association via SO_UPDATE_ACCEPT_CONTEXT after completion.
 
     // Initialize OVERLAPPED
     data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
