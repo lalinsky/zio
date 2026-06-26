@@ -427,10 +427,12 @@ pub const LoopState = struct {
         }
         timer.c.state = .running;
         self.timers[idx].insert(timer);
+        dbg.rec(.timer_set, 1, @intFromPtr(timer), timer.deadline.value, @intFromPtr(self.loop));
     }
 
     pub fn clearTimer(self: *LoopState, timer: *Timer) void {
         const was_active = timer.c.state == .running;
+        dbg.rec(.timer_clear, 1, @intFromPtr(timer), @intFromBool(was_active), @intFromPtr(self.loop));
         if (was_active) {
             self.timers[clockIndex(timer.clock)].remove(timer);
         }
@@ -948,6 +950,7 @@ pub const Loop = struct {
                         }
                         break;
                     }
+                    dbg.rec(.timer_fire, 1, @intFromPtr(timer), timer.deadline.value, @intFromPtr(self));
                     timer.c.setResult(.timer, {});
                     self.state.clearTimer(timer);
                     batch[batch_count] = timer;

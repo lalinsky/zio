@@ -19,6 +19,9 @@ pub const Kind = enum(u8) {
     cancel_enq, // cross-thread cancel enqueued to target loop
     group_dec, // groupCallback: remaining decrement (val = prev)
     group_finish, // groupCallback: group completed (prev==1)
+    timer_set, // setTimer: insert/reset (val = deadline)
+    timer_clear, // clearTimer (val = was_active)
+    timer_fire, // checkTimers: deadline passed, about to markCompleted (val = deadline)
 };
 
 const Event = struct {
