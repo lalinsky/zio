@@ -52,8 +52,18 @@ const N = 8192;
 var buf: [N]Event = undefined;
 var idx: std.atomic.Value(u64) = .init(0);
 
+/// Focus on the wake chain only — recording every completion/group/timer/cancel
+/// event perturbs timing enough to change the bug's manifestation (Heisenbug).
+fn wanted(kind: Kind) bool {
+    return switch (kind) {
+        .wait_io, .wait_join, .wcb, .signal, .mark_complete, .park, .park_prewoken, .sched_local, .sched_migrate, .sched_remote, .sched_token, .sched_main, .sched_finished => true,
+        else => false,
+    };
+}
+
 pub inline fn rec(kind: Kind, op: u16, ptr: usize, val: u64, loop: usize) void {
     if (!enabled) return;
+    if (!wanted(kind)) return;
     const i = idx.fetchAdd(1, .monotonic);
     buf[i % N] = .{ .seq = i, .kind = kind, .op = op, .ptr = ptr, .val = val, .loop = loop };
 }
