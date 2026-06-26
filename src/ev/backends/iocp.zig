@@ -1681,6 +1681,9 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
 
             if (result == windows.FALSE) {
                 const err = windows.WSAGetLastError();
+                // DEBUG (#530): log the listening + accept handles on accept error
+                // so a FileDescriptorNotASocket can be correlated to sock_close.
+                std.debug.print("ACCEPT FAIL listen_h=0x{x} accept_h=0x{x} err={s}\n", .{ @intFromPtr(data.handle), @intFromPtr(data.result_private_do_not_touch), @tagName(err) });
                 // Error occurred - close the accept socket
                 net.close(data.result_private_do_not_touch);
                 c.setError(net.errnoToAcceptError(err));

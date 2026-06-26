@@ -36,6 +36,8 @@ pub const Kind = enum(u8) {
     wait_join, // waitInternal: park on a future/awaitable (val=future)
     wcb, // Waiter.callback fired for a completion (val=completion, loop=0)
     mark_complete, // Awaitable.markComplete entry (ptr=awaitable, val=has_waiter)
+    sock_open, // net.socket created a handle (ptr=handle)
+    sock_close, // net.close closed a handle (ptr=handle)
 };
 
 const Event = struct {
@@ -55,7 +57,7 @@ var idx: std.atomic.Value(u64) = .init(0);
 /// event perturbs timing enough to change the bug's manifestation (Heisenbug).
 fn wanted(kind: Kind) bool {
     return switch (kind) {
-        .wait_io, .wait_join, .wcb, .signal, .mark_complete, .park, .park_prewoken, .sched_local, .sched_migrate, .sched_remote, .sched_token, .sched_main, .sched_finished => true,
+        .wait_io, .wait_join, .wcb, .signal, .mark_complete, .park, .park_prewoken, .sched_local, .sched_migrate, .sched_remote, .sched_token, .sched_main, .sched_finished, .sock_open, .sock_close => true,
         else => false,
     };
 }

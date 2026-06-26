@@ -7,6 +7,7 @@ const unexpectedError = @import("base.zig").unexpectedError;
 const thread = @import("thread.zig");
 
 const log = @import("../common.zig").log;
+const dbg = @import("../debug_trace.zig"); // DEBUG (iocp-debug branch): do not merge
 
 // Windows addrinfo definitions
 const windows_addrinfo = if (builtin.os.tag == .windows) extern struct {
@@ -152,6 +153,7 @@ pub fn poll(fds: []pollfd, timeout: i32) PollError!usize {
 pub fn close(fd: fd_t) void {
     switch (builtin.os.tag) {
         .windows => {
+            dbg.rec(.sock_close, 0, @intFromPtr(fd), 0, 0);
             _ = windows.closesocket(fd);
         },
         else => {
@@ -328,6 +330,7 @@ pub fn socket(domain: Domain, socket_type: Type, protocol: Protocol, flags: Open
                 var mode: c_ulong = 1;
                 _ = windows.ioctlsocket(sock, windows.FIONBIO, &mode);
             }
+            dbg.rec(.sock_open, 0, @intFromPtr(sock), 0, 0);
             return sock;
         },
         else => {
