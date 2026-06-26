@@ -101,4 +101,5 @@ test {
     _ = @import("io.zig");
     _ = @import("random.zig");
     _ = @import("task.zig");
+    _ = @import("iocp_repro.zig"); // DEBUG (#530): standalone AcceptEx repro. Do not merge.
 }
