@@ -63,6 +63,14 @@ pub const BackendCapabilities = struct {
     /// `syncWallTimers`, so the loop must not fold them into the poll timeout.
     /// When false, the loop falls back to the capped poll-timeout re-evaluation.
     native_wall_timers: bool = false,
+    /// When true, the backend may migrate a socket completion's ownership to a
+    /// different loop in the group at submit time (single-owner cross-loop
+    /// registration): a socket fd is monitored by exactly the loop that first
+    /// parked on it, and ops submitted from other loops are handed to that owner.
+    /// This means `active`/`inflight_io` can be incremented by one loop's thread
+    /// and decremented by another, so the loop accounts for them atomically, and
+    /// `Completion.loop` may be reassigned once during submit.
+    cross_loop_socket_reg: bool = false,
 
     pub fn supportsNonBlockingFileIo(comptime self: BackendCapabilities) bool {
         return self.file_read or self.file_write or self.file_read_streaming or self.file_write_streaming;
