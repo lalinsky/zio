@@ -2481,10 +2481,12 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
                     stable = 0;
                     last = cur;
                 }
-                if (stable >= 5 and !dumped) { // ~1.5s with no progress
+                if (stable >= 20 and !dumped) { // ~6s no progress (> the 3s io_timeout)
+                    // If we get here, the 3s timeouts did NOT rescue the stall =>
+                    // a genuine permanent hang, not a timeout-rescued delivery delay.
                     @import("debug_trace.zig").dump();
                     dumped = true;
-                    std.process.exit(7); // fast-fail with the dump (no-timeout hang safety)
+                    std.process.exit(7);
                 }
             }
         }
