@@ -42,6 +42,8 @@ pub const Kind = enum(u8) {
     acc_submit, // submitAccept after AcceptEx: ptr=overlapped, val=accept_socket, loop=completion
     acc_cancel, // iocp.cancel net_accept: ptr=overlapped, loop=completion
     io_submit, // any net submit: op=c.op, ptr=overlapped, val=sync(1)/pending(0)/err(2), loop=completion
+    pc_detail, // processCompletion: op=c.op, ptr=overlapped, val=entry.Internal(NTSTATUS), loop=bytesTransferred
+    pc_ovl, // OVERLAPPED struct contents: ptr=overlapped, val=ovl.Internal, loop=ovl.hEvent
 };
 
 const Event = struct {
@@ -121,7 +123,7 @@ var idx: std.atomic.Value(u64) = .init(0);
 fn wanted(kind: Kind) bool {
     return switch (kind) {
         // Focused on the accept-completion lifecycle for #530.
-        .sock_open, .sock_close, .pc_entry, .acc_submit, .acc_cancel, .io_submit => true,
+        .sock_open, .sock_close, .pc_entry, .acc_submit, .acc_cancel, .io_submit, .pc_detail, .pc_ovl => true,
         else => false,
     };
 }

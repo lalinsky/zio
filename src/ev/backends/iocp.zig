@@ -1628,6 +1628,10 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
     const c: *Completion = @fieldParentPtr("internal", completion_data);
 
     dbg.rec(.pc_entry, @intFromEnum(c.op), @intFromPtr(overlapped), @intFromPtr(c), 0);
+    // Per-packet result snapshot (reliable even if the OVERLAPPED struct was reused),
+    // plus the OVERLAPPED struct's own fields (may be stale/overwritten by reuse).
+    dbg.rec(.pc_detail, @intFromEnum(c.op), @intFromPtr(overlapped), entry.Internal, entry.dwNumberOfBytesTransferred);
+    dbg.rec(.pc_ovl, @intFromEnum(c.op), @intFromPtr(overlapped), overlapped.Internal, @intFromPtr(overlapped.hEvent orelse @as(windows.HANDLE, @ptrFromInt(0xdead))));
 
     // Process based on operation type
     switch (c.op) {
