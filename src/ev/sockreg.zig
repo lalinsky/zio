@@ -273,7 +273,7 @@ pub fn service(self: anytype, state: anytype, fd: net.fd_t, dir: Dir, event: any
         return;
     };
 
-    const had_waiters = entry.waiters(dir).head != null;
+    var serviced_waiter = false;
     var to_finish: Queue(Completion) = .{};
     var iter: ?*Completion = entry.waiters(dir).head;
     while (iter) |c| {
@@ -282,6 +282,7 @@ pub fn service(self: anytype, state: anytype, fd: net.fd_t, dir: Dir, event: any
             _ = entry.waiters(dir).remove(c);
             continue;
         }
+        serviced_waiter = true;
         switch (Backend.checkCompletion(c, event)) {
             .completed => {
                 _ = entry.waiters(dir).remove(c);
@@ -290,9 +291,11 @@ pub fn service(self: anytype, state: anytype, fd: net.fd_t, dir: Dir, event: any
             .requeue => break, // drained to EAGAIN for this direction
         }
     }
-    // Latch a readiness edge that found no waiter so a racing parker retries
-    // instead of sleeping for an edge that already passed.
-    entry.readyPtr(dir).* = !had_waiters;
+    // Latch a readiness edge that no live waiter consumed so a racing parker
+    // retries instead of sleeping for an edge that already passed. Stale
+    // (completed/dead) waiters that were skipped above don't count — they
+    // consume no edge, so a queue holding only stale waiters must still latch.
+    entry.readyPtr(dir).* = !serviced_waiter;
     shard.mutex.unlock();
 
     while (to_finish.pop()) |c| {
