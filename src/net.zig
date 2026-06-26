@@ -2605,7 +2605,10 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
         }
     };
 
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(H.executors) });
+    // DEBUG (iocp-debug branch): migration OFF to bisect #530. If the deadlock
+    // disappears, the bug is in scheduleTask's migrate-to-current branch; if it
+    // persists, it's the remote-wake/home-schedule path.
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(H.executors), .enable_task_migration = false });
     defer runtime.deinit();
 
     var sh: H.Shared = .{};
