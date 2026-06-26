@@ -9,6 +9,7 @@ const WaitNode = @import("utils/wait_queue.zig").WaitNode;
 const Waiter = @import("common.zig").Waiter;
 const GroupNode = @import("group.zig").GroupNode;
 const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
+const dbg = @import("debug_trace.zig"); // DEBUG (iocp-debug branch): do not merge
 
 // Forward declaration - Runtime is defined in runtime.zig
 const Runtime = @import("runtime.zig").Runtime;
@@ -72,6 +73,7 @@ pub const Awaitable = struct {
     /// Waiting tasks may belong to different executors, so always uses `.maybe_remote` mode.
     /// Can be called from any context.
     pub fn markComplete(self: *Awaitable) void {
+        dbg.rec(.mark_complete, 0, @intFromPtr(self), @intFromBool(self.waiting_list.hasWaiters()), 0);
         // Pop and wake all waiters while setting the flag.
         // Break as soon as we pop the last waiter - signaling it can free `self`
         // if the awaitable is destroyed after being observed as complete.

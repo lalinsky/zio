@@ -2451,10 +2451,7 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
         const per_wave = 12;
         const total = 8 * 1024;
         const chunk = 2048;
-        // DEBUG (iocp-debug branch): .none removes the race-group/timer entirely
-        // (plain waitForIo). If the deadlock vanishes, the bug is in the
-        // race-group timer path; if it persists, plain io-completion wake.
-        const io_timeout: Timeout = .none;
+        const io_timeout = Timeout.fromMilliseconds(3_000);
 
         const Shared = struct {
             conns: std.atomic.Value(u32) = .init(0),

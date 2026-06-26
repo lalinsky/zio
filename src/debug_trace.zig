@@ -32,6 +32,11 @@ pub const Kind = enum(u8) {
     sched_token, // scheduleTask -> task .ready, set awaken token (no schedule)
     sched_main, // scheduleTask -> main task, loop.wake
     sched_finished, // scheduleTask -> task already finished
+    // Waiter linking (ptr=waiter, loop=task unless noted)
+    wait_io, // waitForIo: park on a completion (val=completion)
+    wait_join, // waitInternal: park on a future/awaitable (val=future)
+    wcb, // Waiter.callback fired for a completion (val=completion, loop=0)
+    mark_complete, // Awaitable.markComplete entry (ptr=awaitable, val=has_waiter)
 };
 
 const Event = struct {

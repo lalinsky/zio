@@ -8,6 +8,7 @@ const getCurrentTask = @import("runtime.zig").getCurrentTask;
 const getCurrentTaskOrNull = @import("runtime.zig").getCurrentTaskOrNull;
 const yield = @import("runtime.zig").yield;
 const common = @import("common.zig");
+const dbg = @import("debug_trace.zig"); // DEBUG (iocp-debug branch): do not merge
 const Cancelable = common.Cancelable;
 const Waiter = common.Waiter;
 const NO_WINNER = common.NO_WINNER;
@@ -419,6 +420,8 @@ fn waitInternal(future: anytype, comptime flags: WaitFlags) Cancelable!WaitResul
         const result = if (has_context) fut.getResult(&context) else fut.getResult();
         return .{ .value = result };
     }
+
+    dbg.rec(.wait_join, 0, @intFromPtr(&waiter), 0, if (waiter.mode.direct.task) |t| @intFromPtr(t) else 0);
 
     // Clean up waiter on exit
     defer {

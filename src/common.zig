@@ -106,7 +106,7 @@ pub const Waiter = struct {
             .direct => |*d| {
                 if (d.task) |task| {
                     const n = d.notify.state.fetchAdd(1, .release);
-                    dbg.rec(.signal, 0, @intFromPtr(task), n + 1, 0);
+                    dbg.rec(.signal, 0, @intFromPtr(self), n + 1, @intFromPtr(task));
                     task.wake();
                 } else {
                     d.notify.signal();
@@ -246,6 +246,7 @@ pub const Waiter = struct {
     /// Callback for ev.Completion - signals this waiter.
     pub fn callback(_: *ev.Loop, c: *ev.Completion) void {
         const self: *Waiter = @ptrCast(@alignCast(c.userdata.?));
+        dbg.rec(.wcb, 0, @intFromPtr(self), @intFromPtr(c), 0);
         self.signal();
     }
 };
@@ -259,6 +260,7 @@ pub fn waitForIo(c: *ev.Completion) Cancelable!void {
     var waiter = Waiter.init();
     c.userdata = &waiter;
     c.callback = Waiter.callback;
+    dbg.rec(.wait_io, 0, @intFromPtr(&waiter), @intFromPtr(c), if (waiter.mode.direct.task) |t| @intFromPtr(t) else 0);
 
     defer if (std.debug.runtime_safety) {
         c.callback = null;
