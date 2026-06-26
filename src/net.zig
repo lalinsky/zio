@@ -2451,7 +2451,10 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
         const per_wave = 12;
         const total = 8 * 1024;
         const chunk = 2048;
-        const io_timeout = Timeout.fromMilliseconds(3_000);
+        // DEBUG (iocp-debug branch): .none removes the race-group/timer entirely
+        // (plain waitForIo). If the deadlock vanishes, the bug is in the
+        // race-group timer path; if it persists, plain io-completion wake.
+        const io_timeout: Timeout = .none;
 
         const Shared = struct {
             conns: std.atomic.Value(u32) = .init(0),
@@ -2484,7 +2487,7 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
                 if (stable >= 5 and !dumped) { // ~1.5s with no progress
                     @import("debug_trace.zig").dump();
                     dumped = true;
-                    return;
+                    std.process.exit(7); // fast-fail with the dump (no-timeout hang safety)
                 }
             }
         }
@@ -2605,10 +2608,7 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
         }
     };
 
-    // DEBUG (iocp-debug branch): migration OFF to bisect #530. If the deadlock
-    // disappears, the bug is in scheduleTask's migrate-to-current branch; if it
-    // persists, it's the remote-wake/home-schedule path.
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(H.executors), .enable_task_migration = false });
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(H.executors) });
     defer runtime.deinit();
 
     var sh: H.Shared = .{};
