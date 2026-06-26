@@ -28,6 +28,8 @@ pub const AutoCancel = @import("autocancel.zig").AutoCancel;
 pub const Group = @import("group.zig").Group;
 pub const CompletionQueue = @import("completion_queue.zig").CompletionQueue;
 
+pub const TaskLocal = @import("task.zig").TaskLocal;
+
 const common = @import("common.zig");
 pub const Cancelable = common.Cancelable;
 pub const Timeoutable = common.Timeoutable;
@@ -85,4 +87,5 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("io.zig");
     _ = @import("random.zig");
+    _ = @import("task.zig");
 }
