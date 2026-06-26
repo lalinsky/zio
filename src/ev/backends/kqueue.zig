@@ -50,8 +50,8 @@ pub const SharedState = struct {
     /// Group-shared accounting: a completion submitted on one loop may be
     /// finished by the loop that owns the fd registration, so active/inflight_io
     /// are shared atomics rather than per-LoopState fields (see LoopState).
-    active: std.atomic.Value(u64) = .init(0),
-    inflight_io: std.atomic.Value(u64) = .init(0),
+    active: std.atomic.Value(usize) = .init(0),
+    inflight_io: std.atomic.Value(usize) = .init(0),
     /// Cross-loop single-owner socket registration table, shared by every loop
     /// in the group. See sockreg.zig.
     sock_table: sockreg.Table = .{},
