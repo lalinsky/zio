@@ -2494,16 +2494,22 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
         fn handler(stream: Stream, sh: *Shared) void {
             defer stream.close();
             var buf: [chunk]u8 = undefined;
+            var rounds: usize = 0;
             while (true) {
-                const n = stream.read(&buf, io_timeout) catch {
+                const n = stream.read(&buf, io_timeout) catch |e| {
                     _ = sh.errors.fetchAdd(1, .monotonic);
-                    return;
+                    std.debug.print("HANDLER-READ-ERR rounds={d} err={s}\n", .{ rounds, @errorName(e) });
+                    @import("debug_trace.zig").dump();
+                    std.process.exit(8);
                 };
                 if (n == 0) return; // peer closed its send side
-                stream.writeAll(buf[0..n], io_timeout) catch {
+                stream.writeAll(buf[0..n], io_timeout) catch |e| {
                     _ = sh.errors.fetchAdd(1, .monotonic);
-                    return;
+                    std.debug.print("HANDLER-WRITE-ERR rounds={d} n={d} err={s}\n", .{ rounds, n, @errorName(e) });
+                    @import("debug_trace.zig").dump();
+                    std.process.exit(8);
                 };
+                rounds += 1;
                 // DEBUG (iocp-debug branch): nudge spawn/join removed to bisect
                 // #530 — does the deadlock need the spawn/join migration driver?
                 // var h = runtime_mod.spawn(nudge, .{}) catch return;
@@ -2530,10 +2536,14 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
             while (!sh.done.load(.acquire)) {
                 const stream = srv.accept(.{ .timeout = Timeout.fromMilliseconds(50) }) catch |err| {
                     if (err == error.Timeout) continue; // re-check the done flag
-                    break;
+                    std.debug.print("ACCEPT-ERR err={s}\n", .{@errorName(err)});
+                    @import("debug_trace.zig").dump();
+                    std.process.exit(8);
                 };
-                handlers.spawn(handler, .{ stream, sh }) catch {
-                    stream.close();
+                handlers.spawn(handler, .{ stream, sh }) catch |e| {
+                    std.debug.print("SPAWN-FAIL err={s}\n", .{@errorName(e)});
+                    @import("debug_trace.zig").dump();
+                    std.process.exit(8);
                 };
             }
         }
