@@ -419,11 +419,30 @@ pub fn registerSocket(self: *Self, fd: NetHandle, dir: sockreg.Dir, other_owned_
     return self.ensureKevent(fd, dir);
 }
 
-/// kqueue removes a closed fd's knotes automatically, so there is nothing to do
-/// here. Called by sockreg.unregister.
+/// The kernel removes a closed fd's *already-applied* knotes automatically, but a
+/// socket EV_ADD still sitting un-flushed in change_buffer would be applied after
+/// the fd is closed — and if the fd number is reused before the next poll, it
+/// would arm the stale registration on the wrong socket on this loop. Drop any
+/// pending changes for this fd so they cannot outlive it. (We deliberately do not
+/// enqueue an EV_DELETE: a buffered delete flushes after the close and could hit a
+/// reused fd, reintroducing the same hazard.) Called by sockreg.unregister.
 pub fn unregisterCleanup(self: *Self, fd: NetHandle) void {
-    _ = self;
-    _ = fd;
+    const ident: usize = @intCast(fd);
+    var i: usize = 0;
+    while (i < self.change_buffer.items.len) {
+        const ch = self.change_buffer.items[i];
+        // Match only this loop's socket registrations (tagged with sock_marker),
+        // not other changes that may share the ident — on Darwin the wall timers
+        // use idents 0/1 and the async waker is EVFILT_USER, so an ident-only
+        // match could drop a pending timer arm and wedge it.
+        if (ch.ident == ident and ch.udata == sock_marker) {
+            // orderedRemove preserves the relative order of the remaining changes,
+            // which matters for any same-(ident,filter) ADD/DELETE pairing.
+            _ = self.change_buffer.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
 }
 
 /// A no-error event for the optimistic (pre-park) checkCompletion attempt.
