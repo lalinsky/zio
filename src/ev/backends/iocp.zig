@@ -715,6 +715,15 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
     const accept_socket = try net.socket(@enumFromInt(family), .stream, .ip, data.flags);
     errdefer net.close(accept_socket);
 
+    // Publish the accepted socket into the op BEFORE issuing AcceptEx (#530). The
+    // IOCP port is shared across all executors, so AcceptEx can complete and be
+    // dequeued by another thread the instant it is posted. If result_private were
+    // still unset at that point, processCompletion would read an uninitialized
+    // handle and close it — a double-close use-after-free. The AcceptEx call below
+    // is a syscall (a full barrier), so writing the handle first guarantees the
+    // completion handler — on any thread — observes a valid value.
+    data.result_private_do_not_touch = accept_socket;
+
     // Associate the accept socket with IOCP
     const iocp_result = windows.CreateIoCompletionPort(
         @ptrCast(accept_socket),
@@ -745,8 +754,7 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
         &data.c.internal.overlapped,
     );
 
-    // Store accept_socket so we can retrieve it later (needed for both success and error cases)
-    data.result_private_do_not_touch = accept_socket;
+    // (result_private_do_not_touch was published before AcceptEx above — see #530.)
 
     // When AcceptEx succeeds (result == TRUE) OR returns WSA_IO_PENDING,
     // the completion will be posted to the IOCP port.
