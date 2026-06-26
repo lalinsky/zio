@@ -49,6 +49,11 @@ const Event = struct {
     loop: usize = 0,
 };
 
+/// DEBUG (#530): a socket handle the test marks as "must not be closed mid-run"
+/// (the listening socket). net.close panics if it sees this handle closed, so the
+/// panic stack trace reveals the buggy close path.
+pub var protected: usize = 0;
+
 const N = 8192;
 var buf: [N]Event = undefined;
 var idx: std.atomic.Value(u64) = .init(0);

@@ -153,6 +153,10 @@ pub fn poll(fds: []pollfd, timeout: i32) PollError!usize {
 pub fn close(fd: fd_t) void {
     switch (builtin.os.tag) {
         .windows => {
+            if (dbg.protected != 0 and @intFromPtr(fd) == dbg.protected) {
+                dbg.dump();
+                @panic("BUG #530: closing the protected listening socket mid-run");
+            }
             dbg.rec(.sock_close, 0, @intFromPtr(fd), 0, 0);
             _ = windows.closesocket(fd);
         },

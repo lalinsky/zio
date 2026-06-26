@@ -2529,10 +2529,14 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
                 return;
             };
             defer srv.close();
+            // DEBUG (#530): protect the listening socket — net.close panics if
+            // anything closes it before we clear this at loop exit.
+            @import("debug_trace.zig").protected = @intFromPtr(srv.socket.handle);
             port_ch.send(srv.socket.address.ip.getPort()) catch return;
 
             var handlers: Group = .init;
             defer handlers.wait() catch {};
+            defer @import("debug_trace.zig").protected = 0; // legit close at teardown is fine
             while (!sh.done.load(.acquire)) {
                 const stream = srv.accept(.{ .timeout = Timeout.fromMilliseconds(50) }) catch |err| {
                     if (err == error.Timeout) continue; // re-check the done flag
