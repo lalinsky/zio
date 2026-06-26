@@ -441,7 +441,10 @@ pub const Loop = struct {
     loop_group: *LoopGroup,
     internal_loop_group: LoopGroup = .{},
 
-    max_wait: Duration = .fromSeconds(60),
+    // DEBUG (iocp-debug branch): 60s normally; forced to 50ms to bisect #530.
+    // If the deadlock is a lost wakeup, periodic re-polling recovers it and the
+    // test passes; if it's a true hang it still fails. Do not merge.
+    max_wait: Duration = .fromMilliseconds(50),
     /// Upper bound on the poll wait while a boot/real timer is pending on a
     /// backend without native wall-clock timers. The poll clock (`awake`)
     /// can't track suspend or wall-clock steps, so we re-evaluate boot/real

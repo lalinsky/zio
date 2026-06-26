@@ -34,21 +34,23 @@ jobs:
         sudo apt-get update -q -y
         sudo apt-get install -q -y qemu-user-static
 
-    - name: Build and test for each backend
+    # DEBUG (iocp-debug branch): build the cross-loop test once, then run it in a
+    # loop to raise the chance of hitting the flaky #530 stall. Stops on first
+    # failure so the STALL/LATE warn lines are the tail of the log.
+    - name: Build and loop the cross-loop test
       shell: bash
       run: |
-        for backend in ${{ matrix.config.backends }}; do
-          echo "Building with backend: $backend"
-          ./check.sh --full --backend $backend \
-            ${{ matrix.config.target != 'native' && format('--target {0}', matrix.config.target) || '' }} \
-            ${{ matrix.config.qemu && '--qemu' || '' }} \
-            ${{ matrix.config.vm && '--no-exec' || '' }} \
-            ${{ matrix.mode == 'release' && '--release' || '' }}
-          if [ -n "${{ matrix.config.vm }}" ]; then
-            cp zig-out/bin/test zig-out/bin/test-$backend
-          fi
+        zig build test -Dbackend=iocp \
+          ${{ matrix.mode == 'release' && '-Doptimize=ReleaseSafe' || '' }} \
+          -Dtest-filter="multi-executor: cross-loop socket stress" \
+          -Demit-test-bin
+        BIN=$(ls zig-out/bin/test* | head -1)
+        echo "Looping $BIN"
+        for i in $(seq 1 40); do
+          echo "=== iteration $i ==="
+          "$BIN" || { echo "FAILED on iteration $i"; exit 1; }
         done
-      timeout-minutes: 10
+      timeout-minutes: 15
       env:
         TEST_VERBOSE: 2
 
