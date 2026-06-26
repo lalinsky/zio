@@ -2479,11 +2479,10 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
                     _ = sh.errors.fetchAdd(1, .monotonic);
                     return;
                 };
-                // Spawning round-robins to another executor; joining wakes us
-                // from there, migrating this handler (and the socket's next op)
-                // to a different loop.
-                var h = runtime_mod.spawn(nudge, .{}) catch return;
-                h.join();
+                // DEBUG (iocp-debug branch): nudge spawn/join removed to bisect
+                // #530 — does the deadlock need the spawn/join migration driver?
+                // var h = runtime_mod.spawn(nudge, .{}) catch return;
+                // h.join();
             }
         }
 
