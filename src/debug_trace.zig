@@ -4,7 +4,6 @@
 //! hot paths. Do not merge.
 
 const std = @import("std");
-const log = @import("common.zig").log;
 
 pub const enabled = true;
 
@@ -68,16 +67,22 @@ pub inline fn rec(kind: Kind, op: u16, ptr: usize, val: u64, loop: usize) void {
     buf[i % N] = .{ .seq = i, .kind = kind, .op = op, .ptr = ptr, .val = val, .loop = loop };
 }
 
+var dumped = std.atomic.Value(bool).init(false);
+
 pub fn dump() void {
     if (!enabled) return;
+    // Only the first caller dumps (a crash + watchdog could both call).
+    if (dumped.swap(true, .acq_rel)) return;
+    // Write directly to stderr (std.debug.print locks + writes unbuffered) so the
+    // dump survives a hard crash where log/buffered output would be lost.
     const total = idx.load(.monotonic);
     const count = @min(total, @as(u64, N));
     const start = total - count;
-    log.warn("=== TRACE DUMP: last {} of {} events ===", .{ count, total });
+    std.debug.print("=== TRACE DUMP: last {d} of {d} events ===\n", .{ count, total });
     var s = start;
     while (s < total) : (s += 1) {
         const e = buf[s % N];
-        log.warn("T#{d} {s} op={d} c=0x{x} val={d} loop=0x{x}", .{ e.seq, @tagName(e.kind), e.op, e.ptr, e.val, e.loop });
+        std.debug.print("T#{d} {s} op={d} c=0x{x} val={d} loop=0x{x}\n", .{ e.seq, @tagName(e.kind), e.op, e.ptr, e.val, e.loop });
     }
-    log.warn("=== END TRACE DUMP ===", .{});
+    std.debug.print("=== END TRACE DUMP ===\n", .{});
 }
