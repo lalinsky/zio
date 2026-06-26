@@ -135,6 +135,12 @@ pub inline fn rec(kind: Kind, op: u16, ptr: usize, val: u64, loop: usize) void {
     buf[i % N] = .{ .seq = i, .kind = kind, .op = op, .ptr = ptr, .val = val, .loop = loop };
 }
 
+/// DEBUG (#530): monotonic generation stamped into each AcceptEx's OVERLAPPED
+/// (Offset/OffsetHigh, unused by AcceptEx) at submit and read back at completion.
+/// Never reused, unlike the overlapped's address. Lets us prove whether one
+/// AcceptEx submission produces two completions vs two submissions aliasing.
+pub var accept_gen = std.atomic.Value(u64).init(1);
+
 var dumped = std.atomic.Value(bool).init(false);
 
 pub fn dump() void {

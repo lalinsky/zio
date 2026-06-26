@@ -727,6 +727,12 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
     // Initialize OVERLAPPED
     data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
 
+    // DEBUG (#530): stamp a never-reused generation into Offset/OffsetHigh (unused
+    // by AcceptEx) so each completion can be traced back to its exact submission.
+    const accept_gen = dbg.accept_gen.fetchAdd(1, .monotonic);
+    data.c.internal.overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.Offset = @truncate(accept_gen);
+    data.c.internal.overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.OffsetHigh = @truncate(accept_gen >> 32);
+
     // Call AcceptEx
     var bytes_received: windows.DWORD = 0;
     const addr_size: windows.DWORD = NetAcceptData.addr_slot_size;
@@ -744,7 +750,7 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
 
     // Store accept_socket so we can retrieve it later (needed for both success and error cases)
     data.result_private_do_not_touch = accept_socket;
-    dbg.rec(.acc_submit, 0, @intFromPtr(&data.c.internal.overlapped), @intFromPtr(accept_socket), @intFromPtr(state.loop));
+    dbg.rec(.acc_submit, 0, @intFromPtr(&data.c.internal.overlapped), @intFromPtr(accept_socket), accept_gen);
     dbg.rec(.io_submit, @intFromEnum(data.c.op), @intFromPtr(&data.c.internal.overlapped), if (result != windows.FALSE) 1 else 0, @intFromPtr(&data.c));
 
     // When AcceptEx succeeds (result == TRUE) OR returns WSA_IO_PENDING,
@@ -1627,7 +1633,8 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
     // Per-packet result snapshot (reliable even if the OVERLAPPED struct was reused),
     // plus the OVERLAPPED struct's own fields (may be stale/overwritten by reuse).
     dbg.rec(.pc_detail, @intFromEnum(c.op), @intFromPtr(overlapped), entry.Internal, entry.dwNumberOfBytesTransferred);
-    dbg.rec(.pc_ovl, @intFromEnum(c.op), @intFromPtr(overlapped), overlapped.Internal, @intFromPtr(overlapped.hEvent orelse @as(windows.HANDLE, @ptrFromInt(0xdead))));
+    const pc_gen = (@as(u64, overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.OffsetHigh) << 32) | overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.Offset;
+    dbg.rec(.pc_ovl, @intFromEnum(c.op), @intFromPtr(overlapped), overlapped.Internal, pc_gen);
 
     // Process based on operation type
     switch (c.op) {
