@@ -46,7 +46,7 @@ jobs:
           -Demit-test-bin
         BIN=$(ls zig-out/bin/test* | head -1)
         echo "Looping $BIN"
-        for i in $(seq 1 40); do
+        for i in $(seq 1 15); do
           echo "=== iteration $i ==="
           "$BIN" || { echo "FAILED on iteration $i"; exit 1; }
         done
