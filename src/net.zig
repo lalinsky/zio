@@ -2441,7 +2441,6 @@ test "Stream.Reader/Writer.fromStd" {
 // table teardown.
 test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reuse)" {
     if (builtin.single_threaded) return error.SkipZigTest;
-    if (true) return error.SkipZigTest; // DEBUG (#530): skipped while running the standalone repro. Do not merge.
     // DEBUG (iocp-debug branch): IOCP is NOT skipped here — we WANT it to run so
     // CI reproduces lalinsky/zio#530. Load is cranked up and io_timeout lowered
     // so a stall surfaces quickly and the STALL/LATE warn lines fire. Do not merge.

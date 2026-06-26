@@ -716,13 +716,24 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
     const accept_socket = try net.socket(@enumFromInt(family), .stream, .ip, data.flags);
     errdefer net.close(accept_socket);
 
-    // FIX (#530): do NOT associate the accept socket with the IOCP before AcceptEx.
-    // AcceptEx operates on both the listening and accept sockets; if both are bound
-    // to the same completion port, the single AcceptEx completion is delivered TWICE
-    // (once per association), and the second, stray completion is serviced against
-    // the reused accept op -> double-close UAF (the whole #530 cascade). Both libuv
-    // and Go's runtime associate the accepted socket only AFTER AcceptEx completes.
-    // We do the association in processCompletion (after SO_UPDATE_ACCEPT_CONTEXT).
+    // FIX (#530): publish the accept socket into the op BEFORE issuing AcceptEx.
+    // On the shared multi-threaded IOCP port, AcceptEx can complete and be dequeued
+    // by another executor thread the instant it is posted. If result_private were
+    // still unset at that point, processCompletion would read a garbage handle and
+    // close it (the double-close UAF). The AcceptEx syscall below is a full barrier,
+    // so writing the handle first guarantees the completion handler sees it.
+    data.result_private_do_not_touch = accept_socket;
+
+    // Associate the accept socket with IOCP.
+    const iocp_result = windows.CreateIoCompletionPort(
+        @ptrCast(accept_socket),
+        self.shared_state.iocp,
+        0,
+        0,
+    ) orelse return error.Unexpected;
+    if (iocp_result != self.shared_state.iocp) {
+        return error.Unexpected;
+    }
 
     // Initialize OVERLAPPED
     data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
@@ -748,8 +759,7 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
         &data.c.internal.overlapped,
     );
 
-    // Store accept_socket so we can retrieve it later (needed for both success and error cases)
-    data.result_private_do_not_touch = accept_socket;
+    // (result_private_do_not_touch was published before AcceptEx above — see #530.)
     dbg.rec(.acc_submit, 0, @intFromPtr(&data.c.internal.overlapped), @intFromPtr(accept_socket), accept_gen);
     dbg.rec(.io_submit, @intFromEnum(data.c.op), @intFromPtr(&data.c.internal.overlapped), if (result != windows.FALSE) 1 else 0, @intFromPtr(&data.c));
 
@@ -1755,24 +1765,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                         }
                     }
 
-                    // FIX (#530): associate the accepted socket with the IOCP now,
-                    // AFTER AcceptEx has completed (not before — see submitAccept).
-                    // The socket inherits the listener's port association via
-                    // SO_UPDATE_ACCEPT_CONTEXT, so this often returns
-                    // ERROR_INVALID_PARAMETER (already associated), which is fine.
-                    const assoc = windows.CreateIoCompletionPort(
-                        @ptrCast(data.result_private_do_not_touch),
-                        self.shared_state.iocp,
-                        0,
-                        0,
-                    );
-                    if (assoc != self.shared_state.iocp and windows.GetLastError() != .INVALID_PARAMETER) {
-                        net.close(data.result_private_do_not_touch);
-                        c.setError(error.Unexpected);
-                        state.markCompletedFromBackend(c);
-                        return;
-                    }
-
+                    // Socket was already associated with IOCP in submitAccept().
                     c.setResult(.net_accept, data.result_private_do_not_touch);
                 }
             }
