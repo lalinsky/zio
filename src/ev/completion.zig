@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const dbg = @import("../debug_trace.zig"); // DEBUG (iocp-debug branch): do not merge
 const posix = @import("../os/posix.zig");
 
 const Loop = @import("loop.zig").Loop;
@@ -445,7 +446,9 @@ pub const Group = struct {
         }
 
         const prev = self.remaining.fetchSub(1, .acq_rel);
+        dbg.rec(.group_dec, @intFromEnum(completion.op), @intFromPtr(self), prev, @intFromPtr(loop));
         if (prev == 1) {
+            dbg.rec(.group_finish, @intFromEnum(self.c.op), @intFromPtr(self), 0, @intFromPtr(loop));
             if (self.c.cancel_state.load(.acquire).requested) {
                 self.c.setError(error.Canceled);
             } else {

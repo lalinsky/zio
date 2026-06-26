@@ -2466,6 +2466,29 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
 
         fn nudge() void {}
 
+        // DEBUG (iocp-debug branch): dump the trace ring if progress stalls,
+        // catching the #530 hang before the 3s timeout cascade mutates state.
+        fn watchdog(sh: *Shared) void {
+            var last: u32 = 0;
+            var stable: u32 = 0;
+            var dumped = false;
+            while (!sh.done.load(.acquire)) {
+                runtime_mod.sleep(.fromMilliseconds(300)) catch return;
+                const cur = sh.conns.load(.monotonic) + sh.verified.load(.monotonic) + sh.errors.load(.monotonic);
+                if (cur == last) {
+                    stable += 1;
+                } else {
+                    stable = 0;
+                    last = cur;
+                }
+                if (stable >= 5 and !dumped) { // ~1.5s with no progress
+                    @import("debug_trace.zig").dump();
+                    dumped = true;
+                    return;
+                }
+            }
+        }
+
         fn handler(stream: Stream, sh: *Shared) void {
             defer stream.close();
             var buf: [chunk]u8 = undefined;
@@ -2591,11 +2614,15 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
 
     var server_group: Group = .init;
     try server_group.spawn(H.server, .{ &port_ch, &sh });
+    // DEBUG (iocp-debug branch): watchdog dumps the trace ring on a stall.
+    var wd_group: Group = .init;
+    try wd_group.spawn(H.watchdog, .{&sh});
     // Signal the acceptor to stop *before* draining it, so an early return from
     // any `try` below can't leave it looping forever.
     defer {
         sh.done.store(true, .release);
         server_group.wait() catch {};
+        wd_group.wait() catch {};
     }
 
     const port = try port_ch.receive();

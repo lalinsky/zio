@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const dbg = @import("../debug_trace.zig"); // DEBUG (iocp-debug branch): do not merge
 const Backend = @import("backend.zig").Backend;
 const BackendCapabilities = @import("completion.zig").BackendCapabilities;
 const Completion = @import("completion.zig").Completion;
@@ -323,6 +324,7 @@ pub const LoopState = struct {
     /// Called by backends when an I/O operation completes.
     /// Decrements inflight_io counter and marks the completion done.
     pub fn markCompletedFromBackend(self: *LoopState, completion: *Completion) void {
+        dbg.rec(.complete, @intFromEnum(completion.op), @intFromPtr(completion), 0, @intFromPtr(self.loop));
         self.decrInflight();
         self.markCompleted(completion);
     }
@@ -345,15 +347,20 @@ pub const LoopState = struct {
         // Only call finish if not in cancel queue
         // If in_queue, cancel queue processing will call finishCompletion
         if (!old.in_queue) {
+            dbg.rec(.mc_finish, @intFromEnum(completion.op), @intFromPtr(completion), 0, @intFromPtr(self.loop));
             if (self.loop.defer_callbacks) {
                 self.completions.push(completion);
             } else {
                 self.finishCompletion(completion);
             }
+        } else {
+            dbg.rec(.mc_defer, @intFromEnum(completion.op), @intFromPtr(completion), 0, @intFromPtr(self.loop));
         }
     }
 
     pub fn finishCompletion(self: *LoopState, completion: *Completion) void {
+        const grp_ptr: usize = if (completion.group.owner) |o| @intFromPtr(o) else @intFromPtr(completion);
+        dbg.rec(.finish, @intFromEnum(completion.op), @intFromPtr(completion), grp_ptr, @intFromPtr(self.loop));
         std.debug.assert(completion.state == .completed);
 
         completion.state = .dead;
@@ -592,6 +599,7 @@ pub const Loop = struct {
             // Same loop - cancel directly
             self.cancelLocal(completion);
         } else {
+            dbg.rec(.cancel_enq, @intFromEnum(completion.op), @intFromPtr(completion), 0, @intFromPtr(target));
             // Push to target's cancel queue (lock-free Treiber stack)
             var head = target.cancel_queue.load(.acquire);
             while (true) {
@@ -607,6 +615,7 @@ pub const Loop = struct {
 
     /// Cancel a completion on the local loop (must be called from the loop's thread)
     fn cancelLocal(self: *Loop, completion: *Completion) void {
+        dbg.rec(.cancel_local, @intFromEnum(completion.op), @intFromPtr(completion), 0, @intFromPtr(self));
         defer {
             // Clear in_queue and call finishCompletion if completed
             var old = completion.cancel_state.load(.acquire);
@@ -616,7 +625,10 @@ pub const Loop = struct {
                 old = completion.cancel_state.cmpxchgWeak(old, new, .acq_rel, .acquire) orelse break;
             }
             if (old.completed) {
+                dbg.rec(.cancel_fin, @intFromEnum(completion.op), @intFromPtr(completion), 0, @intFromPtr(self));
                 self.state.finishCompletion(completion);
+            } else {
+                dbg.rec(.cancel_nofin, @intFromEnum(completion.op), @intFromPtr(completion), 0, @intFromPtr(self));
             }
         }
 
