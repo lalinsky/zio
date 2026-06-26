@@ -8,6 +8,15 @@ const builtin = @import("builtin");
 // builds so IOCP cross-loop tracing is visible in CI. Do not merge.
 pub const std_options: std.Options = .{ .log_level = .debug };
 
+// DEBUG (iocp-debug branch only): dump the trace ring on any panic / access
+// violation (Zig converts segfaults to panics in safe modes), so a crash that
+// happens before the watchdog's stall dump still yields the lead-up. Do not merge.
+pub const panic = std.debug.FullPanic(panicHandler);
+fn panicHandler(msg: []const u8, ret_addr: ?usize) noreturn {
+    @import("debug_trace.zig").dump();
+    std.debug.defaultPanic(msg, ret_addr);
+}
+
 const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;
 pub const RuntimeOptions = runtime.RuntimeOptions;
