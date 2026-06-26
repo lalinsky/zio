@@ -7,6 +7,7 @@ const builtin = @import("builtin");
 const assert = std.debug.assert;
 
 const ev = @import("ev/root.zig");
+const dbg = @import("debug_trace.zig"); // DEBUG (iocp-debug branch): do not merge
 const os = @import("os/root.zig");
 
 const meta = @import("meta.zig");
@@ -542,6 +543,7 @@ pub const Executor = struct {
         const home_exec = Executor.fromCoroutine(&task.coro);
 
         if (task == &home_exec.main_task) {
+            dbg.rec(.sched_main, 0, @intFromPtr(task), 0, @intFromPtr(&home_exec.loop));
             home_exec.loop.wake();
             return;
         }
@@ -549,6 +551,7 @@ pub const Executor = struct {
         if (getCurrentExecutorOrNull()) |current_exec| {
             if (current_exec == home_exec) {
                 // Schedule locally
+                dbg.rec(.sched_local, 0, @intFromPtr(task), 0, @intFromPtr(&current_exec.loop));
                 current_exec.scheduleTaskLocal(task);
                 return;
             }
@@ -559,6 +562,7 @@ pub const Executor = struct {
             // load (see https://github.com/lalinsky/zio/issues/460).
             if (old.tag != .new and current_exec.runtime == home_exec.runtime and home_exec.runtime.options.enable_task_migration) {
                 // Migrate to the current executor
+                dbg.rec(.sched_migrate, 0, @intFromPtr(task), 0, @intFromPtr(&current_exec.loop));
                 task.last_run_tick = 0;
                 current_exec.scheduleTaskLocal(task);
                 return;
@@ -566,6 +570,7 @@ pub const Executor = struct {
         }
 
         // Schedule on the home executor
+        dbg.rec(.sched_remote, 0, @intFromPtr(task), 0, @intFromPtr(&home_exec.loop));
         home_exec.scheduleTaskRemote(task);
     }
 
@@ -604,6 +609,7 @@ pub const Executor = struct {
                             old = actual;
                             continue;
                         }
+                        dbg.rec(.park_prewoken, 0, @intFromPtr(task), 0, @intFromPtr(&self.loop));
                         self.scheduleTaskLocal(task);
                         return;
                     }
@@ -613,6 +619,7 @@ pub const Executor = struct {
                         old = actual;
                         continue;
                     }
+                    dbg.rec(.park, 0, @intFromPtr(task), 0, @intFromPtr(&self.loop));
                     break; // Task is now .waiting
                 }
             },

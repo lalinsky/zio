@@ -7,6 +7,7 @@ const builtin = @import("builtin");
 pub const log = std.log.scoped(.zio);
 
 const ev = @import("ev/root.zig");
+const dbg = @import("debug_trace.zig"); // DEBUG (iocp-debug branch): do not merge
 const Timeout = @import("time.zig").Timeout;
 const Clock = @import("time.zig").Clock;
 const Timestamp = @import("time.zig").Timestamp;
@@ -104,7 +105,8 @@ pub const Waiter = struct {
         switch (self.mode) {
             .direct => |*d| {
                 if (d.task) |task| {
-                    _ = d.notify.state.fetchAdd(1, .release);
+                    const n = d.notify.state.fetchAdd(1, .release);
+                    dbg.rec(.signal, 0, @intFromPtr(task), n + 1, 0);
                     task.wake();
                 } else {
                     d.notify.signal();

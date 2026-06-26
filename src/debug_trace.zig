@@ -22,6 +22,16 @@ pub const Kind = enum(u8) {
     timer_set, // setTimer: insert/reset (val = deadline)
     timer_clear, // clearTimer (val = was_active)
     timer_fire, // checkTimers: deadline passed, about to markCompleted (val = deadline)
+    // task scheduling (ptr = task)
+    park, // processCleanup: task transitioned to .waiting
+    park_prewoken, // processCleanup: awaken token consumed, rescheduled locally
+    signal, // Waiter.signal: direct waiter signalled (val = notify count)
+    sched_local, // scheduleTask -> local ready queue
+    sched_migrate, // scheduleTask -> migrate to current executor
+    sched_remote, // scheduleTask -> remote queue + wake (val = home loop)
+    sched_token, // scheduleTask -> task .ready, set awaken token (no schedule)
+    sched_main, // scheduleTask -> main task, loop.wake
+    sched_finished, // scheduleTask -> task already finished
 };
 
 const Event = struct {
@@ -33,7 +43,7 @@ const Event = struct {
     loop: usize = 0,
 };
 
-const N = 4096;
+const N = 8192;
 var buf: [N]Event = undefined;
 var idx: std.atomic.Value(u64) = .init(0);
 
