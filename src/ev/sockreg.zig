@@ -299,7 +299,13 @@ pub fn service(self: anytype, state: anytype, fd: net.fd_t, dir: Dir, event: any
     shard.mutex.unlock();
 
     while (to_finish.pop()) |c| {
-        state.markCompletedFromBackend(c);
+        // Sends can be re-entered by the NetSendFile fallback (it re-submits a
+        // NetSend from inside its own send callback), so they must finish via the
+        // deferred queue rather than inline — same rule as submitIo.
+        switch (c.op) {
+            .net_send, .net_sendto, .net_sendmsg => state.markCompletedDeferredFromBackend(c),
+            else => state.markCompletedFromBackend(c),
+        }
     }
 }
 
