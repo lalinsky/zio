@@ -1747,24 +1747,8 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                         }
                     }
 
-                    // FIX (#530): associate the accepted socket with the IOCP now
-                    // (AFTER AcceptEx has completed), not before. Doing it before
-                    // AcceptEx made the single accept completion be queued twice
-                    // (via the listen + accept associations) -> duplicate completion
-                    // -> double-close UAF. SO_UPDATE_ACCEPT_CONTEXT does not inherit
-                    // the port association, so the handler's I/O needs this.
-                    const assoc = windows.CreateIoCompletionPort(
-                        @ptrCast(data.result_private_do_not_touch),
-                        self.shared_state.iocp,
-                        0,
-                        0,
-                    );
-                    if (assoc == null or assoc != self.shared_state.iocp) {
-                        net.close(data.result_private_do_not_touch);
-                        c.setError(error.Unexpected);
-                        state.markCompletedFromBackend(c);
-                        return;
-                    }
+                    // Note: Socket was already associated with IOCP in submitAccept()
+                    // No need to associate again here
 
                     c.setResult(.net_accept, data.result_private_do_not_touch);
                 }
