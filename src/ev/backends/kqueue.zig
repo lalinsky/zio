@@ -39,10 +39,19 @@ pub const capabilities: BackendCapabilities = .{
     // The BSDs' EVFILT_TIMER absolute clock is monotonic-only and underspecified
     // with no CLOCK_REALTIME timer, so they keep the capped poll-timeout fallback.
     .native_wall_timers = builtin.os.tag.isDarwin(),
-    .cross_loop_socket_reg = true,
+    // A socket fd is registered in exactly one loop's kqueue (per direction), but
+    // the op can be submitted from another loop and is serviced/completed by the
+    // registering loop when its edge fires - completions finish on a thread other
+    // than the submitter. That makes active/inflight accounting shared, like IOCP.
+    .is_multi_threaded = true,
 };
 
 pub const SharedState = struct {
+    /// Group-shared accounting: a completion submitted on one loop may be
+    /// finished by the loop that owns the fd registration, so active/inflight_io
+    /// are shared atomics rather than per-LoopState fields (see LoopState).
+    active: std.atomic.Value(u64) = .init(0),
+    inflight_io: std.atomic.Value(u64) = .init(0),
     /// Cross-loop single-owner socket registration table, shared by every loop
     /// in the group. See sockreg.zig.
     sock_table: sockreg.Table = .{},

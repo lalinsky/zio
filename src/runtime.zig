@@ -337,20 +337,10 @@ pub const Executor = struct {
         // Initialize this executor's random state from OS entropy.
         try random_mod.setup(&self.random_state);
 
-        // The shared loop group lets loops coordinate cross-loop socket
-        // registration when fibers migrate between executors. With migration
-        // disabled, a socket fd is only ever driven by one loop, so each loop
-        // can use its own (internal) group and register fds purely locally,
-        // skipping the shared table's cross-loop bookkeeping. Multi-threaded
-        // backends (IOCP) need the shared group regardless - their completion
-        // port and counters live there - so only bypass it for the cross-loop
-        // socket-registration backends (epoll/kqueue).
-        const use_internal_group = ev.Backend.capabilities.cross_loop_socket_reg and
-            !self.runtime.options.enable_task_migration;
         try self.loop.init(.{
             .allocator = self.runtime.allocator,
             .thread_pool = &self.runtime.thread_pool,
-            .loop_group = if (use_internal_group) null else &self.runtime.loop_group,
+            .loop_group = &self.runtime.loop_group,
             .defer_callbacks = false,
         });
         errdefer self.loop.deinit();

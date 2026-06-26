@@ -247,18 +247,15 @@ pub fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion
         owner.* = self_opaque;
     }
 
+    // The completion stays owned by its submitting loop: its `loop` field, timeout
+    // timer, and cancel routing are unchanged. The owner loop only holds the
+    // poller registration and services the op in place when its edge fires,
+    // completing it cross-thread through the synchronized completion machinery.
+    // Accounting is group-shared (is_multi_threaded), so it balances regardless of
+    // which loop finishes the op (the owner on a readiness edge, or the submitter
+    // on cancel/timeout).
     completion.prev = null;
     completion.next = null;
-    if (owner.* != self_opaque) {
-        // Migrate ownership of this completion to the loop that monitors the fd:
-        // move its accounting and reassign its loop so it completes/cancels there.
-        const owner_loop: *Loop = @ptrCast(@alignCast(owner.*));
-        state.decrInflight();
-        state.decrActive();
-        owner_loop.state.incrInflight();
-        owner_loop.state.incrActive();
-        completion.loop = owner_loop;
-    }
     entry.waiters(dir).push(completion);
     shard.mutex.unlock();
     return .parked;
