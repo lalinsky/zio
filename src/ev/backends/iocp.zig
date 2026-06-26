@@ -1759,11 +1759,11 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                         0,
                         0,
                     );
-                    if (assoc != self.shared_state.iocp) {
-                        // DEBUG (#530): non-destructive — log and continue so we can
-                        // see whether result_private is garbage (duplicate completion)
-                        // or a valid socket that's already associated (inheritance).
-                        std.debug.print("POST-ASSOC FAIL h=0x{x} assoc=0x{x} err={s}\n", .{ @intFromPtr(data.result_private_do_not_touch), if (assoc) |a| @intFromPtr(a) else 0, @tagName(windows.GetLastError()) });
+                    if (assoc == null or assoc != self.shared_state.iocp) {
+                        net.close(data.result_private_do_not_touch);
+                        c.setError(error.Unexpected);
+                        state.markCompletedFromBackend(c);
+                        return;
                     }
 
                     c.setResult(.net_accept, data.result_private_do_not_touch);
