@@ -135,7 +135,16 @@ pub fn main(init: std.process.Init) !void {
     if (args.len > 2) cfg.msg = try std.fmt.parseInt(usize, args[2], 10);
     if (args.len > 3) cfg.executors = try std.fmt.parseInt(u8, args[3], 10);
     if (args.len > 4) cfg.conns = try std.fmt.parseInt(u32, args[4], 10);
-    if (args.len > 5) cfg.mode = if (std.mem.eql(u8, args[5], "stream")) .stream else .pingpong;
+    if (args.len > 5) {
+        if (std.mem.eql(u8, args[5], "pingpong")) {
+            cfg.mode = .pingpong;
+        } else if (std.mem.eql(u8, args[5], "stream")) {
+            cfg.mode = .stream;
+        } else {
+            return error.BadMode;
+        }
+    }
+    if (cfg.count == 0) return error.BadCount;
     if (cfg.msg == 0 or cfg.msg > max_msg) return error.BadMsgSize;
     if (cfg.conns == 0) return error.BadConns;
 
