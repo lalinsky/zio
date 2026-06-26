@@ -64,6 +64,7 @@ const impl = struct {
     const State = struct {
         iocp: windows.HANDLE,
         completions: []std.atomic.Value(u32), // indexed by gen
+        global: std.atomic.Value(u32) = .init(0), // total completions (works even when overlapped reused)
         stop: std.atomic.Value(bool) = .init(false),
         assoc: Assoc,
     };
@@ -84,6 +85,7 @@ const impl = struct {
                 if (st.assoc == .after) {
                     _ = windows.CreateIoCompletionPort(toHandle(ctx.accept_sock), st.iocp, 0, 0);
                 }
+                _ = st.global.fetchAdd(1, .monotonic);
                 if (ctx.gen < st.completions.len) {
                     _ = st.completions[ctx.gen].fetchAdd(1, .monotonic);
                 }
@@ -93,7 +95,7 @@ const impl = struct {
 
     const Result = struct { accepts: u64, total: u64, max: u32, dup_gens: u64 };
 
-    fn runVariant(alloc: std.mem.Allocator, assoc: Assoc, n_accepts: u64, n_pollers: usize) !Result {
+    fn runVariant(alloc: std.mem.Allocator, assoc: Assoc, reuse: bool, n_accepts: u64, n_pollers: usize) !Result {
         const iocp = windows.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, null, 0, 0) orelse return error.Unexpected;
         defer _ = windows.CloseHandle(iocp);
 
@@ -125,9 +127,15 @@ const impl = struct {
 
         const connect_addr = IpAddress.initIp4(.{ 127, 0, 0, 1 }, port);
 
+        // In reuse mode, a single AcceptCtx (and its OVERLAPPED) is recycled for
+        // every accept — exactly what zio's acceptor does. The accepted socket is
+        // closed after each completion before the slot is reused.
+        var shared_ctx: *AcceptCtx = undefined;
+        if (reuse) shared_ctx = try alloc.create(AcceptCtx);
+
         var gen: u64 = 1;
         while (gen <= n_accepts) : (gen += 1) {
-            const ctx = try alloc.create(AcceptCtx); // intentionally never freed during run
+            const ctx = if (reuse) shared_ctx else try alloc.create(AcceptCtx);
             ctx.* = .{ .gen = gen };
             ctx.accept_sock = try net.socket(.ipv4, .stream, .ip, .{ .nonblocking = false });
 
@@ -135,6 +143,7 @@ const impl = struct {
                 _ = windows.CreateIoCompletionPort(toHandle(ctx.accept_sock), iocp, 0, 0);
             }
 
+            const before = st.global.load(.monotonic);
             var bytes: windows.DWORD = 0;
             const r = acceptex(listener, ctx.accept_sock, &ctx.buf, 0, addr_slot, addr_slot, &bytes, &ctx.overlapped);
             if (r == windows.FALSE and windows.WSAGetLastError() != .IO_PENDING) return error.Unexpected;
@@ -143,12 +152,14 @@ const impl = struct {
             const client = try net.socket(.ipv4, .stream, .ip, .{ .nonblocking = false });
             try net.connect(client, &connect_addr.any, @sizeOf(windows.sockaddr.in));
 
-            // Wait for this generation's first completion (bounded).
+            // Wait for a completion to land (bounded). Use the global counter so it
+            // works whether the overlapped is unique or reused.
             var spins: u32 = 0;
-            while (st.completions[gen].load(.monotonic) == 0 and spins < 4000) : (spins += 1) {
+            while (st.global.load(.monotonic) == before and spins < 4000) : (spins += 1) {
                 Sleep(1);
             }
             net.close(client);
+            net.close(ctx.accept_sock);
             // Brief window for a possible duplicate completion to arrive.
             Sleep(2);
         }
@@ -158,15 +169,21 @@ const impl = struct {
         st.stop.store(true, .release);
         for (pollers) |t| t.join();
 
-        var total: u64 = 0;
+        const total: u64 = st.global.load(.monotonic);
         var max: u32 = 0;
         var dups: u64 = 0;
-        var g: u64 = 1;
-        while (g <= n_accepts) : (g += 1) {
-            const c = completions[g].load(.monotonic);
-            total += c;
-            if (c > max) max = c;
-            if (c > 1) dups += 1;
+        if (!reuse) {
+            var g: u64 = 1;
+            while (g <= n_accepts) : (g += 1) {
+                const c = completions[g].load(.monotonic);
+                if (c > max) max = c;
+                if (c > 1) dups += 1;
+            }
+        } else {
+            // Per-gen is meaningless when the overlapped is reused; a duplicate
+            // shows up as more completions than accepts.
+            max = if (total > n_accepts) 2 else 1;
+            dups = if (total > n_accepts) total - n_accepts else 0;
         }
         return .{ .accepts = n_accepts, .total = total, .max = max, .dup_gens = dups };
     }
@@ -193,15 +210,17 @@ const impl = struct {
         net.ensureWSAInitialized(); // the runtime normally does this; we run runtime-free
         const alloc = std.heap.page_allocator;
         const n: u64 = 1000;
-        const variants = [_]struct { name: []const u8, assoc: Assoc }{
-            .{ .name = "assoc_none  ", .assoc = .none },
-            .{ .name = "assoc_before", .assoc = .before },
-            .{ .name = "assoc_after ", .assoc = .after },
+        const variants = [_]struct { name: []const u8, assoc: Assoc, reuse: bool }{
+            .{ .name = "unique assoc_none  ", .assoc = .none, .reuse = false },
+            .{ .name = "unique assoc_before", .assoc = .before, .reuse = false },
+            .{ .name = "REUSE  assoc_none  ", .assoc = .none, .reuse = true },
+            .{ .name = "REUSE  assoc_before", .assoc = .before, .reuse = true },
+            .{ .name = "REUSE  assoc_after ", .assoc = .after, .reuse = true },
         };
         for (variants) |v| {
-            const res = try runVariant(alloc, v.assoc, n, 3);
+            const res = try runVariant(alloc, v.assoc, v.reuse, n, 3);
             std.debug.print(
-                "REPRO #530 variant={s} accepts={d} total_completions={d} max_per_gen={d} DUP_GENS={d}\n",
+                "REPRO #530 variant=[{s}] accepts={d} total_completions={d} max_per_gen={d} DUP={d}\n",
                 .{ v.name, res.accepts, res.total, res.max, res.dup_gens },
             );
         }
