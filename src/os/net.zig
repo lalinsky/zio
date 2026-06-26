@@ -158,6 +158,7 @@ pub fn close(fd: fd_t) void {
                 @panic("BUG #530: closing the protected listening socket mid-run");
             }
             if (!dbg.sockClose(@intFromPtr(fd))) {
+                std.debug.print("DOUBLE-CLOSE h=0x{x}\n", .{@intFromPtr(fd)});
                 dbg.dump();
                 @panic("BUG #530: double-close / close of never-opened socket");
             }
