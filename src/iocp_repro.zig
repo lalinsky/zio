@@ -190,6 +190,7 @@ const impl = struct {
     }
 
     fn run() !void {
+        net.ensureWSAInitialized(); // the runtime normally does this; we run runtime-free
         const alloc = std.heap.page_allocator;
         const n: u64 = 1000;
         const variants = [_]struct { name: []const u8, assoc: Assoc }{
