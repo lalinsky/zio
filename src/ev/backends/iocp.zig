@@ -321,6 +321,7 @@ pub const NetShutdownError = error{
 const Self = @This();
 
 const log = @import("../../common.zig").log;
+const dbg = @import("../../debug_trace.zig"); // DEBUG (iocp-debug branch): do not merge
 
 allocator: std.mem.Allocator,
 shared_state: *SharedState,
@@ -747,6 +748,7 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
 
     // Store accept_socket so we can retrieve it later (needed for both success and error cases)
     data.result_private_do_not_touch = accept_socket;
+    dbg.rec(.acc_submit, 0, @intFromPtr(&data.c.internal.overlapped), @intFromPtr(accept_socket), @intFromPtr(&data.c));
 
     // When AcceptEx succeeds (result == TRUE) OR returns WSA_IO_PENDING,
     // the completion will be posted to the IOCP port.
@@ -1569,7 +1571,7 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
             //   TRUE      -> op genuinely still pending in the kernel = no data /
             //                kernel-level stall.
             switch (target.op) {
-                .net_accept => {},
+                .net_accept => dbg.rec(.acc_cancel, 0, @intFromPtr(&target.internal.overlapped), 0, @intFromPtr(target)),
                 .net_recv, .net_send, .net_connect, .net_poll, .net_send_file, .net_recvfrom, .net_sendto, .net_recvmsg, .net_sendmsg => {
                     const outcome = if (cancel_err) |e| switch (e) {
                         .NOT_FOUND => "NOT_FOUND(already-completed)",
@@ -1619,6 +1621,8 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
 
     // Use @fieldParentPtr again to get from CompletionData to Completion
     const c: *Completion = @fieldParentPtr("internal", completion_data);
+
+    dbg.rec(.pc_entry, @intFromEnum(c.op), @intFromPtr(overlapped), @intFromPtr(c), 0);
 
     // Process based on operation type
     switch (c.op) {
