@@ -337,7 +337,16 @@ pub fn submitIo(self: anytype, state: anytype, c: *Completion) void {
     while (true) {
         switch (Backend.checkCompletion(c, &probe)) {
             .completed => {
-                state.markCompletedDeferredFromBackend(c);
+                // Sends can be re-entered by the NetSendFile fallback (it
+                // re-submits a NetSend from inside its own send callback), so they
+                // must finish via the deferred queue. Reads/accepts cannot
+                // re-enter submit, so finishing them inline lets the consumer
+                // resume immediately - which keeps the producer/consumer in step
+                // and avoids an extra epoll_wait + EAGAIN per round trip.
+                switch (c.op) {
+                    .net_send, .net_sendto, .net_sendmsg => state.markCompletedDeferredFromBackend(c),
+                    else => state.markCompletedFromBackend(c),
+                }
                 return;
             },
             .requeue => switch (park(self, state, fd, c)) {
