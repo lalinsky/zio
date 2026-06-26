@@ -2613,3 +2613,161 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
     try std.testing.expectEqual(@as(u32, H.waves * H.per_wave), sh.conns.load(.monotonic));
     try std.testing.expectEqual(@as(u32, H.waves * H.per_wave), sh.verified.load(.monotonic));
 }
+
+// Migration-disabled bypass: with enable_task_migration=false the executors do
+// not share a loop group, so each loop registers its sockets purely locally. A
+// connection's reader and writer still run as separate tasks that land on
+// different executors, so the same fd is driven from two loops at once (each
+// owning its own direction in its own table) - verify that still works.
+test "multi-executor: full-duplex with task migration disabled" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const H = struct {
+        const conns = 16;
+        const total = 4 * 1024;
+        const chunk = 1024;
+        const io_timeout = Timeout.fromMilliseconds(5_000);
+
+        const Shared = struct {
+            verified: std.atomic.Value(u32) = .init(0),
+            errors: std.atomic.Value(u32) = .init(0),
+            done: std.atomic.Value(bool) = .init(false),
+        };
+
+        fn pat(id: usize, i: usize) u8 {
+            return @truncate(id *% 31 +% i);
+        }
+
+        fn handler(stream: Stream, sh: *Shared) void {
+            defer stream.close();
+            var buf: [chunk]u8 = undefined;
+            while (true) {
+                const n = stream.read(&buf, io_timeout) catch {
+                    _ = sh.errors.fetchAdd(1, .monotonic);
+                    return;
+                };
+                if (n == 0) return;
+                stream.writeAll(buf[0..n], io_timeout) catch {
+                    _ = sh.errors.fetchAdd(1, .monotonic);
+                    return;
+                };
+            }
+        }
+
+        fn server(port_ch: *Channel(u16), sh: *Shared) void {
+            const addr = IpAddress.parseIp4("127.0.0.1", 0) catch {
+                _ = sh.errors.fetchAdd(1, .monotonic);
+                port_ch.send(0) catch {};
+                return;
+            };
+            const srv = addr.listen(.{ .reuse_address = true }) catch {
+                _ = sh.errors.fetchAdd(1, .monotonic);
+                port_ch.send(0) catch {};
+                return;
+            };
+            defer srv.close();
+            port_ch.send(srv.socket.address.ip.getPort()) catch return;
+
+            var handlers: Group = .init;
+            defer handlers.wait() catch {};
+            while (!sh.done.load(.acquire)) {
+                const stream = srv.accept(.{ .timeout = Timeout.fromMilliseconds(50) }) catch |err| {
+                    if (err == error.Timeout) continue;
+                    break;
+                };
+                handlers.spawn(handler, .{ stream, sh }) catch stream.close();
+            }
+        }
+
+        fn writer(stream: Stream, id: usize, sh: *Shared) void {
+            var buf: [chunk]u8 = undefined;
+            var sent: usize = 0;
+            while (sent < total) {
+                const this = @min(chunk, total - sent);
+                for (0..this) |i| buf[i] = pat(id, sent + i);
+                stream.writeAll(buf[0..this], io_timeout) catch {
+                    _ = sh.errors.fetchAdd(1, .monotonic);
+                    return;
+                };
+                sent += this;
+            }
+        }
+
+        fn reader(stream: Stream, id: usize, sh: *Shared) void {
+            var buf: [chunk]u8 = undefined;
+            var got: usize = 0;
+            while (got < total) {
+                const n = stream.read(buf[0..@min(chunk, total - got)], io_timeout) catch {
+                    _ = sh.errors.fetchAdd(1, .monotonic);
+                    return;
+                };
+                if (n == 0) {
+                    _ = sh.errors.fetchAdd(1, .monotonic);
+                    return;
+                }
+                for (0..n) |k| {
+                    if (buf[k] != pat(id, got + k)) {
+                        _ = sh.errors.fetchAdd(1, .monotonic);
+                        return;
+                    }
+                }
+                got += n;
+            }
+            _ = sh.verified.fetchAdd(1, .monotonic);
+        }
+
+        fn client(port: u16, id: usize, sh: *Shared) void {
+            const addr = IpAddress.parseIp4("127.0.0.1", port) catch {
+                _ = sh.errors.fetchAdd(1, .monotonic);
+                return;
+            };
+            const stream = addr.connect(.{ .timeout = io_timeout }) catch {
+                _ = sh.errors.fetchAdd(1, .monotonic);
+                return;
+            };
+            defer stream.close();
+            var dup: Group = .init;
+            dup.spawn(writer, .{ stream, id, sh }) catch {
+                _ = sh.errors.fetchAdd(1, .monotonic);
+                return;
+            };
+            dup.spawn(reader, .{ stream, id, sh }) catch {
+                _ = sh.errors.fetchAdd(1, .monotonic);
+                dup.wait() catch {};
+                return;
+            };
+            dup.wait() catch {};
+        }
+    };
+
+    const runtime = try Runtime.init(std.testing.allocator, .{
+        .executors = .exact(3),
+        .enable_task_migration = false,
+    });
+    defer runtime.deinit();
+
+    var sh: H.Shared = .{};
+    var port_buf: [1]u16 = undefined;
+    var port_ch = Channel(u16).init(&port_buf);
+
+    var server_group: Group = .init;
+    try server_group.spawn(H.server, .{ &port_ch, &sh });
+    defer {
+        sh.done.store(true, .release);
+        server_group.wait() catch {};
+    }
+
+    const port = try port_ch.receive();
+    try std.testing.expect(port != 0);
+
+    var clients: Group = .init;
+    var id: usize = 0;
+    for (0..H.conns) |_| {
+        try clients.spawn(H.client, .{ port, id, &sh });
+        id += 1;
+    }
+    try clients.wait();
+
+    try std.testing.expectEqual(@as(u32, 0), sh.errors.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, H.conns), sh.verified.load(.monotonic));
+}
