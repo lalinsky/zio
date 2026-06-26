@@ -27,8 +27,6 @@ const MachPort = @import("../completion.zig").MachPort;
 const ProcessWait = @import("../completion.zig").ProcessWait;
 const fs = @import("../../os/fs.zig");
 const sockreg = @import("../sockreg.zig");
-const Loop = @import("../loop.zig").Loop;
-const Op = @import("../completion.zig").Op;
 
 pub const NetHandle = net.fd_t;
 
@@ -87,35 +85,6 @@ const sock_marker: usize = std.math.maxInt(usize) - 1;
 // Persistent edge-triggered (EV_CLEAR) interest for sockets: a fd/direction is
 // added to its owner loop's kqueue once and stays registered for the fd's life.
 // Edge-triggered is safe because submit() drains the socket to EAGAIN first.
-
-fn isSocketOp(op: Op) bool {
-    return switch (op) {
-        .net_connect,
-        .net_accept,
-        .net_recv,
-        .net_send,
-        .net_recvfrom,
-        .net_sendto,
-        .net_recvmsg,
-        .net_sendmsg,
-        .net_poll,
-        => true,
-        else => false,
-    };
-}
-
-/// Direction (read/write filter) a socket op waits on.
-fn dirForOp(c: *Completion) sockreg.Dir {
-    return switch (c.op) {
-        .net_accept, .net_recv, .net_recvfrom, .net_recvmsg => .read,
-        .net_connect, .net_send, .net_sendto, .net_sendmsg => .write,
-        .net_poll => switch (c.cast(NetPoll).event) {
-            .recv => .read,
-            .send => .write,
-        },
-        else => unreachable,
-    };
-}
 
 fn filterForDir(dir: sockreg.Dir) i16 {
     return switch (dir) {
@@ -412,14 +381,7 @@ fn removeFromPollQueue(self: *Self, completion: *Completion) void {
 
 // ---- single-owner socket registration path ----------------------------------
 
-const ParkResult = enum {
-    /// Completion parked in the owner loop's waiter queue.
-    parked,
-    /// A readiness edge raced us; the caller should retry the syscall.
-    retry,
-    /// Registration/allocation failed; completion already finished with an error.
-    failed,
-};
+// Backend hooks for the generic single-owner socket path in sockreg.zig.
 
 /// Queue an EV_ADD | EV_CLEAR for `(fd, dir)` on this loop's kqueue (applied on
 /// the next poll). Edge-triggered + persistent: the registration stays for the
@@ -440,77 +402,24 @@ fn ensureKevent(self: *Self, fd: NetHandle, dir: sockreg.Dir) bool {
     return true;
 }
 
-/// Park `completion` on the loop that owns `(fd, dir)`, registering this loop as
-/// the owner if nobody is yet. If the owner is a different loop, the completion
-/// (and its accounting) is migrated to it. Returns `.retry` if a readiness edge
-/// raced the optimistic syscall.
-fn parkSocket(self: *Self, state: *LoopState, fd: NetHandle, completion: *Completion) ParkResult {
-    const dir = dirForOp(completion);
-    const self_loop: *anyopaque = @ptrCast(state.loop);
-    const shard = self.shared.sock_table.shardForFd(fd);
-
-    shard.mutex.lock();
-    const gop = shard.map.getOrPut(self.shared.sock_table.allocator, @as(u32, @bitCast(fd))) catch {
-        shard.mutex.unlock();
-        log.err("sock registration table OOM", .{});
-        completion.setError(error.Unexpected);
-        state.markCompletedDeferredFromBackend(completion);
-        return .failed;
-    };
-    if (!gop.found_existing) gop.value_ptr.* = .{};
-    const entry = gop.value_ptr;
-    const created = !gop.found_existing;
-
-    // A readiness edge fired since our optimistic syscall: retry instead of
-    // sleeping (the data the edge announced is still in the socket buffer).
-    const ready = entry.readyPtr(dir);
-    if (ready.*) {
-        ready.* = false;
-        if (created and entry.isEmpty()) _ = shard.map.remove(@as(u32, @bitCast(fd)));
-        shard.mutex.unlock();
-        return .retry;
-    }
-
-    const owner = entry.ownerPtr(dir);
-    if (owner.* == null) {
-        // Become the owner: register this fd/direction in this loop's kqueue.
-        if (!self.ensureKevent(fd, dir)) {
-            if (created and entry.isEmpty()) _ = shard.map.remove(@as(u32, @bitCast(fd)));
-            shard.mutex.unlock();
-            completion.setError(error.Unexpected);
-            state.markCompletedDeferredFromBackend(completion);
-            return .failed;
-        }
-        owner.* = self_loop;
-    }
-
-    completion.prev = null;
-    completion.next = null;
-    if (owner.* != self_loop) {
-        // Migrate ownership of this completion to the loop that monitors the fd:
-        // move its accounting and reassign its loop so it completes/cancels there.
-        const owner_loop: *Loop = @ptrCast(@alignCast(owner.*));
-        state.decrInflight();
-        state.decrActive();
-        owner_loop.state.incrInflight();
-        owner_loop.state.incrActive();
-        completion.loop = owner_loop;
-        // The owner monitors this fd in its own kqueue; nudge it so it applies a
-        // possibly-pending registration / re-checks readiness promptly.
-        owner_loop.wake();
-    }
-    entry.waiters(dir).push(completion);
-    shard.mutex.unlock();
-    return .parked;
+/// Arm this loop's kqueue for `(fd, dir)`. kqueue tracks read/write as separate
+/// filters, so `other_owned_here` is irrelevant (no combined mask like epoll).
+/// Called by sockreg.park.
+pub fn registerSocket(self: *Self, fd: NetHandle, dir: sockreg.Dir, other_owned_here: bool) bool {
+    _ = other_owned_here;
+    return self.ensureKevent(fd, dir);
 }
 
-/// Generic submit for socket read/write/accept-family ops: try the syscall
-/// optimistically (reusing checkCompletion with a no-error synthetic event) and
-/// only park on WouldBlock. Draining to EAGAIN first makes EV_CLEAR safe.
-fn submitSocketIo(self: *Self, state: *LoopState, c: *Completion) void {
-    const fd: NetHandle = @intCast(getIdent(c));
-    const dir = dirForOp(c);
-    var probe: std.c.Kevent = .{
+/// kqueue removes a closed fd's knotes automatically, so there is nothing to do
+/// here. Called by sockreg.unregister.
+pub fn unregisterCleanup(self: *Self, fd: NetHandle) void {
+    _ = self;
+    _ = fd;
+}
+
+/// A no-error event for the optimistic (pre-park) checkCompletion attempt.
+pub fn probeEvent(fd: NetHandle, dir: sockreg.Dir) std.c.Kevent {
+    return .{
         .ident = @intCast(fd),
         .filter = filterForDir(dir),
         .flags = 0,
@@ -518,117 +427,6 @@ fn submitSocketIo(self: *Self, state: *LoopState, c: *Completion) void {
         .data = 0,
         .udata = 0,
     };
-    while (true) {
-        switch (checkCompletion(c, &probe)) {
-            .completed => {
-                state.markCompletedDeferredFromBackend(c);
-                return;
-            },
-            .requeue => switch (self.parkSocket(state, fd, c)) {
-                .parked, .failed => return,
-                .retry => {}, // loop and retry the syscall
-            },
-        }
-    }
-}
-
-/// Submit a connect: try connect() first, register on WouldBlock.
-fn submitConnect(self: *Self, state: *LoopState, c: *Completion) void {
-    const data = c.cast(NetConnect);
-    if (net.connect(data.handle, data.addr, data.addr_len)) |_| {
-        c.setResult(.net_connect, {});
-        state.markCompletedDeferredFromBackend(c);
-        return;
-    } else |err| switch (err) {
-        error.WouldBlock, error.ConnectionPending => {},
-        else => {
-            c.setError(err);
-            state.markCompletedDeferredFromBackend(c);
-            return;
-        },
-    }
-    switch (self.parkSocket(state, data.handle, c)) {
-        .parked, .failed => {},
-        .retry => {
-            // The socket became writable while we raced: the connect finished.
-            if (net.getSockError(data.handle)) |se| {
-                if (se == 0) c.setResult(.net_connect, {}) else c.setError(net.errnoToConnectError(@enumFromInt(se)));
-            } else |_| c.setError(error.Unexpected);
-            state.markCompletedDeferredFromBackend(c);
-        },
-    }
-}
-
-/// Submit a net_poll: probe readiness with a 0-timeout poll() first (it has no
-/// I/O to drain, so it cannot rely on a fresh edge for an already-ready socket),
-/// and register for an edge only when not ready.
-fn submitPoll(self: *Self, state: *LoopState, c: *Completion) void {
-    const data = c.cast(NetPoll);
-    const want: i16 = switch (data.event) {
-        .recv => std.posix.POLL.IN,
-        .send => std.posix.POLL.OUT,
-    };
-    while (true) {
-        var pfd = [_]std.posix.pollfd{.{ .fd = data.handle, .events = want, .revents = 0 }};
-        const ready = std.posix.poll(&pfd, 0) catch 0;
-        if (ready > 0 and (pfd[0].revents & (want | std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
-            c.setResult(.net_poll, {});
-            state.markCompletedDeferredFromBackend(c);
-            return;
-        }
-        switch (self.parkSocket(state, data.handle, c)) {
-            .parked, .failed => return,
-            .retry => {}, // re-probe
-        }
-    }
-}
-
-/// Service ready waiters for one (fd, dir) on the owner loop. Runs each waiter's
-/// syscall under the shard lock (non-blocking), collects the finished ones, then
-/// completes them after unlocking (completing can resume a fiber re-entrantly).
-fn serviceSocket(self: *Self, state: *LoopState, fd: NetHandle, dir: sockreg.Dir, event: *const std.c.Kevent) void {
-    const shard = self.shared.sock_table.shardForFd(fd);
-    shard.mutex.lock();
-    const entry = shard.map.getPtr(@as(u32, @bitCast(fd))) orelse {
-        shard.mutex.unlock();
-        return;
-    };
-
-    const had_waiters = entry.waiters(dir).head != null;
-    var to_finish: Queue(Completion) = .{};
-    var iter: ?*Completion = entry.waiters(dir).head;
-    while (iter) |c| {
-        iter = c.next;
-        if (c.state == .completed or c.state == .dead) {
-            _ = entry.waiters(dir).remove(c);
-            continue;
-        }
-        switch (checkCompletion(c, event)) {
-            .completed => {
-                _ = entry.waiters(dir).remove(c);
-                to_finish.push(c);
-            },
-            .requeue => break, // drained to EAGAIN for this direction
-        }
-    }
-    // Latch a readiness edge that found no waiter so a racing parker retries
-    // instead of sleeping for an edge that already passed.
-    entry.readyPtr(dir).* = !had_waiters;
-    shard.mutex.unlock();
-
-    while (to_finish.pop()) |c| {
-        state.markCompletedFromBackend(c);
-    }
-}
-
-/// Tear down the shared registration for a socket fd about to be closed. Closing
-/// the fd removes it from every kqueue at the kernel level, so this only drops
-/// the software bookkeeping (for all loops at once).
-fn unregisterSocket(self: *Self, fd: NetHandle) void {
-    const shard = self.shared.sock_table.shardForFd(fd);
-    shard.mutex.lock();
-    _ = shard.map.remove(@as(u32, @bitCast(fd)));
-    shard.mutex.unlock();
 }
 
 /// Submit a completion to the backend - infallible.
@@ -657,7 +455,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(NetClose);
             // Tear down the persistent registration before the fd is closed, so a
             // future socket that reuses this fd number starts clean on every loop.
-            self.unregisterSocket(data.handle);
+            sockreg.unregister(self, data.handle);
             common.handleNetClose(c);
             state.markCompletedFromBackend(c);
         },
@@ -668,7 +466,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 
         // Sockets take the single-owner, persistent edge-triggered path: try the
         // syscall optimistically, register with the owning loop only on WouldBlock.
-        .net_connect => self.submitConnect(state, c),
+        .net_connect => sockreg.submitConnect(self, state, c),
         .net_accept,
         .net_recv,
         .net_send,
@@ -676,8 +474,8 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .net_sendto,
         .net_recvmsg,
         .net_sendmsg,
-        => self.submitSocketIo(state, c),
-        .net_poll => self.submitPoll(state, c),
+        => sockreg.submitIo(self, state, c),
+        .net_poll => sockreg.submitPoll(self, state, c),
 
         .pipe_poll,
         // Streaming file I/O is routed here by the loop only when the fd is
@@ -719,19 +517,12 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 /// Cancel a completion - infallible.
 /// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
 pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
-    if (isSocketOp(target.op)) {
+    if (sockreg.isSocketOp(target.op)) {
         // Sockets are parked in the shared (fd, dir) waiter queue of their owner
         // loop. cancel routes to that owner (target.loop), so this runs on the
         // owner's thread and just detaches from the waiter queue. The kqueue
         // registration is persistent and left in place for the fd's lifetime.
-        const fd: NetHandle = @intCast(getIdent(target));
-        const dir = dirForOp(target);
-        const shard = self.shared.sock_table.shardForFd(fd);
-        shard.mutex.lock();
-        if (shard.map.getPtr(@as(u32, @bitCast(fd)))) |entry| {
-            _ = entry.waiters(dir).remove(target);
-        }
-        shard.mutex.unlock();
+        sockreg.detach(self, target);
     } else {
         self.removeFromPollQueue(target);
     }
@@ -803,7 +594,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         if (event.udata == sock_marker) {
             const sock_fd: NetHandle = @intCast(event.ident);
             const dir: sockreg.Dir = if (event.filter == std.c.EVFILT.READ) .read else .write;
-            self.serviceSocket(state, sock_fd, dir, &event);
+            sockreg.service(self, state, sock_fd, dir, &event);
             continue;
         }
 
