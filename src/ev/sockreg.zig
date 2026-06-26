@@ -327,6 +327,15 @@ pub fn detach(self: anytype, target: *Completion) void {
 pub fn unregister(self: anytype, fd: net.fd_t) void {
     const shard = self.shared.sock_table.shardForFd(fd);
     shard.mutex.lock();
+    if (shard.map.getPtr(@as(u32, @bitCast(fd)))) |entry| {
+        // Closing an fd with ops still parked on it would orphan those
+        // completions (removed here without finishing) and leak their
+        // active/inflight accounting. The contract is that callers cancel or
+        // await outstanding socket ops before closing the fd; assert it so a
+        // violation surfaces in safe builds rather than silently leaking.
+        std.debug.assert(entry.waiters(.read).head == null);
+        std.debug.assert(entry.waiters(.write).head == null);
+    }
     _ = shard.map.remove(@as(u32, @bitCast(fd)));
     shard.mutex.unlock();
     self.unregisterCleanup(fd);
