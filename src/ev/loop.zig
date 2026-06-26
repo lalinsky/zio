@@ -270,6 +270,10 @@ pub const LoopState = struct {
     pub fn incrInflight(self: *LoopState) void {
         if (comptime Backend.capabilities.is_multi_threaded) {
             _ = self.loop.loop_group.shared.inflight_io.fetchAdd(1, .monotonic);
+        } else if (comptime Backend.capabilities.cross_loop_socket_reg) {
+            // A socket op may be migrated to an owner loop at submit time, so the
+            // incrementing thread is not always this loop's thread.
+            _ = @atomicRmw(usize, &self.inflight_io, .Add, 1, .monotonic);
         } else {
             self.inflight_io += 1;
         }
@@ -279,6 +283,8 @@ pub const LoopState = struct {
     pub fn decrInflight(self: *LoopState) void {
         if (comptime Backend.capabilities.is_multi_threaded) {
             _ = self.loop.loop_group.shared.inflight_io.fetchSub(1, .monotonic);
+        } else if (comptime Backend.capabilities.cross_loop_socket_reg) {
+            _ = @atomicRmw(usize, &self.inflight_io, .Sub, 1, .monotonic);
         } else {
             self.inflight_io -= 1;
         }
@@ -288,6 +294,8 @@ pub const LoopState = struct {
     pub fn loadInflight(self: *const LoopState) usize {
         if (comptime Backend.capabilities.is_multi_threaded) {
             return @intCast(self.loop.loop_group.shared.inflight_io.load(.monotonic));
+        } else if (comptime Backend.capabilities.cross_loop_socket_reg) {
+            return @atomicLoad(usize, &self.inflight_io, .monotonic);
         } else {
             return self.inflight_io;
         }
@@ -297,6 +305,8 @@ pub const LoopState = struct {
     pub fn incrActive(self: *LoopState) void {
         if (comptime Backend.capabilities.is_multi_threaded) {
             _ = self.loop.loop_group.shared.active.fetchAdd(1, .monotonic);
+        } else if (comptime Backend.capabilities.cross_loop_socket_reg) {
+            _ = @atomicRmw(usize, &self.active, .Add, 1, .monotonic);
         } else {
             self.active += 1;
         }
@@ -306,6 +316,8 @@ pub const LoopState = struct {
     pub fn decrActive(self: *LoopState) void {
         if (comptime Backend.capabilities.is_multi_threaded) {
             _ = self.loop.loop_group.shared.active.fetchSub(1, .monotonic);
+        } else if (comptime Backend.capabilities.cross_loop_socket_reg) {
+            _ = @atomicRmw(usize, &self.active, .Sub, 1, .monotonic);
         } else {
             self.active -= 1;
         }
@@ -315,6 +327,8 @@ pub const LoopState = struct {
     pub fn loadActive(self: *const LoopState) usize {
         if (comptime Backend.capabilities.is_multi_threaded) {
             return @intCast(self.loop.loop_group.shared.active.load(.monotonic));
+        } else if (comptime Backend.capabilities.cross_loop_socket_reg) {
+            return @atomicLoad(usize, &self.active, .monotonic);
         } else {
             return self.active;
         }
@@ -325,6 +339,31 @@ pub const LoopState = struct {
     pub fn markCompletedFromBackend(self: *LoopState, completion: *Completion) void {
         self.decrInflight();
         self.markCompleted(completion);
+    }
+
+    /// Like markCompletedFromBackend, but always finishes via the deferred
+    /// completion queue instead of possibly running the callback inline. Used by
+    /// backends that complete an op synchronously inside `submit` (e.g. an
+    /// optimistic socket syscall that succeeds): finishing inline there would
+    /// re-enter the submit/add path of whatever driver issued the op.
+    pub fn markCompletedDeferredFromBackend(self: *LoopState, completion: *Completion) void {
+        self.decrInflight();
+
+        std.debug.assert(completion.state == .running);
+        std.debug.assert(completion.has_result);
+
+        var old = completion.cancel_state.load(.acquire);
+        while (true) {
+            var new = old;
+            new.completed = true;
+            old = completion.cancel_state.cmpxchgWeak(old, new, .acq_rel, .acquire) orelse break;
+        }
+        completion.state = .completed;
+
+        // If in_queue, cancel queue processing will call finishCompletion.
+        if (!old.in_queue) {
+            self.completions.push(completion);
+        }
     }
 
     pub fn markCompleted(self: *LoopState, completion: *Completion) void {
@@ -1048,6 +1087,26 @@ pub const Loop = struct {
         while (c) |completion| {
             const next = completion.cancel_next;
             completion.cancel_next = null;
+
+            // A socket completion can be reassigned to its owner loop during
+            // submit (cross_loop_socket_reg). A cancel that read the old loop
+            // lands here on the wrong loop; forward it to the current owner.
+            if (comptime Backend.capabilities.cross_loop_socket_reg) {
+                if (completion.loop) |owner| {
+                    if (owner != self) {
+                        var head = owner.cancel_queue.load(.acquire);
+                        while (true) {
+                            completion.cancel_next = head;
+                            head = owner.cancel_queue.cmpxchgWeak(head, completion, .release, .acquire) orelse break;
+                        }
+                        if (owner.state.wake_requested.fetchOr(LoopState.wake_cancel, .acq_rel) == 0) {
+                            owner.backend.wake(&owner.state);
+                        }
+                        c = next;
+                        continue;
+                    }
+                }
+            }
 
             // cancelLocal handles completed check and clears in_queue
             self.cancelLocal(completion);
