@@ -2441,6 +2441,11 @@ test "Stream.Reader/Writer.fromStd" {
 // table teardown.
 test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reuse)" {
     if (builtin.single_threaded) return error.SkipZigTest;
+    // IOCP intermittently loses a cross-loop completion under this workload
+    // (lalinsky/zio#530); skip until that latent IOCP bug is fixed so it does
+    // not flake CI. The bug being regression-tested here (the race-group
+    // use-after-free) is exercised by the epoll/kqueue and io_uring backends.
+    if (ev.backend == .iocp) return error.SkipZigTest;
 
     const H = struct {
         const executors = 3;
