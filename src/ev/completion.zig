@@ -417,9 +417,21 @@ pub const Group = struct {
 
     fn groupCallback(loop: *Loop, completion: *Completion) void {
         const self: *Group = @ptrCast(@alignCast(completion.group.owner.?));
-        const prev = self.remaining.fetchSub(1, .acq_rel);
 
-        // Race mode: first to clear the flag wins, cancels siblings
+        // Race mode: first to clear the flag wins, cancels siblings.
+        //
+        // This MUST run before the `remaining` decrement below. With a
+        // multi-threaded backend (IOCP, or epoll/kqueue once a socket op is
+        // serviced cross-loop) the children of a race group can complete
+        // concurrently on different loops - e.g. the I/O on the owner loop and
+        // its timeout timer on the submitting loop. Whichever thread drives
+        // `remaining` to zero completes the group and wakes its waiter, which
+        // frees the stack frame the Group (and the sibling completions) live on.
+        // If we decremented first, that free could happen while this thread is
+        // still walking `self.head` to cancel siblings -> use-after-free. By
+        // cancelling before decrementing, `remaining` stays >= 1 for the duration
+        // of this loop, so the frame cannot be freed until the final decrementer
+        // runs - by which point every sibling cancellation has completed.
         if (self.race.swap(false, .acq_rel)) {
             var node = self.head;
             while (node) |n| {
@@ -432,6 +444,7 @@ pub const Group = struct {
             }
         }
 
+        const prev = self.remaining.fetchSub(1, .acq_rel);
         if (prev == 1) {
             if (self.c.cancel_state.load(.acquire).requested) {
                 self.c.setError(error.Canceled);
