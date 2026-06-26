@@ -54,6 +54,60 @@ const Event = struct {
 /// panic stack trace reveals the buggy close path.
 pub var protected: usize = 0;
 
+/// DEBUG (#530): open-socket tracker to catch a double-close / close-of-not-open
+/// (a stale close of a reused fd). Fixed open-addressing set under a mutex.
+var sock_lock = std.atomic.Value(bool).init(false);
+fn lockSock() void {
+    while (sock_lock.swap(true, .acquire)) {}
+}
+fn unlockSock() void {
+    sock_lock.store(false, .release);
+}
+const SET_N = 16384;
+var open_set: [SET_N]usize = @splat(0); // 0 = empty slot
+
+pub fn sockOpen(h: usize) void {
+    if (!enabled or h == 0) return;
+    lockSock();
+    defer unlockSock();
+    var i = h % SET_N;
+    var probes: usize = 0;
+    while (open_set[i] != 0) : (probes += 1) {
+        if (open_set[i] == h) return; // already present (shouldn't happen)
+        if (probes >= SET_N) return; // full; give up silently
+        i = (i + 1) % SET_N;
+    }
+    open_set[i] = h;
+}
+
+/// Returns true if `h` was open (and removes it); false = double-close.
+pub fn sockClose(h: usize) bool {
+    if (!enabled or h == 0) return true;
+    lockSock();
+    defer unlockSock();
+    var i = h % SET_N;
+    var probes: usize = 0;
+    while (open_set[i] != 0) : (probes += 1) {
+        if (open_set[i] == h) {
+            open_set[i] = 0;
+            // Re-cluster: rehash the following cluster so probe chains stay valid.
+            var j = (i + 1) % SET_N;
+            while (open_set[j] != 0) {
+                const v = open_set[j];
+                open_set[j] = 0;
+                var k = v % SET_N;
+                while (open_set[k] != 0) k = (k + 1) % SET_N;
+                open_set[k] = v;
+                j = (j + 1) % SET_N;
+            }
+            return true;
+        }
+        if (probes >= SET_N) break;
+        i = (i + 1) % SET_N;
+    }
+    return false; // not found = double-close / close of never-opened
+}
+
 const N = 8192;
 var buf: [N]Event = undefined;
 var idx: std.atomic.Value(u64) = .init(0);

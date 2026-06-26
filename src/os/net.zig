@@ -157,6 +157,10 @@ pub fn close(fd: fd_t) void {
                 dbg.dump();
                 @panic("BUG #530: closing the protected listening socket mid-run");
             }
+            if (!dbg.sockClose(@intFromPtr(fd))) {
+                dbg.dump();
+                @panic("BUG #530: double-close / close of never-opened socket");
+            }
             dbg.rec(.sock_close, 0, @intFromPtr(fd), 0, 0);
             _ = windows.closesocket(fd);
         },
@@ -335,6 +339,7 @@ pub fn socket(domain: Domain, socket_type: Type, protocol: Protocol, flags: Open
                 _ = windows.ioctlsocket(sock, windows.FIONBIO, &mode);
             }
             dbg.rec(.sock_open, 0, @intFromPtr(sock), 0, 0);
+            dbg.sockOpen(@intFromPtr(sock));
             return sock;
         },
         else => {
