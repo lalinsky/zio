@@ -327,6 +327,31 @@ pub const LoopState = struct {
         self.markCompleted(completion);
     }
 
+    /// Like markCompletedFromBackend, but always finishes via the deferred
+    /// completion queue instead of possibly running the callback inline. Used by
+    /// backends that complete an op synchronously inside `submit` (e.g. an
+    /// optimistic socket syscall that succeeds): finishing inline there would
+    /// re-enter the submit/add path of whatever driver issued the op.
+    pub fn markCompletedDeferredFromBackend(self: *LoopState, completion: *Completion) void {
+        self.decrInflight();
+
+        std.debug.assert(completion.state == .running);
+        std.debug.assert(completion.has_result);
+
+        var old = completion.cancel_state.load(.acquire);
+        while (true) {
+            var new = old;
+            new.completed = true;
+            old = completion.cancel_state.cmpxchgWeak(old, new, .acq_rel, .acquire) orelse break;
+        }
+        completion.state = .completed;
+
+        // If in_queue, cancel queue processing will call finishCompletion.
+        if (!old.in_queue) {
+            self.completions.push(completion);
+        }
+    }
+
     pub fn markCompleted(self: *LoopState, completion: *Completion) void {
         std.debug.assert(completion.state == .running);
         std.debug.assert(completion.has_result);
