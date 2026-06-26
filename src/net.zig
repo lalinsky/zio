@@ -2545,6 +2545,7 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
                 const this = @min(chunk, total - sent);
                 for (0..this) |i| buf[i] = pat(id, sent + i);
                 stream.writeAll(buf[0..this], io_timeout) catch |e| {
+                    _ = sh.errors.fetchAdd(1, .monotonic);
                     std.debug.print("WRITE-ERR id={d} sent={d} err={s}\n", .{ id, sent, @errorName(e) });
                     @import("debug_trace.zig").dump();
                     std.process.exit(8);
