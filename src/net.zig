@@ -2441,19 +2441,17 @@ test "Stream.Reader/Writer.fromStd" {
 // table teardown.
 test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reuse)" {
     if (builtin.single_threaded) return error.SkipZigTest;
-    // IOCP intermittently loses a cross-loop completion under this workload
-    // (lalinsky/zio#530); skip until that latent IOCP bug is fixed so it does
-    // not flake CI. The bug being regression-tested here (the race-group
-    // use-after-free) is exercised by the epoll/kqueue and io_uring backends.
-    if (ev.backend == .iocp) return error.SkipZigTest;
+    // DEBUG (iocp-debug branch): IOCP is NOT skipped here — we WANT it to run so
+    // CI reproduces lalinsky/zio#530. Load is cranked up and io_timeout lowered
+    // so a stall surfaces quickly and the STALL/LATE warn lines fire. Do not merge.
 
     const H = struct {
         const executors = 3;
-        const waves = 5;
+        const waves = 40;
         const per_wave = 12;
         const total = 8 * 1024;
         const chunk = 2048;
-        const io_timeout = Timeout.fromMilliseconds(5_000);
+        const io_timeout = Timeout.fromMilliseconds(3_000);
 
         const Shared = struct {
             conns: std.atomic.Value(u32) = .init(0),

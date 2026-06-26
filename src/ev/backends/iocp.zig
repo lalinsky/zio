@@ -1474,7 +1474,6 @@ fn submitProcessWait(self: *Self, state: *LoopState, data: *ProcessWait) !void {
 /// Cancel a completion - infallible.
 /// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
 pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
-    _ = self;
     _ = state;
 
     switch (target.state) {
@@ -1557,8 +1556,38 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
 
             // Cancel the I/O operation
             const result = windows.CancelIoEx(handle, &target.internal.overlapped);
-            if (result == .FALSE) {
-                const err = windows.GetLastError();
+            // Capture the error immediately, before any log call (which issues a
+            // write syscall that would clobber GetLastError).
+            const cancel_err: ?windows.Win32Error = if (result == .FALSE) windows.GetLastError() else null;
+
+            // DEBUG (iocp-debug branch): data-op cancels happen only on a real
+            // io_timeout in the stress test (accept uses its own short timeout and
+            // is excluded), so each line here marks a stalled op. The CancelIoEx
+            // outcome is the key discriminator:
+            //   NOT_FOUND -> kernel already completed it; the completion packet is
+            //                (or was) in the port = a delivery/wake stall.
+            //   TRUE      -> op genuinely still pending in the kernel = no data /
+            //                kernel-level stall.
+            switch (target.op) {
+                .net_accept => {},
+                .net_recv, .net_send, .net_connect, .net_poll, .net_send_file, .net_recvfrom, .net_sendto, .net_recvmsg, .net_sendmsg => {
+                    const outcome = if (cancel_err) |e| switch (e) {
+                        .NOT_FOUND => "NOT_FOUND(already-completed)",
+                        else => "OTHER-ERR",
+                    } else "TRUE(pending)";
+                    log.warn("STALL cancel op={s} c=0x{x} hresult={s} cancel_state={} inflight={} active={}", .{
+                        @tagName(target.op),
+                        @intFromPtr(target),
+                        outcome,
+                        target.cancel_state.load(.acquire),
+                        self.shared_state.inflight_io.load(.monotonic),
+                        self.shared_state.active.load(.monotonic),
+                    });
+                },
+                else => {},
+            }
+
+            if (cancel_err) |err| {
                 // ERROR_NOT_FOUND means the operation already completed - that's fine
                 if (err != .NOT_FOUND) {
                     log.warn("CancelIoEx failed: {}", .{err});
@@ -1732,8 +1761,12 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
 
             if (result == windows.FALSE) {
                 const err = windows.WSAGetLastError();
+                if (c.cancel_state.load(.acquire).requested)
+                    log.warn("LATE complete op=net_recv c=0x{x} ERR={s}", .{ @intFromPtr(c), @tagName(err) });
                 c.setError(net.errnoToRecvError(err));
             } else {
+                if (c.cancel_state.load(.acquire).requested)
+                    log.warn("LATE complete op=net_recv c=0x{x} bytes={} (data arrived after cancel)", .{ @intFromPtr(c), bytes_transferred });
                 c.setResult(.net_recv, @intCast(bytes_transferred));
             }
 
@@ -1755,8 +1788,12 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
 
             if (result == windows.FALSE) {
                 const err = windows.WSAGetLastError();
+                if (c.cancel_state.load(.acquire).requested)
+                    log.warn("LATE complete op=net_send c=0x{x} ERR={s}", .{ @intFromPtr(c), @tagName(err) });
                 c.setError(net.errnoToSendError(err));
             } else {
+                if (c.cancel_state.load(.acquire).requested)
+                    log.warn("LATE complete op=net_send c=0x{x} bytes={} (sent after cancel)", .{ @intFromPtr(c), bytes_transferred });
                 c.setResult(.net_send, @intCast(bytes_transferred));
             }
 

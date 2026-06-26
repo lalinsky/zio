@@ -4,6 +4,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+// DEBUG (iocp-debug branch only): surface log.warn/info/debug in release test
+// builds so IOCP cross-loop tracing is visible in CI. Do not merge.
+pub const std_options: std.Options = .{ .log_level = .debug };
+
 const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;
 pub const RuntimeOptions = runtime.RuntimeOptions;
