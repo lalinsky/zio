@@ -2610,8 +2610,9 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
                 _ = sh.errors.fetchAdd(1, .monotonic);
                 return;
             };
-            const stream = addr.connect(.{ .timeout = io_timeout }) catch {
+            const stream = addr.connect(.{ .timeout = io_timeout }) catch |e| {
                 _ = sh.errors.fetchAdd(1, .monotonic);
+                std.debug.print("CONNECT-ERR id={d} err={s}\n", .{ id, @errorName(e) });
                 return;
             };
             defer stream.close();
