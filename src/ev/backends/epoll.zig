@@ -36,10 +36,20 @@ const BackendCapabilities = @import("../completion.zig").BackendCapabilities;
 pub const capabilities: BackendCapabilities = .{
     .process_wait = true,
     .native_wall_timers = true,
-    .cross_loop_socket_reg = true,
+    // A socket fd is registered in exactly one loop's epoll (per direction), but
+    // the op can be submitted from another loop and is serviced/completed by the
+    // registering loop when its edge fires - i.e. completions finish on a thread
+    // other than the one that submitted them. That makes the group's
+    // active/inflight accounting shared, exactly like IOCP.
+    .is_multi_threaded = true,
 };
 
 pub const SharedState = struct {
+    /// Group-shared accounting: a completion submitted on one loop may be
+    /// finished by the loop that owns the fd registration, so active/inflight_io
+    /// are shared atomics rather than per-LoopState fields (see LoopState).
+    active: std.atomic.Value(u64) = .init(0),
+    inflight_io: std.atomic.Value(u64) = .init(0),
     /// Cross-loop single-owner socket registration table, shared by every loop
     /// in the group. See sockreg.zig.
     sock_table: sockreg.Table = .{},
