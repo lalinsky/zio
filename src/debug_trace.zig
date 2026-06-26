@@ -41,6 +41,7 @@ pub const Kind = enum(u8) {
     pc_entry, // processCompletion top: op=c.op, ptr=overlapped, val=completion
     acc_submit, // submitAccept after AcceptEx: ptr=overlapped, val=accept_socket, loop=completion
     acc_cancel, // iocp.cancel net_accept: ptr=overlapped, loop=completion
+    io_submit, // any net submit: op=c.op, ptr=overlapped, val=sync(1)/pending(0)/err(2), loop=completion
 };
 
 const Event = struct {
@@ -111,7 +112,7 @@ pub fn sockClose(h: usize) bool {
     return false; // not found = double-close / close of never-opened
 }
 
-const N = 8192;
+const N = 32768;
 var buf: [N]Event = undefined;
 var idx: std.atomic.Value(u64) = .init(0);
 
@@ -120,7 +121,7 @@ var idx: std.atomic.Value(u64) = .init(0);
 fn wanted(kind: Kind) bool {
     return switch (kind) {
         // Focused on the accept-completion lifecycle for #530.
-        .sock_open, .sock_close, .pc_entry, .acc_submit, .acc_cancel => true,
+        .sock_open, .sock_close, .pc_entry, .acc_submit, .acc_cancel, .io_submit => true,
         else => false,
     };
 }
