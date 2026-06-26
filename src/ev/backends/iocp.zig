@@ -716,17 +716,13 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
     const accept_socket = try net.socket(@enumFromInt(family), .stream, .ip, data.flags);
     errdefer net.close(accept_socket);
 
-    // Associate the accept socket with IOCP
-    const iocp_result = windows.CreateIoCompletionPort(
-        @ptrCast(accept_socket),
-        self.shared_state.iocp,
-        0,
-        0,
-    ) orelse return error.Unexpected;
-
-    if (iocp_result != self.shared_state.iocp) {
-        return error.Unexpected;
-    }
+    // FIX (#530): do NOT associate the accept socket with the IOCP before AcceptEx.
+    // AcceptEx operates on both the listening and accept sockets; if both are bound
+    // to the same completion port, the single AcceptEx completion is delivered TWICE
+    // (once per association), and the second, stray completion is serviced against
+    // the reused accept op -> double-close UAF (the whole #530 cascade). Both libuv
+    // and Go's runtime associate the accepted socket only AFTER AcceptEx completes.
+    // We do the association in processCompletion (after SO_UPDATE_ACCEPT_CONTEXT).
 
     // Initialize OVERLAPPED
     data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
@@ -1752,8 +1748,23 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                         }
                     }
 
-                    // Note: Socket was already associated with IOCP in submitAccept()
-                    // No need to associate again here
+                    // FIX (#530): associate the accepted socket with the IOCP now,
+                    // AFTER AcceptEx has completed (not before — see submitAccept).
+                    // The socket inherits the listener's port association via
+                    // SO_UPDATE_ACCEPT_CONTEXT, so this often returns
+                    // ERROR_INVALID_PARAMETER (already associated), which is fine.
+                    const assoc = windows.CreateIoCompletionPort(
+                        @ptrCast(data.result_private_do_not_touch),
+                        self.shared_state.iocp,
+                        0,
+                        0,
+                    );
+                    if (assoc != self.shared_state.iocp and windows.GetLastError() != .INVALID_PARAMETER) {
+                        net.close(data.result_private_do_not_touch);
+                        c.setError(error.Unexpected);
+                        state.markCompletedFromBackend(c);
+                        return;
+                    }
 
                     c.setResult(.net_accept, data.result_private_do_not_touch);
                 }
