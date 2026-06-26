@@ -2544,9 +2544,10 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
             while (sent < total) {
                 const this = @min(chunk, total - sent);
                 for (0..this) |i| buf[i] = pat(id, sent + i);
-                stream.writeAll(buf[0..this], io_timeout) catch {
-                    _ = sh.errors.fetchAdd(1, .monotonic);
-                    return;
+                stream.writeAll(buf[0..this], io_timeout) catch |e| {
+                    std.debug.print("WRITE-ERR id={d} sent={d} err={s}\n", .{ id, sent, @errorName(e) });
+                    @import("debug_trace.zig").dump();
+                    std.process.exit(8);
                 };
                 sent += this;
             }
@@ -2559,18 +2560,27 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
                 const want = @min(chunk, total - got);
                 var off: usize = 0;
                 while (off < want) {
-                    const n = stream.read(buf[off..want], io_timeout) catch {
-                        _ = sh.errors.fetchAdd(1, .monotonic);
-                        return;
+                    const n = stream.read(buf[off..want], io_timeout) catch |e| {
+                        std.debug.print("READ-ERR id={d} got={d} off={d} err={s}\n", .{ id, got, off, @errorName(e) });
+                        @import("debug_trace.zig").dump();
+                        std.process.exit(8);
                     };
                     if (n == 0) {
-                        _ = sh.errors.fetchAdd(1, .monotonic); // premature EOF
-                        return;
+                        std.debug.print("PREMATURE-EOF id={d} got={d} off={d}\n", .{ id, got, off });
+                        @import("debug_trace.zig").dump();
+                        std.process.exit(8);
                     }
                     for (0..n) |k| {
-                        if (buf[off + k] != pat(id, got + off + k)) {
-                            _ = sh.errors.fetchAdd(1, .monotonic);
-                            return;
+                        const pos = got + off + k;
+                        const expected = pat(id, pos);
+                        const gotb = buf[off + k];
+                        if (gotb != expected) {
+                            // DEBUG (#530): which connection does the wrong byte
+                            // belong to? cand = (got-pos)*31^-1 mod 256; 31^-1=223.
+                            const cand: u8 = (gotb -% @as(u8, @truncate(pos))) *% 223;
+                            std.debug.print("MISMATCH id={d}(idmod={d}) pos={d} expected={d} got={d} cand_id_mod256={d} k={d}/n={d} buf=0x{x}\n", .{ id, @as(u8, @truncate(id)), pos, expected, gotb, cand, k, n, @intFromPtr(&buf) });
+                            @import("debug_trace.zig").dump();
+                            std.process.exit(8);
                         }
                     }
                     off += n;
