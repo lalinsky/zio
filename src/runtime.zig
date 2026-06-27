@@ -843,14 +843,22 @@ pub const Runtime = struct {
         // Set shutting_down flag to prevent new spawns
         self.shutting_down.store(true, .release);
 
-        // Stop worker executors and join threads
-        self.shutdownWorkers();
-
-        // Shutdown thread pool
+        // Stop and join the thread pool first, while all executor loops are
+        // still alive. Thread-pool completion callbacks wake the owning loop
+        // (writing its eventfd), so the pool's worker threads must be fully
+        // joined before any loop is torn down. stop() leaves the pool object
+        // valid (in shutdown mode), so any late submissions from executors being
+        // shut down are safely dropped.
         self.thread_pool.stop();
+
+        // Stop worker executors and join threads (deinits their loops)
+        self.shutdownWorkers();
 
         // All tasks should be complete before deinit
         std.debug.assert(self.task_count.load(.acquire) == 0);
+
+        // Clean up ThreadPool (worker threads already joined by stop()).
+        self.thread_pool.deinit();
 
         // Worker executors clean themselves up via defer in runWorker.
         // We only need to deinit the main executor here (if it was created).
@@ -859,9 +867,6 @@ pub const Runtime = struct {
         }
 
         self.executors.deinit(allocator);
-
-        // Clean up ThreadPool after executors
-        self.thread_pool.deinit();
 
         // Clean up stack pool
         self.stack_pool.deinit();
