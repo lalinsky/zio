@@ -107,10 +107,33 @@ pub const ThreadPool = struct {
     }
 
     pub fn deinit(self: *ThreadPool) void {
+        // stop() has already joined all worker threads (it is idempotent, so
+        // calling it again here is safe if the caller did not stop() first).
         self.stop();
+        self.workers.deinit(self.allocator);
+    }
 
-        // Join all threads - they will remove themselves from the list
-        // We need to keep joining until all workers are gone
+    /// Stop the pool: drop any queued work, refuse new submissions, and join all
+    /// worker threads. After this returns, no worker thread exists, so no
+    /// completion callback can run anymore (callbacks wake the owning event
+    /// loop, so the loop must outlive the pool's threads). The pool object stays
+    /// valid until deinit(); submit() called after stop() drops the work.
+    pub fn stop(self: *ThreadPool) void {
+        {
+            self.queue_mutex.lock();
+            defer self.queue_mutex.unlock();
+            if (self.shutdown) return; // already stopped, threads already joined
+            self.shutdown = true;
+            // Drop any queued (not-yet-started) work so it can't be removed and
+            // completed later (e.g. by cancel()), which would invoke its
+            // completion_fn after shutdown and wake a loop being torn down.
+            while (self.queue.pop()) |_| {}
+            self.queue_size = 0;
+            self.queue_not_empty.broadcast();
+        }
+
+        // Join all threads - they will remove themselves from the list.
+        // We need to keep joining until all workers are gone.
         while (true) {
             self.workers_mutex.lock();
             const thread = if (self.workers.items.len > 0) self.workers.items[0].thread else null;
@@ -122,15 +145,6 @@ pub const ThreadPool = struct {
                 break;
             }
         }
-
-        self.workers.deinit(self.allocator);
-    }
-
-    pub fn stop(self: *ThreadPool) void {
-        self.queue_mutex.lock();
-        defer self.queue_mutex.unlock();
-        self.shutdown = true;
-        self.queue_not_empty.broadcast();
     }
 
     pub fn submit(self: *ThreadPool, work: *Work) void {
@@ -150,6 +164,12 @@ pub const ThreadPool = struct {
         }
 
         self.queue_mutex.lock();
+        if (self.shutdown) {
+            // Pool is shutting down: drop the work without running it or
+            // signaling completion. The owning loop may already be tearing down.
+            self.queue_mutex.unlock();
+            return;
+        }
         self.queue.push(&work.c);
         self.queue_size += 1;
         const queued = self.queue_size;

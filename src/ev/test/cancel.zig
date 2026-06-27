@@ -330,6 +330,9 @@ test "cancel: work after completion is no-op" {
     var loop: Loop = undefined;
     try loop.init(.{ .thread_pool = &thread_pool });
     defer loop.deinit();
+    // Join the pool's threads before the loop is torn down: completion
+    // callbacks wake the loop, so the loop must outlive the pool's threads.
+    defer thread_pool.stop();
 
     const TestFn = struct {
         called: bool = false,
@@ -365,11 +368,15 @@ test "cancel: work before run" {
         .max_threads = 1,
     });
     defer thread_pool.deinit();
-    defer blocker_event.set(); // Ensure thread unblocks before deinit
 
     var loop: Loop = undefined;
     try loop.init(.{ .thread_pool = &thread_pool });
     defer loop.deinit();
+    // Teardown order (defers run LIFO): unblock the worker, then join the pool's
+    // threads while the loop is still alive (completion callbacks wake the loop),
+    // then deinit the loop, then free the pool.
+    defer thread_pool.stop();
+    defer blocker_event.set();
 
     const BlockingFn = struct {
         started: *os.ResetEvent,
@@ -429,11 +436,15 @@ test "cancel: work double cancel is idempotent" {
         .max_threads = 1,
     });
     defer thread_pool.deinit();
-    defer blocker_event.set(); // Ensure thread unblocks before deinit
 
     var loop: Loop = undefined;
     try loop.init(.{ .thread_pool = &thread_pool });
     defer loop.deinit();
+    // Teardown order (defers run LIFO): unblock the worker, then join the pool's
+    // threads while the loop is still alive (completion callbacks wake the loop),
+    // then deinit the loop, then free the pool.
+    defer thread_pool.stop();
+    defer blocker_event.set();
 
     const BlockingFn = struct {
         started: *os.ResetEvent,

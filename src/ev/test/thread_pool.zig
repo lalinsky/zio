@@ -14,6 +14,9 @@ test "ev.ThreadPool: one task" {
         .thread_pool = &thread_pool,
     });
     defer loop.deinit();
+    // Join the pool's threads before the loop is torn down: completion
+    // callbacks wake the loop, so the loop must outlive the pool's threads.
+    defer thread_pool.stop();
 
     const TestFn = struct {
         called: usize = 0,
