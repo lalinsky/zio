@@ -124,6 +124,11 @@ pub const ThreadPool = struct {
             defer self.queue_mutex.unlock();
             if (self.shutdown) return; // already stopped, threads already joined
             self.shutdown = true;
+            // Drop any queued (not-yet-started) work so it can't be removed and
+            // completed later (e.g. by cancel()), which would invoke its
+            // completion_fn after shutdown and wake a loop being torn down.
+            while (self.queue.pop()) |_| {}
+            self.queue_size = 0;
             self.queue_not_empty.broadcast();
         }
 
