@@ -1070,6 +1070,27 @@ test "Runtime: sleep from main" {
     try std.testing.expect(start.durationTo(end).toMilliseconds() >= 10);
 }
 
+test "runtime: spawnBlocking does not leak with a large result" {
+    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer runtime.deinit();
+
+    // Regression test for a blocking-task refcount leak. A large result forces
+    // TaskPool.alloc down the direct allocator path (size > pool_item_size), so
+    // the leaked allocation is reported by testing.allocator. With a small (e.g.
+    // i32) result the task is pool-allocated and the leak is masked by
+    // pool.deinit freeing the pool's backing buffer -- which is why the existing
+    // smoke test did not catch it.
+    const blockingWork = struct {
+        fn call(x: u8) [4000]u8 {
+            return [_]u8{x} ** 4000;
+        }
+    }.call;
+
+    var handle = try runtime.spawnBlocking(blockingWork, .{@as(u8, 7)});
+    const result = handle.join();
+    try std.testing.expectEqual(@as(u8, 7), result[0]);
+}
+
 test "runtime: basic sleep" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();

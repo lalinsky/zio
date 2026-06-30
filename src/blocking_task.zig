@@ -129,7 +129,13 @@ fn registerBlockingTask(rt: *Runtime, task: *AnyBlockingTask) error{RuntimeShutd
         return error.RuntimeShutdown;
     }
 
-    task.awaitable.ref_count.incr();
+    // Do NOT increment ref_count here. Unlike registerTask (task.zig), this would
+    // add a third reference that is never released: the init ref (=1) is dropped by
+    // finishTask via threadPoolCompletion, and the caller (JoinHandle) ref is added
+    // in spawnBlockingTask before submit and dropped by join()/cancel()/detach().
+    // The extra incr orphans one reference and leaks the blocking-task allocation.
+    // It is masked for pool-sized tasks (pool.deinit frees the backing buffer) and
+    // only observable for tasks larger than pool_item_size (direct allocator path).
     _ = rt.task_count.fetchAdd(1, .acq_rel);
     rt.thread_pool.submit(&task.work);
 }
