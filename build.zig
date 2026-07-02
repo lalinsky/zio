@@ -70,11 +70,10 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ping", .file = "examples/ping.zig" },
         .{ .name = "coro-demo", .file = "examples/coro_demo.zig" },
         .{ .name = "ev-demo", .file = "examples/ev_demo.zig" },
-        .{ .name = "tcp-pingpong-bench", .file = "examples/tcp_pingpong_bench.zig" },
     };
 
-    // Create examples step. -Dexample=<name> limits it to a single example and
-    // adds a run step for it (e.g. `zig build examples -Dexample=wake-latency`).
+    // Create examples step. -Dexample=<name> limits it to a single example
+    // (e.g. `zig build examples -Dexample=http-bench`).
     const examples_step = b.step("examples", "Build examples");
     const only_example = b.option([]const u8, "example", "Build/run only this example by name");
 
@@ -93,11 +92,6 @@ pub fn build(b: *std.Build) void {
 
         const install_exe = b.addInstallArtifact(exe, .{});
         examples_step.dependOn(&install_exe.step);
-
-        if (only_example != null) {
-            const run = b.addRunArtifact(exe);
-            examples_step.dependOn(&run.step);
-        }
     }
 
     // Single-threaded build of hello-world to verify single-threaded support
