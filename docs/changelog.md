@@ -2,12 +2,53 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.15.0] - 2026-07-02
 
-### Changed
+- Overhaul of the `epoll` and `kqueue` backends, to make them comparable to the performance of
+  the io_uring backend. When migrating from libxev to our own event loop, I decided to use
+  a similar approach for both backends, which really goes against the nature of these APIs.
+  With this new rewrite, both backends keep fds registered in the kernel, so readiness is
+  always available. This results in far fewer syscalls, and overall better performance.
+  One side effect is that now tasks that were running on executor A can be moved to
+  executor B, if the event loop B is where the fd is registered.
 
-- `net.Stream.Writer.sendFile` now uses the native `TransmitFile` API on Windows,
-  doing a zero-copy file-to-socket transfer instead of the generic read/write fallback.
+- Improved performance of `net.Stream.Writer.sendFile` on all platforms. There is now
+  a native zero-copy implementation for Windows using `TransmitFile`, and the generic
+  fallback now uses the entire reader/writer buffers, so it's always faster than the
+  read/write loop fallback implemented in `std.Io.Writer`.
+
+- Added `File.stdReader`/`File.stdWriter` to wrap a zio-opened file as the concrete
+  `std.Io.File.Reader`/`std.Io.File.Writer` types, so it works with `std.Io` APIs that
+  require them (like `std.Io.Writer.sendFileAll`).
+
+- Implemented wall-clock timers, so you can now sleep/timeout using the real-time clock and be
+  woken up exactly on time, even if the clock is adjusted. This is natively supported on Linux,
+  but needs more careful coordination on other platforms.
+
+- Added support for all clocks that `std.Io` supports (`real`, `boot`, `awake`, and the
+  `cpu_process`/`cpu_thread` CPU-time clocks), as well as querying their resolution.
+
+- Changed how `stdin`/`stdout`/`stderr` are handled on Windows, to make sure we can work
+  with these without blocking the event loop, since they are not open as `OVERLAPPED` handles.
+
+- Changed the `io_uring` backend from futex-based wake ups to `eventfd`, which works much
+  more reliably. The previous futex approach introduced wake up latency that I could not explain.
+
+- Error code `ETIMEDOUT` is now mapped to `error.ConnectionTimedOut` for send/recv operations.
+  We are not using kernel-level socket timeouts, but it seems that these error codes can still happen.
+
+- New `TaskLocal` API for storing custom task-local data.
+
+- Added custom `random` and `randomSecure` APIs for generating random numbers,
+  to reduce dependency on `std.Io.Threaded`.
+
+- Fixed handling of Unix socket addresses containing null bytes.
+
+- Fixed race in cross-thread handling of `AcceptEx` calls on Windows.
+
+- Fixed shutdown sequence to properly stop the thread pool before closing the event loop.
+
+- Fixed memory leak that happens after spawning blocking tasks on the thread pool.
 
 ## [0.14.0] - 2026-06-08
 
