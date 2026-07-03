@@ -137,6 +137,12 @@ pub fn timedWait(ptr: *const u32, expect: u32, timeout: Timeout) (Timeoutable ||
 
 /// Like `timedWait`, but the timeout is measured against `clock`.
 pub fn timedWaitClock(ptr: *const u32, expect: u32, timeout: Timeout, clock: Clock) (Timeoutable || Cancelable)!void {
+    // No deadline: delegate to the untimed `wait`. This skips the timer setup
+    // and, more importantly, the unconditional post-wake `removeFromBucket`
+    // below (a second bucket-mutex acquisition per wait) that can never observe
+    // a timeout when there is none. `wake()` dequeues us instead.
+    if (timeout == .none) return wait(ptr, expect);
+
     // Fast path: check if value already changed
     if (@atomicLoad(u32, ptr, .acquire) != expect) {
         return;
