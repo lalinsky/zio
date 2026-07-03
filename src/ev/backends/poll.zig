@@ -6,7 +6,6 @@ const time = @import("../../os/time.zig");
 const Duration = @import("../../time.zig").Duration;
 const common = @import("common.zig");
 const LoopState = @import("../loop.zig").LoopState;
-const LoopGroup = @import("../loop.zig").LoopGroup;
 const Completion = @import("../completion.zig").Completion;
 const Op = @import("../completion.zig").Op;
 const Queue = @import("../queue.zig").Queue;
@@ -64,9 +63,8 @@ waker_write_fd: net.fd_t = undefined,
 queue_size: u16,
 pending_changes: usize = 0,
 
-pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState, loop_group: *LoopGroup) !void {
+pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
     _ = shared_state;
-    _ = loop_group;
 
     const waker_fds = switch (builtin.os.tag) {
         .windows => try net.createLoopbackSocketPair(),

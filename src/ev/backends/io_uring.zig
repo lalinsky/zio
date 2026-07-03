@@ -12,7 +12,6 @@ const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
 const Queue = @import("../queue.zig").Queue;
 const Cancel = @import("../completion.zig").Cancel;
-const LoopGroup = @import("../loop.zig").LoopGroup;
 
 // user_data encoding. A *Completion pointer is aligned, so its low bit is 0;
 // internal ops set the low bit and pack a kind (bits 1-2) plus, for the wall
@@ -103,7 +102,10 @@ pub const capabilities: BackendCapabilities = .{
     .native_wall_timers = true,
 };
 
-pub const SharedState = struct {};
+pub const SharedState = struct {
+    master_fd: std.atomic.Value(c_int) = .init(-1),
+    refcount: std.atomic.Value(usize) = .init(0),
+};
 
 pub const NetRecvData = struct {
     msg: linux.msghdr = undefined,
@@ -197,32 +199,35 @@ wall_generation: [2]u32 = .{ 0, 0 },
 /// Backing storage for the wall timeout `kernel_timespec`s; must outlive the
 /// SQE until the next `io_uring_enter2` reads it.
 wall_ts: [2]linux.kernel_timespec = undefined,
+shared_state: *SharedState,
+is_master: bool = false,
 
-pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState, loop_group: *LoopGroup) !void {
-    _ = shared_state;
+pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
     var flags: u32 = 0;
     flags |= linux.IORING_SETUP_SINGLE_ISSUER;
     flags |= linux.IORING_SETUP_DEFER_TASKRUN;
     flags |= linux.IORING_SETUP_COOP_TASKRUN;
 
-    const current_master_fd = loop_group.master_fd.load(.seq_cst);
     var ring = blk: {
-        if (current_master_fd != -1) {
-            const master_fd = current_master_fd;
-            flags |= linux.IORING_SETUP_ATTACH_WQ;
-            var params = std.mem.zeroInit(linux.io_uring_params, .{
-                .flags = flags,
-                .sq_thread_idle = 1000,
-                .wq_fd = @as(u32, @intCast(master_fd)),
-            });
-            break :blk try linux.IoUring.init_params(queue_size, &params);
+        if (shared_state.master_fd.load(.seq_cst) != -1) {
+            const master_fd = shared_state.master_fd.load(.seq_cst);
+
+            break :blk try ringFromMasterFd(master_fd, flags, queue_size);
         } else {
             const ring = try linux.IoUring.init(queue_size, flags);
-            _ = loop_group.master_fd.swap(ring.fd, .seq_cst);
+            const old_fd = shared_state.master_fd.cmpxchgStrong(-1, ring.fd, .seq_cst, .seq_cst);
+            if (old_fd != -1) {
+                ring.deinit();
+                const master_fd = shared_state.master_fd.load(.seq_cst);
+
+                break :blk try ringFromMasterFd(master_fd, flags, queue_size);
+            }
+            self.is_master = true;
             break :blk ring;
         }
     };
     errdefer ring.deinit();
+    shared_state.refcount.fetchAdd(1, .seq_cst);
 
     const waker_eventfd = try posix.eventfd(0, posix.EFD.CLOEXEC | posix.EFD.NONBLOCK);
     errdefer _ = linux.close(waker_eventfd);
@@ -232,6 +237,7 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
         .ring = ring,
         .waker_eventfd = waker_eventfd,
         .waker_needs_rearm = true,
+        .shared_state = shared_state,
     };
 
     // Arm the multishot poll once. It stays armed across wakes, so the loop is
@@ -240,9 +246,29 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
     _ = self.armWaker();
 }
 
+fn ringFromMasterFd(master_fd: i32, flags: u32, queue_size: u32) !linux.IoUring {
+    flags |= linux.IORING_SETUP_ATTACH_WQ;
+    var params = std.mem.zeroInit(linux.io_uring_params, .{
+        .flags = flags,
+        .sq_thread_idle = 1000,
+        .wq_fd = @as(u32, @intCast(master_fd)),
+    });
+
+    return try linux.IoUring.init_params(queue_size, &params);
+}
+
 pub fn deinit(self: *Self) void {
     _ = linux.close(self.waker_eventfd);
+    if (self.is_master) self.ring.fd = -1;
     self.ring.deinit();
+
+    if (self.shared_state.refcount.fetchSub(1, .seq_cst) == 1) {
+        const master_fd = self.shared_state.master_fd.load(.seq_cst);
+        if (master_fd != -1) {
+            _ = linux.close(master_fd);
+            _ = self.shared_state.master_fd.swap(-1, .seq_cst);
+        }
+    }
 }
 
 pub fn wake(self: *Self, state: *LoopState) void {

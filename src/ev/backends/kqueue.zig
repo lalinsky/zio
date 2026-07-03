@@ -9,7 +9,6 @@ const common = @import("common.zig");
 
 const unexpectedError = @import("../../os/base.zig").unexpectedError;
 const LoopState = @import("../loop.zig").LoopState;
-const LoopGroup = @import("../loop.zig").LoopGroup;
 const Completion = @import("../completion.zig").Completion;
 const Queue = @import("../queue.zig").Queue;
 const NetConnect = @import("../completion.zig").NetConnect;
@@ -131,8 +130,7 @@ fn makeKey(ident: usize, filter: i32) u64 {
     return (@as(u64, @intCast(ident)) << 32) | @as(u32, @bitCast(filter));
 }
 
-pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState, loop_group: *LoopGroup) !void {
-    _ = loop_group;
+pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
     shared_state.sock_table.acquire(allocator);
     errdefer shared_state.sock_table.release();
     const kq = std.c.kqueue();

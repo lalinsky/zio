@@ -128,7 +128,6 @@ test sendfileLayout {
 
 pub const LoopGroup = struct {
     shared: Backend.SharedState = .{},
-    master_fd: std.atomic.Value(c_int) = .init(-1),
 };
 
 pub const RunMode = enum {
@@ -514,7 +513,11 @@ pub const Loop = struct {
         net.ensureWSAInitialized();
         self.state.updateNow();
 
-        try self.backend.init(options.allocator, options.queue_size, &self.loop_group.shared, self.loop_group);
+        try self.backend.init(
+            options.allocator,
+            options.queue_size,
+            &self.loop_group.shared,
+        );
         errdefer self.backend.deinit();
 
         self.state.initialized = true;
