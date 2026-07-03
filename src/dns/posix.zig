@@ -5,6 +5,7 @@ const std = @import("std");
 const os_net = @import("../os/net.zig");
 const common = @import("../common.zig");
 const blockInPlace = common.blockInPlace;
+const syscall_cancel = @import("../os/syscall_cancel.zig");
 const dns = @import("root.zig");
 
 /// Fills `storage` with canonical name (if requested) and addresses from
@@ -76,6 +77,10 @@ fn lookupBlocking(options: dns.LookupOptions) dns.LookupError!?*os_net.addrinfo 
     }
 
     var res: ?*os_net.addrinfo = null;
+
+    // getaddrinfo cannot be interrupted by a signal, so if the task was already
+    // canceled while this work was queued, abort before starting the lookup.
+    try syscall_cancel.checkCanceled();
 
     os_net.getaddrinfo(name_c.ptr, port_c.ptr, &hints, &res) catch |err| {
         return switch (err) {

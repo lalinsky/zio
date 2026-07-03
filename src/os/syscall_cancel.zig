@@ -69,7 +69,12 @@ pub const Token = struct {
     /// the canceller observes `blocked` via an acquiring CAS.
     handle: std.atomic.Value(?Handle) = .init(null),
 
-    const Handle = if (enabled) std.c.pthread_t else void;
+    // When disabled the field is never accessed, but it still has to have a
+    // defined in-memory layout: `std.atomic.Value` is an extern struct, and only
+    // a *pointer* optional has a guaranteed layout (null pointer), so the
+    // disabled placeholder must be a pointer type, not `void`/an integer.
+    // (`std.c.pthread_t` is itself a pointer, which is why the enabled case works.)
+    const Handle = if (enabled) std.c.pthread_t else *anyopaque;
 
     /// Bind the calling worker thread to this token. Call immediately before
     /// running the task's function.
@@ -200,6 +205,22 @@ pub const Syscall = struct {
         return err;
     }
 };
+
+/// Check whether the current worker's bound task already has a cancellation
+/// pending, without entering a cancelable syscall region. Returns
+/// `error.Canceled` if so, otherwise a no-op.
+///
+/// Intended for blocking calls that a `SIGURG` cannot interrupt (e.g. glibc
+/// `getaddrinfo`, which restarts internally). We can't break out of such a call
+/// once it is running, but we can still honor a cancel that arrived while the
+/// work sat in the pool queue by checking right before we start it.
+pub fn checkCanceled() Cancelable!void {
+    if (!enabled) return;
+    const tok = current orelse return;
+    // Outside a begin()/finish() region the state is only ever `idle` or
+    // `canceled`, so a plain load is enough to decide.
+    if (tok.state.load(.monotonic) == .canceled) return error.Canceled;
+}
 
 const sig = if (enabled) std.c.SIG.URG else {};
 
