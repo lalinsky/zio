@@ -12,6 +12,7 @@ const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
 const Queue = @import("../queue.zig").Queue;
 const Cancel = @import("../completion.zig").Cancel;
+const LoopGroup = @import("../loop.zig").LoopGroup;
 
 // user_data encoding. A *Completion pointer is aligned, so its low bit is 0;
 // internal ops set the low bit and pack a kind (bits 1-2) plus, for the wall
@@ -197,14 +198,30 @@ wall_generation: [2]u32 = .{ 0, 0 },
 /// SQE until the next `io_uring_enter2` reads it.
 wall_ts: [2]linux.kernel_timespec = undefined,
 
-pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
+pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState, loop_group: *LoopGroup) !void {
     _ = shared_state;
     var flags: u32 = 0;
     flags |= linux.IORING_SETUP_SINGLE_ISSUER;
     flags |= linux.IORING_SETUP_DEFER_TASKRUN;
     flags |= linux.IORING_SETUP_COOP_TASKRUN;
 
-    var ring = try linux.IoUring.init(queue_size, flags);
+    const current_master_fd = loop_group.master_fd.load(.seq_cst);
+    var ring = blk: {
+        if (current_master_fd != -1) {
+            const master_fd = current_master_fd;
+            flags |= linux.IORING_SETUP_ATTACH_WQ;
+            var params = std.mem.zeroInit(linux.io_uring_params, .{
+                .flags = flags,
+                .sq_thread_idle = 1000,
+                .wq_fd = @as(u32, @intCast(master_fd)),
+            });
+            break :blk try linux.IoUring.init_params(queue_size, &params);
+        } else {
+            const ring = try linux.IoUring.init(queue_size, flags);
+            _ = loop_group.master_fd.swap(ring.fd, .seq_cst);
+            break :blk ring;
+        }
+    };
     errdefer ring.deinit();
 
     const waker_eventfd = try posix.eventfd(0, posix.EFD.CLOEXEC | posix.EFD.NONBLOCK);

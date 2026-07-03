@@ -8,6 +8,7 @@ const common = @import("common.zig");
 
 const unexpectedError = @import("../../os/base.zig").unexpectedError;
 const LoopState = @import("../loop.zig").LoopState;
+const LoopGroup = @import("../loop.zig").LoopGroup;
 const Completion = @import("../completion.zig").Completion;
 const Op = @import("../completion.zig").Op;
 const Queue = @import("../queue.zig").Queue;
@@ -132,7 +133,8 @@ pending_changes: usize = 0,
 /// millisecond epoll_wait for the rest of this loop's lifetime.
 epoll_pwait2_supported: bool = true,
 
-pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
+pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState, loop_group: *LoopGroup) !void {
+    _ = loop_group;
     shared_state.sock_table.acquire(allocator);
     errdefer shared_state.sock_table.release();
     const rc = std.os.linux.epoll_create1(std.os.linux.EPOLL.CLOEXEC);

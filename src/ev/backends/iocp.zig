@@ -8,6 +8,7 @@ const Clock = @import("../../time.zig").Clock;
 const time = @import("../../os/time.zig");
 const common = @import("common.zig");
 const LoopState = @import("../loop.zig").LoopState;
+const LoopGroup = @import("../loop.zig").LoopGroup;
 const Completion = @import("../completion.zig").Completion;
 const NetOpen = @import("../completion.zig").NetOpen;
 const NetConnect = @import("../completion.zig").NetConnect;
@@ -339,7 +340,8 @@ real_timer: windows.HANDLE = windows.INVALID_HANDLE_VALUE,
 real_armed: ?u64 = null,
 real_fired: bool = false,
 
-pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
+pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState, loop_group: *LoopGroup) !void {
+    _ = loop_group;
     // Acquire reference to shared state (creates IOCP handle if first loop)
     try shared_state.acquire();
     errdefer shared_state.release();
