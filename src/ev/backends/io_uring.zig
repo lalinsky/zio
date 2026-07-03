@@ -212,14 +212,16 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
         if (shared_state.master_fd.load(.seq_cst) != -1) {
             const master_fd = shared_state.master_fd.load(.seq_cst);
 
+            flags |= linux.IORING_SETUP_ATTACH_WQ;
             break :blk try ringFromMasterFd(master_fd, flags, queue_size);
         } else {
-            const ring = try linux.IoUring.init(queue_size, flags);
+            var ring = try linux.IoUring.init(queue_size, flags);
             const old_fd = shared_state.master_fd.cmpxchgStrong(-1, ring.fd, .seq_cst, .seq_cst);
-            if (old_fd != -1) {
+            if (old_fd != null) {
                 ring.deinit();
                 const master_fd = shared_state.master_fd.load(.seq_cst);
 
+                flags |= linux.IORING_SETUP_ATTACH_WQ;
                 break :blk try ringFromMasterFd(master_fd, flags, queue_size);
             }
             self.is_master = true;
@@ -227,10 +229,11 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
         }
     };
     errdefer ring.deinit();
-    shared_state.refcount.fetchAdd(1, .seq_cst);
 
     const waker_eventfd = try posix.eventfd(0, posix.EFD.CLOEXEC | posix.EFD.NONBLOCK);
     errdefer _ = linux.close(waker_eventfd);
+
+    _ = shared_state.refcount.fetchAdd(1, .seq_cst);
 
     self.* = .{
         .allocator = allocator,
@@ -246,8 +249,7 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
     _ = self.armWaker();
 }
 
-fn ringFromMasterFd(master_fd: i32, flags: u32, queue_size: u32) !linux.IoUring {
-    flags |= linux.IORING_SETUP_ATTACH_WQ;
+fn ringFromMasterFd(master_fd: i32, flags: u32, queue_size: u16) !linux.IoUring {
     var params = std.mem.zeroInit(linux.io_uring_params, .{
         .flags = flags,
         .sq_thread_idle = 1000,
