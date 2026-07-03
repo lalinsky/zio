@@ -49,28 +49,43 @@ pub fn Heap(
     return struct {
         const Self = @This();
 
-        root: ?*T = null,
+        /// Atomic so `isEmpty` can be read without the caller's lock. All
+        /// mutations still happen under that lock; the atomicity only exists to
+        /// make the pointer safe to *read* (never dereference) concurrently.
+        root: std.atomic.Value(?*T) = .init(null),
         context: Context,
 
         /// Insert a new element v into the heap. An element v can only
         /// be a member of a single heap at any given time. When compiled
         /// with runtime-safety, assertions will help verify this property.
         pub fn insert(self: *Self, v: *T) void {
-            self.root = if (self.root) |root| self.meld(v, root) else v;
+            const cur = self.root.load(.monotonic);
+            self.root.store(if (cur) |root| self.meld(v, root) else v, .release);
         }
 
         /// Look at the next minimum value but do not remove it.
         pub fn peek(self: *Self) ?*T {
-            return self.root;
+            return self.root.load(.monotonic);
+        }
+
+        /// Lock-free emptiness check. Unlike the other methods, this is safe to
+        /// call *without* the caller's lock: it only compares the root pointer to
+        /// null and never dereferences it, so a stale non-null read at worst
+        /// sends the caller into its locked path to re-check. A null read is
+        /// always real — root only becomes non-null via `insert` (owner thread,
+        /// which orders before that thread's own check) and a cross-thread
+        /// `remove` can only null it.
+        pub fn isEmpty(self: *Self) bool {
+            return self.root.load(.acquire) == null;
         }
 
         /// Delete the minimum value from the heap and return it.
         pub fn deleteMin(self: *Self) ?*T {
-            const root = self.root orelse return null;
-            self.root = if (root.heap.child) |child|
+            const root = self.root.load(.monotonic) orelse return null;
+            self.root.store(if (root.heap.child) |child|
                 self.combine_siblings(child)
             else
-                null;
+                null, .release);
 
             // Clear pointers with runtime safety so we can verify on
             // insert that values aren't incorrectly being set multiple times.
@@ -85,7 +100,7 @@ pub fn Heap(
             // element. If it is NOT the root element, v can't be in this
             // heap and we trigger an assertion failure.
             const prev = v.heap.prev orelse {
-                assert(self.root.? == v);
+                assert(self.root.load(.monotonic).? == v);
                 _ = self.deleteMin();
                 return;
             };
@@ -106,7 +121,8 @@ pub fn Heap(
             const child = v.heap.child orelse return;
             v.heap.child = null;
             const x = self.combine_siblings(child);
-            self.root = self.meld(x, self.root.?);
+            const cur = self.root.load(.monotonic).?;
+            self.root.store(self.meld(x, cur), .release);
         }
 
         /// Meld (union) two heaps together. This isn't a generalized

@@ -914,9 +914,10 @@ pub const Loop = struct {
 
         // Advance the scan once and refresh the awake snapshot; this also
         // invalidates the lazily-cached boot/real values for this scan.
-        self.state.lockTimers();
+        // `now`/`tick` are only ever touched by the owning executor thread
+        // (`updateNow` is called here and in `setTimer`, both owner-thread; the
+        // cross-thread `clearTimer` never reads them), so no timer lock is needed.
         self.state.updateNow();
-        self.state.unlockTimers();
 
         // Each wall-clock domain has its own heap, compared against `now` in
         // that clock. The earliest remaining across all domains becomes the
@@ -925,6 +926,12 @@ pub const Loop = struct {
         // (the re-read of `now(clock)` on the next scan corrects it).
         for (0..wall_clock_count) |idx| {
             const clock = indexClock(idx);
+
+            // Lock-free fast path: an empty heap has nothing to fire and no
+            // deadline to contribute, so skip the timer mutex entirely. A null
+            // read is always real (see Heap.isEmpty); a stale non-null just falls
+            // through to the locked drain below and re-checks.
+            if (self.state.timers[idx].isEmpty()) continue;
 
             // Process fired timers in batches to avoid holding the lock during
             // callbacks. This prevents deadlock when callbacks set/clear timers.
