@@ -451,17 +451,10 @@ pub const Executor = struct {
 
             // Run event loop - non-blocking if there's work, otherwise wait for I/O
             const main_ready = check_ready and self.main_task.state.load(.acquire).tag == .ready;
-            has_local_work = main_ready;
+            if (!has_local_work) has_local_work = main_ready;
+
             if (!has_local_work) {
-                for (&self.queue_pool) |*stack| {
-                    if (stack.head.load(.acquire) != null) {
-                        has_local_work = true;
-                        break;
-                    }
-                }
-            }
-            if (!has_local_work) {
-                try self.runtime.global_queue_mutex.lock();
+                self.runtime.global_queue_mutex.lock() catch unreachable;
                 has_local_work = self.runtime.global_queue.head != null;
                 self.runtime.global_queue_mutex.unlock();
             }
@@ -532,16 +525,20 @@ pub const Executor = struct {
         for (0..num_stealable_stacks) |_| {
             if (self.queue_pool[self.pop_cursor].pop()) |node| {
                 const task = AnyTask.fromWaitNode(node);
-                if (task.last_run_tick != self.current_tick) {
-                    task.last_run_tick = self.current_tick;
-                    self.tick_task_count += 1;
-                    _ = self.ready_count.fetchSub(1, .acq_rel);
-                    return task;
+                // If the task was already run this tick, push it to the end of the line
+                // or just leave it for the next tick.
+                // However, we MUST check tick.
+                if (task.last_run_tick == self.current_tick) {
+                    // Still this tick - re-queue it.
+                    self.queue_pool[self.pop_cursor].push(node);
+                    self.pop_cursor = (self.pop_cursor + 1) % num_stealable_stacks;
+                    continue;
                 }
-                // Task already ran this tick, push back to a different stack?
-                // Or just ignore and keep popping to preserve FIFO order?
-                // For now, simple re-push to current stack is fine.
-                self.queue_pool[self.pop_cursor].push(node);
+
+                task.last_run_tick = self.current_tick;
+                self.tick_task_count += 1;
+                _ = self.ready_count.fetchSub(1, .acq_rel);
+                return task;
             }
             self.pop_cursor = (self.pop_cursor + 1) % num_stealable_stacks;
         }
@@ -615,7 +612,9 @@ pub const Executor = struct {
         }
 
         // Schedule on the home executor
-        home_exec.scheduleTaskRemote(task) catch {};
+        home_exec.scheduleTaskRemote(task) catch {
+            @panic("Failed to schedule task: Mutex.Canceled");
+        };
     }
 
     const TaskCleanup = union(enum) {
