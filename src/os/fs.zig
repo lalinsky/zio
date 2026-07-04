@@ -2651,6 +2651,7 @@ fn dirReadPosix(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
     }
 
     // Call getdents64 (Linux) or getdirentries (BSD)
+    const sc = try syscall_cancel.Syscall.begin();
     while (true) {
         const rc = switch (builtin.os.tag) {
             .linux => std.os.linux.getdents64(handle, buffer.ptr, buffer.len),
@@ -2666,14 +2667,23 @@ fn dirReadPosix(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
         };
 
         switch (posix.errno(rc)) {
-            .SUCCESS => return if (builtin.os.tag == .linux) rc else @intCast(rc),
-            .INTR => continue,
-            .BADF, .FAULT, .NOTDIR => return error.Unexpected,
-            .NOENT => return 0, // Directory deleted during iteration
-            .ACCES => return error.AccessDenied,
-            .PERM => return error.PermissionDenied,
-            .NOMEM => return error.SystemResources,
-            else => |err| return unexpectedError(err),
+            .SUCCESS => {
+                sc.finish();
+                return if (builtin.os.tag == .linux) rc else @intCast(rc);
+            },
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
+            .BADF, .FAULT, .NOTDIR => return sc.fail(error.Unexpected),
+            .NOENT => {
+                sc.finish();
+                return 0; // Directory deleted during iteration
+            },
+            .ACCES => return sc.fail(error.AccessDenied),
+            .PERM => return sc.fail(error.PermissionDenied),
+            .NOMEM => return sc.fail(error.SystemResources),
+            else => |err| return sc.fail(unexpectedError(err)),
         }
     }
 }
