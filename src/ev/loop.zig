@@ -13,6 +13,7 @@ const Clock = @import("../time.zig").Clock;
 const Queue = @import("queue.zig").Queue;
 const Heap = @import("heap.zig").Heap;
 const Work = @import("completion.zig").Work;
+const DelegatedWork = @import("completion.zig").DelegatedWork;
 const FileRead = @import("completion.zig").FileRead;
 const NetSend = @import("completion.zig").NetSend;
 const NetSendFile = @import("completion.zig").NetSendFile;
@@ -148,6 +149,11 @@ const TimerHeap = Heap(Timer, void, timerDeadlineLess);
 /// 0..wall_clock_count contiguously, so the enum value is the heap index.
 const wall_clock_count = 3;
 
+/// How often `tick` re-sends `SIGURG` to a worker still blocked in a canceled
+/// syscall (see `LoopState.cancel_resend`). One signal almost always suffices;
+/// this bounds how long a lost first signal delays the interruption.
+const resend_interval: Duration = .fromMilliseconds(1);
+
 fn clockIndex(clock: Clock) usize {
     // Where the platform has no distinct suspend-inclusive clock, `.boot` and
     // `.awake` are the same clock, so boot timers share the awake heap (index 0)
@@ -238,6 +244,14 @@ pub const LoopState = struct {
         .{ .context = {} },
         .{ .context = {} },
     },
+
+    /// Intrusive list of thread-pool-delegated works whose cancellation has been
+    /// requested but whose worker is still blocked in the canceled syscall. Each
+    /// `tick` re-sends `SIGURG` to cover a first signal lost in the tiny window
+    /// between `Syscall.begin()` and the kernel entering the sleep. Touched only
+    /// on this loop's thread (added in `cancelLocal`, swept in `tick`, removed as
+    /// the completion is finalized in the `work_completions` drain).
+    cancel_resend: ?*DelegatedWork = null,
     // TODO: Linked timers optimization
     // Instead of mutex-protected cross-thread timer cancellation, link timers to their
     // associated operations. When an operation completes, its linked timer is cleared
@@ -453,6 +467,67 @@ pub const LoopState = struct {
             self.timers[clockIndex(timer.clock)].remove(timer);
         }
         timer.deadline = .zero;
+    }
+
+    /// Add a delegated work to the cancel-resend list (idempotent). Loop-thread
+    /// only. Only works whose worker is blocked-and-canceling belong here.
+    fn addResend(self: *LoopState, dw: *DelegatedWork) void {
+        if (dw.in_resend_list) return;
+        dw.in_resend_list = true;
+        dw.resend_next = self.cancel_resend;
+        self.cancel_resend = dw;
+    }
+
+    /// Remove a delegated work from the cancel-resend list if present.
+    /// Loop-thread only.
+    fn removeResend(self: *LoopState, dw: *DelegatedWork) void {
+        if (!dw.in_resend_list) return;
+        var slot = &self.cancel_resend;
+        while (slot.*) |node| {
+            if (node == dw) {
+                slot.* = node.resend_next;
+                dw.resend_next = null;
+                dw.in_resend_list = false;
+                return;
+            }
+            slot = &node.resend_next;
+        }
+    }
+
+    /// Remove the delegated work owning `completion` from the resend list, if it
+    /// is on it. Called as the completion is finalized (before its waiter is
+    /// signaled) so the sweep never dereferences a token whose `op_data` is about
+    /// to be freed. The list is empty in the common case, so this is O(1) then.
+    /// Loop-thread only.
+    fn removeResendByCompletion(self: *LoopState, completion: *Completion) void {
+        if (self.cancel_resend == null) return;
+        var slot = &self.cancel_resend;
+        while (slot.*) |node| {
+            if (node.linked_context.linked == completion) {
+                slot.* = node.resend_next;
+                node.resend_next = null;
+                node.in_resend_list = false;
+                return;
+            }
+            slot = &node.resend_next;
+        }
+    }
+
+    /// Re-send `SIGURG` to every still-blocked canceling worker, dropping any
+    /// that have acknowledged. Called once per `tick`. Loop-thread only.
+    fn sweepResend(self: *LoopState) void {
+        var slot = &self.cancel_resend;
+        while (slot.*) |node| {
+            if (node.token.signal()) {
+                // Still blocked-and-canceling; keep it and re-check next tick.
+                slot = &node.resend_next;
+            } else {
+                // Worker acknowledged (or the op finished); stop re-sending.
+                slot.* = node.resend_next;
+                node.resend_next = null;
+                node.in_resend_list = false;
+            }
+        }
     }
 };
 
@@ -705,6 +780,16 @@ pub const Loop = struct {
                         const thread_pool = self.thread_pool orelse unreachable;
                         const op_data = completion.cast(op.toType());
                         thread_pool.cancel(&op_data.internal.work);
+                        // If the worker is blocked in the canceled syscall, the
+                        // first SIGURG (sent by cancel above) can be lost in the
+                        // begin()->sleep window. Track it so `tick` re-sends until
+                        // the worker acknowledges. Only DelegatedWork ops have a
+                        // token; the entry is removed when the op finalizes.
+                        if (@hasField(@TypeOf(op_data.internal), "token")) {
+                            if (op_data.internal.token.isCanceling()) {
+                                self.state.addResend(&op_data.internal);
+                            }
+                        }
                     } else {
                         self.backend.cancel(&self.state, completion);
                     }
@@ -1065,6 +1150,10 @@ pub const Loop = struct {
     pub fn processCompletions(self: *Loop) void {
         var work_completions = self.state.work_completions.popAll();
         while (work_completions.pop()) |completion| {
+            // Drop from the cancel-resend list before finalizing: markCompleted
+            // wakes the waiter, whose coroutine may then free the op (and its
+            // token). Removing here keeps the sweep from touching freed memory.
+            self.state.removeResendByCompletion(completion);
             self.state.markCompleted(completion);
         }
 
@@ -1160,6 +1249,12 @@ pub const Loop = struct {
                 op_data.internal.work = Work.init(op_func, null);
                 op_data.internal.work.completion_fn = loopLinkedWorkComplete;
                 op_data.internal.work.completion_context = @ptrCast(&op_data.internal.linked_context);
+                // Ops whose internal is a DelegatedWork carry a cancellation
+                // token: bind it to the work so the worker enters/exits it and
+                // the blocking syscall becomes SIGURG-cancelable.
+                if (@hasField(@TypeOf(op_data.internal), "token")) {
+                    op_data.internal.work.cancel_token = &op_data.internal.token;
+                }
                 tp.submit(&op_data.internal.work);
             },
             else => unreachable,
@@ -1310,6 +1405,9 @@ pub const Loop = struct {
 
         const timer_result = self.checkTimers();
 
+        // Re-send SIGURG to any worker still blocked in a canceled syscall.
+        self.state.sweepResend();
+
         var timeout: Duration = .zero;
         if (wait) {
             // Don't block if we have completions waiting to be processed or timers fired
@@ -1321,6 +1419,11 @@ pub const Loop = struct {
             } else {
                 // No timers, wait for blocking I/O
                 timeout = self.max_wait;
+            }
+            // While cancellations are pending, keep waking to re-send SIGURG so a
+            // lost first signal is retried promptly rather than at max_wait.
+            if (self.state.cancel_resend != null and timeout.value > resend_interval.value) {
+                timeout = resend_interval;
             }
         }
 

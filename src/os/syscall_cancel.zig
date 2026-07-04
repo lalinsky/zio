@@ -127,6 +127,15 @@ pub const Token = struct {
         _ = std.c.pthread_kill(handle, sig);
         return true;
     }
+
+    /// True while the worker is blocked in the canceled syscall and has not yet
+    /// acknowledged the cancellation — i.e. the `SIGURG` may still need
+    /// re-sending. Used to decide whether a work belongs on the loop's
+    /// cancel-resend list.
+    pub fn isCanceling(self: *Token) bool {
+        if (!enabled) return false;
+        return self.state.load(.acquire) == .blocked_canceling;
+    }
 };
 
 /// A scoped, cancelable syscall region. Obtained by `begin()`, closed by

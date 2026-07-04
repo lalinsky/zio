@@ -1014,12 +1014,32 @@ pub const FileOpenResult = struct {
     pollable: bool = false,
 };
 
+/// Shared `internal` payload for file/dir ops delegated to the thread pool on
+/// backends without native async support (kqueue/poll). Bundles the pool `Work`,
+/// the loop linkage, an allocator slot (used by path-based ops), the syscall
+/// cancellation token bound by the worker, and the intrusive link for the loop's
+/// cancel-resend list (see `Loop.cancel_resend`). `linked_context.linked` back-
+/// points to the owning `Completion`, so the loop can find a `DelegatedWork` from
+/// a completion at finalization without any per-op-type knowledge.
+pub const DelegatedWork = struct {
+    work: Work = undefined,
+    allocator: std.mem.Allocator = undefined,
+    linked_context: Loop.LinkedWorkContext = undefined,
+    /// Bound by the worker (`enter`/`exit`) around the syscall; signaled on
+    /// cancel. See `os.syscall_cancel`.
+    token: os.syscall_cancel.Token = .{},
+    /// Intrusive link + membership flag for `Loop.cancel_resend`. Touched only
+    /// on the owning loop's thread.
+    resend_next: ?*DelegatedWork = null,
+    in_resend_list: bool = false,
+};
+
 pub const FileOpen = struct {
     c: Completion,
     result_private_do_not_touch: FileOpenResult = undefined,
     internal: switch (Backend.capabilities.file_open) {
         true => if (@hasDecl(Backend, "FileOpenData")) Backend.FileOpenData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     dir: fs.fd_t,
     path: []const u8,
@@ -1046,7 +1066,7 @@ pub const FileCreate = struct {
     result_private_do_not_touch: FileOpenResult = undefined,
     internal: switch (Backend.capabilities.file_create) {
         true => if (@hasDecl(Backend, "FileCreateData")) Backend.FileCreateData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     dir: fs.fd_t,
     path: []const u8,
@@ -1073,7 +1093,7 @@ pub const FileClose = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.file_close) {
         true => if (@hasDecl(Backend, "FileCloseData")) Backend.FileCloseData else struct {},
-        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     handle: fs.fd_t,
 
@@ -1096,7 +1116,7 @@ pub const FileRead = struct {
     result_private_do_not_touch: usize = undefined,
     internal: switch (Backend.capabilities.file_read) {
         true => if (@hasDecl(Backend, "FileReadData")) Backend.FileReadData else struct {},
-        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     handle: fs.fd_t,
     buffer: ReadBuf,
@@ -1123,7 +1143,7 @@ pub const FileWrite = struct {
     result_private_do_not_touch: usize = undefined,
     internal: switch (Backend.capabilities.file_write) {
         true => if (@hasDecl(Backend, "FileWriteData")) Backend.FileWriteData else struct {},
-        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     handle: fs.fd_t,
     buffer: WriteBuf,
@@ -1150,7 +1170,7 @@ pub const FileReadStreaming = struct {
     result_private_do_not_touch: usize = undefined,
     internal: switch (Backend.capabilities.file_read_streaming) {
         true => if (@hasDecl(Backend, "FileReadStreamingData")) Backend.FileReadStreamingData else struct {},
-        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     handle: fs.fd_t,
     buffer: ReadBuf,
@@ -1180,7 +1200,7 @@ pub const FileWriteStreaming = struct {
     result_private_do_not_touch: usize = undefined,
     internal: switch (Backend.capabilities.file_write_streaming) {
         true => if (@hasDecl(Backend, "FileWriteStreamingData")) Backend.FileWriteStreamingData else struct {},
-        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     handle: fs.fd_t,
     buffer: WriteBuf,
@@ -1210,7 +1230,7 @@ pub const FileSync = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.file_sync) {
         true => if (@hasDecl(Backend, "FileSyncData")) Backend.FileSyncData else struct {},
-        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     handle: fs.fd_t,
     flags: fs.FileSyncFlags,
@@ -1235,7 +1255,7 @@ pub const FileSetSize = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.file_set_size) {
         true => if (@hasDecl(Backend, "FileSetSizeData")) Backend.FileSetSizeData else struct {},
-        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     handle: fs.fd_t,
     length: u64,
@@ -1260,7 +1280,7 @@ pub const FileSetPermissions = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.file_set_permissions) {
         true => if (@hasDecl(Backend, "FileSetPermissionsData")) Backend.FileSetPermissionsData else struct {},
-        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     handle: fs.fd_t,
     mode: fs.mode_t,
@@ -1285,7 +1305,7 @@ pub const FileSetOwner = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.file_set_owner) {
         true => if (@hasDecl(Backend, "FileSetOwnerData")) Backend.FileSetOwnerData else struct {},
-        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     handle: fs.fd_t,
     uid: ?fs.uid_t,
@@ -1312,7 +1332,7 @@ pub const FileSetTimestamps = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.file_set_timestamps) {
         true => if (@hasDecl(Backend, "FileSetTimestampsData")) Backend.FileSetTimestampsData else struct {},
-        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     handle: fs.fd_t,
     timestamps: fs.FileTimestamps,
@@ -1337,7 +1357,7 @@ pub const DirSetPermissions = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.dir_set_permissions) {
         true => if (@hasDecl(Backend, "DirSetPermissionsData")) Backend.DirSetPermissionsData else struct {},
-        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     handle: fs.fd_t,
     mode: fs.mode_t,
@@ -1362,7 +1382,7 @@ pub const DirSetOwner = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.dir_set_owner) {
         true => if (@hasDecl(Backend, "DirSetOwnerData")) Backend.DirSetOwnerData else struct {},
-        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     handle: fs.fd_t,
     uid: ?fs.uid_t,
@@ -1389,7 +1409,7 @@ pub const DirSetFilePermissions = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.dir_set_file_permissions) {
         true => if (@hasDecl(Backend, "DirSetFilePermissionsData")) Backend.DirSetFilePermissionsData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     dir: fs.fd_t,
     path: []const u8,
@@ -1418,7 +1438,7 @@ pub const DirSetFileOwner = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.dir_set_file_owner) {
         true => if (@hasDecl(Backend, "DirSetFileOwnerData")) Backend.DirSetFileOwnerData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     dir: fs.fd_t,
     path: []const u8,
@@ -1449,7 +1469,7 @@ pub const DirSetFileTimestamps = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.dir_set_file_timestamps) {
         true => if (@hasDecl(Backend, "DirSetFileTimestampsData")) Backend.DirSetFileTimestampsData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     dir: fs.fd_t,
     path: []const u8,
@@ -1478,7 +1498,7 @@ pub const DirSymLink = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.dir_sym_link) {
         true => if (@hasDecl(Backend, "DirSymLinkData")) Backend.DirSymLinkData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     dir: fs.fd_t,
     target: []const u8,
@@ -1507,7 +1527,7 @@ pub const DirReadLink = struct {
     result_private_do_not_touch: usize = undefined,
     internal: switch (Backend.capabilities.dir_read_link) {
         true => if (@hasDecl(Backend, "DirReadLinkData")) Backend.DirReadLinkData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     dir: fs.fd_t,
     path: []const u8,
@@ -1534,7 +1554,7 @@ pub const DirHardLink = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.dir_hard_link) {
         true => if (@hasDecl(Backend, "DirHardLinkData")) Backend.DirHardLinkData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     old_dir: fs.fd_t,
     old_path: []const u8,
@@ -1565,7 +1585,7 @@ pub const DirAccess = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.dir_access) {
         true => if (@hasDecl(Backend, "DirAccessData")) Backend.DirAccessData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     dir: fs.fd_t,
     path: []const u8,
@@ -1592,7 +1612,7 @@ pub const DirRealPath = struct {
     result_private_do_not_touch: usize = undefined,
     internal: switch (Backend.capabilities.dir_real_path) {
         true => if (@hasDecl(Backend, "DirRealPathData")) Backend.DirRealPathData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     fd: fs.fd_t,
     buffer: []u8,
@@ -1617,7 +1637,7 @@ pub const DirRealPathFile = struct {
     result_private_do_not_touch: usize = undefined,
     internal: switch (Backend.capabilities.dir_real_path_file) {
         true => if (@hasDecl(Backend, "DirRealPathFileData")) Backend.DirRealPathFileData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     dir: fs.fd_t,
     path: []const u8,
@@ -1644,7 +1664,7 @@ pub const FileRealPath = struct {
     result_private_do_not_touch: usize = undefined,
     internal: switch (Backend.capabilities.file_real_path) {
         true => if (@hasDecl(Backend, "FileRealPathData")) Backend.FileRealPathData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     fd: fs.fd_t,
     buffer: []u8,
@@ -1669,7 +1689,7 @@ pub const FileHardLink = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.file_hard_link) {
         true => if (@hasDecl(Backend, "FileHardLinkData")) Backend.FileHardLinkData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     fd: fs.fd_t,
     new_dir: fs.fd_t,
@@ -1698,7 +1718,7 @@ pub const DirCreateDir = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.dir_create_dir) {
         true => if (@hasDecl(Backend, "DirCreateDirData")) Backend.DirCreateDirData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     dir: fs.fd_t,
     path: []const u8,
@@ -1725,7 +1745,7 @@ pub const DirRename = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.dir_rename) {
         true => if (@hasDecl(Backend, "DirRenameData")) Backend.DirRenameData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     old_dir: fs.fd_t,
     old_path: []const u8,
@@ -1754,7 +1774,7 @@ pub const DirRenamePreserve = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.dir_rename_preserve) {
         true => if (@hasDecl(Backend, "DirRenamePreserveData")) Backend.DirRenamePreserveData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     old_dir: fs.fd_t,
     old_path: []const u8,
@@ -1783,7 +1803,7 @@ pub const DirDeleteFile = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.dir_delete_file) {
         true => if (@hasDecl(Backend, "DirDeleteFileData")) Backend.DirDeleteFileData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     dir: fs.fd_t,
     path: []const u8,
@@ -1808,7 +1828,7 @@ pub const DirDeleteDir = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.dir_delete_dir) {
         true => if (@hasDecl(Backend, "DirDeleteDirData")) Backend.DirDeleteDirData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     dir: fs.fd_t,
     path: []const u8,
@@ -1833,7 +1853,7 @@ pub const FileSize = struct {
     result_private_do_not_touch: u64 = undefined,
     internal: switch (Backend.capabilities.file_size) {
         true => if (@hasDecl(Backend, "FileSizeData")) Backend.FileSizeData else struct {},
-        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     handle: fs.fd_t,
 
@@ -1856,7 +1876,7 @@ pub const FileStat = struct {
     result_private_do_not_touch: fs.FileStatInfo = undefined,
     internal: switch (Backend.capabilities.file_stat) {
         true => if (@hasDecl(Backend, "FileStatData")) Backend.FileStatData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     handle: fs.fd_t,
     path: ?[]const u8,
@@ -1886,7 +1906,7 @@ pub const DirOpen = struct {
     result_private_do_not_touch: fs.fd_t = undefined,
     internal: switch (Backend.capabilities.dir_open) {
         true => if (@hasDecl(Backend, "DirOpenData")) Backend.DirOpenData else struct {},
-        false => struct { work: Work = undefined, allocator: std.mem.Allocator = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     dir: fs.fd_t,
     path: []const u8,
@@ -1913,7 +1933,7 @@ pub const DirClose = struct {
     result_private_do_not_touch: void = {},
     internal: switch (Backend.capabilities.dir_close) {
         true => if (@hasDecl(Backend, "DirCloseData")) Backend.DirCloseData else struct {},
-        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     handle: fs.fd_t,
 
@@ -1936,7 +1956,7 @@ pub const DirRead = struct {
     result_private_do_not_touch: usize = undefined,
     internal: switch (Backend.capabilities.dir_read) {
         true => if (@hasDecl(Backend, "DirReadData")) Backend.DirReadData else struct {},
-        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
     handle: fs.fd_t,
     buffer: []u8,
@@ -2123,7 +2143,7 @@ pub const ProcessWait = struct {
     handle: ProcessHandle,
     internal: switch (Backend.capabilities.process_wait) {
         true => if (@hasDecl(Backend, "ProcessWaitData")) Backend.ProcessWaitData else struct {},
-        false => struct { work: Work = undefined, linked_context: Loop.LinkedWorkContext = undefined },
+        false => DelegatedWork,
     } = .{},
 
     pub const ProcessHandle = switch (builtin.os.tag) {

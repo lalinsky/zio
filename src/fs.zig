@@ -1272,3 +1272,48 @@ test "Dir: resolve_beneath blocks parent escape" {
         else => return err,
     }
 }
+
+extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
+
+test "Dir: canceling a blocking open interrupts the worker" {
+    // Only exercises the thread-pool-delegated path (kqueue/poll and friends);
+    // backends that open natively (io_uring) cancel via the backend instead, and
+    // the SIGURG mechanism is POSIX-only.
+    if (ev.Backend.capabilities.file_open) return;
+    if (!os.syscall_cancel.enabled) return;
+
+    // A FIFO opened O_RDONLY with no writer blocks in the worker's openat(). On
+    // POSIX the open is unconditionally blocking (O_NONBLOCK is applied only
+    // *after* open, in probePollable), so this reliably parks a worker we can
+    // then interrupt.
+    const path = "zig-cache-zio-open-cancel.fifo";
+    _ = std.c.unlink(path);
+    try std.testing.expectEqual(0, mkfifo(path, 0o600));
+    defer _ = std.c.unlink(path);
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const worker = struct {
+        fn call(p: []const u8, result: *(Dir.OpenFileError!void)) void {
+            if (openFile(p)) |file| {
+                file.close();
+                result.* = {};
+            } else |err| {
+                result.* = err;
+            }
+        }
+    };
+
+    var result: Dir.OpenFileError!void = {};
+    var handle = try rt.spawn(worker.call, .{ path, &result });
+
+    // Let the worker reach the blocking open, then cancel. The loop re-sends
+    // SIGURG each tick until the worker acknowledges (covering a lost first
+    // signal), so the open returns error.Canceled.
+    try rt.sleep(.fromMilliseconds(50));
+    handle.cancel();
+    handle.join();
+
+    try std.testing.expectError(error.Canceled, result);
+}

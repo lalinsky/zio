@@ -6,6 +6,7 @@ const w = @import("windows.zig");
 const options = @import("zio_options");
 
 const unexpectedError = @import("base.zig").unexpectedError;
+const syscall_cancel = @import("syscall_cancel.zig");
 
 // Cached probe result: once we see ENOSYS from openat2, skip future attempts.
 var openat2_nosys: std.atomic.Value(bool) = .init(false);
@@ -687,17 +688,30 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
         std.log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
     }
 
+    // Cancelable region: when this runs on a thread-pool worker bound to a
+    // cancellation token (delegated file ops on kqueue/poll backends), a SIGURG
+    // turns the blocking open into EINTR and `checkCancel` reports `Canceled`.
+    // Off a cancelable worker the token is null and every call here is a no-op.
+    const sc = try syscall_cancel.Syscall.begin();
     while (true) {
         const rc = posix.system.openat(dir, path_z.ptr, open_flags, @as(mode_t, 0));
         switch (posix.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            .INTR => continue,
+            .SUCCESS => {
+                sc.finish();
+                return @intCast(rc);
+            },
+            // EINTR is either the cancellation SIGURG (checkCancel -> Canceled) or
+            // a spurious/foreign wake, in which case we retry the open.
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| {
                 if (flags.resolve_beneath) {
-                    if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.AccessDenied;
-                    if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 107) return error.AccessDenied;
+                    if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return sc.fail(error.AccessDenied);
+                    if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 107) return sc.fail(error.AccessDenied);
                 }
-                return errnoToFileOpenError(err, flags);
+                return sc.fail(errnoToFileOpenError(err, flags));
             },
         }
     }
@@ -898,17 +912,24 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
         std.log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
     while (true) {
         const rc = posix.system.openat(dir, path_z.ptr, open_flags, flags.mode);
         switch (posix.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            .INTR => continue,
+            .SUCCESS => {
+                sc.finish();
+                return @intCast(rc);
+            },
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| {
                 if (flags.resolve_beneath) {
-                    if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.AccessDenied;
-                    if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 107) return error.AccessDenied;
+                    if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return sc.fail(error.AccessDenied);
+                    if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 107) return sc.fail(error.AccessDenied);
                 }
-                return errnoToFileOpenError(err, flags);
+                return sc.fail(errnoToFileOpenError(err, flags));
             },
         }
     }
@@ -1047,12 +1068,19 @@ pub fn preadv(fd: fd_t, buffers: []iovec, offset: u64) FileReadError!usize {
         return total_read;
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
     while (true) {
         const rc = posix.system.preadv(fd, buffers.ptr, @intCast(buffers.len), @intCast(offset));
         switch (posix.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            .INTR => continue,
-            else => |err| return errnoToFileReadError(err),
+            .SUCCESS => {
+                sc.finish();
+                return @intCast(rc);
+            },
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
+            else => |err| return sc.fail(errnoToFileReadError(err)),
         }
     }
 }
@@ -1086,12 +1114,19 @@ pub fn pwritev(fd: fd_t, buffers: []const iovec_const, offset: u64) FileWriteErr
         return total_written;
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
     while (true) {
         const rc = posix.system.pwritev(fd, buffers.ptr, @intCast(buffers.len), @intCast(offset));
         switch (posix.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            .INTR => continue,
-            else => |err| return errnoToFileWriteError(err),
+            .SUCCESS => {
+                sc.finish();
+                return @intCast(rc);
+            },
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
+            else => |err| return sc.fail(errnoToFileWriteError(err)),
         }
     }
 }
@@ -1157,12 +1192,19 @@ pub fn readv(fd: fd_t, buffers: []iovec) FileReadError!usize {
         return total_read;
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
     while (true) {
         const rc = posix.system.readv(fd, buffers.ptr, @intCast(buffers.len));
         switch (posix.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            .INTR => continue,
-            else => |err| return errnoToFileReadError(err),
+            .SUCCESS => {
+                sc.finish();
+                return @intCast(rc);
+            },
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
+            else => |err| return sc.fail(errnoToFileReadError(err)),
         }
     }
 }
@@ -1220,12 +1262,19 @@ pub fn writev(fd: fd_t, buffers: []const iovec_const) FileWriteError!usize {
         return total_written;
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
     while (true) {
         const rc = posix.system.writev(fd, buffers.ptr, @intCast(buffers.len));
         switch (posix.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            .INTR => continue,
-            else => |err| return errnoToFileWriteError(err),
+            .SUCCESS => {
+                sc.finish();
+                return @intCast(rc);
+            },
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
+            else => |err| return sc.fail(errnoToFileWriteError(err)),
         }
     }
 }
