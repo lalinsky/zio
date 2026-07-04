@@ -200,7 +200,6 @@ wall_generation: [2]u32 = .{ 0, 0 },
 /// SQE until the next `io_uring_enter2` reads it.
 wall_ts: [2]linux.kernel_timespec = undefined,
 shared_state: *SharedState,
-is_master: bool = false,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
     var flags: u32 = 0;
@@ -209,9 +208,8 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
     flags |= linux.IORING_SETUP_COOP_TASKRUN;
 
     var ring = blk: {
-        if (shared_state.master_fd.load(.seq_cst) != -1) {
-            const master_fd = shared_state.master_fd.load(.seq_cst);
-
+        const master_fd = shared_state.master_fd.load(.seq_cst);
+        if (master_fd != -1) {
             flags |= linux.IORING_SETUP_ATTACH_WQ;
             break :blk try ringFromMasterFd(master_fd, flags, queue_size);
         } else {
@@ -219,12 +217,9 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
             const old_fd = shared_state.master_fd.cmpxchgStrong(-1, ring.fd, .seq_cst, .seq_cst);
             if (old_fd != null) {
                 ring.deinit();
-                const master_fd = shared_state.master_fd.load(.seq_cst);
-
                 flags |= linux.IORING_SETUP_ATTACH_WQ;
-                break :blk try ringFromMasterFd(master_fd, flags, queue_size);
+                break :blk try ringFromMasterFd(old_fd.?, flags, queue_size);
             }
-            self.is_master = true;
             break :blk ring;
         }
     };
@@ -261,11 +256,14 @@ fn ringFromMasterFd(master_fd: i32, flags: u32, queue_size: u16) !linux.IoUring 
 
 pub fn deinit(self: *Self) void {
     _ = linux.close(self.waker_eventfd);
-    if (self.is_master) self.ring.fd = -1;
-    self.ring.deinit();
+    const master_fd = self.shared_state.master_fd.load(.seq_cst);
+    if (self.ring.fd == master_fd) {
+        self.ring.cq.deinit();
+        self.ring.sq.deinit();
+        self.ring.fd = -1;
+    } else self.ring.deinit();
 
     if (self.shared_state.refcount.fetchSub(1, .seq_cst) == 1) {
-        const master_fd = self.shared_state.master_fd.load(.seq_cst);
         if (master_fd != -1) {
             _ = linux.close(master_fd);
             _ = self.shared_state.master_fd.swap(-1, .seq_cst);
