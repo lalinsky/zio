@@ -38,6 +38,25 @@ pub fn ConcurrentStack(comptime T: type) type {
             }
         }
 
+        /// Atomically pops an item from the stack.
+        /// Returns null if the stack is empty.
+        pub fn pop(self: *Self) ?*T {
+            while (true) {
+                const current_head = self.head.load(.acquire);
+                if (current_head == null) return null;
+                const new_head = current_head.?.next;
+
+                if (self.head.cmpxchgWeak(
+                    current_head,
+                    new_head,
+                    .release,
+                    .acquire,
+                ) == null) {
+                    return current_head;
+                }
+            }
+        }
+
         /// Atomically drain all items from the stack.
         /// Returns a SimpleStack containing all drained items (LIFO order).
         pub fn popAll(self: *Self) SimpleStack(T) {
