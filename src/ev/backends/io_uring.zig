@@ -102,7 +102,10 @@ pub const capabilities: BackendCapabilities = .{
     .native_wall_timers = true,
 };
 
-pub const SharedState = struct {};
+pub const SharedState = struct {
+    master_fd: std.atomic.Value(c_int) = .init(-1),
+    refcount: std.atomic.Value(usize) = .init(0),
+};
 
 pub const NetRecvData = struct {
     msg: linux.msghdr = undefined,
@@ -196,25 +199,43 @@ wall_generation: [2]u32 = .{ 0, 0 },
 /// Backing storage for the wall timeout `kernel_timespec`s; must outlive the
 /// SQE until the next `io_uring_enter2` reads it.
 wall_ts: [2]linux.kernel_timespec = undefined,
+shared_state: *SharedState,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
-    _ = shared_state;
     var flags: u32 = 0;
     flags |= linux.IORING_SETUP_SINGLE_ISSUER;
     flags |= linux.IORING_SETUP_DEFER_TASKRUN;
     flags |= linux.IORING_SETUP_COOP_TASKRUN;
 
-    var ring = try linux.IoUring.init(queue_size, flags);
+    var ring = blk: {
+        const master_fd = shared_state.master_fd.load(.seq_cst);
+        if (master_fd != -1) {
+            flags |= linux.IORING_SETUP_ATTACH_WQ;
+            break :blk try ringFromMasterFd(master_fd, flags, queue_size);
+        } else {
+            var ring = try linux.IoUring.init(queue_size, flags);
+            const old_fd = shared_state.master_fd.cmpxchgStrong(-1, ring.fd, .seq_cst, .seq_cst);
+            if (old_fd != null) {
+                ring.deinit();
+                flags |= linux.IORING_SETUP_ATTACH_WQ;
+                break :blk try ringFromMasterFd(old_fd.?, flags, queue_size);
+            }
+            break :blk ring;
+        }
+    };
     errdefer ring.deinit();
 
     const waker_eventfd = try posix.eventfd(0, posix.EFD.CLOEXEC | posix.EFD.NONBLOCK);
     errdefer _ = linux.close(waker_eventfd);
+
+    _ = shared_state.refcount.fetchAdd(1, .seq_cst);
 
     self.* = .{
         .allocator = allocator,
         .ring = ring,
         .waker_eventfd = waker_eventfd,
         .waker_needs_rearm = true,
+        .shared_state = shared_state,
     };
 
     // Arm the multishot poll once. It stays armed across wakes, so the loop is
@@ -223,9 +244,31 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
     _ = self.armWaker();
 }
 
+fn ringFromMasterFd(master_fd: i32, flags: u32, queue_size: u16) !linux.IoUring {
+    var params = std.mem.zeroInit(linux.io_uring_params, .{
+        .flags = flags,
+        .sq_thread_idle = 1000,
+        .wq_fd = @as(u32, @intCast(master_fd)),
+    });
+
+    return try linux.IoUring.init_params(queue_size, &params);
+}
+
 pub fn deinit(self: *Self) void {
     _ = linux.close(self.waker_eventfd);
-    self.ring.deinit();
+    const master_fd = self.shared_state.master_fd.load(.seq_cst);
+    if (self.ring.fd == master_fd) {
+        self.ring.cq.deinit();
+        self.ring.sq.deinit();
+        self.ring.fd = -1;
+    } else self.ring.deinit();
+
+    if (self.shared_state.refcount.fetchSub(1, .seq_cst) == 1) {
+        if (master_fd != -1) {
+            _ = linux.close(master_fd);
+            _ = self.shared_state.master_fd.swap(-1, .seq_cst);
+        }
+    }
 }
 
 pub fn wake(self: *Self, state: *LoopState) void {

@@ -513,7 +513,11 @@ pub const Loop = struct {
         net.ensureWSAInitialized();
         self.state.updateNow();
 
-        try self.backend.init(options.allocator, options.queue_size, &self.loop_group.shared);
+        try self.backend.init(
+            options.allocator,
+            options.queue_size,
+            &self.loop_group.shared,
+        );
         errdefer self.backend.deinit();
 
         self.state.initialized = true;
