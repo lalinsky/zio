@@ -442,7 +442,15 @@ pub fn blockInPlace(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) meta
     // so ctx.result is always valid. A canceled syscall makes `func` return
     // error.Canceled, which surfaces here as that result; waitForIo re-arms the
     // task's pending cancellation before returning.
-    waitForIo(&work.c) catch {};
+    //
+    // waitForIo only fails with error.Canceled, and only when the *completion*
+    // carries a Canceled result — which happens on the drop path, where workFn
+    // never runs and ctx.result would be undefined. Token-bearing work is never
+    // dropped (it always completes via setResult, cancellation delivered in-band
+    // through func's return), so this is unreachable. Assert it: were it ever to
+    // fire we would be returning uninitialized ctx.result, which we would much
+    // rather crash on.
+    waitForIo(&work.c) catch unreachable;
 
     return ctx.result;
 }
