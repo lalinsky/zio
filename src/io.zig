@@ -267,6 +267,8 @@ fn globalIo() Io {
 
 fn crashHandlerImpl(_: ?*anyopaque) void {
     coro.crashHandler();
+    // Route any panic-message I/O through the blocking path, never the event loop.
+    runtime_mod.markCrashed();
 }
 
 fn asyncImpl(

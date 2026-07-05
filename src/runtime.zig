@@ -284,10 +284,14 @@ pub const Executor = struct {
     // Periodic timer for evicting idle stacks from the shared stack pool.
     stack_pool_eviction_timer: ev.Timer = ev.Timer.init(.{ .duration = .fromSeconds(60) }),
 
-    // The task currently executing on this executor.
+    // The task currently executing on this executor, or null when we are running
+    // scheduler code (the run loop, a context switch, a completion callback) rather
+    // than a task body. A null value routes any I/O performed here through the
+    // blocking path in waitForIo instead of re-entering the event loop, which would
+    // otherwise recurse into Loop.add (see issue #545).
     // Updated before every context switch into a task and after every switch back.
     // Used by getCurrentTaskOrNull() instead of the TLS current_context chain.
-    current_task: *AnyTask,
+    current_task: ?*AnyTask,
 
     // Executor dedicated to this thread. Written once on init, never updated.
     pub threadlocal var current_DO_NOT_ACCESS_DIRECTLY: ?*Executor = null;
@@ -406,6 +410,16 @@ pub const Executor = struct {
     pub fn run(self: *Executor, mode: RunMode) !void {
         const check_ready = mode != .until_stopped;
 
+        // The run loop is scheduler code, not a task: clear current_task so any I/O
+        // it performs (a completion callback, std.log, a debug_io write) takes the
+        // blocking path rather than recursing into the event loop. Restored to the
+        // main task on return, since control goes back to the main task's user code
+        // (or, for worker executors, to shutdown). This defer does not run on the
+        // crash path: markCrashed()'s callers are noreturn and a panic does not
+        // unwind through defers, so the null marker it sets survives until abort().
+        self.current_task = null;
+        defer self.current_task = &self.main_task;
+
         // Process deferred cleanup (e.g. main task's park/reschedule)
         self.processCleanup();
 
@@ -415,7 +429,7 @@ pub const Executor = struct {
                 @atomicStore(*Context, &next_task.coro.parent_context_ptr, &self.main_task.coro.context, .release);
                 self.current_task = next_task;
                 next_task.coro.step();
-                self.current_task = &self.main_task;
+                self.current_task = null;
                 self.processCleanup();
             }
 
@@ -631,12 +645,16 @@ pub const Executor = struct {
     /// Yield the current coroutine to the next ready task or back to the run loop.
     /// Sets current_task for the target and performs the context switch.
     pub fn switchOut(self: *Executor, coro: *Coroutine) void {
+        // Picking the next task and switching is scheduler code: clear current_task
+        // so I/O performed here doesn't re-enter the event loop. On the direct-switch
+        // path it is set to the target task just before the switch; on the fall-back
+        // path it stays null and the run loop keeps it null until it steps a task.
+        self.current_task = null;
         if (self.getNextTask()) |next_task| {
             @atomicStore(*Context, &next_task.coro.parent_context_ptr, &self.main_task.coro.context, .release);
             self.current_task = next_task;
             coro.yieldTo(&next_task.coro);
         } else {
-            self.current_task = &self.main_task;
             coro.yield();
         }
     }
@@ -667,6 +685,18 @@ pub fn getCurrentTask() *AnyTask {
 pub fn getCurrentTaskOrNull() ?*AnyTask {
     const exec = getCurrentExecutorOrNull() orelse return null;
     return exec.current_task;
+}
+
+/// Called from the panic/crash handler. Marks this thread as not running a task so
+/// that any I/O performed while unwinding — in particular writing the panic message
+/// through debug_io — takes the blocking path in waitForIo instead of re-entering
+/// the event loop (which would recurse into Loop.add and abort with no message).
+/// The marker is never restored: markCrashed()'s callers (defaultPanic,
+/// defaultHandleSegfault) are noreturn and a panic does not unwind through defers,
+/// so no scheduler code runs again on this thread before abort(). See issue #545.
+pub fn markCrashed() void {
+    const exec = getCurrentExecutorOrNull() orelse return;
+    exec.current_task = null;
 }
 
 /// Cooperatively yield control to allow other tasks to run.
