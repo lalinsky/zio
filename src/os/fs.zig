@@ -131,6 +131,13 @@ pub const FileOpenFlags = struct {
     /// Enforced by the kernel on Linux 5.6+ (openat2 RESOLVE_BENEATH) and FreeBSD 13+ (O_RESOLVE_BENEATH).
     /// On other platforms a warning is logged and the flag is ignored.
     resolve_beneath: bool = false,
+    /// Bypass the OS page cache and transfer data directly to/from userspace buffers.
+    /// The caller is responsible for satisfying the platform's alignment requirements
+    /// (buffer address, file offset, and transfer length must typically be multiples of
+    /// the underlying device's logical block size, e.g. 512 bytes) — otherwise I/O fails.
+    /// Linux: O_DIRECT. macOS: fcntl(F_NOCACHE) applied after open. Windows: FILE_FLAG_NO_BUFFERING.
+    /// On platforms without an equivalent a warning is logged and the flag is ignored.
+    direct: bool = false,
 };
 
 pub const DirOpenFlags = struct {
@@ -152,6 +159,9 @@ pub const FileCreateFlags = struct {
     /// Prevent path resolution from escaping the starting directory.
     /// See FileOpenFlags.resolve_beneath for platform support details.
     resolve_beneath: bool = false,
+    /// Bypass the OS page cache and transfer data directly to/from userspace buffers.
+    /// See FileOpenFlags.direct for the alignment requirements and platform support details.
+    direct: bool = false,
 };
 
 pub const FileOpenError = error{
@@ -619,6 +629,8 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
         // closest Windows analogue to O_NOFOLLOW; allow_ctty and path_only have
         // no Windows equivalent and are ignored.
         if (!flags.follow_symlinks) file_flags |= w.FILE_FLAG_OPEN_REPARSE_POINT;
+        // Direct (unbuffered) I/O, the Windows analogue of O_DIRECT.
+        if (flags.direct) file_flags |= w.FILE_FLAG_NO_BUFFERING;
 
         const handle = w.CreateFileW(
             path_w.ptr,
@@ -653,6 +665,16 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
     };
     if (@hasField(@TypeOf(open_flags), "NOCTTY")) open_flags.NOCTTY = !flags.allow_ctty;
     if (@hasField(@TypeOf(open_flags), "PATH")) open_flags.PATH = flags.path_only;
+    if (flags.direct) {
+        if (@hasField(@TypeOf(open_flags), "DIRECT")) {
+            // Linux (and any platform whose O flags expose O_DIRECT).
+            open_flags.DIRECT = true;
+        } else if (!builtin.os.tag.isDarwin()) {
+            // Darwin has no open-time flag; it is applied via fcntl(F_NOCACHE)
+            // after a successful open (see below). Everything else is unsupported.
+            std.log.warn("direct I/O is not supported on {s}, buffering will not be disabled", .{@tagName(builtin.os.tag)});
+        }
+    }
 
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
@@ -703,7 +725,17 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
     while (true) {
         const rc = posix.system.openat(dir, path_z.ptr, open_flags, @as(mode_t, 0));
         switch (posix.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
+            .SUCCESS => {
+                const opened_fd: fd_t = @intCast(rc);
+                // Darwin has no O_DIRECT; disable caching on the fd after opening.
+                if (builtin.os.tag.isDarwin() and flags.direct) {
+                    const err = posix.errno(posix.system.fcntl(opened_fd, posix.system.F.NOCACHE, @as(c_int, 1)));
+                    if (err != .SUCCESS) {
+                        std.log.warn("failed to enable direct I/O (F_NOCACHE) on fd {d}: {s}, caching remains enabled", .{ opened_fd, @tagName(err) });
+                    }
+                }
+                return opened_fd;
+            },
             // EINTR is either the cancellation SIGURG (checkCancel -> Canceled) or
             // a spurious/foreign wake, in which case we retry the open.
             .INTR => {
@@ -857,10 +889,12 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
         else
             w.OPEN_ALWAYS;
 
-        const file_flags: w.DWORD = if (flags.nonblocking)
+        var file_flags: w.DWORD = if (flags.nonblocking)
             w.FILE_ATTRIBUTE_NORMAL | w.FILE_FLAG_OVERLAPPED
         else
             w.FILE_ATTRIBUTE_NORMAL;
+        // Direct (unbuffered) I/O, the Windows analogue of O_DIRECT.
+        if (flags.direct) file_flags |= w.FILE_FLAG_NO_BUFFERING;
 
         const handle = w.CreateFileW(
             path_w.ptr,
@@ -893,6 +927,16 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
     };
     if (flags.truncate) open_flags.TRUNC = true;
     if (flags.exclusive) open_flags.EXCL = true;
+    if (flags.direct) {
+        if (@hasField(@TypeOf(open_flags), "DIRECT")) {
+            // Linux (and any platform whose O flags expose O_DIRECT).
+            open_flags.DIRECT = true;
+        } else if (!builtin.os.tag.isDarwin()) {
+            // Darwin has no open-time flag; it is applied via fcntl(F_NOCACHE)
+            // after a successful open (see below). Everything else is unsupported.
+            std.log.warn("direct I/O is not supported on {s}, buffering will not be disabled", .{@tagName(builtin.os.tag)});
+        }
+    }
 
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
@@ -940,7 +984,17 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
     while (true) {
         const rc = posix.system.openat(dir, path_z.ptr, open_flags, flags.mode);
         switch (posix.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
+            .SUCCESS => {
+                const opened_fd: fd_t = @intCast(rc);
+                // Darwin has no O_DIRECT; disable caching on the fd after opening.
+                if (builtin.os.tag.isDarwin() and flags.direct) {
+                    const err = posix.errno(posix.system.fcntl(opened_fd, posix.system.F.NOCACHE, @as(c_int, 1)));
+                    if (err != .SUCCESS) {
+                        std.log.warn("failed to enable direct I/O (F_NOCACHE) on fd {d}: {s}, caching remains enabled", .{ opened_fd, @tagName(err) });
+                    }
+                }
+                return opened_fd;
+            },
             .INTR => {
                 try sc.checkCancel();
                 continue;

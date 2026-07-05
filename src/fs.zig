@@ -895,6 +895,47 @@ test "File: basic read and write" {
     try dir.deleteFile(file_path);
 }
 
+test "File: direct I/O round-trip" {
+    // Direct I/O requires the buffer, offset, and length to be aligned to the
+    // device's logical block size (O_DIRECT on Linux/BSD, FILE_FLAG_NO_BUFFERING
+    // on Windows); macOS F_NOCACHE has no such constraint. A 4096-aligned,
+    // 4096-byte transfer at offset 0 satisfies all of them. Windows is skipped:
+    // unbuffered I/O there needs the exact sector size and is awkward to exercise
+    // portably.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+    const file_path = "test_file_direct.bin";
+
+    var file = dir.createFile(file_path, .{ .read = true, .direct = true }) catch |err| switch (err) {
+        // Some filesystems (tmpfs, overlayfs, ...) reject O_DIRECT with EINVAL,
+        // which surfaces as Unexpected. Nothing to exercise there.
+        error.Unexpected => return error.SkipZigTest,
+        else => return err,
+    };
+    defer dir.deleteFile(file_path) catch {};
+
+    const block = 4096;
+    var write_buf: [block]u8 align(block) = undefined;
+    for (&write_buf, 0..) |*b, i| b.* = @truncate(i);
+
+    // Write through the createFile(.direct) handle.
+    try std.testing.expectEqual(block, try file.write(&write_buf, 0));
+    file.close();
+
+    // Read it back through a separate openFile(.direct) handle, exercising the
+    // FileOpenFlags path as well as the FileCreateFlags one above.
+    var read_file = try dir.openFile(file_path, .{ .mode = .read_only, .direct = true });
+    defer read_file.close();
+
+    var read_buf: [block]u8 align(block) = undefined;
+    try std.testing.expectEqual(block, try read_file.read(&read_buf, 0));
+    try std.testing.expectEqualSlices(u8, &write_buf, &read_buf);
+}
+
 test "File: positional read and write" {
     var t = try TestFile.create("test_file_positional.txt", .{ .read = true });
     defer t.deinit();
