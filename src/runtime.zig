@@ -515,25 +515,22 @@ pub const Executor = struct {
             }
         }
 
-        // Try to pop from the current cursor and rotate if empty
+        // Try to pop from the current cursor stack and rotate if empty
+        // We check all stacks to ensure we don't block on I/O while work is pending.
         for (0..num_stealable_stacks) |_| {
-            if (self.queue_pool[self.pop_cursor].pop()) |node| {
+            const stack = &self.queue_pool[self.pop_cursor];
+            if (stack.pop()) |node| {
                 const task = AnyTask.fromWaitNode(node);
-                // If the task was already run this tick, push it to the end of the line
-                // or just leave it for the next tick.
-                // However, we MUST check tick.
-                if (task.last_run_tick == self.current_tick) {
-                    // Still this tick - re-queue it.
-                    self.queue_pool[self.pop_cursor].push(node);
-                    self.pop_cursor = (self.pop_cursor + 1) % num_stealable_stacks;
-                    continue;
+                if (task.last_run_tick != self.current_tick) {
+                    task.last_run_tick = self.current_tick;
+                    self.tick_task_count += 1;
+                    _ = self.ready_count.fetchSub(1, .acq_rel);
+                    return task;
                 }
-
-                task.last_run_tick = self.current_tick;
-                self.tick_task_count += 1;
-                _ = self.ready_count.fetchSub(1, .acq_rel);
-                return task;
+                // Task already ran this tick, push back
+                stack.push(node);
             }
+            // Rotate cursor
             self.pop_cursor = (self.pop_cursor + 1) % num_stealable_stacks;
         }
 
