@@ -78,7 +78,12 @@ pub const RandomState = struct {
 /// cannot provide entropy rather than running with a predictable seed.
 pub fn setup(state: *RandomState) os.GetRandomError!void {
     var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 = undefined;
-    try os.getrandom(&seed);
+    // No cancellation token is bound at executor startup, so `getrandom` can
+    // never return `Canceled` here — only the OS entropy error is reachable.
+    os.getrandom(&seed) catch |err| switch (err) {
+        error.EntropyUnavailable => return error.EntropyUnavailable,
+        error.Canceled => unreachable,
+    };
     state.csprng = std.Random.DefaultCsprng.init(seed);
 }
 
