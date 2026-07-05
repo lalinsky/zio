@@ -1214,6 +1214,63 @@ test "runtime: yield from main allows tasks to run" {
     try std.testing.expectEqual(10, counter);
 }
 
+test "runtime: yield without an executor is a no-op" {
+    // No Runtime has been initialized on this thread, so there's no current
+    // executor. yield() should just fall back to an OS thread yield and return.
+    try yield();
+}
+
+test "runtime: maybeYield without an executor is a no-op" {
+    // Same as above, but for the fairness-checked variant.
+    try maybeYield();
+}
+
+test "runtime: maybeYield yields once the ready queue crosses the fairness threshold" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const ResetEvent = @import("sync/ResetEvent.zig");
+
+    var event: ResetEvent = .init;
+    var counter: usize = 0;
+
+    const waiterTask = struct {
+        fn call(reset_event: *ResetEvent, counter_ptr: *usize) !void {
+            try reset_event.wait();
+            counter_ptr.* += 1;
+        }
+    }.call;
+
+    // Spawn more waiters than Executor.yield_ready_threshold so that, once they're
+    // all woken at once, ready_count is high enough for maybeYield() to actually
+    // reschedule instead of no-op.
+    const task_count = Executor.yield_ready_threshold + 5;
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    for (0..task_count) |_| {
+        try group.spawn(waiterTask, .{ &event, &counter });
+    }
+
+    // Every task is now parked in event.wait(), so waking them all at once fills
+    // the ready queue past the fairness threshold.
+    event.set();
+
+    var iterations: usize = 0;
+    while (counter < task_count) : (iterations += 1) {
+        if (iterations >= 100) {
+            std.debug.print("maybeYield not working: counter={}, iterations={}\n", .{ counter, iterations });
+            return error.TestExpectedEqual;
+        }
+        try maybeYield();
+    }
+
+    try std.testing.expectEqual(task_count, counter);
+    try group.wait();
+    try std.testing.expect(!group.hasFailed());
+}
+
 test "runtime: sleep from main allows tasks to run" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
