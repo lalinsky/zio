@@ -302,6 +302,65 @@ pub const Dir = struct {
         const len = try op.getResult();
         return buffer[0..len];
     }
+
+    /// Iterate the directory's entries. The directory must have been opened with
+    /// `.iterate = true`. Returned entry names point into the iterator's own
+    /// buffer and are only valid until the next call to `next()`.
+    pub fn iterate(self: Dir) Iterator {
+        return .{ .fd = self.fd };
+    }
+
+    pub const Iterator = struct {
+        fd: Handle,
+        buffer: [buffer_size]u8 = undefined,
+        // index/end are positions in the raw-entry (unreserved) region.
+        index: usize = 0,
+        end: usize = 0,
+        name_index: usize = 0,
+        started: bool = false,
+        finished: bool = false,
+
+        const buffer_size = 8192;
+
+        pub const Entry = os.fs.DirEntry;
+        pub const Error = ev.DirRead.Error;
+
+        /// Returns the next entry, or null at the end. "." and ".." are skipped.
+        pub fn next(self: *Iterator) Error!?Entry {
+            while (true) {
+                if (self.end - self.index == 0) {
+                    if (self.finished) return null;
+                    const restart = !self.started;
+                    self.started = true;
+
+                    var op = ev.DirRead.init(self.fd, &self.buffer, restart);
+                    try waitForIo(&op.c);
+                    const n = try op.getResult();
+                    if (n == 0) {
+                        self.finished = true;
+                        return null;
+                    }
+                    self.index = 0;
+                    self.end = n;
+                    self.name_index = 0;
+                }
+
+                // Reconstruct the parser each call (rather than storing it) so the
+                // Iterator holds no slice into its own buffer and stays movable.
+                var it = os.fs.DirEntryIterator.init(&self.buffer, self.index, self.end);
+                it.name_index = self.name_index;
+                const entry = it.next() orelse {
+                    self.index = it.index;
+                    self.end = it.end;
+                    self.name_index = it.name_index;
+                    continue;
+                };
+                self.index = it.index;
+                self.name_index = it.name_index;
+                return entry;
+            }
+        }
+    };
 };
 
 /// Whether the Reader/Writer issues positional (offset-based) or streaming
@@ -1357,4 +1416,43 @@ test "Dir: canceling a blocking open interrupts the worker" {
     handle.join();
 
     try std.testing.expectError(error.Canceled, result);
+}
+
+test "Dir: iterate" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const cwd = Dir.cwd();
+    const dir_path = "test_dir_iterate";
+    try cwd.createDir(dir_path, 0o755);
+    defer cwd.deleteDir(dir_path) catch {};
+
+    var dir = try cwd.openDir(dir_path, .{ .iterate = true });
+    defer dir.close();
+
+    (try dir.createFile("a.txt", .{})).close();
+    (try dir.createFile("b.txt", .{})).close();
+    try dir.createDir("sub", 0o755);
+    defer {
+        dir.deleteFile("a.txt") catch {};
+        dir.deleteFile("b.txt") catch {};
+        dir.deleteDir("sub") catch {};
+    }
+
+    var found_a = false;
+    var found_b = false;
+    var found_sub = false;
+    var count: usize = 0;
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        count += 1;
+        if (std.mem.eql(u8, entry.name, "a.txt")) found_a = true;
+        if (std.mem.eql(u8, entry.name, "b.txt")) found_b = true;
+        if (std.mem.eql(u8, entry.name, "sub")) {
+            found_sub = true;
+            try std.testing.expectEqual(os.fs.FileKind.directory, entry.kind);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+    try std.testing.expect(found_a and found_b and found_sub);
 }
