@@ -801,11 +801,16 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
         std.log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.openat(dir, path_z.ptr, open_flags, @as(mode_t, 0));
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| {
                 if (flags.resolve_beneath) {
                     if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.AccessDenied;
@@ -1152,11 +1157,16 @@ pub fn read(fd: fd_t, buffer: []u8) FileReadError!usize {
         return bytes_read;
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.read(fd, buffer.ptr, buffer.len);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileReadError(err),
         }
     }
@@ -1226,11 +1236,16 @@ pub fn write(fd: fd_t, buffer: []const u8) FileWriteError!usize {
         return bytes_written;
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.write(fd, buffer.ptr, buffer.len);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileWriteError(err),
         }
     }
@@ -1292,6 +1307,8 @@ pub fn fileSync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
         return;
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = if (flags.only_data)
             posix.system.fdatasync(fd)
@@ -1300,7 +1317,10 @@ pub fn fileSync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
 
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileSyncError(err),
         }
     }
@@ -1339,11 +1359,16 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
     const new_path_z = allocator.dupeSentinel(u8, new_path, 0) catch return error.SystemResources;
     defer allocator.free(new_path_z);
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.renameat(old_dir, old_path_z.ptr, new_dir, new_path_z.ptr);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToDirRenameError(err),
         }
     }
@@ -1451,11 +1476,16 @@ pub fn dirDeleteFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) 
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.unlinkat(dir, path_z.ptr, 0);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             .PERM => {
                 // macOS and BSDs return EPERM (not EISDIR) when unlinkat is
                 // called on a directory without AT_REMOVEDIR.  Check with
@@ -1506,11 +1536,16 @@ pub fn dirDeleteDir(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) D
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.unlinkat(dir, path_z.ptr, posix.AT.REMOVEDIR);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToDirDeleteDirError(err),
         }
     }
@@ -1539,11 +1574,16 @@ pub fn mkdirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, mode: 
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.mkdirat(dir, path_z.ptr, mode);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToDirCreateDirError(err),
         }
     }
@@ -1794,6 +1834,8 @@ pub fn fileSize(fd: fd_t) FileSizeError!u64 {
         return @intCast(file_size);
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     if (builtin.os.tag == .linux) {
         const linux = std.os.linux;
         var statx_buf: linux.Statx = undefined;
@@ -1801,7 +1843,10 @@ pub fn fileSize(fd: fd_t) FileSizeError!u64 {
             const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, linux.STATX{ .SIZE = true }, &statx_buf);
             switch (posix.errno(rc)) {
                 .SUCCESS => return statx_buf.size,
-                .INTR => continue,
+                .INTR => {
+                    try sc.checkCancel();
+                    continue;
+                },
                 else => |err| return errnoToFileSizeError(err),
             }
         }
@@ -1812,7 +1857,10 @@ pub fn fileSize(fd: fd_t) FileSizeError!u64 {
         const rc = posix.system.fstat(fd, &stat_buf);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(stat_buf.size),
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileSizeError(err),
         }
     }
@@ -1865,6 +1913,8 @@ pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
         };
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     if (builtin.os.tag == .linux) {
         const linux = std.os.linux;
         const mask = linux.STATX{ .TYPE = true, .MODE = true, .INO = true, .NLINK = true, .SIZE = true, .ATIME = true, .MTIME = true, .CTIME = true };
@@ -1873,7 +1923,10 @@ pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
             const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, mask, &statx_buf);
             switch (posix.errno(rc)) {
                 .SUCCESS => return statxToFileStat(statx_buf),
-                .INTR => continue,
+                .INTR => {
+                    try sc.checkCancel();
+                    continue;
+                },
                 else => |err| return errnoToFileStatError(err),
             }
         }
@@ -1884,7 +1937,10 @@ pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
         const rc = posix.system.fstat(fd, &stat_buf);
         switch (posix.errno(rc)) {
             .SUCCESS => return statToFileStat(stat_buf),
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileStatError(err),
         }
     }
@@ -1928,6 +1984,8 @@ pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
 
     const at_flags: u32 = if (flags.follow_symlinks) 0 else posix.AT.SYMLINK_NOFOLLOW;
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     if (builtin.os.tag == .linux) {
         const linux = std.os.linux;
         const mask = linux.STATX{ .TYPE = true, .MODE = true, .INO = true, .NLINK = true, .SIZE = true, .ATIME = true, .MTIME = true, .CTIME = true };
@@ -1936,7 +1994,10 @@ pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
             const rc = linux.statx(dir, path_z.ptr, at_flags, mask, &statx_buf);
             switch (posix.errno(rc)) {
                 .SUCCESS => return statxToFileStat(statx_buf),
-                .INTR => continue,
+                .INTR => {
+                    try sc.checkCancel();
+                    continue;
+                },
                 else => |err| return errnoToFileStatError(err),
             }
         }
@@ -1947,7 +2008,10 @@ pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
         const rc = posix.system.fstatat(dir, path_z.ptr, &stat_buf, at_flags);
         switch (posix.errno(rc)) {
             .SUCCESS => return statToFileStat(stat_buf),
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileStatError(err),
         }
     }
@@ -2071,11 +2135,16 @@ pub fn fileSetSize(fd: fd_t, length: u64) FileSetSizeError!void {
         return;
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.ftruncate(fd, @intCast(length));
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileSetSizeError(err),
         }
     }
@@ -2102,11 +2171,16 @@ pub fn fileSetPermissions(fd: fd_t, mode: mode_t) FileSetPermissionsError!void {
     // Windows doesn't have POSIX-style permissions
     if (builtin.os.tag == .windows) return;
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.fchmod(fd, mode);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileSetPermissionsError(err),
         }
     }
@@ -2132,11 +2206,16 @@ pub fn fileSetOwner(fd: fd_t, uid: ?uid_t, gid: ?gid_t) FileSetOwnerError!void {
     const uid_arg: uid_t = uid orelse @bitCast(@as(i32, -1));
     const gid_arg: gid_t = gid orelse @bitCast(@as(i32, -1));
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.fchown(fd, uid_arg, gid_arg);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileSetOwnerError(err),
         }
     }
@@ -2195,11 +2274,16 @@ pub fn fileSetTimestamps(fd: fd_t, timestamps: FileTimestamps) FileSetTimestamps
             .{ .sec = 0, .nsec = UTIME_OMIT },
     };
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.futimens(fd, &times);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileSetTimestampsError(err),
         }
     }
@@ -2232,11 +2316,16 @@ pub fn dirSetFilePermissions(allocator: std.mem.Allocator, dir: fd_t, path: []co
     // Note: AT_SYMLINK_NOFOLLOW for fchmodat requires Linux 6.6+ (fchmodat2)
     const at_flags: u32 = if (flags.follow_symlinks) 0 else posix.AT.SYMLINK_NOFOLLOW;
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.fchmodat(dir, path_z.ptr, mode, at_flags);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileSetPermissionsError(err),
         }
     }
@@ -2256,11 +2345,16 @@ pub fn dirSetFileOwner(allocator: std.mem.Allocator, dir: fd_t, path: []const u8
 
     const at_flags: u32 = if (!flags.follow_symlinks) posix.AT.SYMLINK_NOFOLLOW else 0;
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.fchownat(dir, path_z.ptr, uid_arg, gid_arg, at_flags);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileSetOwnerError(err),
         }
     }
@@ -2292,11 +2386,16 @@ pub fn dirSetFileTimestamps(allocator: std.mem.Allocator, dir: fd_t, path: []con
 
     const at_flags: u32 = if (!flags.follow_symlinks) posix.AT.SYMLINK_NOFOLLOW else 0;
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.utimensat(dir, path_z.ptr, &times, at_flags);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileSetTimestampsError(err),
         }
     }
@@ -2337,11 +2436,16 @@ pub fn dirSymLink(allocator: std.mem.Allocator, dir: fd_t, target: []const u8, l
     const link_path_z = allocator.dupeSentinel(u8, link_path, 0) catch return error.SystemResources;
     defer allocator.free(link_path_z);
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.symlinkat(target_z.ptr, dir, link_path_z.ptr);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToSymLinkError(err),
         }
     }
@@ -2389,11 +2493,16 @@ pub fn dirReadLink(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, bu
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.readlinkat(dir, path_z.ptr, buffer.ptr, buffer.len);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToReadLinkError(err),
         }
     }
@@ -2451,11 +2560,16 @@ pub fn dirHardLink(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []cons
 
     const at_flags: u32 = if (flags.follow_symlinks) posix.AT.SYMLINK_FOLLOW else 0;
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.linkat(old_dir, old_path_z.ptr, new_dir, new_path_z.ptr, at_flags);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToHardLinkError(err),
         }
     }
@@ -2578,11 +2692,16 @@ pub fn dirAccess(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flag
 
     const at_flags: u32 = if (flags.follow_symlinks) 0 else posix.AT.SYMLINK_NOFOLLOW;
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.faccessat(dir, path_z.ptr, mode, at_flags);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToDirAccessError(err),
         }
     }
@@ -2759,6 +2878,8 @@ pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
     } else fd;
     defer if (fd == posix.AT.FDCWD) posix.close(actual_fd);
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     if (builtin.os.tag == .linux) {
         // Use /proc/self/fd/{fd} with readlink
         var proc_path_buf: [32:0]u8 = undefined;
@@ -2768,7 +2889,10 @@ pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
             const rc = posix.system.readlink(proc_path, buffer.ptr, buffer.len);
             switch (posix.errno(rc)) {
                 .SUCCESS => return @intCast(rc),
-                .INTR => continue,
+                .INTR => {
+                    try sc.checkCancel();
+                    continue;
+                },
                 else => |err| return errnoToDirRealPathError(err),
             }
         }
@@ -2786,7 +2910,10 @@ pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
                     @memcpy(buffer[0..n], sufficient_buffer[0..n]);
                     return n;
                 },
-                .INTR => continue,
+                .INTR => {
+                    try sc.checkCancel();
+                    continue;
+                },
                 else => |err| return errnoToDirRealPathError(err),
             }
         }
@@ -2805,7 +2932,10 @@ pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
                     @memcpy(buffer[0..n], kf.path[0..n]);
                     return n;
                 },
-                .INTR => continue,
+                .INTR => {
+                    try sc.checkCancel();
+                    continue;
+                },
                 else => |err| return errnoToDirRealPathError(err),
             }
         }

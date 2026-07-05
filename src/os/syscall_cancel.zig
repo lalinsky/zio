@@ -191,6 +191,10 @@ pub const Syscall = struct {
     /// Close the syscall region on success or any non-`EINTR` error:
     /// `blocked → idle`, or `blocked_canceling → canceled` (cancel still pending,
     /// surfaces at the next `start()`).
+    ///
+    /// Idempotent: closing an already-closed region (`idle`/`canceled`) is a
+    /// no-op, so `finish()` is safe as a `defer` even when `checkCancel()` has
+    /// already finalized the region on the `Canceled` path.
     pub fn finish(self: Syscall) void {
         const tok = self.token orelse return;
         var s = tok.state.load(.monotonic);
@@ -198,7 +202,7 @@ pub const Syscall = struct {
             const next: State = switch (s) {
                 .blocked => .idle,
                 .blocked_canceling => .canceled,
-                .idle, .canceled => unreachable,
+                .idle, .canceled => return,
             };
             if (tok.state.cmpxchgWeak(s, next, .acq_rel, .monotonic)) |actual| {
                 s = actual;
