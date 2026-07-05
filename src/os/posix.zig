@@ -335,19 +335,15 @@ pub fn getrandom(buffer: []u8) (GetRandomError || syscall_cancel.Cancelable)!voi
             var i: usize = 0;
             while (i < buffer.len) {
                 const sc = try syscall_cancel.Syscall.begin();
+                // `defer` closes the region at the end of each iteration
+                // (blocked→idle, or blocked_canceling→canceled). On EINTR we just
+                // retry; if the token was canceled, the next begin() surfaces it.
+                defer sc.finish();
                 const rc = system.getrandom(buffer[i..].ptr, buffer.len - i, 0);
                 switch (errno(rc)) {
-                    .SUCCESS => {
-                        sc.finish();
-                        i += rc;
-                    },
-                    // EINTR: finish the region (blocked→idle or blocked_canceling→canceled)
-                    // and retry. If the token was canceled, the next begin() surfaces it.
-                    .INTR => {
-                        sc.finish();
-                        continue;
-                    },
-                    else => return sc.fail(error.EntropyUnavailable),
+                    .SUCCESS => i += rc,
+                    .INTR => continue,
+                    else => return error.EntropyUnavailable,
                 }
             }
         },

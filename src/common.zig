@@ -411,70 +411,46 @@ pub fn blockInPlace(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) meta
     const Context = struct {
         args: Args,
         result: Result = undefined,
-        // Distinct from the waiter's signal count: the resend timer below also
-        // signals the waiter, so we need an unambiguous "work finished" flag.
-        done: std.atomic.Value(bool) = .init(false),
 
         fn workFn(work: *ev.Work) void {
             const ctx: *@This() = @ptrCast(@alignCast(work.userdata.?));
             ctx.result = @call(.auto, func, ctx.args);
         }
-
-        fn completionFn(completion_ctx: ?*anyopaque, work: *ev.Work) void {
-            const ctx: *@This() = @ptrCast(@alignCast(work.userdata.?));
-            ctx.done.store(true, .release);
-            const waiter: *Waiter = @ptrCast(@alignCast(completion_ctx.?));
-            waiter.signal();
-        }
     };
 
     var ctx: Context = .{ .args = args };
-    var waiter: Waiter = .init();
 
-    // If not in a task context, just run the function directly
-    const task = waiter.mode.direct.task orelse {
+    // Outside a task there is no event loop / thread pool to hand off to, so run
+    // the function inline on the calling thread.
+    if (getCurrentTaskOrNull() == null) {
         return @call(.auto, func, args);
-    };
+    }
 
     var token: os.syscall_cancel.Token = .{};
     var work = ev.Work.init(Context.workFn, &ctx);
-    work.completion_fn = Context.completionFn;
-    work.completion_context = &waiter;
     work.cancel_token = &token;
 
-    const thread_pool = task.getThreadPool();
-    thread_pool.submit(&work);
-
-    waiter.wait(1, .allow_cancel) catch {
-        // The task was canceled. Signal the token to interrupt any running
-        // cancelable syscall via SIGURG. We do NOT drop the work from the
-        // queue: workFn must always run so ctx.result is always valid, and
-        // for queued (not-yet-started) work the canceled token causes
-        // Syscall.begin() to return error.Canceled when the worker picks it up.
-        const need_signal = token.cancel();
-        if (need_signal) _ = token.signal();
-
-        // Wait for completion (ctx/work live on our stack). Drive resend-with-
-        // backoff to cover the begin()→syscall gap where the first SIGURG can
-        // be lost. The wait is a cooperative timedWait (parks the coroutine on
-        // an executor timer), so resending never blocks the thread.
-        // Use an incrementing wait_count so each timedWait actually parks
-        // instead of returning immediately once the timer has fired once.
-        var wait_count: u32 = 1;
-        var backoff = Duration.fromMicroseconds(1);
-        const cap = Duration.fromMilliseconds(1);
-        while (!ctx.done.load(.acquire)) {
-            waiter.timedWait(wait_count, .{ .duration = backoff }, .no_cancel);
-            wait_count +|= 1;
-            // Resend if the worker is still blocked in the canceled syscall (the
-            // first signal can be lost in the start()→syscall window). Once it
-            // acknowledges, `signal()` returns false and we just park until done.
-            backoff = if (token.signal())
-                .{ .value = @min(backoff.value *| 2, cap.value) }
-            else
-                cap;
-        }
-    };
+    // Submit to the thread pool and wait through the event loop. The loop owns
+    // completion delivery — it finalizes work.c and signals the waiter on the
+    // loop thread as the *last* step — and cancellation: loop.cancel interrupts
+    // a blocking cancelable syscall via SIGURG and resends each tick until the
+    // worker acknowledges (see Loop.cancel_resend). Unlike a direct worker-thread
+    // completion callback, nothing touches this stack frame after we might
+    // return, so there is no use-after-free window.
+    //
+    // workFn always runs (token-bearing work is never dropped from the queue),
+    // so ctx.result is always valid. A canceled syscall makes `func` return
+    // error.Canceled, which surfaces here as that result; waitForIo re-arms the
+    // task's pending cancellation before returning.
+    //
+    // waitForIo only fails with error.Canceled, and only when the *completion*
+    // carries a Canceled result — which happens on the drop path, where workFn
+    // never runs and ctx.result would be undefined. Token-bearing work is never
+    // dropped (it always completes via setResult, cancellation delivered in-band
+    // through func's return), so this is unreachable. Assert it: were it ever to
+    // fire we would be returning uninitialized ctx.result, which we would much
+    // rather crash on.
+    waitForIo(&work.c) catch unreachable;
 
     return ctx.result;
 }
@@ -507,18 +483,19 @@ test "blockInPlace: cancellation interrupts a blocking syscall on the worker" {
     const worker = struct {
         fn cancelableRead(fd: std.c.fd_t, ready: *std.atomic.Value(bool)) error{ Canceled, Unexpected }!void {
             const sc = try os.syscall_cancel.Syscall.begin();
+            defer sc.finish();
             // Signal that we are inside the cancelable region, just before read().
             ready.store(true, .release);
             var buf: [1]u8 = undefined;
             while (true) {
                 const rc = std.c.read(fd, &buf, buf.len);
-                if (rc >= 0) return sc.fail(error.Unexpected);
+                if (rc >= 0) return error.Unexpected;
                 switch (std.posix.errno(rc)) {
                     .INTR => {
                         try sc.checkCancel();
                         continue;
                     },
-                    else => return sc.fail(error.Unexpected),
+                    else => return error.Unexpected,
                 }
             }
         }
