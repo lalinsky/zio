@@ -540,6 +540,16 @@ pub const Work = struct {
     /// `ThreadPool.cancel` signals it to interrupt an in-progress syscall.
     cancel_token: ?*os.syscall_cancel.Token = null,
 
+    /// Intrusive link + membership key for the loop's cancel-resend list
+    /// (`Loop.cancel_resend`). A canceled-but-still-blocked worker is added here
+    /// so `tick` re-sends `SIGURG` until it acknowledges. `resend_key` is the
+    /// public completion whose finalization removes this work from the list
+    /// (== `&c` for a plain `.work` op, or the owning op's completion for a
+    /// delegated file op); non-null means "in the list". Touched only on the
+    /// owning loop's thread.
+    resend_next: ?*Work = null,
+    resend_key: ?*Completion = null,
+
     pub const Error = error{NoThreadPool} || Cancelable;
 
     pub const State = enum(u8) {
@@ -1016,22 +1026,21 @@ pub const FileOpenResult = struct {
 
 /// Shared `internal` payload for file/dir ops delegated to the thread pool on
 /// backends without native async support (kqueue/poll). Bundles the pool `Work`,
-/// the loop linkage, an allocator slot (used by path-based ops), the syscall
-/// cancellation token bound by the worker, and the intrusive link for the loop's
-/// cancel-resend list (see `Loop.cancel_resend`). `linked_context.linked` back-
-/// points to the owning `Completion`, so the loop can find a `DelegatedWork` from
-/// a completion at finalization without any per-op-type knowledge.
+/// the loop linkage, an allocator slot (used by path-based ops), and the syscall
+/// cancellation token bound by the worker. The cancel-resend list link lives on
+/// the embedded `work` (see `Work.resend_next`/`resend_key`); `linked_context.linked`
+/// back-points to the owning `Completion` and is used as the work's `resend_key`,
+/// so the loop finds the entry from a completion at finalization without any
+/// per-op-type knowledge.
 pub const DelegatedWork = struct {
     work: Work = undefined,
     allocator: std.mem.Allocator = undefined,
     linked_context: Loop.LinkedWorkContext = undefined,
     /// Bound by the worker (`enter`/`exit`) around the syscall; signaled on
-    /// cancel. See `os.syscall_cancel`.
+    /// cancel. See `os.syscall_cancel`. The cancel-resend linkage now lives on
+    /// the embedded `work` (see `Work.resend_next`/`resend_key`), keyed on
+    /// `linked_context.linked` so it is reachable generically from a completion.
     token: os.syscall_cancel.Token = .{},
-    /// Intrusive link + membership flag for `Loop.cancel_resend`. Touched only
-    /// on the owning loop's thread.
-    resend_next: ?*DelegatedWork = null,
-    in_resend_list: bool = false,
 };
 
 pub const FileOpen = struct {
