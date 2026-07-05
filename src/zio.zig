@@ -13,6 +13,7 @@ pub const JoinHandle = runtime.JoinHandle;
 pub const spawn = runtime.spawn;
 pub const spawnBlocking = runtime.spawnBlocking;
 pub const yield = runtime.yield;
+pub const maybeYield = runtime.maybeYield;
 pub const sleep = runtime.sleep;
 pub const now = runtime.now;
 

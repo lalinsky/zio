@@ -681,6 +681,15 @@ pub fn yield() Cancelable!void {
     return task.yield(.reschedule, .allow_cancel);
 }
 
+/// Cooperatively yield, but only if enough other tasks are waiting (a cheap
+/// fairness check for long CPU-bound loops that would otherwise hog the
+/// executor). Returns error.Canceled if the task was canceled. No-op if called
+/// from a thread without an executor.
+pub fn maybeYield() Cancelable!void {
+    const exec = getCurrentExecutorOrNull() orelse return;
+    return exec.maybeYield(.reschedule, .allow_cancel);
+}
+
 /// Spawn a task on the current runtime.
 /// Panics if called outside of a task context.
 pub fn spawn(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !JoinHandle(meta.ReturnType(func)) {
