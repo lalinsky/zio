@@ -728,8 +728,11 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
             .SUCCESS => {
                 const opened_fd: fd_t = @intCast(rc);
                 // Darwin has no O_DIRECT; disable caching on the fd after opening.
-                if (builtin.os.tag.isDarwin()) {
-                    if (flags.direct) _ = posix.system.fcntl(opened_fd, posix.system.F.NOCACHE, @as(c_int, 1));
+                if (builtin.os.tag.isDarwin() and flags.direct) {
+                    const err = posix.errno(posix.system.fcntl(opened_fd, posix.system.F.NOCACHE, @as(c_int, 1)));
+                    if (err != .SUCCESS) {
+                        std.log.warn("failed to enable direct I/O (F_NOCACHE) on fd {d}: {s}, caching remains enabled", .{ opened_fd, @tagName(err) });
+                    }
                 }
                 return opened_fd;
             },
@@ -984,8 +987,11 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
             .SUCCESS => {
                 const opened_fd: fd_t = @intCast(rc);
                 // Darwin has no O_DIRECT; disable caching on the fd after opening.
-                if (builtin.os.tag.isDarwin()) {
-                    if (flags.direct) _ = posix.system.fcntl(opened_fd, posix.system.F.NOCACHE, @as(c_int, 1));
+                if (builtin.os.tag.isDarwin() and flags.direct) {
+                    const err = posix.errno(posix.system.fcntl(opened_fd, posix.system.F.NOCACHE, @as(c_int, 1)));
+                    if (err != .SUCCESS) {
+                        std.log.warn("failed to enable direct I/O (F_NOCACHE) on fd {d}: {s}, caching remains enabled", .{ opened_fd, @tagName(err) });
+                    }
                 }
                 return opened_fd;
             },
