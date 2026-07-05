@@ -196,14 +196,21 @@ pub const ThreadPool = struct {
     }
 
     pub fn cancel(self: *ThreadPool, work: *Work) void {
-        // Try to transition from pending to canceled atomically
+        // Token-bearing work is never dropped from the queue: its `func` always
+        // runs, so any caller-owned result (e.g. blockInPlace's stack result, or
+        // a delegated op's completion) is always produced. Cancellation is
+        // delivered through the token — a still-queued syscall aborts at
+        // `begin()`, a running one is interrupted via SIGURG (the loop drives
+        // resend until the worker acknowledges).
+        if (work.cancel_token) |token| {
+            if (token.cancel()) _ = token.signal();
+            return;
+        }
+
+        // Untokened work has no way to abort in-flight, so cancellation must drop
+        // it. Try to transition from pending to canceled atomically.
         if (work.state.cmpxchgStrong(.pending, .canceled, .acq_rel, .acquire)) |_| {
             // Already running or completed - worker will call completion_fn.
-            // If it is running and blocked in a cancelable syscall, interrupt it;
-            // the caller drives resend-with-backoff while awaiting completion.
-            if (work.cancel_token) |token| {
-                if (token.cancel()) _ = token.signal();
-            }
             return;
         }
 

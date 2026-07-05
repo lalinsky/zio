@@ -251,7 +251,7 @@ pub const LoopState = struct {
     /// between `Syscall.begin()` and the kernel entering the sleep. Touched only
     /// on this loop's thread (added in `cancelLocal`, swept in `tick`, removed as
     /// the completion is finalized in the `work_completions` drain).
-    cancel_resend: ?*DelegatedWork = null,
+    cancel_resend: ?*Work = null,
     // TODO: Linked timers optimization
     // Instead of mutex-protected cross-thread timer cancellation, link timers to their
     // associated operations. When an operation completes, its linked timer is cleared
@@ -469,44 +469,30 @@ pub const LoopState = struct {
         timer.deadline = .zero;
     }
 
-    /// Add a delegated work to the cancel-resend list (idempotent). Loop-thread
-    /// only. Only works whose worker is blocked-and-canceling belong here.
-    fn addResend(self: *LoopState, dw: *DelegatedWork) void {
-        if (dw.in_resend_list) return;
-        dw.in_resend_list = true;
-        dw.resend_next = self.cancel_resend;
-        self.cancel_resend = dw;
+    /// Add a canceled-but-blocked work to the cancel-resend list (idempotent).
+    /// Loop-thread only. Only works whose worker is blocked-and-canceling belong
+    /// here. `key` is the public completion whose finalization drops the entry
+    /// (== `&work.c` for a plain `.work` op, or the owning op's completion for a
+    /// delegated file op).
+    fn addResend(self: *LoopState, work: *Work, key: *Completion) void {
+        if (work.resend_key != null) return;
+        work.resend_key = key;
+        work.resend_next = self.cancel_resend;
+        self.cancel_resend = work;
     }
 
-    /// Remove a delegated work from the cancel-resend list if present.
-    /// Loop-thread only.
-    fn removeResend(self: *LoopState, dw: *DelegatedWork) void {
-        if (!dw.in_resend_list) return;
-        var slot = &self.cancel_resend;
-        while (slot.*) |node| {
-            if (node == dw) {
-                slot.* = node.resend_next;
-                dw.resend_next = null;
-                dw.in_resend_list = false;
-                return;
-            }
-            slot = &node.resend_next;
-        }
-    }
-
-    /// Remove the delegated work owning `completion` from the resend list, if it
-    /// is on it. Called as the completion is finalized (before its waiter is
-    /// signaled) so the sweep never dereferences a token whose `op_data` is about
-    /// to be freed. The list is empty in the common case, so this is O(1) then.
-    /// Loop-thread only.
+    /// Remove the work owning `completion` from the resend list, if it is on it.
+    /// Called as the completion is finalized (before its waiter is signaled) so
+    /// the sweep never dereferences a token whose op is about to be freed. The
+    /// list is empty in the common case, so this is O(1) then. Loop-thread only.
     fn removeResendByCompletion(self: *LoopState, completion: *Completion) void {
         if (self.cancel_resend == null) return;
         var slot = &self.cancel_resend;
         while (slot.*) |node| {
-            if (node.linked_context.linked == completion) {
+            if (node.resend_key == completion) {
                 slot.* = node.resend_next;
                 node.resend_next = null;
-                node.in_resend_list = false;
+                node.resend_key = null;
                 return;
             }
             slot = &node.resend_next;
@@ -518,14 +504,14 @@ pub const LoopState = struct {
     fn sweepResend(self: *LoopState) void {
         var slot = &self.cancel_resend;
         while (slot.*) |node| {
-            if (node.token.signal()) {
+            if (node.cancel_token.?.signal()) {
                 // Still blocked-and-canceling; keep it and re-check next tick.
                 slot = &node.resend_next;
             } else {
                 // Worker acknowledged (or the op finished); stop re-sending.
                 slot.* = node.resend_next;
                 node.resend_next = null;
-                node.in_resend_list = false;
+                node.resend_key = null;
             }
         }
     }
@@ -754,6 +740,13 @@ pub const Loop = struct {
                 const thread_pool = self.thread_pool orelse unreachable;
                 const work = completion.cast(Work);
                 thread_pool.cancel(work);
+                // If the worker is blocked in the canceled syscall, the first
+                // SIGURG (sent by cancel above) can be lost in the begin()->sleep
+                // window. Track it so `tick` re-sends until the worker acks; the
+                // entry is dropped when this completion finalizes.
+                if (work.cancel_token) |token| {
+                    if (token.isCanceling()) self.state.addResend(work, completion);
+                }
             },
             .net_send_file => {
                 const op = completion.cast(NetSendFile);
@@ -787,7 +780,7 @@ pub const Loop = struct {
                         // token; the entry is removed when the op finalizes.
                         if (@hasField(@TypeOf(op_data.internal), "token")) {
                             if (op_data.internal.token.isCanceling()) {
-                                self.state.addResend(&op_data.internal);
+                                self.state.addResend(&op_data.internal.work, completion);
                             }
                         }
                     } else {
