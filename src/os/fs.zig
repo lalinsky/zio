@@ -657,6 +657,14 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    // Cancelable region covering both the openat2 (resolve_beneath) path and the
+    // plain openat loop below: on a thread-pool worker bound to a cancellation
+    // token (delegated file ops on kqueue/poll backends), a SIGURG turns the
+    // blocking open into EINTR and `checkCancel` reports `Canceled`. Off a
+    // cancelable worker the token is null and every call here is a no-op.
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
+
     if (builtin.os.tag == .linux and flags.resolve_beneath) {
         if (!openat2_nosys.load(.monotonic)) {
             const how: posix.sys.open_how = .{
@@ -668,7 +676,11 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
                 const rc = posix.sys.openat2(dir, path_z.ptr, &how);
                 switch (posix.errno(rc)) {
                     .SUCCESS => return @intCast(rc),
-                    .INTR, .AGAIN => continue,
+                    .INTR => {
+                        try sc.checkCancel();
+                        continue;
+                    },
+                    .AGAIN => continue,
                     .NOSYS => {
                         openat2_nosys.store(true, .monotonic);
                         if (options.resolve_beneath_mode == .strict) return error.Unsupported;
@@ -688,12 +700,6 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
         std.log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
     }
 
-    // Cancelable region: when this runs on a thread-pool worker bound to a
-    // cancellation token (delegated file ops on kqueue/poll backends), a SIGURG
-    // turns the blocking open into EINTR and `checkCancel` reports `Canceled`.
-    // Off a cancelable worker the token is null and every call here is a no-op.
-    const sc = try syscall_cancel.Syscall.begin();
-    defer sc.finish();
     while (true) {
         const rc = posix.system.openat(dir, path_z.ptr, open_flags, @as(mode_t, 0));
         switch (posix.errno(rc)) {
@@ -768,6 +774,11 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    // Cancelable region covering both the openat2 (resolve_beneath) path and the
+    // plain openat loop below (see the note in `openat`).
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
+
     if (builtin.os.tag == .linux and flags.resolve_beneath) {
         if (!openat2_nosys.load(.monotonic)) {
             const how: posix.sys.open_how = .{
@@ -779,7 +790,11 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
                 const rc = posix.sys.openat2(dir, path_z.ptr, &how);
                 switch (posix.errno(rc)) {
                     .SUCCESS => return @intCast(rc),
-                    .INTR, .AGAIN => continue,
+                    .INTR => {
+                        try sc.checkCancel();
+                        continue;
+                    },
+                    .AGAIN => continue,
                     .NOSYS => {
                         openat2_nosys.store(true, .monotonic);
                         if (options.resolve_beneath_mode == .strict) return error.Unsupported;
@@ -799,8 +814,6 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
         std.log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
     }
 
-    const sc = try syscall_cancel.Syscall.begin();
-    defer sc.finish();
     while (true) {
         const rc = posix.system.openat(dir, path_z.ptr, open_flags, @as(mode_t, 0));
         switch (posix.errno(rc)) {
@@ -884,6 +897,11 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    // Cancelable region covering both the openat2 (resolve_beneath) path and the
+    // plain openat loop below (see the note in `openat`).
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
+
     if (builtin.os.tag == .linux and flags.resolve_beneath) {
         if (!openat2_nosys.load(.monotonic)) {
             const how: posix.sys.open_how = .{
@@ -895,7 +913,11 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
                 const rc = posix.sys.openat2(dir, path_z.ptr, &how);
                 switch (posix.errno(rc)) {
                     .SUCCESS => return @intCast(rc),
-                    .INTR, .AGAIN => continue,
+                    .INTR => {
+                        try sc.checkCancel();
+                        continue;
+                    },
+                    .AGAIN => continue,
                     .NOSYS => {
                         openat2_nosys.store(true, .monotonic);
                         if (options.resolve_beneath_mode == .strict) return error.Unsupported;
@@ -915,8 +937,6 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
         std.log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
     }
 
-    const sc = try syscall_cancel.Syscall.begin();
-    defer sc.finish();
     while (true) {
         const rc = posix.system.openat(dir, path_z.ptr, open_flags, flags.mode);
         switch (posix.errno(rc)) {
