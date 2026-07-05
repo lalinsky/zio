@@ -411,8 +411,11 @@ pub fn blockInPlace(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) meta
     const Context = struct {
         args: Args,
         result: Result = undefined,
-        // Distinct from the waiter's signal count: the resend timer below also
-        // signals the waiter, so we need an unambiguous "work finished" flag.
+        // Set by completionFn (before it signals the waiter) to tell the cancel
+        // path's resend loop that the work has finished, so it stops resending.
+        // It is NOT a "safe to return" flag: completionFn still touches our stack
+        // frame in the trailing waiter.signal(), which the cancel path waits for
+        // separately. See the cancel handler below.
         done: std.atomic.Value(bool) = .init(false),
 
         fn workFn(work: *ev.Work) void {
@@ -454,26 +457,33 @@ pub fn blockInPlace(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) meta
         const need_signal = token.cancel();
         if (need_signal) _ = token.signal();
 
-        // Wait for completion (ctx/work live on our stack). Drive resend-with-
-        // backoff to cover the begin()→syscall gap where the first SIGURG can
-        // be lost. The wait is a cooperative timedWait (parks the coroutine on
-        // an executor timer), so resending never blocks the thread.
-        // Use an incrementing wait_count so each timedWait actually parks
-        // instead of returning immediately once the timer has fired once.
-        var wait_count: u32 = 1;
+        // Wait for the worker to finish. ctx/work/waiter live on our stack, so
+        // we must not return until completionFn is completely done touching them
+        // — including its trailing waiter.signal(), which runs *after* it sets
+        // `done`. Observing `done` alone is therefore not safe: the pending
+        // signal() would then access this frame after we returned and freed it
+        // (a use-after-free that corrupts the waiter and crashes in signal()).
+        //
+        // So we split it: resend SIGURG with backoff until the work finishes
+        // (`done`), then do one clean wait for completionFn's trailing signal().
+        // The backoff sleeps park on a *separate* waiter, leaving our `waiter`
+        // to be signaled only by completionFn, so that final wait synchronizes
+        // exactly with the worker's last access to our frame.
         var backoff = Duration.fromMicroseconds(1);
         const cap = Duration.fromMilliseconds(1);
         while (!ctx.done.load(.acquire)) {
-            waiter.timedWait(wait_count, .{ .duration = backoff }, .no_cancel);
-            wait_count +|= 1;
-            // Resend if the worker is still blocked in the canceled syscall (the
-            // first signal can be lost in the start()→syscall window). Once it
-            // acknowledges, `signal()` returns false and we just park until done.
-            backoff = if (token.signal())
-                .{ .value = @min(backoff.value *| 2, cap.value) }
-            else
-                cap;
+            var sleeper: Waiter = .init();
+            sleeper.timedWait(1, .{ .duration = backoff }, .no_cancel);
+            // Resend while the worker is still blocked in the canceled syscall
+            // (the first signal can be lost in the start()→syscall window). Once
+            // it acknowledges, signal() is a no-op and we just park until done.
+            _ = token.signal();
+            backoff = .{ .value = @min(backoff.value *| 2, cap.value) };
         }
+
+        // `done` is set; wait for completionFn's trailing waiter.signal() (the
+        // worker's last touch of our stack frame) before returning.
+        waiter.wait(1, .no_cancel);
     };
 
     return ctx.result;
