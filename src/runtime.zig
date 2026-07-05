@@ -36,8 +36,6 @@ const select = @import("select.zig");
 const Waiter = @import("common.zig").Waiter;
 const random_mod = @import("random.zig");
 
-const Mutex = @import("sync/Mutex.zig");
-
 const mod = @This();
 
 /// Number of executor threads to run (including main).
@@ -427,13 +425,11 @@ pub const Executor = struct {
                 @panic("event loop stopped while the main task was yielding");
             }
 
-            for (&self.queue_pool) |*stack| {
-                var drained = stack.popAll();
-                while (drained.pop()) |task| {
-                    self.queue_pool[self.push_cursor].push(task);
-                    self.push_cursor = (self.push_cursor + 1) % num_stealable_stacks;
-                    _ = self.ready_count.fetchAdd(1, .acq_rel);
-                }
+            var drained = self.queue_pool[self.pop_cursor].popAll();
+            while (drained.pop()) |task| {
+                self.queue_pool[self.push_cursor].push(task);
+                self.push_cursor = (self.push_cursor + 1) % num_stealable_stacks;
+                _ = self.ready_count.fetchAdd(1, .acq_rel);
             }
 
             // Ensure there's no more work to be run
@@ -445,18 +441,16 @@ pub const Executor = struct {
                 }
             }
 
-            if (!has_local_work) {
-                if (self.stealWork()) continue;
-            }
+            if (!has_local_work) has_local_work = self.stealWork();
 
             // Run event loop - non-blocking if there's work, otherwise wait for I/O
             const main_ready = check_ready and self.main_task.state.load(.acquire).tag == .ready;
             if (!has_local_work) has_local_work = main_ready;
 
             if (!has_local_work) {
-                self.runtime.global_queue_mutex.lock() catch unreachable;
+                self.runtime.global_queue_mutex.lock(self.runtime.io()) catch unreachable;
                 has_local_work = self.runtime.global_queue.head != null;
-                self.runtime.global_queue_mutex.unlock();
+                self.runtime.global_queue_mutex.unlock(self.runtime.io());
             }
             try self.loop.run(if (has_local_work) .no_wait else .once);
 
@@ -503,21 +497,21 @@ pub const Executor = struct {
     /// Returns null if no tasks are available, or if EVENT_INTERVAL tasks have
     /// been run since the last event loop tick (to ensure I/O responsiveness).
     fn getNextTask(self: *Executor) ?*AnyTask {
-        // Maximum tasks to run before forcing an event loop tick
+        // Maximum tasks to run before forcing an event loop tick (from Go's scheduler)
         const EVENT_INTERVAL = 61;
         if (self.tick_task_count >= EVENT_INTERVAL) return null;
 
         // Try to pop from the global queue occasionally
-        if (self.tick_task_count % 8 == 0) {
+        if (self.tick_task_count % EVENT_INTERVAL == 0) {
             if (self.runtime.global_queue_mutex.tryLock()) {
                 if (self.runtime.global_queue.pop()) |node| {
-                    self.runtime.global_queue_mutex.unlock();
+                    self.runtime.global_queue_mutex.unlock(self.runtime.io());
                     const task = AnyTask.fromWaitNode(node);
                     task.last_run_tick = self.current_tick;
                     self.tick_task_count += 1;
                     return task;
                 }
-                self.runtime.global_queue_mutex.unlock();
+                self.runtime.global_queue_mutex.unlock(self.runtime.io());
             }
         }
 
@@ -561,9 +555,9 @@ pub const Executor = struct {
         std.debug.assert(task != &self.main_task);
 
         const wait_node = &task.awaitable.wait_node;
-        try self.runtime.global_queue_mutex.lock();
+        try self.runtime.global_queue_mutex.lock(self.runtime.io());
         self.runtime.global_queue.push(wait_node);
-        self.runtime.global_queue_mutex.unlock();
+        self.runtime.global_queue_mutex.unlock(self.runtime.io());
         self.loop.wake();
     }
 
@@ -788,7 +782,7 @@ pub const Runtime = struct {
 
     executors: std.ArrayList(*Executor) = .empty,
     global_queue: SimpleQueue(WaitNode) = .empty,
-    global_queue_mutex: Mutex = .init,
+    global_queue_mutex: std.Io.Mutex = .init,
     loop_group: ev.LoopGroup = .{},
     main_executor: Executor,
     next_executor_index: std.atomic.Value(usize) = .init(0),
@@ -1434,6 +1428,8 @@ fn wakeBeforeParkStress(executor_count: u6) !void {
 }
 
 test "runtime: mutex contention with task migration" {
+    const Mutex = @import("sync/Mutex.zig");
+
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
