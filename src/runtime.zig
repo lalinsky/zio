@@ -8,6 +8,7 @@ const assert = std.debug.assert;
 
 const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
+const cgroup = @import("cgroup.zig");
 
 const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
@@ -52,9 +53,18 @@ pub const ExecutorCount = enum(u8) {
 
     pub fn resolve(self: ExecutorCount) u8 {
         return switch (self) {
-            .auto => @intCast(@min(Executor.max_executors, std.Thread.getCpuCount() catch 1)),
+            .auto => autoDetect(),
             _ => @intFromEnum(self),
         };
+    }
+
+    fn autoDetect() u8 {
+        const affinity = @min(Executor.max_executors, std.Thread.getCpuCount() catch 1);
+        // Honor a cgroup CPU quota (Docker/Kubernetes CPU limits) that
+        // sched_getaffinity() can't see, mirroring Go's container-aware
+        // GOMAXPROCS. The affinity mask still wins when it is the tighter bound.
+        const limit = cgroup.cpuLimit() orelse return @intCast(affinity);
+        return @intCast(@min(affinity, @as(usize, limit)));
     }
 };
 
