@@ -139,9 +139,10 @@ pub const Token = struct {
 };
 
 /// A scoped, cancelable syscall region. Obtained by `begin()`, closed by
-/// `finish()` (or `fail()`); on `EINTR` call `checkCancel()` to decide between
-/// retry and `error.Canceled`. A `null` token means "not on a cancelable worker"
-/// — every method is then a no-op and the syscall runs uncancelably.
+/// `finish()` (idempotent, so it pairs with `defer`); on `EINTR` call
+/// `checkCancel()` to decide between retry and `error.Canceled`. A `null` token
+/// means "not on a cancelable worker" — every method is then a no-op and the
+/// syscall runs uncancelably.
 pub const Syscall = struct {
     token: ?*Token,
 
@@ -210,12 +211,6 @@ pub const Syscall = struct {
             }
             return;
         }
-    }
-
-    /// `finish()` then return `err` — convenience for non-`EINTR` error exits.
-    pub fn fail(self: Syscall, err: anytype) @TypeOf(err) {
-        self.finish();
-        return err;
     }
 };
 
@@ -306,18 +301,19 @@ test "syscall_cancel: signal interrupts a blocking read" {
 
             self.result = blk: {
                 const sc = Syscall.begin() catch |e| break :blk e;
+                defer sc.finish();
                 // Signal that we are inside the cancelable region, just before read().
                 self.ready.store(true, .release);
                 var buf: [1]u8 = undefined;
                 while (true) {
                     const rc = std.c.read(self.read_fd, &buf, buf.len);
-                    if (rc >= 0) break :blk sc.fail(error.UnexpectedData);
+                    if (rc >= 0) break :blk error.UnexpectedData;
                     switch (std.posix.errno(rc)) {
                         .INTR => {
                             sc.checkCancel() catch |e| break :blk e;
                             continue;
                         },
-                        else => |e| break :blk sc.fail(std.posix.unexpectedErrno(e)),
+                        else => |e| break :blk std.posix.unexpectedErrno(e),
                     }
                 }
             };

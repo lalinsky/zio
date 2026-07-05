@@ -507,18 +507,19 @@ test "blockInPlace: cancellation interrupts a blocking syscall on the worker" {
     const worker = struct {
         fn cancelableRead(fd: std.c.fd_t, ready: *std.atomic.Value(bool)) error{ Canceled, Unexpected }!void {
             const sc = try os.syscall_cancel.Syscall.begin();
+            defer sc.finish();
             // Signal that we are inside the cancelable region, just before read().
             ready.store(true, .release);
             var buf: [1]u8 = undefined;
             while (true) {
                 const rc = std.c.read(fd, &buf, buf.len);
-                if (rc >= 0) return sc.fail(error.Unexpected);
+                if (rc >= 0) return error.Unexpected;
                 switch (std.posix.errno(rc)) {
                     .INTR => {
                         try sc.checkCancel();
                         continue;
                     },
-                    else => return sc.fail(error.Unexpected),
+                    else => return error.Unexpected,
                 }
             }
         }
