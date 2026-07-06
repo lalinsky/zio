@@ -78,8 +78,9 @@ pub fn wait(ptr: *const u32, expect: u32) Cancelable!void {
     const bucket = getBucket(address);
 
     // Use a stack-allocated waiter
+    var waiter = Waiter.init();
     var futex_waiter = FutexWaiter{
-        .waiter = Waiter.init(),
+        .waiter = &waiter,
         .address = address,
     };
 
@@ -117,14 +118,19 @@ pub fn waitUncancelable(ptr: *const u32, expect: u32) void {
     wait(ptr, expect) catch unreachable;
 }
 
-/// Stack-allocated waiter for futex operations.
-const FutexWaiter = struct {
+/// Stack-allocated waiter node for the global futex buckets.
+///
+/// `waiter` references an externally-owned `Waiter`: the blocking `wait()` /
+/// `timedWait()` paths point it at a local direct waiter, while the non-blocking
+/// `prepareWait()` path used by select() points it at a caller-owned select
+/// waiter. All fields default so the node can serve as a select `WaitContext`.
+pub const FutexWaiter = struct {
     // Linked list fields for SimpleQueue
     next: ?*FutexWaiter = null,
     prev: ?*FutexWaiter = null,
     in_list: if (std.debug.runtime_safety) bool else void = if (std.debug.runtime_safety) false else {},
-    waiter: Waiter,
-    address: usize,
+    waiter: *Waiter = undefined,
+    address: usize = 0,
 
     /// Pad to cache line to prevent false sharing.
     _: void align(std.atomic.cache_line) = {},
@@ -152,8 +158,9 @@ pub fn timedWaitClock(ptr: *const u32, expect: u32, timeout: Timeout, clock: Clo
     const bucket = getBucket(address);
 
     // Use a stack-allocated waiter with its own WaitNode
+    var waiter = Waiter.init();
     var futex_waiter = FutexWaiter{
-        .waiter = Waiter.init(),
+        .waiter = &waiter,
         .address = address,
     };
 
@@ -236,6 +243,32 @@ pub fn wake(ptr: *const u32, max_waiters: u32) void {
         local_stack = waiter.next;
         waiter.waiter.signal();
     }
+}
+
+/// Register `node` in the bucket for `ptr` so a later `wake(ptr)` signals `waiter`.
+///
+/// Non-blocking counterpart of `wait()`, used by the select() future protocol.
+/// The caller owns `node` and must keep it alive (and not move it) until either
+/// `cancelWait(node)` is called or the wake fires. Unlike `wait()`, this performs
+/// no value check: the caller is responsible for checking its own completion
+/// predicate before and after registering (to close the lost-wakeup race).
+pub fn prepareWait(ptr: *const u32, node: *FutexWaiter, waiter: *Waiter) void {
+    const address = @intFromPtr(ptr);
+    node.* = .{ .waiter = waiter, .address = address };
+
+    const bucket = getBucket(address);
+    bucket.mutex.lock();
+    bucket.waiters.push(node);
+    bucket.mutex.unlock();
+}
+
+/// Cancel a `prepareWait()` registration.
+///
+/// Returns true if `node` was still queued (it will not be woken), or false if a
+/// concurrent `wake()` already dequeued it (a signal to `node`'s waiter is
+/// in-flight and the caller must wait for it before reusing the waiter).
+pub fn cancelWait(node: *FutexWaiter) bool {
+    return removeFromBucket(getBucket(node.address), node);
 }
 
 test "Futex: basic wait/wake" {

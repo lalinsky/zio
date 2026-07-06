@@ -4,6 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const log = @import("common.zig").log;
+const Waiter = @import("common.zig").Waiter;
 const meta = @import("meta.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentExecutor = @import("runtime.zig").getCurrentExecutor;
@@ -217,6 +218,52 @@ pub const Group = struct {
         // Clear the canceled flag for reuse
         group.getTasks().clearFlag();
     }
+
+    // Future protocol implementation for use with select() / wait().
+    //
+    // Waits until the group naturally drains to zero pending tasks. Unlike
+    // `wait()`, this does NOT close the group and does not participate in
+    // fail_fast — it purely observes the task counter reaching zero, so it can
+    // be raced against other futures without changing the group's behavior.
+    //
+    // Registration parks on the same futex address that `unregisterGroupTask`
+    // wakes when the counter hits zero, so no per-group waiter storage is needed.
+
+    pub const Result = void;
+
+    pub const WaitContext = Futex.FutexWaiter;
+
+    pub fn getResult(self: *Group, ctx: *WaitContext) void {
+        _ = self;
+        _ = ctx;
+    }
+
+    pub fn asyncWait(self: *Group, waiter: *Waiter, ctx: *WaitContext) bool {
+        const state_ptr = self.getState();
+
+        // Fast path: no pending tasks means the group is already "complete".
+        if (@atomicLoad(u32, state_ptr, .acquire) & counter_mask == 0) return false;
+
+        // Park on the completion futex address.
+        Futex.prepareWait(state_ptr, ctx, waiter);
+
+        // Double-check: the last task may have completed (and issued its wake)
+        // between the fast-path check and our registration above.
+        if (@atomicLoad(u32, state_ptr, .acquire) & counter_mask == 0) {
+            // We removed ourselves before any wake -> already complete.
+            if (Futex.cancelWait(ctx)) return false;
+            // A concurrent completion already dequeued us; the wake is in-flight.
+            return true;
+        }
+
+        return true;
+    }
+
+    pub fn asyncCancelWait(self: *Group, waiter: *Waiter, ctx: *WaitContext) bool {
+        _ = self;
+        _ = waiter;
+        return Futex.cancelWait(ctx);
+    }
 };
 
 /// Spawn a task in the group with raw context bytes and start function.
@@ -421,4 +468,128 @@ test "Group: failed task does not close group" {
     try group.wait();
 
     try std.testing.expectEqual(n / 2, T.counter);
+}
+
+test "Group: select on group completion - group wins" {
+    const select = @import("select.zig").select;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const quick = struct {
+        fn call() void {
+            sleep(.fromMilliseconds(10)) catch {};
+        }
+    }.call;
+
+    const slow = struct {
+        fn call() i32 {
+            sleep(.fromMilliseconds(1000)) catch {};
+            return 42;
+        }
+    }.call;
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(quick, .{});
+    try group.spawn(quick, .{});
+
+    var slow_handle = try rt.spawn(slow, .{});
+    defer slow_handle.cancel();
+
+    // The group's quick tasks drain long before the slow handle completes.
+    const result = try select(.{ .group = &group, .slow = &slow_handle });
+    switch (result) {
+        .group => {},
+        .slow => return error.TestUnexpectedResult,
+    }
+
+    // select() must not have closed the group: it is still usable.
+    try group.spawn(quick, .{});
+    try group.wait();
+}
+
+test "Group: select on group completion - other future wins" {
+    const select = @import("select.zig").select;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const slow = struct {
+        fn call() void {
+            sleep(.fromMilliseconds(1000)) catch {};
+        }
+    }.call;
+
+    const quick = struct {
+        fn call() i32 {
+            sleep(.fromMilliseconds(10)) catch {};
+            return 7;
+        }
+    }.call;
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(slow, .{});
+
+    var quick_handle = try rt.spawn(quick, .{});
+    defer quick_handle.cancel();
+
+    const result = try select(.{ .group = &group, .quick = &quick_handle });
+    switch (result) {
+        .group => return error.TestUnexpectedResult,
+        .quick => |v| try std.testing.expectEqual(7, v),
+    }
+}
+
+test "Group: select on already-drained group - fast path" {
+    const select = @import("select.zig").select;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const slow = struct {
+        fn call() i32 {
+            sleep(.fromMilliseconds(1000)) catch {};
+            return 3;
+        }
+    }.call;
+
+    // Empty group: counter is already zero, so select must pick it immediately.
+    var group: Group = .init;
+    defer group.cancel();
+
+    var slow_handle = try rt.spawn(slow, .{});
+    defer slow_handle.cancel();
+
+    const result = try select(.{ .group = &group, .slow = &slow_handle });
+    try std.testing.expectEqual(std.meta.Tag(@TypeOf(result)).group, std.meta.activeTag(result));
+}
+
+test "Group: wait() future protocol drains without closing" {
+    const waitFuture = @import("select.zig").wait;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const quick = struct {
+        fn call() void {
+            sleep(.fromMilliseconds(10)) catch {};
+        }
+    }.call;
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(quick, .{});
+    try group.spawn(quick, .{});
+
+    // Single-future wait() over the group completes when tasks drain.
+    _ = try waitFuture(&group);
+
+    // Not closed: can spawn again and drain a second time.
+    try group.spawn(quick, .{});
+    _ = try waitFuture(&group);
 }
