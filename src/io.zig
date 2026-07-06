@@ -1902,36 +1902,21 @@ fn listenErrToListenErr(err: ListenOrCancel) Io.net.IpAddress.ListenError {
 fn netListenIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: Io.net.IpAddress.ListenOptions) Io.net.IpAddress.ListenError!Io.net.Socket {
     const zio_addr = stdIoIpToZio(address.*);
 
-    var open_op = ev.NetOpen.init(.fromPosix(zio_addr.any.family), .fromStd(options.mode), .fromStd(options.protocol), .{ .nonblocking = true });
-    try waitForIo(&open_op.c);
-    const handle = open_op.getResult() catch |err| return openErrToListenErr(err);
-    errdefer {
-        var close_op = ev.NetClose.init(handle);
-        waitForIoUncancelable(&close_op.c);
-    }
+    // Thin adapter over the native zio.net.Socket API: it already opens
+    // nonblocking, writes the actual bound address back into socket.address, and
+    // its error unions line up with the *ErrToListenErr mappers (which include
+    // cancellation). This keeps reuse (and everything else) in one place.
+    var socket = zio_net.Socket.open(.fromStd(options.mode), .fromPosix(zio_addr.any.family), .fromStd(options.protocol)) catch |err| return openErrToListenErr(err);
+    errdefer socket.close();
 
-    if (options.reuse_address) {
-        const value: c_int = 1;
-        os_net.setsockopt(handle, os_net.SOL.SOCKET, os_net.SO.REUSEADDR, std.mem.asBytes(&value)) catch
-            return error.OptionUnsupported;
-        if (@hasDecl(os_net.SO, "REUSEPORT")) {
-            os_net.setsockopt(handle, os_net.SOL.SOCKET, os_net.SO.REUSEPORT, std.mem.asBytes(&value)) catch {};
-        }
-    }
+    if (options.reuse_address) socket.setReuse(true) catch return error.OptionUnsupported;
 
-    var bind_addr = zio_addr;
-    var addr_len = sockAddrLen(&bind_addr.any);
-    var bind_op = ev.NetBind.init(handle, &bind_addr.any, &addr_len);
-    try waitForIo(&bind_op.c);
-    bind_op.getResult() catch |err| return bindErrToListenErr(err);
-
-    var listen_op = ev.NetListen.init(handle, options.kernel_backlog);
-    try waitForIo(&listen_op.c);
-    listen_op.getResult() catch |err| return listenErrToListenErr(err);
+    socket.bind(.{ .ip = zio_addr }) catch |err| return bindErrToListenErr(err);
+    socket.listen(options.kernel_backlog) catch |err| return listenErrToListenErr(err);
 
     return .{
-        .handle = handle,
-        .address = zioIpToStdIo(bind_addr),
+        .handle = socket.handle,
+        .address = zioIpToStdIo(socket.address.ip),
     };
 }
 
