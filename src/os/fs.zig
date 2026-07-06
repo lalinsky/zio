@@ -413,6 +413,12 @@ pub const DirEntryIterator = struct {
             // Skip . and ..
             if (self.isDotOrDotDot(entry)) continue;
 
+            // On NetBSD/OpenBSD a zero fileno marks an invalid or deleted entry
+            // still present in the directory block; skip it (matches std).
+            if (builtin.os.tag == .netbsd or builtin.os.tag == .openbsd) {
+                if (self.extractInode(entry) == 0) continue;
+            }
+
             const name = self.extractName(entry) orelse {
                 // On Windows, null means no buffer space - backtrack and stop
                 if (builtin.os.tag == .windows) {
@@ -2841,7 +2847,12 @@ fn dirReadPosix(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
                 var basep: i64 = 0;
                 break :blk @as(usize, @bitCast(std.c.__getdirentries64(handle, buffer.ptr, buffer.len, &basep)));
             },
-            .freebsd, .netbsd, .openbsd, .dragonfly => blk: {
+            // NetBSD's getdirentries(2) is a legacy compat interface that returns
+            // the old dirent layout (32-bit d_fileno), which does not match the
+            // modern std.c.dirent we parse with. getdents(2) (__getdents30) returns
+            // the modern layout, matching std's own directory iteration.
+            .netbsd => posix.system.getdents(handle, buffer.ptr, buffer.len),
+            .freebsd, .openbsd, .dragonfly => blk: {
                 var basep: c_long = 0;
                 break :blk posix.system.getdirentries(handle, buffer.ptr, buffer.len, &basep);
             },
