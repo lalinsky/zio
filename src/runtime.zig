@@ -458,38 +458,19 @@ pub const Executor = struct {
                 _ = self.ready_count.fetchAdd(1, .acq_rel);
             }
 
-            // Try to pop from the global queue occasionally
-            if (self.tick_task_count % 61 == 0) {
-                self.runtime.global_queue_mutex.lock();
-                if (self.runtime.global_queue.pop()) |node| {
-                    self.queue_pool[self.push_cursor].push(node);
-                    self.push_cursor = (self.push_cursor + 1) % num_stealable_stacks;
-                    _ = self.ready_count.fetchAdd(1, .acq_rel);
-                }
-                self.runtime.global_queue_mutex.unlock();
-            }
+            // Set ourselves as idle before scanning for work.
+            const my_bit = @as(u64, 1) << @as(u6, @intCast(self.id));
+            _ = self.runtime.idle_mask.fetchOr(my_bit, .seq_cst);
 
             // Ensure there's no more work to be run
-            var has_local_work = false;
-            for (&self.queue_pool) |*stack| {
-                if (stack.head.load(.acquire) != null) {
-                    has_local_work = true;
-                    break;
-                }
+            if (checkAboutForWork(self, check_ready)) {
+                _ = self.runtime.idle_mask.fetchAnd(~my_bit, .seq_cst);
+                try self.loop.run(.no_wait);
+            } else {
+                try self.loop.run(.once);
+                _ = self.runtime.idle_mask.fetchAnd(~my_bit, .seq_cst);
+                _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .acquire);
             }
-
-            if (!has_local_work) has_local_work = self.stealWork();
-
-            // Run event loop - non-blocking if there's work, otherwise wait for I/O
-            const main_ready = check_ready and self.main_task.state.load(.acquire).tag == .ready;
-            if (!has_local_work) has_local_work = main_ready;
-
-            if (!has_local_work) {
-                self.runtime.global_queue_mutex.lock();
-                has_local_work = self.runtime.global_queue.head != null;
-                self.runtime.global_queue_mutex.unlock();
-            }
-            try self.loop.run(if (has_local_work) .no_wait else .once);
 
             // Reset task counter and update tick time after event loop tick
             self.tick_task_count = 0;
@@ -501,6 +482,42 @@ pub const Executor = struct {
                 return;
             }
         }
+    }
+
+    fn checkAboutForWork(self: *Executor, check_ready: bool) bool {
+        var has_work = false;
+        for (&self.queue_pool) |*stack| {
+            if (stack.head.load(.acquire) != null) {
+                has_work = true;
+                break;
+            }
+        }
+
+        if (!has_work) has_work = self.stealWork();
+
+        // Run event loop - non-blocking if there's work, otherwise wait for I/O
+        const main_ready = check_ready and self.main_task.state.load(.acquire).tag == .ready;
+        if (!has_work) has_work = main_ready;
+
+        // Last resort before going idle
+        if (!has_work) {
+            has_work = self.popWorkFromGlobal();
+        }
+        return has_work;
+    }
+
+    fn popWorkFromGlobal(self: *Executor) bool {
+        self.runtime.global_queue_mutex.lock();
+        if (self.runtime.global_queue.pop()) |node| {
+            std.debug.print("here\n", .{});
+            self.runtime.global_queue_mutex.unlock();
+            self.queue_pool[self.push_cursor].push(node);
+            self.push_cursor = (self.push_cursor + 1) % num_stealable_stacks;
+            _ = self.ready_count.fetchAdd(1, .acq_rel);
+            return true;
+        }
+        self.runtime.global_queue_mutex.unlock();
+        return false;
     }
 
     fn stealWork(self: *Executor) bool {
@@ -578,7 +595,7 @@ pub const Executor = struct {
         self.runtime.global_queue_mutex.lock();
         self.runtime.global_queue.push(wait_node);
         self.runtime.global_queue_mutex.unlock();
-        self.loop.wake();
+        self.runtime.wakeOne();
     }
 
     /// Schedule a task for execution.
@@ -826,6 +843,8 @@ pub const Runtime = struct {
     executors: std.ArrayList(*Executor) = .empty,
     global_queue: SimpleQueue(WaitNode) = .empty,
     global_queue_mutex: OsMutex = .init(),
+    idle_mask: std.atomic.Value(u64) = .init(0),
+    searchers: std.atomic.Value(u32) = .init(0),
     loop_group: ev.LoopGroup = .{},
     main_executor: Executor,
     next_executor_index: std.atomic.Value(usize) = .init(0),
@@ -1024,6 +1043,21 @@ pub const Runtime = struct {
             .awaitable = &task.awaitable,
             .result = undefined,
         };
+    }
+
+    pub fn wakeOne(self: *Runtime) void {
+        const idle = self.idle_mask.load(.acquire);
+        if (idle == 0) return; // Everyone is busy
+
+        // Try to claim the "searcher" token so only one thread wakes up
+        if (self.searchers.cmpxchgStrong(0, 1, .acq_rel, .acquire) == null) {
+            // We armed a searcher. Now, pick an idle executor to wake.
+            // We use trailing zeros to pick the first bit set in the mask.
+            const target_id = @ctz(idle);
+            if (target_id < self.executors.items.len) {
+                self.executors.items[target_id].loop.wake();
+            }
+        }
     }
 
     /// Worker thread entry point. Initializes executor and runs until stopped.
