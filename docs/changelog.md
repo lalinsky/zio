@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+- `RuntimeOptions.executors = .auto` now honors the CPU limit of the current cgroup
+  on Linux, in addition to the CPU affinity mask. Container CPU limits (Docker
+  `--cpus`, Kubernetes `resources.limits.cpu`) and systemd `CPUQuota=` are enforced
+  via the CFS bandwidth controller, which is invisible to `sched_getaffinity()`.
+  Without this, `.auto` would size the executor pool to the host's CPU count and get
+  throttled by the scheduler. The effective count is now `min(affinity, ceil(quota/period))`,
+  mirroring Go's container-aware `GOMAXPROCS` default.
+
 ## [0.15.0] - 2026-07-02
 
 - Overhaul of the `epoll` and `kqueue` backends, to make them comparable to the performance of

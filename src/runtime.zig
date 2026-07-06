@@ -8,6 +8,7 @@ const assert = std.debug.assert;
 
 const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
+const cgroup = @import("cgroup.zig");
 
 const meta = @import("meta.zig");
 const Cancelable = @import("common.zig").Cancelable;
@@ -54,9 +55,18 @@ pub const ExecutorCount = enum(u8) {
 
     pub fn resolve(self: ExecutorCount) u8 {
         return switch (self) {
-            .auto => @intCast(@min(Executor.max_executors, std.Thread.getCpuCount() catch 1)),
+            .auto => autoDetect(),
             _ => @intFromEnum(self),
         };
+    }
+
+    fn autoDetect() u8 {
+        const affinity = @min(Executor.max_executors, std.Thread.getCpuCount() catch 1);
+        // Honor a cgroup CPU quota (Docker/Kubernetes CPU limits) that
+        // sched_getaffinity() can't see, mirroring Go's container-aware
+        // GOMAXPROCS. The affinity mask still wins when it is the tighter bound.
+        const limit = cgroup.cpuLimit() orelse return @intCast(affinity);
+        return @intCast(@min(affinity, @as(usize, limit)));
     }
 };
 
@@ -284,10 +294,14 @@ pub const Executor = struct {
     // Periodic timer for evicting idle stacks from the shared stack pool.
     stack_pool_eviction_timer: ev.Timer = ev.Timer.init(.{ .duration = .fromSeconds(60) }),
 
-    // The task currently executing on this executor.
+    // The task currently executing on this executor, or null when we are running
+    // scheduler code (the run loop, a context switch, a completion callback) rather
+    // than a task body. A null value routes any I/O performed here through the
+    // blocking path in waitForIo instead of re-entering the event loop, which would
+    // otherwise recurse into Loop.add (see issue #545).
     // Updated before every context switch into a task and after every switch back.
     // Used by getCurrentTaskOrNull() instead of the TLS current_context chain.
-    current_task: *AnyTask,
+    current_task: ?*AnyTask,
 
     // Executor dedicated to this thread. Written once on init, never updated.
     pub threadlocal var current_DO_NOT_ACCESS_DIRECTLY: ?*Executor = null;
@@ -406,6 +420,16 @@ pub const Executor = struct {
     pub fn run(self: *Executor, mode: RunMode) !void {
         const check_ready = mode != .until_stopped;
 
+        // The run loop is scheduler code, not a task: clear current_task so any I/O
+        // it performs (a completion callback, std.log, a debug_io write) takes the
+        // blocking path rather than recursing into the event loop. Restored to the
+        // main task on return, since control goes back to the main task's user code
+        // (or, for worker executors, to shutdown). This defer does not run on the
+        // crash path: markCrashed()'s callers are noreturn and a panic does not
+        // unwind through defers, so the null marker it sets survives until abort().
+        self.current_task = null;
+        defer self.current_task = &self.main_task;
+
         // Process deferred cleanup (e.g. main task's park/reschedule)
         self.processCleanup();
 
@@ -415,7 +439,7 @@ pub const Executor = struct {
                 @atomicStore(*Context, &next_task.coro.parent_context_ptr, &self.main_task.coro.context, .release);
                 self.current_task = next_task;
                 next_task.coro.step();
-                self.current_task = &self.main_task;
+                self.current_task = null;
                 self.processCleanup();
             }
 
@@ -667,12 +691,16 @@ pub const Executor = struct {
     /// Yield the current coroutine to the next ready task or back to the run loop.
     /// Sets current_task for the target and performs the context switch.
     pub fn switchOut(self: *Executor, coro: *Coroutine) void {
+        // Picking the next task and switching is scheduler code: clear current_task
+        // so I/O performed here doesn't re-enter the event loop. On the direct-switch
+        // path it is set to the target task just before the switch; on the fall-back
+        // path it stays null and the run loop keeps it null until it steps a task.
+        self.current_task = null;
         if (self.getNextTask()) |next_task| {
             @atomicStore(*Context, &next_task.coro.parent_context_ptr, &self.main_task.coro.context, .release);
             self.current_task = next_task;
             coro.yieldTo(&next_task.coro);
         } else {
-            self.current_task = &self.main_task;
             coro.yield();
         }
     }
@@ -705,6 +733,18 @@ pub fn getCurrentTaskOrNull() ?*AnyTask {
     return exec.current_task;
 }
 
+/// Called from the panic/crash handler. Marks this thread as not running a task so
+/// that any I/O performed while unwinding — in particular writing the panic message
+/// through debug_io — takes the blocking path in waitForIo instead of re-entering
+/// the event loop (which would recurse into Loop.add and abort with no message).
+/// The marker is never restored: markCrashed()'s callers (defaultPanic,
+/// defaultHandleSegfault) are noreturn and a panic does not unwind through defers,
+/// so no scheduler code runs again on this thread before abort(). See issue #545.
+pub fn markCrashed() void {
+    const exec = getCurrentExecutorOrNull() orelse return;
+    exec.current_task = null;
+}
+
 /// Cooperatively yield control to allow other tasks to run.
 /// The current task will be rescheduled and continue execution later.
 /// Returns error.Canceled if the task was canceled.
@@ -715,6 +755,15 @@ pub fn yield() Cancelable!void {
         return;
     };
     return task.yield(.reschedule, .allow_cancel);
+}
+
+/// Cooperatively yield, but only if enough other tasks are waiting (a cheap
+/// fairness check for long CPU-bound loops that would otherwise hog the
+/// executor). Returns error.Canceled if the task was canceled. No-op if called
+/// from a thread without an executor.
+pub fn maybeYield() Cancelable!void {
+    const exec = getCurrentExecutorOrNull() orelse return;
+    return exec.maybeYield(.reschedule, .allow_cancel);
 }
 
 /// Spawn a task on the current runtime.
@@ -1241,6 +1290,63 @@ test "runtime: yield from main allows tasks to run" {
     }
 
     try std.testing.expectEqual(10, counter);
+}
+
+test "runtime: yield without an executor is a no-op" {
+    // No Runtime has been initialized on this thread, so there's no current
+    // executor. yield() should just fall back to an OS thread yield and return.
+    try yield();
+}
+
+test "runtime: maybeYield without an executor is a no-op" {
+    // Same as above, but for the fairness-checked variant.
+    try maybeYield();
+}
+
+test "runtime: maybeYield yields once the ready queue crosses the fairness threshold" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const ResetEvent = @import("sync/ResetEvent.zig");
+
+    var event: ResetEvent = .init;
+    var counter: usize = 0;
+
+    const waiterTask = struct {
+        fn call(reset_event: *ResetEvent, counter_ptr: *usize) !void {
+            try reset_event.wait();
+            counter_ptr.* += 1;
+        }
+    }.call;
+
+    // Spawn more waiters than Executor.yield_ready_threshold so that, once they're
+    // all woken at once, ready_count is high enough for maybeYield() to actually
+    // reschedule instead of no-op.
+    const task_count = Executor.yield_ready_threshold + 5;
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    for (0..task_count) |_| {
+        try group.spawn(waiterTask, .{ &event, &counter });
+    }
+
+    // Every task is now parked in event.wait(), so waking them all at once fills
+    // the ready queue past the fairness threshold.
+    event.set();
+
+    var iterations: usize = 0;
+    while (counter < task_count) : (iterations += 1) {
+        if (iterations >= 100) {
+            std.debug.print("maybeYield not working: counter={}, iterations={}\n", .{ counter, iterations });
+            return error.TestExpectedEqual;
+        }
+        try maybeYield();
+    }
+
+    try std.testing.expectEqual(task_count, counter);
+    try group.wait();
+    try std.testing.expect(!group.hasFailed());
 }
 
 test "runtime: sleep from main allows tasks to run" {

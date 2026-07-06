@@ -9,6 +9,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Completion = @import("completion.zig").Completion;
+const Group = @import("completion.zig").Group;
 const PipeClose = @import("completion.zig").PipeClose;
 const NetClose = @import("completion.zig").NetClose;
 const NetShutdown = @import("completion.zig").NetShutdown;
@@ -117,13 +118,50 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
         // Device I/O control - blocking ioctl
         .device_io_control => handleDeviceIoControl(c),
 
+        // A gather group of individually-supported ops can be run sequentially.
+        .group => handleBlockingGroup(c, allocator),
+
         // Async operations require the event loop
-        .async,
-        .group,
-        => @panic("Async operations not supported in blocking mode (requires event loop)"),
+        .async => @panic("Async operations not supported in blocking mode (requires event loop)"),
 
         .mach_port => unreachable,
     }
+}
+
+/// Execute a group completion synchronously by running each child in turn.
+///
+/// Only gather groups whose children are all individually supported in blocking
+/// mode are handled. Today that means close batches (see `io.fileCloseImpl` /
+/// `io.netCloseImpl`), which the panic/crash path exercises when std's stack-trace
+/// symbolization opens and then closes the executable through `debug_io`. Anything
+/// else keeps the "requires event loop" panic. Children are validated before any is
+/// run so we never leave a group half-executed.
+fn handleBlockingGroup(c: *Completion, allocator: std.mem.Allocator) void {
+    const group: *Group = @alignCast(@fieldParentPtr("c", c));
+
+    // Race groups (used for timeouts) genuinely need the loop to arbitrate.
+    if (group.race.load(.acquire)) {
+        @panic("Race groups are not supported in blocking mode (requires event loop)");
+    }
+
+    // Validate every child is an op we can run inline before running any of them.
+    var node = group.head;
+    while (node) |n| : (node = n.next) {
+        const child: *Completion = @alignCast(@fieldParentPtr("group", n));
+        switch (child.op) {
+            .file_close, .net_close => {},
+            else => @panic("Group contains an operation not supported in blocking mode"),
+        }
+    }
+
+    // Run each child to completion; each sets its own result.
+    node = group.head;
+    while (node) |n| : (node = n.next) {
+        const child: *Completion = @alignCast(@fieldParentPtr("group", n));
+        executeBlocking(child, allocator);
+    }
+
+    c.setResult(.group, {});
 }
 
 /// Synchronous file-to-socket transfer for the no-runtime path. Drives the same

@@ -127,12 +127,22 @@ pub const Token = struct {
         _ = std.c.pthread_kill(handle, sig);
         return true;
     }
+
+    /// True while the worker is blocked in the canceled syscall and has not yet
+    /// acknowledged the cancellation — i.e. the `SIGURG` may still need
+    /// re-sending. Used to decide whether a work belongs on the loop's
+    /// cancel-resend list.
+    pub fn isCanceling(self: *Token) bool {
+        if (!enabled) return false;
+        return self.state.load(.acquire) == .blocked_canceling;
+    }
 };
 
 /// A scoped, cancelable syscall region. Obtained by `begin()`, closed by
-/// `finish()` (or `fail()`); on `EINTR` call `checkCancel()` to decide between
-/// retry and `error.Canceled`. A `null` token means "not on a cancelable worker"
-/// — every method is then a no-op and the syscall runs uncancelably.
+/// `finish()` (idempotent, so it pairs with `defer`); on `EINTR` call
+/// `checkCancel()` to decide between retry and `error.Canceled`. A `null` token
+/// means "not on a cancelable worker" — every method is then a no-op and the
+/// syscall runs uncancelably.
 pub const Syscall = struct {
     token: ?*Token,
 
@@ -182,6 +192,10 @@ pub const Syscall = struct {
     /// Close the syscall region on success or any non-`EINTR` error:
     /// `blocked → idle`, or `blocked_canceling → canceled` (cancel still pending,
     /// surfaces at the next `start()`).
+    ///
+    /// Idempotent: closing an already-closed region (`idle`/`canceled`) is a
+    /// no-op, so `finish()` is safe as a `defer` even when `checkCancel()` has
+    /// already finalized the region on the `Canceled` path.
     pub fn finish(self: Syscall) void {
         const tok = self.token orelse return;
         var s = tok.state.load(.monotonic);
@@ -189,7 +203,7 @@ pub const Syscall = struct {
             const next: State = switch (s) {
                 .blocked => .idle,
                 .blocked_canceling => .canceled,
-                .idle, .canceled => unreachable,
+                .idle, .canceled => return,
             };
             if (tok.state.cmpxchgWeak(s, next, .acq_rel, .monotonic)) |actual| {
                 s = actual;
@@ -197,12 +211,6 @@ pub const Syscall = struct {
             }
             return;
         }
-    }
-
-    /// `finish()` then return `err` — convenience for non-`EINTR` error exits.
-    pub fn fail(self: Syscall, err: anytype) @TypeOf(err) {
-        self.finish();
-        return err;
     }
 };
 
@@ -293,18 +301,19 @@ test "syscall_cancel: signal interrupts a blocking read" {
 
             self.result = blk: {
                 const sc = Syscall.begin() catch |e| break :blk e;
+                defer sc.finish();
                 // Signal that we are inside the cancelable region, just before read().
                 self.ready.store(true, .release);
                 var buf: [1]u8 = undefined;
                 while (true) {
                     const rc = std.c.read(self.read_fd, &buf, buf.len);
-                    if (rc >= 0) break :blk sc.fail(error.UnexpectedData);
+                    if (rc >= 0) break :blk error.UnexpectedData;
                     switch (std.posix.errno(rc)) {
                         .INTR => {
                             sc.checkCancel() catch |e| break :blk e;
                             continue;
                         },
-                        else => |e| break :blk sc.fail(std.posix.unexpectedErrno(e)),
+                        else => |e| break :blk std.posix.unexpectedErrno(e),
                     }
                 }
             };

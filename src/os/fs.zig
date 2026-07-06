@@ -6,6 +6,7 @@ const w = @import("windows.zig");
 const options = @import("zio_options");
 
 const unexpectedError = @import("base.zig").unexpectedError;
+const syscall_cancel = @import("syscall_cancel.zig");
 
 // Cached probe result: once we see ENOSYS from openat2, skip future attempts.
 var openat2_nosys: std.atomic.Value(bool) = .init(false);
@@ -130,6 +131,13 @@ pub const FileOpenFlags = struct {
     /// Enforced by the kernel on Linux 5.6+ (openat2 RESOLVE_BENEATH) and FreeBSD 13+ (O_RESOLVE_BENEATH).
     /// On other platforms a warning is logged and the flag is ignored.
     resolve_beneath: bool = false,
+    /// Bypass the OS page cache and transfer data directly to/from userspace buffers.
+    /// The caller is responsible for satisfying the platform's alignment requirements
+    /// (buffer address, file offset, and transfer length must typically be multiples of
+    /// the underlying device's logical block size, e.g. 512 bytes) — otherwise I/O fails.
+    /// Linux: O_DIRECT. macOS: fcntl(F_NOCACHE) applied after open. Windows: FILE_FLAG_NO_BUFFERING.
+    /// On platforms without an equivalent a warning is logged and the flag is ignored.
+    direct: bool = false,
 };
 
 pub const DirOpenFlags = struct {
@@ -151,6 +159,9 @@ pub const FileCreateFlags = struct {
     /// Prevent path resolution from escaping the starting directory.
     /// See FileOpenFlags.resolve_beneath for platform support details.
     resolve_beneath: bool = false,
+    /// Bypass the OS page cache and transfer data directly to/from userspace buffers.
+    /// See FileOpenFlags.direct for the alignment requirements and platform support details.
+    direct: bool = false,
 };
 
 pub const FileOpenError = error{
@@ -618,6 +629,8 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
         // closest Windows analogue to O_NOFOLLOW; allow_ctty and path_only have
         // no Windows equivalent and are ignored.
         if (!flags.follow_symlinks) file_flags |= w.FILE_FLAG_OPEN_REPARSE_POINT;
+        // Direct (unbuffered) I/O, the Windows analogue of O_DIRECT.
+        if (flags.direct) file_flags |= w.FILE_FLAG_NO_BUFFERING;
 
         const handle = w.CreateFileW(
             path_w.ptr,
@@ -652,9 +665,27 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
     };
     if (@hasField(@TypeOf(open_flags), "NOCTTY")) open_flags.NOCTTY = !flags.allow_ctty;
     if (@hasField(@TypeOf(open_flags), "PATH")) open_flags.PATH = flags.path_only;
+    if (flags.direct) {
+        if (@hasField(@TypeOf(open_flags), "DIRECT")) {
+            // Linux (and any platform whose O flags expose O_DIRECT).
+            open_flags.DIRECT = true;
+        } else if (!builtin.os.tag.isDarwin()) {
+            // Darwin has no open-time flag; it is applied via fcntl(F_NOCACHE)
+            // after a successful open (see below). Everything else is unsupported.
+            std.log.warn("direct I/O is not supported on {s}, buffering will not be disabled", .{@tagName(builtin.os.tag)});
+        }
+    }
 
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
+
+    // Cancelable region covering both the openat2 (resolve_beneath) path and the
+    // plain openat loop below: on a thread-pool worker bound to a cancellation
+    // token (delegated file ops on kqueue/poll backends), a SIGURG turns the
+    // blocking open into EINTR and `checkCancel` reports `Canceled`. Off a
+    // cancelable worker the token is null and every call here is a no-op.
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
 
     if (builtin.os.tag == .linux and flags.resolve_beneath) {
         if (!openat2_nosys.load(.monotonic)) {
@@ -667,7 +698,11 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
                 const rc = posix.sys.openat2(dir, path_z.ptr, &how);
                 switch (posix.errno(rc)) {
                     .SUCCESS => return @intCast(rc),
-                    .INTR, .AGAIN => continue,
+                    .INTR => {
+                        try sc.checkCancel();
+                        continue;
+                    },
+                    .AGAIN => continue,
                     .NOSYS => {
                         openat2_nosys.store(true, .monotonic);
                         if (options.resolve_beneath_mode == .strict) return error.Unsupported;
@@ -690,8 +725,23 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
     while (true) {
         const rc = posix.system.openat(dir, path_z.ptr, open_flags, @as(mode_t, 0));
         switch (posix.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            .INTR => continue,
+            .SUCCESS => {
+                const opened_fd: fd_t = @intCast(rc);
+                // Darwin has no O_DIRECT; disable caching on the fd after opening.
+                if (builtin.os.tag.isDarwin() and flags.direct) {
+                    const err = posix.errno(posix.system.fcntl(opened_fd, posix.system.F.NOCACHE, @as(c_int, 1)));
+                    if (err != .SUCCESS) {
+                        std.log.warn("failed to enable direct I/O (F_NOCACHE) on fd {d}: {s}, caching remains enabled", .{ opened_fd, @tagName(err) });
+                    }
+                }
+                return opened_fd;
+            },
+            // EINTR is either the cancellation SIGURG (checkCancel -> Canceled) or
+            // a spurious/foreign wake, in which case we retry the open.
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| {
                 if (flags.resolve_beneath) {
                     if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.AccessDenied;
@@ -756,6 +806,11 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    // Cancelable region covering both the openat2 (resolve_beneath) path and the
+    // plain openat loop below (see the note in `openat`).
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
+
     if (builtin.os.tag == .linux and flags.resolve_beneath) {
         if (!openat2_nosys.load(.monotonic)) {
             const how: posix.sys.open_how = .{
@@ -767,7 +822,11 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
                 const rc = posix.sys.openat2(dir, path_z.ptr, &how);
                 switch (posix.errno(rc)) {
                     .SUCCESS => return @intCast(rc),
-                    .INTR, .AGAIN => continue,
+                    .INTR => {
+                        try sc.checkCancel();
+                        continue;
+                    },
+                    .AGAIN => continue,
                     .NOSYS => {
                         openat2_nosys.store(true, .monotonic);
                         if (options.resolve_beneath_mode == .strict) return error.Unsupported;
@@ -791,7 +850,10 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
         const rc = posix.system.openat(dir, path_z.ptr, open_flags, @as(mode_t, 0));
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| {
                 if (flags.resolve_beneath) {
                     if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.AccessDenied;
@@ -827,10 +889,12 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
         else
             w.OPEN_ALWAYS;
 
-        const file_flags: w.DWORD = if (flags.nonblocking)
+        var file_flags: w.DWORD = if (flags.nonblocking)
             w.FILE_ATTRIBUTE_NORMAL | w.FILE_FLAG_OVERLAPPED
         else
             w.FILE_ATTRIBUTE_NORMAL;
+        // Direct (unbuffered) I/O, the Windows analogue of O_DIRECT.
+        if (flags.direct) file_flags |= w.FILE_FLAG_NO_BUFFERING;
 
         const handle = w.CreateFileW(
             path_w.ptr,
@@ -863,9 +927,24 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
     };
     if (flags.truncate) open_flags.TRUNC = true;
     if (flags.exclusive) open_flags.EXCL = true;
+    if (flags.direct) {
+        if (@hasField(@TypeOf(open_flags), "DIRECT")) {
+            // Linux (and any platform whose O flags expose O_DIRECT).
+            open_flags.DIRECT = true;
+        } else if (!builtin.os.tag.isDarwin()) {
+            // Darwin has no open-time flag; it is applied via fcntl(F_NOCACHE)
+            // after a successful open (see below). Everything else is unsupported.
+            std.log.warn("direct I/O is not supported on {s}, buffering will not be disabled", .{@tagName(builtin.os.tag)});
+        }
+    }
 
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
+
+    // Cancelable region covering both the openat2 (resolve_beneath) path and the
+    // plain openat loop below (see the note in `openat`).
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
 
     if (builtin.os.tag == .linux and flags.resolve_beneath) {
         if (!openat2_nosys.load(.monotonic)) {
@@ -878,7 +957,11 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
                 const rc = posix.sys.openat2(dir, path_z.ptr, &how);
                 switch (posix.errno(rc)) {
                     .SUCCESS => return @intCast(rc),
-                    .INTR, .AGAIN => continue,
+                    .INTR => {
+                        try sc.checkCancel();
+                        continue;
+                    },
+                    .AGAIN => continue,
                     .NOSYS => {
                         openat2_nosys.store(true, .monotonic);
                         if (options.resolve_beneath_mode == .strict) return error.Unsupported;
@@ -901,8 +984,21 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
     while (true) {
         const rc = posix.system.openat(dir, path_z.ptr, open_flags, flags.mode);
         switch (posix.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            .INTR => continue,
+            .SUCCESS => {
+                const opened_fd: fd_t = @intCast(rc);
+                // Darwin has no O_DIRECT; disable caching on the fd after opening.
+                if (builtin.os.tag.isDarwin() and flags.direct) {
+                    const err = posix.errno(posix.system.fcntl(opened_fd, posix.system.F.NOCACHE, @as(c_int, 1)));
+                    if (err != .SUCCESS) {
+                        std.log.warn("failed to enable direct I/O (F_NOCACHE) on fd {d}: {s}, caching remains enabled", .{ opened_fd, @tagName(err) });
+                    }
+                }
+                return opened_fd;
+            },
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| {
                 if (flags.resolve_beneath) {
                     if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.AccessDenied;
@@ -1047,11 +1143,16 @@ pub fn preadv(fd: fd_t, buffers: []iovec, offset: u64) FileReadError!usize {
         return total_read;
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.preadv(fd, buffers.ptr, @intCast(buffers.len), @intCast(offset));
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileReadError(err),
         }
     }
@@ -1086,11 +1187,16 @@ pub fn pwritev(fd: fd_t, buffers: []const iovec_const, offset: u64) FileWriteErr
         return total_written;
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.pwritev(fd, buffers.ptr, @intCast(buffers.len), @intCast(offset));
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileWriteError(err),
         }
     }
@@ -1117,11 +1223,16 @@ pub fn read(fd: fd_t, buffer: []u8) FileReadError!usize {
         return bytes_read;
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.read(fd, buffer.ptr, buffer.len);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileReadError(err),
         }
     }
@@ -1157,11 +1268,16 @@ pub fn readv(fd: fd_t, buffers: []iovec) FileReadError!usize {
         return total_read;
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.readv(fd, buffers.ptr, @intCast(buffers.len));
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileReadError(err),
         }
     }
@@ -1184,11 +1300,16 @@ pub fn write(fd: fd_t, buffer: []const u8) FileWriteError!usize {
         return bytes_written;
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.write(fd, buffer.ptr, buffer.len);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileWriteError(err),
         }
     }
@@ -1220,11 +1341,16 @@ pub fn writev(fd: fd_t, buffers: []const iovec_const) FileWriteError!usize {
         return total_written;
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.writev(fd, buffers.ptr, @intCast(buffers.len));
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileWriteError(err),
         }
     }
@@ -1243,6 +1369,8 @@ pub fn fileSync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
         return;
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = if (flags.only_data)
             posix.system.fdatasync(fd)
@@ -1251,7 +1379,10 @@ pub fn fileSync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
 
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileSyncError(err),
         }
     }
@@ -1290,11 +1421,16 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
     const new_path_z = allocator.dupeSentinel(u8, new_path, 0) catch return error.SystemResources;
     defer allocator.free(new_path_z);
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.renameat(old_dir, old_path_z.ptr, new_dir, new_path_z.ptr);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToDirRenameError(err),
         }
     }
@@ -1402,11 +1538,16 @@ pub fn dirDeleteFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) 
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.unlinkat(dir, path_z.ptr, 0);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             .PERM => {
                 // macOS and BSDs return EPERM (not EISDIR) when unlinkat is
                 // called on a directory without AT_REMOVEDIR.  Check with
@@ -1457,11 +1598,16 @@ pub fn dirDeleteDir(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) D
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.unlinkat(dir, path_z.ptr, posix.AT.REMOVEDIR);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToDirDeleteDirError(err),
         }
     }
@@ -1490,11 +1636,16 @@ pub fn mkdirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, mode: 
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.mkdirat(dir, path_z.ptr, mode);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToDirCreateDirError(err),
         }
     }
@@ -1745,6 +1896,8 @@ pub fn fileSize(fd: fd_t) FileSizeError!u64 {
         return @intCast(file_size);
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     if (builtin.os.tag == .linux) {
         const linux = std.os.linux;
         var statx_buf: linux.Statx = undefined;
@@ -1752,7 +1905,10 @@ pub fn fileSize(fd: fd_t) FileSizeError!u64 {
             const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, linux.STATX{ .SIZE = true }, &statx_buf);
             switch (posix.errno(rc)) {
                 .SUCCESS => return statx_buf.size,
-                .INTR => continue,
+                .INTR => {
+                    try sc.checkCancel();
+                    continue;
+                },
                 else => |err| return errnoToFileSizeError(err),
             }
         }
@@ -1763,7 +1919,10 @@ pub fn fileSize(fd: fd_t) FileSizeError!u64 {
         const rc = posix.system.fstat(fd, &stat_buf);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(stat_buf.size),
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileSizeError(err),
         }
     }
@@ -1816,6 +1975,8 @@ pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
         };
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     if (builtin.os.tag == .linux) {
         const linux = std.os.linux;
         const mask = linux.STATX{ .TYPE = true, .MODE = true, .INO = true, .NLINK = true, .SIZE = true, .ATIME = true, .MTIME = true, .CTIME = true };
@@ -1824,7 +1985,10 @@ pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
             const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, mask, &statx_buf);
             switch (posix.errno(rc)) {
                 .SUCCESS => return statxToFileStat(statx_buf),
-                .INTR => continue,
+                .INTR => {
+                    try sc.checkCancel();
+                    continue;
+                },
                 else => |err| return errnoToFileStatError(err),
             }
         }
@@ -1835,7 +1999,10 @@ pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
         const rc = posix.system.fstat(fd, &stat_buf);
         switch (posix.errno(rc)) {
             .SUCCESS => return statToFileStat(stat_buf),
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileStatError(err),
         }
     }
@@ -1879,6 +2046,8 @@ pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
 
     const at_flags: u32 = if (flags.follow_symlinks) 0 else posix.AT.SYMLINK_NOFOLLOW;
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     if (builtin.os.tag == .linux) {
         const linux = std.os.linux;
         const mask = linux.STATX{ .TYPE = true, .MODE = true, .INO = true, .NLINK = true, .SIZE = true, .ATIME = true, .MTIME = true, .CTIME = true };
@@ -1887,7 +2056,10 @@ pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
             const rc = linux.statx(dir, path_z.ptr, at_flags, mask, &statx_buf);
             switch (posix.errno(rc)) {
                 .SUCCESS => return statxToFileStat(statx_buf),
-                .INTR => continue,
+                .INTR => {
+                    try sc.checkCancel();
+                    continue;
+                },
                 else => |err| return errnoToFileStatError(err),
             }
         }
@@ -1898,7 +2070,10 @@ pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
         const rc = posix.system.fstatat(dir, path_z.ptr, &stat_buf, at_flags);
         switch (posix.errno(rc)) {
             .SUCCESS => return statToFileStat(stat_buf),
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileStatError(err),
         }
     }
@@ -2022,11 +2197,16 @@ pub fn fileSetSize(fd: fd_t, length: u64) FileSetSizeError!void {
         return;
     }
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.ftruncate(fd, @intCast(length));
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileSetSizeError(err),
         }
     }
@@ -2053,11 +2233,16 @@ pub fn fileSetPermissions(fd: fd_t, mode: mode_t) FileSetPermissionsError!void {
     // Windows doesn't have POSIX-style permissions
     if (builtin.os.tag == .windows) return;
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.fchmod(fd, mode);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileSetPermissionsError(err),
         }
     }
@@ -2083,11 +2268,16 @@ pub fn fileSetOwner(fd: fd_t, uid: ?uid_t, gid: ?gid_t) FileSetOwnerError!void {
     const uid_arg: uid_t = uid orelse @bitCast(@as(i32, -1));
     const gid_arg: gid_t = gid orelse @bitCast(@as(i32, -1));
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.fchown(fd, uid_arg, gid_arg);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileSetOwnerError(err),
         }
     }
@@ -2146,11 +2336,16 @@ pub fn fileSetTimestamps(fd: fd_t, timestamps: FileTimestamps) FileSetTimestamps
             .{ .sec = 0, .nsec = UTIME_OMIT },
     };
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.futimens(fd, &times);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileSetTimestampsError(err),
         }
     }
@@ -2183,11 +2378,16 @@ pub fn dirSetFilePermissions(allocator: std.mem.Allocator, dir: fd_t, path: []co
     // Note: AT_SYMLINK_NOFOLLOW for fchmodat requires Linux 6.6+ (fchmodat2)
     const at_flags: u32 = if (flags.follow_symlinks) 0 else posix.AT.SYMLINK_NOFOLLOW;
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.fchmodat(dir, path_z.ptr, mode, at_flags);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileSetPermissionsError(err),
         }
     }
@@ -2207,11 +2407,16 @@ pub fn dirSetFileOwner(allocator: std.mem.Allocator, dir: fd_t, path: []const u8
 
     const at_flags: u32 = if (!flags.follow_symlinks) posix.AT.SYMLINK_NOFOLLOW else 0;
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.fchownat(dir, path_z.ptr, uid_arg, gid_arg, at_flags);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileSetOwnerError(err),
         }
     }
@@ -2243,11 +2448,16 @@ pub fn dirSetFileTimestamps(allocator: std.mem.Allocator, dir: fd_t, path: []con
 
     const at_flags: u32 = if (!flags.follow_symlinks) posix.AT.SYMLINK_NOFOLLOW else 0;
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.utimensat(dir, path_z.ptr, &times, at_flags);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToFileSetTimestampsError(err),
         }
     }
@@ -2288,11 +2498,16 @@ pub fn dirSymLink(allocator: std.mem.Allocator, dir: fd_t, target: []const u8, l
     const link_path_z = allocator.dupeSentinel(u8, link_path, 0) catch return error.SystemResources;
     defer allocator.free(link_path_z);
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.symlinkat(target_z.ptr, dir, link_path_z.ptr);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToSymLinkError(err),
         }
     }
@@ -2340,11 +2555,16 @@ pub fn dirReadLink(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, bu
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.system.readlinkat(dir, path_z.ptr, buffer.ptr, buffer.len);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToReadLinkError(err),
         }
     }
@@ -2402,11 +2622,16 @@ pub fn dirHardLink(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []cons
 
     const at_flags: u32 = if (flags.follow_symlinks) posix.AT.SYMLINK_FOLLOW else 0;
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.linkat(old_dir, old_path_z.ptr, new_dir, new_path_z.ptr, at_flags);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToHardLinkError(err),
         }
     }
@@ -2529,11 +2754,16 @@ pub fn dirAccess(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flag
 
     const at_flags: u32 = if (flags.follow_symlinks) 0 else posix.AT.SYMLINK_NOFOLLOW;
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = posix.faccessat(dir, path_z.ptr, mode, at_flags);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             else => |err| return errnoToDirAccessError(err),
         }
     }
@@ -2602,6 +2832,8 @@ fn dirReadPosix(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
     }
 
     // Call getdents64 (Linux) or getdirentries (BSD)
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     while (true) {
         const rc = switch (builtin.os.tag) {
             .linux => std.os.linux.getdents64(handle, buffer.ptr, buffer.len),
@@ -2618,7 +2850,10 @@ fn dirReadPosix(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
 
         switch (posix.errno(rc)) {
             .SUCCESS => return if (builtin.os.tag == .linux) rc else @intCast(rc),
-            .INTR => continue,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
             .BADF, .FAULT, .NOTDIR => return error.Unexpected,
             .NOENT => return 0, // Directory deleted during iteration
             .ACCES => return error.AccessDenied,
@@ -2700,6 +2935,8 @@ pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
     } else fd;
     defer if (fd == posix.AT.FDCWD) posix.close(actual_fd);
 
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
     if (builtin.os.tag == .linux) {
         // Use /proc/self/fd/{fd} with readlink
         var proc_path_buf: [32:0]u8 = undefined;
@@ -2709,7 +2946,10 @@ pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
             const rc = posix.system.readlink(proc_path, buffer.ptr, buffer.len);
             switch (posix.errno(rc)) {
                 .SUCCESS => return @intCast(rc),
-                .INTR => continue,
+                .INTR => {
+                    try sc.checkCancel();
+                    continue;
+                },
                 else => |err| return errnoToDirRealPathError(err),
             }
         }
@@ -2727,7 +2967,10 @@ pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
                     @memcpy(buffer[0..n], sufficient_buffer[0..n]);
                     return n;
                 },
-                .INTR => continue,
+                .INTR => {
+                    try sc.checkCancel();
+                    continue;
+                },
                 else => |err| return errnoToDirRealPathError(err),
             }
         }
@@ -2746,7 +2989,10 @@ pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
                     @memcpy(buffer[0..n], kf.path[0..n]);
                     return n;
                 },
-                .INTR => continue,
+                .INTR => {
+                    try sc.checkCancel();
+                    continue;
+                },
                 else => |err| return errnoToDirRealPathError(err),
             }
         }

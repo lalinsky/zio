@@ -302,6 +302,65 @@ pub const Dir = struct {
         const len = try op.getResult();
         return buffer[0..len];
     }
+
+    /// Iterate the directory's entries. The directory must have been opened with
+    /// `.iterate = true`. Returned entry names point into the iterator's own
+    /// buffer and are only valid until the next call to `next()`.
+    pub fn iterate(self: Dir) Iterator {
+        return .{ .fd = self.fd };
+    }
+
+    pub const Iterator = struct {
+        fd: Handle,
+        buffer: [buffer_size]u8 = undefined,
+        // index/end are positions in the raw-entry (unreserved) region.
+        index: usize = 0,
+        end: usize = 0,
+        name_index: usize = 0,
+        started: bool = false,
+        finished: bool = false,
+
+        const buffer_size = 8192;
+
+        pub const Entry = os.fs.DirEntry;
+        pub const Error = ev.DirRead.Error;
+
+        /// Returns the next entry, or null at the end. "." and ".." are skipped.
+        pub fn next(self: *Iterator) Error!?Entry {
+            while (true) {
+                if (self.end - self.index == 0) {
+                    if (self.finished) return null;
+                    const restart = !self.started;
+                    self.started = true;
+
+                    var op = ev.DirRead.init(self.fd, &self.buffer, restart);
+                    try waitForIo(&op.c);
+                    const n = try op.getResult();
+                    if (n == 0) {
+                        self.finished = true;
+                        return null;
+                    }
+                    self.index = 0;
+                    self.end = n;
+                    self.name_index = 0;
+                }
+
+                // Reconstruct the parser each call (rather than storing it) so the
+                // Iterator holds no slice into its own buffer and stays movable.
+                var it = os.fs.DirEntryIterator.init(&self.buffer, self.index, self.end);
+                it.name_index = self.name_index;
+                const entry = it.next() orelse {
+                    self.index = it.index;
+                    self.end = it.end;
+                    self.name_index = it.name_index;
+                    continue;
+                };
+                self.index = it.index;
+                self.name_index = it.name_index;
+                return entry;
+            }
+        }
+    };
 };
 
 /// Whether the Reader/Writer issues positional (offset-based) or streaming
@@ -895,6 +954,47 @@ test "File: basic read and write" {
     try dir.deleteFile(file_path);
 }
 
+test "File: direct I/O round-trip" {
+    // Direct I/O requires the buffer, offset, and length to be aligned to the
+    // device's logical block size (O_DIRECT on Linux/BSD, FILE_FLAG_NO_BUFFERING
+    // on Windows); macOS F_NOCACHE has no such constraint. A 4096-aligned,
+    // 4096-byte transfer at offset 0 satisfies all of them. Windows is skipped:
+    // unbuffered I/O there needs the exact sector size and is awkward to exercise
+    // portably.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+    const file_path = "test_file_direct.bin";
+
+    var file = dir.createFile(file_path, .{ .read = true, .direct = true }) catch |err| switch (err) {
+        // Some filesystems (tmpfs, overlayfs, ...) reject O_DIRECT with EINVAL,
+        // which surfaces as Unexpected. Nothing to exercise there.
+        error.Unexpected => return error.SkipZigTest,
+        else => return err,
+    };
+    defer dir.deleteFile(file_path) catch {};
+
+    const block = 4096;
+    var write_buf: [block]u8 align(block) = undefined;
+    for (&write_buf, 0..) |*b, i| b.* = @truncate(i);
+
+    // Write through the createFile(.direct) handle.
+    try std.testing.expectEqual(block, try file.write(&write_buf, 0));
+    file.close();
+
+    // Read it back through a separate openFile(.direct) handle, exercising the
+    // FileOpenFlags path as well as the FileCreateFlags one above.
+    var read_file = try dir.openFile(file_path, .{ .mode = .read_only, .direct = true });
+    defer read_file.close();
+
+    var read_buf: [block]u8 align(block) = undefined;
+    try std.testing.expectEqual(block, try read_file.read(&read_buf, 0));
+    try std.testing.expectEqualSlices(u8, &write_buf, &read_buf);
+}
+
 test "File: positional read and write" {
     var t = try TestFile.create("test_file_positional.txt", .{ .read = true });
     defer t.deinit();
@@ -1271,4 +1371,88 @@ test "Dir: resolve_beneath blocks parent escape" {
         error.AccessDenied, error.Unsupported => {},
         else => return err,
     }
+}
+
+extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
+
+test "Dir: canceling a blocking open interrupts the worker" {
+    // Only exercises the thread-pool-delegated path (kqueue/poll and friends);
+    // backends that open natively (io_uring) cancel via the backend instead, and
+    // the SIGURG mechanism is POSIX-only.
+    if (ev.Backend.capabilities.file_open) return;
+    if (!os.syscall_cancel.enabled) return;
+
+    // A FIFO opened O_RDONLY with no writer blocks in the worker's openat(). On
+    // POSIX the open is unconditionally blocking (O_NONBLOCK is applied only
+    // *after* open, in probePollable), so this reliably parks a worker we can
+    // then interrupt.
+    const path = "zig-cache-zio-open-cancel.fifo";
+    _ = std.c.unlink(path);
+    try std.testing.expectEqual(0, mkfifo(path, 0o600));
+    defer _ = std.c.unlink(path);
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const worker = struct {
+        fn call(p: []const u8, result: *(Dir.OpenFileError!void)) void {
+            if (openFile(p)) |file| {
+                file.close();
+                result.* = {};
+            } else |err| {
+                result.* = err;
+            }
+        }
+    };
+
+    var result: Dir.OpenFileError!void = {};
+    var handle = try rt.spawn(worker.call, .{ path, &result });
+
+    // Let the worker reach the blocking open, then cancel. The loop re-sends
+    // SIGURG each tick until the worker acknowledges (covering a lost first
+    // signal), so the open returns error.Canceled.
+    try rt.sleep(.fromMilliseconds(50));
+    handle.cancel();
+    handle.join();
+
+    try std.testing.expectError(error.Canceled, result);
+}
+
+test "Dir: iterate" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const cwd = Dir.cwd();
+    const dir_path = "test_dir_iterate";
+    try cwd.createDir(dir_path, 0o755);
+    defer cwd.deleteDir(dir_path) catch {};
+
+    var dir = try cwd.openDir(dir_path, .{ .iterate = true });
+    defer dir.close();
+
+    (try dir.createFile("a.txt", .{})).close();
+    (try dir.createFile("b.txt", .{})).close();
+    try dir.createDir("sub", 0o755);
+    defer {
+        dir.deleteFile("a.txt") catch {};
+        dir.deleteFile("b.txt") catch {};
+        dir.deleteDir("sub") catch {};
+    }
+
+    var found_a = false;
+    var found_b = false;
+    var found_sub = false;
+    var count: usize = 0;
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        count += 1;
+        if (std.mem.eql(u8, entry.name, "a.txt")) found_a = true;
+        if (std.mem.eql(u8, entry.name, "b.txt")) found_b = true;
+        if (std.mem.eql(u8, entry.name, "sub")) {
+            found_sub = true;
+            try std.testing.expectEqual(os.fs.FileKind.directory, entry.kind);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+    try std.testing.expect(found_a and found_b and found_sub);
 }
