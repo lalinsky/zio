@@ -626,7 +626,7 @@ pub const IpAddress = extern union {
         errdefer socket.close();
 
         if (options.reuse_address) {
-            try socket.setReuseAddress(true);
+            try socket.setReuse(true);
         }
 
         try socket.bind(.{ .ip = self });
@@ -639,7 +639,7 @@ pub const IpAddress = extern union {
         errdefer socket.close();
 
         if (options.reuse_address) {
-            try socket.setReuseAddress(true);
+            try socket.setReuse(true);
         }
 
         try socket.bind(.{ .ip = self });
@@ -716,7 +716,7 @@ pub const UnixAddress = extern union {
         errdefer socket.close();
 
         if (options.reuse_address) {
-            try socket.setReuseAddress(true);
+            try socket.setReuse(true);
         }
 
         try socket.bind(.{ .unix = self });
@@ -903,6 +903,16 @@ pub const Socket = struct {
             return error.Unsupported;
         }
         try self.setBoolOption(os.posix.SOL.SOCKET, os.posix.SO.REUSEPORT, enabled);
+    }
+
+    /// Set SO_REUSEADDR, plus SO_REUSEPORT where supported. Callers that ask for
+    /// address reuse want both: REUSEADDR alone still fails to rebind while a
+    /// prior process's socket lingers (e.g. right after a crash/restart), which
+    /// REUSEPORT allows. Keeps the native bind/listen paths consistent with the
+    /// std.Io listen path, which already sets both.
+    pub fn setReuse(self: Socket, enabled: bool) !void {
+        try self.setReuseAddress(enabled);
+        self.setReusePort(enabled) catch {}; // best-effort; unsupported on Windows
     }
 
     /// Enable or disable TCP keepalive (SO_KEEPALIVE)
