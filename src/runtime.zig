@@ -438,7 +438,6 @@ pub const Executor = struct {
             if (self.tick_task_count % 61 == 0) {
                 self.runtime.global_queue_mutex.lock();
                 if (self.runtime.global_queue.pop()) |node| {
-                    self.runtime.global_queue_mutex.unlock();
                     self.queue_pool[self.push_cursor].push(node);
                     self.push_cursor = (self.push_cursor + 1) % num_stealable_stacks;
                     _ = self.ready_count.fetchAdd(1, .acq_rel);
