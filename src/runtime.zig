@@ -36,6 +36,8 @@ const select = @import("select.zig");
 const Waiter = @import("common.zig").Waiter;
 const random_mod = @import("random.zig");
 
+const OsMutex = @import("os/thread.zig").Mutex;
+
 const mod = @This();
 
 /// Number of executor threads to run (including main).
@@ -432,6 +434,18 @@ pub const Executor = struct {
                 _ = self.ready_count.fetchAdd(1, .acq_rel);
             }
 
+            // Try to pop from the global queue occasionally
+            if (self.tick_task_count % 61 == 0) {
+                self.runtime.global_queue_mutex.lock();
+                if (self.runtime.global_queue.pop()) |node| {
+                    self.runtime.global_queue_mutex.unlock();
+                    self.queue_pool[self.push_cursor].push(node);
+                    self.push_cursor = (self.push_cursor + 1) % num_stealable_stacks;
+                    _ = self.ready_count.fetchAdd(1, .acq_rel);
+                }
+                self.runtime.global_queue_mutex.unlock();
+            }
+
             // Ensure there's no more work to be run
             var has_local_work = false;
             for (&self.queue_pool) |*stack| {
@@ -448,9 +462,9 @@ pub const Executor = struct {
             if (!has_local_work) has_local_work = main_ready;
 
             if (!has_local_work) {
-                self.runtime.global_queue_mutex.lock(self.runtime.io()) catch unreachable;
+                self.runtime.global_queue_mutex.lock();
                 has_local_work = self.runtime.global_queue.head != null;
-                self.runtime.global_queue_mutex.unlock(self.runtime.io());
+                self.runtime.global_queue_mutex.unlock();
             }
             try self.loop.run(if (has_local_work) .no_wait else .once);
 
@@ -501,20 +515,6 @@ pub const Executor = struct {
         const EVENT_INTERVAL = 61;
         if (self.tick_task_count >= EVENT_INTERVAL) return null;
 
-        // Try to pop from the global queue occasionally
-        if (self.tick_task_count % EVENT_INTERVAL == 0) {
-            if (self.runtime.global_queue_mutex.tryLock()) {
-                if (self.runtime.global_queue.pop()) |node| {
-                    self.runtime.global_queue_mutex.unlock(self.runtime.io());
-                    const task = AnyTask.fromWaitNode(node);
-                    task.last_run_tick = self.current_tick;
-                    self.tick_task_count += 1;
-                    return task;
-                }
-                self.runtime.global_queue_mutex.unlock(self.runtime.io());
-            }
-        }
-
         // Try to pop from the current cursor stack and rotate if empty
         // We check all stacks to ensure we don't block on I/O while work is pending.
         for (0..num_stealable_stacks) |_| {
@@ -548,13 +548,13 @@ pub const Executor = struct {
 
     /// Schedule a task to a remote executor (different executor or no current executor).
     /// Uses the thread-safe remote queue and notifies the executor.
-    fn scheduleTaskRemote(self: *Executor, task: *AnyTask) !void {
+    fn scheduleTaskRemote(self: *Executor, task: *AnyTask) void {
         std.debug.assert(task != &self.main_task);
 
         const wait_node = &task.awaitable.wait_node;
-        try self.runtime.global_queue_mutex.lock(self.runtime.io());
+        self.runtime.global_queue_mutex.lock();
         self.runtime.global_queue.push(wait_node);
-        self.runtime.global_queue_mutex.unlock(self.runtime.io());
+        self.runtime.global_queue_mutex.unlock();
         self.loop.wake();
     }
 
@@ -603,9 +603,7 @@ pub const Executor = struct {
         }
 
         // Schedule on the home executor
-        home_exec.scheduleTaskRemote(task) catch {
-            @panic("Failed to schedule task: Mutex.Canceled");
-        };
+        home_exec.scheduleTaskRemote(task);
     }
 
     const TaskCleanup = union(enum) {
@@ -779,7 +777,7 @@ pub const Runtime = struct {
 
     executors: std.ArrayList(*Executor) = .empty,
     global_queue: SimpleQueue(WaitNode) = .empty,
-    global_queue_mutex: std.Io.Mutex = .init,
+    global_queue_mutex: OsMutex = .init(),
     loop_group: ev.LoopGroup = .{},
     main_executor: Executor,
     next_executor_index: std.atomic.Value(usize) = .init(0),
