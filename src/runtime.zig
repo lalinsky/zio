@@ -455,7 +455,6 @@ pub const Executor = struct {
             while (drained.pop()) |task| {
                 self.queue_pool[self.push_cursor].push(task);
                 self.push_cursor = (self.push_cursor + 1) % num_stealable_stacks;
-                _ = self.ready_count.fetchAdd(1, .acq_rel);
             }
 
             // Set ourselves as idle before scanning for work.
@@ -509,7 +508,6 @@ pub const Executor = struct {
     fn popWorkFromGlobal(self: *Executor) bool {
         self.runtime.global_queue_mutex.lock();
         if (self.runtime.global_queue.pop()) |node| {
-            std.debug.print("here\n", .{});
             self.runtime.global_queue_mutex.unlock();
             self.queue_pool[self.push_cursor].push(node);
             self.push_cursor = (self.push_cursor + 1) % num_stealable_stacks;
@@ -540,7 +538,10 @@ pub const Executor = struct {
                 }
 
                 _ = self.ready_count.fetchAdd(count, .acq_rel);
-                if (count > 0) return true;
+                if (count > 0) {
+                    _ = victim.ready_count.fetchSub(count, .acq_rel);
+                    return true;
+                }
             }
         }
         return false;
