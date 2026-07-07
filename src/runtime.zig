@@ -459,16 +459,22 @@ pub const Executor = struct {
 
             // Set ourselves as idle before scanning for work.
             const my_bit = @as(u64, 1) << @as(u6, @intCast(self.id));
-            _ = self.runtime.idle_mask.fetchOr(my_bit, .seq_cst);
+            if (self.runtime.options.enable_task_migration) {
+                _ = self.runtime.idle_mask.fetchOr(my_bit, .seq_cst);
+            }
 
             // Ensure there's no more work to be run
             if (checkAboutForWork(self, check_ready)) {
-                _ = self.runtime.idle_mask.fetchAnd(~my_bit, .seq_cst);
+                if (self.runtime.options.enable_task_migration) {
+                    _ = self.runtime.idle_mask.fetchAnd(~my_bit, .seq_cst);
+                }
                 try self.loop.run(.no_wait);
             } else {
                 try self.loop.run(.once);
-                _ = self.runtime.idle_mask.fetchAnd(~my_bit, .seq_cst);
-                _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .acquire);
+                if (self.runtime.options.enable_task_migration) {
+                    _ = self.runtime.idle_mask.fetchAnd(~my_bit, .seq_cst);
+                    _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .acquire);
+                }
             }
 
             // Reset task counter and update tick time after event loop tick
@@ -498,49 +504,52 @@ pub const Executor = struct {
         const main_ready = check_ready and self.main_task.state.load(.acquire).tag == .ready;
         if (!has_work) has_work = main_ready;
 
-        // Last resort before going idle
-        if (!has_work) {
-            has_work = self.popWorkFromGlobal();
+        if (self.runtime.options.enable_task_migration) {
+            // Last resort before going idle
+            if (!has_work) {
+                has_work = self.popWorkFromGlobal();
+            }
         }
         return has_work;
     }
 
     fn popWorkFromGlobal(self: *Executor) bool {
-        self.runtime.global_queue_mutex.lock();
-        if (self.runtime.global_queue.pop()) |node| {
+        if (self.runtime.options.enable_task_migration) {
+            self.runtime.global_queue_mutex.lock();
+            if (self.runtime.global_queue.pop()) |node| {
+                self.runtime.global_queue_mutex.unlock();
+                self.queue_pool[self.push_cursor].push(node);
+                self.push_cursor = (self.push_cursor + 1) % num_stealable_stacks;
+                _ = self.ready_count.fetchAdd(1, .acq_rel);
+                return true;
+            }
             self.runtime.global_queue_mutex.unlock();
-            self.queue_pool[self.push_cursor].push(node);
-            self.push_cursor = (self.push_cursor + 1) % num_stealable_stacks;
-            _ = self.ready_count.fetchAdd(1, .acq_rel);
-            return true;
         }
-        self.runtime.global_queue_mutex.unlock();
         return false;
     }
 
     fn stealWork(self: *Executor) bool {
-        const num_executors = self.runtime.executors.items.len;
-        if (num_executors <= 1) return false;
+        if (self.runtime.options.enable_task_migration) {
+            const num_executors = self.runtime.executors.items.len;
+            if (num_executors <= 1) return false;
 
-        const start_index = self.id % num_executors;
-        for (0..num_executors) |i| {
-            const index = (start_index + i) % num_executors;
-            const victim = self.runtime.executors.items[index];
-            if (victim == self) continue;
+            const start_index = self.id % num_executors;
+            for (0..num_executors) |i| {
+                const index = (start_index + i) % num_executors;
+                const victim = self.runtime.executors.items[index];
+                if (victim == self) continue;
 
-            for (&victim.queue_pool) |*stack| {
-                var drained = stack.popAll();
-                var count: u32 = 0;
-                while (drained.pop()) |task| {
-                    self.queue_pool[self.push_cursor].push(task);
-                    self.push_cursor = (self.push_cursor + 1) % num_stealable_stacks;
-                    count += 1;
-                }
+                for (&victim.queue_pool) |*stack| {
+                    var drained = stack.popAll();
+                    var count: u32 = 0;
+                    while (drained.pop()) |task| {
+                        self.queue_pool[self.push_cursor].push(task);
+                        self.push_cursor = (self.push_cursor + 1) % num_stealable_stacks;
+                        count += 1;
+                    }
 
-                _ = self.ready_count.fetchAdd(count, .acq_rel);
-                if (count > 0) {
-                    _ = victim.ready_count.fetchSub(count, .acq_rel);
-                    return true;
+                    _ = self.ready_count.fetchAdd(count, .acq_rel);
+                    if (count > 0) return true;
                 }
             }
         }
@@ -589,14 +598,17 @@ pub const Executor = struct {
 
     /// Schedule a task to a remote executor (different executor or no current executor).
     /// Uses the thread-safe remote queue and notifies the executor.
-    fn scheduleTaskRemote(self: *Executor, task: *AnyTask) void {
+    pub fn scheduleTaskRemote(self: *Executor, task: *AnyTask) void {
         std.debug.assert(task != &self.main_task);
+        std.debug.assert(self.runtime.options.enable_task_migration);
 
         const wait_node = &task.awaitable.wait_node;
         self.runtime.global_queue_mutex.lock();
         self.runtime.global_queue.push(wait_node);
         self.runtime.global_queue_mutex.unlock();
-        self.runtime.wakeOne();
+        if (self.runtime.options.enable_task_migration) {
+            self.runtime.wakeOne();
+        }
     }
 
     /// Schedule a task for execution.
@@ -643,8 +655,11 @@ pub const Executor = struct {
             return;
         }
 
-        // Schedule on the home executor
-        home_exec.scheduleTaskRemote(task);
+        if (home_exec.runtime.options.enable_task_migration) {
+            home_exec.scheduleTaskRemote(task);
+        } else {
+            home_exec.scheduleTaskLocal(task);
+        }
     }
 
     const TaskCleanup = union(enum) {
@@ -1047,6 +1062,7 @@ pub const Runtime = struct {
     }
 
     pub fn wakeOne(self: *Runtime) void {
+        std.debug.assert(self.options.enable_task_migration);
         const idle = self.idle_mask.load(.acquire);
         if (idle == 0) return; // Everyone is busy
 
