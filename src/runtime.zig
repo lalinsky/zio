@@ -274,7 +274,7 @@ pub const Executor = struct {
     pending_cleanup: TaskCleanup = .none,
 
     // Local task support - lock-free LIFO stacks for cross-thread resumption and stealing.
-    queue_pool: [num_stealable_stacks]ConcurrentStack(WaitNode) = .{ .{}, .{}, .{}, .{} },
+    queue_pool: [num_stealable_stacks]ConcurrentStack(WaitNode) = @splat(.{}),
     pop_cursor: u8 = 0,
     push_cursor: u8 = 0,
 
@@ -521,15 +521,25 @@ pub const Executor = struct {
 
     fn popWorkFromGlobal(self: *Executor) bool {
         if (self.runtime.options.enable_task_migration) {
+            if (self.runtime.global_queue_count.load(.acquire) == 0) return false;
+
             self.runtime.global_queue_mutex.lock();
-            if (self.runtime.global_queue.pop()) |node| {
-                self.runtime.global_queue_mutex.unlock();
-                self.queue_pool[self.push_cursor].push(node);
-                self.push_cursor = (self.push_cursor + 1) % num_stealable_stacks;
-                _ = self.ready_count.fetchAdd(1, .acq_rel);
+            defer self.runtime.global_queue_mutex.unlock();
+            var count: u32 = 0;
+            const pops = self.runtime.global_queue_count.load(.acquire) / self.runtime.executors.capacity;
+            const num_to_pop = if (pops < 1) 1 else pops;
+            for (0..num_to_pop) |_| {
+                if (self.runtime.global_queue.pop()) |node| {
+                    self.queue_pool[self.push_cursor].push(node);
+                    self.push_cursor = (self.push_cursor + 1) % num_stealable_stacks;
+                    count += 1;
+                } else break;
+            }
+            if (count > 0) {
+                _ = self.ready_count.fetchAdd(count, .acq_rel);
+                _ = self.runtime.global_queue_count.fetchSub(count, .acq_rel);
                 return true;
             }
-            self.runtime.global_queue_mutex.unlock();
         }
         return false;
     }
@@ -555,7 +565,10 @@ pub const Executor = struct {
                     }
 
                     _ = self.ready_count.fetchAdd(count, .acq_rel);
-                    if (count > 0) return true;
+                    if (count > 0) {
+                        _ = victim.ready_count.fetchSub(count, .acq_rel);
+                        return true;
+                    }
                 }
             }
         }
@@ -612,6 +625,7 @@ pub const Executor = struct {
         self.runtime.global_queue_mutex.lock();
         self.runtime.global_queue.push(wait_node);
         self.runtime.global_queue_mutex.unlock();
+        _ = self.runtime.global_queue_count.fetchAdd(1, .acq_rel);
         if (self.runtime.options.enable_task_migration) {
             self.runtime.wakeOne();
         }
@@ -649,15 +663,15 @@ pub const Executor = struct {
             break;
         }
 
-        if (getCurrentExecutorOrNull()) |current_exec| {
-            current_exec.scheduleTaskLocal(task);
-            return;
-        }
-
         const home_exec = Executor.fromCoroutine(&task.coro);
 
         if (task == &home_exec.main_task) {
             home_exec.loop.wake();
+            return;
+        }
+
+        if (getCurrentExecutorOrNull()) |current_exec| {
+            current_exec.scheduleTaskLocal(task);
             return;
         }
 
@@ -864,6 +878,7 @@ pub const Runtime = struct {
 
     executors: std.ArrayList(*Executor) = .empty,
     global_queue: SimpleQueue(WaitNode) = .empty,
+    global_queue_count: std.atomic.Value(u32) = .init(0),
     global_queue_mutex: OsMutex = .init(),
     idle_mask: u64 = 0,
     idle_mask_mutex: OsMutex = .init(),
@@ -1615,4 +1630,28 @@ test "runtime: mutex contention with task migration" {
     try group.wait();
     try std.testing.expect(!group.hasFailed());
     try std.testing.expectEqual(2_000, counter);
+}
+
+test "runtime: disable main executor" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    // Create a runtime where the calling thread is not an executor.
+    // All tasks run on background worker threads.
+    const runtime = try Runtime.init(std.testing.allocator, .{
+        .executors = .exact(2),
+        .enable_main_executor = false,
+    });
+    defer runtime.deinit();
+
+    const compute = struct {
+        fn call(x: i32) i32 {
+            return x * 2;
+        }
+    }.call;
+
+    // Spawn tasks and join from the non-executor calling thread.
+    // join() blocks via OS futex when called outside an executor context.
+    var handle = try runtime.spawn(compute, .{21});
+    const result = handle.join();
+    try std.testing.expectEqual(42, result);
 }
