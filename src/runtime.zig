@@ -248,6 +248,7 @@ pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
 
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
+    // TODO: replace with atomic scoped based on architecture
     pub const max_executors = 64;
     const num_stealable_stacks = 4;
 
@@ -402,7 +403,7 @@ pub const Executor = struct {
     const yield_ready_threshold = 13;
 
     pub fn maybeYield(self: *Executor, comptime mode: AnyTask.YieldMode, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        if (self.ready_count.load(.seq_cst) >= yield_ready_threshold) {
+        if (self.ready_count.load(.acquire) >= yield_ready_threshold) {
             return getCurrentTask().yield(mode, cancel_mode);
         }
     }
@@ -451,35 +452,37 @@ pub const Executor = struct {
                 @panic("event loop stopped while the main task was yielding");
             }
 
-            var drained = self.queue_pool[self.pop_cursor].popAll();
-            while (drained.pop()) |task| {
-                self.queue_pool[self.push_cursor].push(task);
-                self.push_cursor = (self.push_cursor + 1) % num_stealable_stacks;
-            }
-
             // Set ourselves as idle before scanning for work.
             const my_bit = @as(u64, 1) << @as(u6, @intCast(self.id));
-            if (self.runtime.options.enable_task_migration) {
-                self.runtime.idle_mask_mutex.lock();
-                self.runtime.idle_mask |= my_bit;
-                self.runtime.idle_mask_mutex.unlock();
-            }
 
             // Ensure there's no more work to be run
             if (checkAboutForWork(self, check_ready)) {
-                if (self.runtime.options.enable_task_migration) {
-                    self.runtime.idle_mask_mutex.lock();
-                    self.runtime.idle_mask &= ~my_bit;
-                    self.runtime.idle_mask_mutex.unlock();
-                }
                 try self.loop.run(.no_wait);
             } else {
-                try self.loop.run(.once);
                 if (self.runtime.options.enable_task_migration) {
                     self.runtime.idle_mask_mutex.lock();
-                    self.runtime.idle_mask &= ~my_bit;
+                    self.runtime.idle_mask |= my_bit;
                     self.runtime.idle_mask_mutex.unlock();
-                    _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .acquire);
+                }
+
+                // We've set ourselves to idle but work could still come in
+                // One more check
+                if (checkAboutForWork(self, check_ready)) {
+                    if (self.runtime.options.enable_task_migration) {
+                        self.runtime.idle_mask_mutex.lock();
+                        self.runtime.idle_mask &= ~my_bit;
+                        self.runtime.idle_mask_mutex.unlock();
+                        _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .acquire);
+                    }
+                    try self.loop.run(.no_wait);
+                } else {
+                    try self.loop.run(.once);
+                    if (self.runtime.options.enable_task_migration) {
+                        self.runtime.idle_mask_mutex.lock();
+                        self.runtime.idle_mask &= ~my_bit;
+                        self.runtime.idle_mask_mutex.unlock();
+                        _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .acquire);
+                    }
                 }
             }
 
@@ -608,6 +611,7 @@ pub const Executor = struct {
 
     fn scheduleTaskLocal(self: *Executor, task: *AnyTask) void {
         if (task == &self.main_task) return;
+        std.debug.assert(getCurrentExecutor() == self);
 
         const wait_node = &task.awaitable.wait_node;
         self.queue_pool[self.push_cursor].push(wait_node);
@@ -881,6 +885,7 @@ pub const Runtime = struct {
     global_queue_count: std.atomic.Value(u32) = .init(0),
     global_queue_mutex: OsMutex = .init(),
     idle_mask: u64 = 0,
+    // TODO: replace with atomic scoped based on architecture
     idle_mask_mutex: OsMutex = .init(),
     searchers: std.atomic.Value(u32) = .init(0),
     loop_group: ev.LoopGroup = .{},
