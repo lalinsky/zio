@@ -460,20 +460,25 @@ pub const Executor = struct {
             // Set ourselves as idle before scanning for work.
             const my_bit = @as(u64, 1) << @as(u6, @intCast(self.id));
             if (self.runtime.options.enable_task_migration) {
-                _ = self.runtime.idle_mask.fetchOr(my_bit, .seq_cst);
+                self.runtime.idle_mask_mutex.lock();
+                self.runtime.idle_mask |= my_bit;
+                self.runtime.idle_mask_mutex.unlock();
             }
 
             // Ensure there's no more work to be run
             if (checkAboutForWork(self, check_ready)) {
                 if (self.runtime.options.enable_task_migration) {
-                    _ = self.runtime.idle_mask.fetchAnd(~my_bit, .seq_cst);
-                    _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .acquire);
+                    self.runtime.idle_mask_mutex.lock();
+                    self.runtime.idle_mask &= ~my_bit;
+                    self.runtime.idle_mask_mutex.unlock();
                 }
                 try self.loop.run(.no_wait);
             } else {
                 try self.loop.run(.once);
                 if (self.runtime.options.enable_task_migration) {
-                    _ = self.runtime.idle_mask.fetchAnd(~my_bit, .seq_cst);
+                    self.runtime.idle_mask_mutex.lock();
+                    self.runtime.idle_mask &= ~my_bit;
+                    self.runtime.idle_mask_mutex.unlock();
                     _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .acquire);
                 }
             }
@@ -860,7 +865,8 @@ pub const Runtime = struct {
     executors: std.ArrayList(*Executor) = .empty,
     global_queue: SimpleQueue(WaitNode) = .empty,
     global_queue_mutex: OsMutex = .init(),
-    idle_mask: std.atomic.Value(u64) = .init(0),
+    idle_mask: u64 = 0,
+    idle_mask_mutex: OsMutex = .init(),
     searchers: std.atomic.Value(u32) = .init(0),
     loop_group: ev.LoopGroup = .{},
     main_executor: Executor,
@@ -1064,7 +1070,9 @@ pub const Runtime = struct {
 
     pub fn wakeOne(self: *Runtime) void {
         std.debug.assert(self.options.enable_task_migration);
-        const idle = self.idle_mask.load(.acquire);
+        self.idle_mask_mutex.lock();
+        const idle = self.idle_mask;
+        self.idle_mask_mutex.unlock();
         if (idle == 0) return; // Everyone is busy
 
         // Try to claim the "searcher" token so only one thread wakes up
