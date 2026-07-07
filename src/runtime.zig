@@ -467,6 +467,7 @@ pub const Executor = struct {
             if (checkAboutForWork(self, check_ready)) {
                 if (self.runtime.options.enable_task_migration) {
                     _ = self.runtime.idle_mask.fetchAnd(~my_bit, .seq_cst);
+                    _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .acquire);
                 }
                 try self.loop.run(.no_wait);
             } else {
