@@ -517,6 +517,8 @@ pub const Executor = struct {
         // Maximum tasks to run before forcing an event loop tick (from Go's scheduler)
         const EVENT_INTERVAL = 61;
 
+        dbgCheckPC(self, "getNextTask:entry");
+
         // Force event loop tick after running EVENT_INTERVAL tasks
         if (self.tick_task_count >= EVENT_INTERVAL) {
             return null;
@@ -528,8 +530,10 @@ pub const Executor = struct {
         // re-readied itself, so a self-looping task stays I/O-responsive. A task
         // that isn't runnable is left in place and we return null (poll first).
         const node = self.run_queue.popIf(self, isRunnableThisTick) orelse return null;
+        dbgCheckPC(self, "getNextTask:after-popIf");
         const task = AnyTask.fromWaitNode(node);
         task.last_run_tick = self.current_tick;
+        dbgCheckPC(self, "getNextTask:after-lastruntick");
         self.tick_task_count += 1;
         return task;
     }
