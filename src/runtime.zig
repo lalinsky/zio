@@ -5,6 +5,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
+const zio_options = @import("zio_options");
 
 const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
@@ -85,8 +86,11 @@ pub const RuntimeOptions = struct {
     /// Set to false when creating runtimes in background threads that should not block
     /// the creating thread in an event loop. Requires executors >= 1 to have any workers.
     enable_main_executor: bool = true,
-    /// Allow tasks to migrate between executors when true.
-    enable_task_migration: bool = true,
+    /// Allow tasks to migrate between executors when true. Requires migration
+    /// support to be compiled in (the `task-migration` build option, default on);
+    /// enabling it in a build compiled without support is an error at init.
+    /// Defaults to whether support is compiled in.
+    enable_task_migration: bool = zio_options.task_migration,
     /// DNS resolver configuration.
     dns: DnsOptions = .{},
 };
@@ -581,7 +585,7 @@ pub const Executor = struct {
             // migrate to the current executor (for cache locality with the waker).
             // The .new check can be removed once we have work stealing to rebalance
             // load (see https://github.com/lalinsky/zio/issues/460).
-            if (old.tag != .new and current_exec.runtime == home_exec.runtime and home_exec.runtime.options.enable_task_migration) {
+            if (zio_options.task_migration and old.tag != .new and current_exec.runtime == home_exec.runtime and home_exec.runtime.options.enable_task_migration) {
                 // Migrate to the current executor
                 task.last_run_tick = 0;
                 current_exec.scheduleTaskLocal(task);
@@ -815,6 +819,11 @@ pub const Runtime = struct {
     }
 
     pub fn initStatic(self: *Runtime, allocator: Allocator, options: RuntimeOptions) !void {
+        // Task migration can only be enabled at runtime if it was compiled in.
+        if (!zio_options.task_migration and options.enable_task_migration) {
+            return error.TaskMigrationNotCompiledIn;
+        }
+
         const num_executors = options.executors.resolve();
         const num_workers = if (options.enable_main_executor) num_executors - 1 else num_executors;
 
@@ -1340,6 +1349,16 @@ test "runtime: sleep from main allows tasks to run" {
     }
 
     try std.testing.expectEqual(10, counter);
+}
+
+test "runtime: enabling task migration at runtime errors when compiled out" {
+    // Only meaningful in a build without migration support; a normal build
+    // compiles migration in, so there is nothing to reject.
+    if (zio_options.task_migration) return error.SkipZigTest;
+    try std.testing.expectError(
+        error.TaskMigrationNotCompiledIn,
+        Runtime.init(std.testing.allocator, .{ .enable_task_migration = true }),
+    );
 }
 
 test "runtime: multi-threaded execution with 2 executors" {
