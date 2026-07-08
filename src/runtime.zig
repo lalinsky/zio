@@ -548,6 +548,7 @@ pub const Executor = struct {
         const text_addr = @intFromPtr(&assertTaskPtr);
         const image_base = text_addr & ~@as(usize, 0x3FFF_FFFF); // align down 1 GiB
         if (@intFromPtr(task) >= image_base) {
+            dbgDumpCleanupHistory();
             std.debug.panic("{s}: bogus task ptr {*} (>= image_base 0x{x}, text 0x{x})", .{ where, task, image_base, text_addr });
         }
     }
@@ -661,10 +662,12 @@ pub const Executor = struct {
         switch (self.pending_cleanup) {
             .none => {},
             .reschedule => |task| {
+                dbgRecCleanup(10, @intFromPtr(task), self.current_tick, @intFromPtr(self));
                 self.pending_cleanup = .none;
                 self.scheduleTaskLocal(task);
             },
             .park => |task| {
+                dbgRecCleanup(11, @intFromPtr(task), self.current_tick, @intFromPtr(self));
                 self.pending_cleanup = .none;
                 // Context is now saved — safe to make the task wakeable.
                 // Atomically check the awaken bit and either:
@@ -693,6 +696,7 @@ pub const Executor = struct {
                 }
             },
             .finish => |task| {
+                dbgRecCleanup(12, @intFromPtr(task), self.current_tick, @intFromPtr(self));
                 self.pending_cleanup = .none;
                 task.state.store(.{ .tag = .finished }, .release);
                 if (task.coro.context.stack_info.allocation_len > 0) {
@@ -721,6 +725,31 @@ pub const Executor = struct {
         }
     }
 };
+
+// DEBUG(#460): low-overhead history ring for pending_cleanup set/process ops.
+// All calls happen on the single executor thread (yield/startFn/processCleanup),
+// so no synchronization is needed. Dumped from assertTaskPtr at the crash.
+const DbgCleanupRec = struct { site: u8 = 0, ptr: usize = 0, tick: u32 = 0, exec: usize = 0 };
+var dbg_cleanup_ring: [64]DbgCleanupRec = @splat(.{});
+var dbg_cleanup_pos: usize = 0;
+
+/// site codes: 1=yield set .park, 2=yield set .reschedule, 3=startFn set .finish,
+/// 10=proc .reschedule, 11=proc .park, 12=proc .finish, 13=proc .none
+pub fn dbgRecCleanup(site: u8, ptr: usize, tick: u32, exec: usize) void {
+    dbg_cleanup_ring[dbg_cleanup_pos & 63] = .{ .site = site, .ptr = ptr, .tick = tick, .exec = exec };
+    dbg_cleanup_pos +%= 1;
+}
+
+fn dbgDumpCleanupHistory() void {
+    const n = @min(dbg_cleanup_pos, dbg_cleanup_ring.len);
+    std.log.info("=== pending_cleanup history (oldest→newest), {} entries ===", .{n});
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const idx = (dbg_cleanup_pos -% n +% i) & 63;
+        const r = dbg_cleanup_ring[idx];
+        std.log.info("DBG site={} ptr=0x{x} tick={} exec=0x{x}", .{ r.site, r.ptr, r.tick, r.exec });
+    }
+}
 
 /// Get the current thread's executor, or null if not in executor context.
 pub noinline fn getCurrentExecutorOrNull() ?*Executor {

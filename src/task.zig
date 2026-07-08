@@ -294,6 +294,10 @@ pub const AnyTask = struct {
             .park => .{ .park = self },
             .reschedule => .{ .reschedule = self },
         };
+        runtime.dbgRecCleanup(switch (mode) {
+            .park => 1,
+            .reschedule => 2,
+        }, @intFromPtr(self), executor.current_tick, @intFromPtr(executor));
 
         if (self == &executor.main_task) {
             // Main task enters the run loop instead of context switching
@@ -500,6 +504,7 @@ pub const AnyTask = struct {
         // Re-fetch executor — task may have migrated during execution
         executor = getCurrentExecutor();
         executor.pending_cleanup = .{ .finish = self };
+        runtime.dbgRecCleanup(3, @intFromPtr(self), executor.current_tick, @intFromPtr(executor));
         executor.switchOut(&self.coro);
         unreachable;
     }
