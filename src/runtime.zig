@@ -544,7 +544,7 @@ pub const Executor = struct {
     /// against a known .text address (this fn) and panic with a backtrace at the
     /// push site so we learn WHO scheduled the garbage, instead of crashing later
     /// in getNextTask.
-    fn assertTaskPtr(task: *AnyTask, where: []const u8) void {
+    pub fn assertTaskPtr(task: *AnyTask, where: []const u8) void {
         const text_addr = @intFromPtr(&assertTaskPtr);
         const image_base = text_addr & ~@as(usize, 0x3FFF_FFFF); // align down 1 GiB
         if (@intFromPtr(task) >= image_base) {
