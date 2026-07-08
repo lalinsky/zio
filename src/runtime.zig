@@ -659,10 +659,19 @@ pub const Executor = struct {
     /// - yield resume (after yieldTo returns)
     /// - run loop (after step returns)
     pub fn processCleanup(self: *Executor) void {
-        // DEBUG(#460): capture the raw pending_cleanup before we consume it, so the
-        // bogus-task dump below can show exactly what was stored and where.
+        // DEBUG(#460): before consuming pending_cleanup, if its payload is bogus
+        // (points into the image), snapshot the executor bytes around the field so
+        // the crash dump shows the real stomp pattern + neighbors (not the post-
+        // consume .none). Near-zero cost on the normal path (one range check).
         dbg_last_pc = self.pending_cleanup;
         dbg_last_pc_exec = self;
+        switch (self.pending_cleanup) {
+            .reschedule, .park, .finish => |t| {
+                const image_base = @intFromPtr(&assertTaskPtr) & ~@as(usize, 0x3FFF_FFFF);
+                if (@intFromPtr(t) >= image_base) dbgSnapshotExecutor(self);
+            },
+            .none => {},
+        }
         switch (self.pending_cleanup) {
             .none => {},
             .reschedule => |task| {
@@ -734,6 +743,23 @@ pub const Executor = struct {
 // contiguous stomp, etc.) without perturbing timing on the hot path.
 var dbg_last_pc: Executor.TaskCleanup = .none;
 var dbg_last_pc_exec: ?*Executor = null;
+// Snapshot of executor bytes around pending_cleanup, taken the moment a bogus
+// payload is first observed (before consume), so the dump shows the true stomp.
+const dbg_snap_span = 192;
+var dbg_snap: [dbg_snap_span]u8 = @splat(0);
+var dbg_snap_off: usize = 0; // executor offset the snapshot starts at
+var dbg_snapped = false;
+
+fn dbgSnapshotExecutor(exec: *Executor) void {
+    if (dbg_snapped) return;
+    const pc_off = @intFromPtr(&exec.pending_cleanup) - @intFromPtr(exec);
+    const start = (if (pc_off > 64) pc_off - 64 else 0) & ~@as(usize, 7);
+    const base: [*]const u8 = @ptrCast(exec);
+    const n = @min(dbg_snap_span, @sizeOf(Executor) - start);
+    @memcpy(dbg_snap[0..n], base[start..][0..n]);
+    dbg_snap_off = start;
+    dbg_snapped = true;
+}
 
 fn dbgDumpCleanupHistory() void {
     const exec = dbg_last_pc_exec orelse {
@@ -746,22 +772,23 @@ fn dbgDumpCleanupHistory() void {
         .reschedule, .park, .finish => |t| @intFromPtr(t),
     };
     std.log.info("DBG pending_cleanup: tag={} payload=0x{x}", .{ tag, payload });
-    std.log.info("DBG exec=0x{x} &pending_cleanup=0x{x} &main_task=0x{x} current_task=0x{x}", .{
-        @intFromPtr(exec),
-        @intFromPtr(&exec.pending_cleanup),
-        @intFromPtr(&exec.main_task),
-        @intFromPtr(exec.current_task),
+    std.log.info("DBG exec=0x{x} runtime=0x{x} current_task=0x{x}", .{
+        @intFromPtr(exec), @intFromPtr(exec.runtime), @intFromPtr(exec.current_task),
     });
-    // Dump the executor as raw u64 words around pending_cleanup so we can see if a
-    // neighbor was clobbered (contiguous stomp) and match the garbage to a field.
-    const base: [*]const u8 = @ptrCast(exec);
-    const pc_off = @intFromPtr(&exec.pending_cleanup) - @intFromPtr(exec);
-    const start = if (pc_off > 64) pc_off - 64 else 0;
-    var off = start & ~@as(usize, 7);
-    const end = @min(pc_off + 96, @sizeOf(Executor));
-    while (off < end) : (off += 8) {
-        const w = std.mem.readInt(u64, base[off..][0..8], .little);
-        std.log.info("DBG exec+0x{x}: 0x{x}", .{ off, w });
+    // Comptime field offsets so we can map snapshot words to fields.
+    inline for (.{ "run_queue", "overflow", "tick_task_count", "current_tick", "last_tick_time", "pending_cleanup", "runtime", "main_task", "shutdown", "current_task" }) |f| {
+        std.log.info("DBG off {s} = 0x{x}", .{ f, @offsetOf(Executor, f) });
+    }
+    std.log.info("DBG sizeOf(Executor)=0x{x} sizeOf(Loop)=0x{x} runq.buffer off within run_queue", .{ @sizeOf(Executor), @sizeOf(ev.Loop) });
+    // Snapshot taken before consume (true stomp pattern + neighbors).
+    if (dbg_snapped) {
+        var i: usize = 0;
+        while (i + 8 <= dbg_snap_span) : (i += 8) {
+            const w = std.mem.readInt(u64, dbg_snap[i..][0..8], .little);
+            std.log.info("DBG snap exec+0x{x}: 0x{x}", .{ dbg_snap_off + i, w });
+        }
+    } else {
+        std.log.info("DBG: no snapshot", .{});
     }
 }
 
