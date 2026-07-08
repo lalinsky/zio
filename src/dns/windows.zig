@@ -23,6 +23,7 @@ const LookupContext = struct {
 };
 
 fn completionCallback(dwError: u32, _: u32, lpOverlapped: ?*windows.OVERLAPPED) callconv(.winapi) void {
+    std.log.info("completionCallback {} {}", .{ lpOverlapped.?, dwError });
     const ctx: *LookupContext = @fieldParentPtr("overlapped", lpOverlapped.?);
     ctx.err = dwError;
     ctx.waiter.signal();
@@ -65,6 +66,7 @@ pub fn lookup(
     };
     var cancel_handle: windows.HANDLE = undefined;
 
+    std.log.info("Calling GetAddrInfoExW", .{});
     const rc = windows.GetAddrInfoExW(
         @ptrCast(&name_wide),
         @ptrCast(&port_wide),
@@ -77,6 +79,7 @@ pub fn lookup(
         completionCallback,
         &cancel_handle,
     );
+    std.log.info("got {} from GetAddrInfoExW", .{rc});
 
     if (rc == 0) {
         return fillBuffers(storage, options, result);
@@ -89,12 +92,15 @@ pub fn lookup(
     // Async path: wait for the completion callback to signal
     ctx.waiter.wait(1, .allow_cancel) catch {
         // Cancelled — ask Windows to cancel, then wait for the callback
+        std.log.info("Calling GetAddrInfoExCancel", .{});
         _ = windows.GetAddrInfoExCancel(&cancel_handle);
         ctx.waiter.wait(1, .no_cancel);
 
         if (result) |r| windows.FreeAddrInfoExW(r);
         return error.Canceled;
     };
+
+    std.log.info("GetAddrInfoEx done {}", .{ctx.err});
 
     if (ctx.err != 0) {
         if (result) |r| windows.FreeAddrInfoExW(r);

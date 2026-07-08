@@ -1467,10 +1467,12 @@ test "tcpConnectToHost: basic" {
             std.log.info("Server listening on port {}\n", .{server.socket.address.ip.getPort()});
 
             try server_port.send(server.socket.address.ip.getPort());
+            std.log.info("Accepting\n", .{});
 
             var stream = try server.accept(.{});
             defer stream.close();
 
+            std.log.info("Accepted\n", .{});
             var read_buffer: [256]u8 = undefined;
             var reader = stream.reader(&read_buffer);
 
@@ -1487,6 +1489,7 @@ test "tcpConnectToHost: basic" {
             var stream = try tcpConnectToHost("localhost", port, .{});
             defer stream.close();
 
+            std.log.info("Connected\n", .{});
             var write_buffer: [256]u8 = undefined;
             var writer = stream.writer(&write_buffer);
 
