@@ -550,7 +550,20 @@ pub const Executor = struct {
 
         std.debug.assert(getCurrentExecutorOrNull() == self);
 
+        assertTaskPtr(task, "scheduleTaskLocal");
         self.run_queue.push(&task.awaitable.wait_node);
+    }
+
+    /// DEBUG(#460): a valid task lives on the heap far below the ASLR image base;
+    /// the corrupt pointers we see are code addresses. Panic at the push site with
+    /// the pending_cleanup value + executor neighbor words so we can locate the stomp.
+    pub fn assertTaskPtr(task: *AnyTask, where: []const u8) void {
+        const text_addr = @intFromPtr(&assertTaskPtr);
+        const image_base = text_addr & ~@as(usize, 0x3FFF_FFFF);
+        if (@intFromPtr(task) >= image_base) {
+            dbgDump(text_addr, image_base);
+            std.debug.panic("{s}: bogus task ptr {*} (image_base 0x{x})", .{ where, task, image_base });
+        }
     }
 
     /// Schedule a task from another thread (or no executor context) onto its home
@@ -639,6 +652,10 @@ pub const Executor = struct {
     /// - yield resume (after yieldTo returns)
     /// - run loop (after step returns)
     pub fn processCleanup(self: *Executor) void {
+        // DEBUG(#460): record the raw pending_cleanup + executor for the crash dump
+        // (2 writes; keeps the reliable-repro timing).
+        dbg_last_pc = self.pending_cleanup;
+        dbg_last_pc_exec = self;
         switch (self.pending_cleanup) {
             .none => {},
             .reschedule => |task| {
@@ -702,6 +719,36 @@ pub const Executor = struct {
         }
     }
 };
+
+// DEBUG(#460): captured at the top of processCleanup (2 writes; reliable repro).
+var dbg_last_pc: Executor.TaskCleanup = .none;
+var dbg_last_pc_exec: ?*Executor = null;
+
+fn dbgDump(text_addr: usize, image_base: usize) void {
+    const tag = @intFromEnum(std.meta.activeTag(dbg_last_pc));
+    const payload: usize = switch (dbg_last_pc) {
+        .none => 0,
+        .reschedule, .park, .finish => |t| @intFromPtr(t),
+    };
+    std.log.info("DBG text=0x{x} image_base=0x{x}", .{ text_addr, image_base });
+    std.log.info("DBG pending_cleanup: tag={} payload=0x{x}", .{ tag, payload });
+    inline for (.{ "run_queue", "overflow", "tick_task_count", "current_tick", "last_tick_time", "pending_cleanup", "runtime", "main_task", "shutdown", "stack_pool_eviction_timer", "current_task" }) |f| {
+        std.log.info("DBG off {s} = 0x{x}", .{ f, @offsetOf(Executor, f) });
+    }
+    const exec = dbg_last_pc_exec orelse return;
+    std.log.info("DBG exec=0x{x} runtime=0x{x} current_task=0x{x} sizeof(Executor)=0x{x}", .{
+        @intFromPtr(exec), @intFromPtr(exec.runtime), @intFromPtr(exec.current_task), @sizeOf(Executor),
+    });
+    // Live read of executor words around pending_cleanup (neighbors aren't consumed).
+    const base: [*]const u8 = @ptrCast(exec);
+    const pc_off = @offsetOf(Executor, "pending_cleanup");
+    var off: usize = (if (pc_off > 96) pc_off - 96 else 0) & ~@as(usize, 7);
+    const end = @min(pc_off + 128, @sizeOf(Executor));
+    while (off + 8 <= end) : (off += 8) {
+        const w = std.mem.readInt(u64, base[off..][0..8], .little);
+        std.log.info("DBG exec+0x{x}: 0x{x}", .{ off, w });
+    }
+}
 
 /// Get the current thread's executor, or null if not in executor context.
 pub noinline fn getCurrentExecutorOrNull() ?*Executor {
