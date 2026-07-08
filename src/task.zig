@@ -274,12 +274,6 @@ pub const AnyTask = struct {
     pub fn yield(self: *AnyTask, comptime mode: YieldMode, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         var executor = getCurrentExecutor();
 
-        // DEBUG(#460): bisect where the garbage *AnyTask enters pending_cleanup.
-        // If this fires, `self` was already garbage at yield entry (corrupt
-        // waiter/task). If instead only the processCleanup site (below) fires, the
-        // pending_cleanup field was corrupted/stale after being set here.
-        Executor.assertTaskPtr(self, "yield entry (self)");
-
         // Check and consume cancellation flag before yielding (unless no_cancel).
         // On cancel: restore clean .ready state (clearing any awaken bit) before returning.
         if (cancel_mode == .allow_cancel) {
@@ -294,10 +288,6 @@ pub const AnyTask = struct {
             .park => .{ .park = self },
             .reschedule => .{ .reschedule = self },
         };
-        runtime.dbgRecCleanup(switch (mode) {
-            .park => 1,
-            .reschedule => 2,
-        }, @intFromPtr(self), executor.current_tick, @intFromPtr(executor));
 
         if (self == &executor.main_task) {
             // Main task enters the run loop instead of context switching
@@ -504,7 +494,6 @@ pub const AnyTask = struct {
         // Re-fetch executor — task may have migrated during execution
         executor = getCurrentExecutor();
         executor.pending_cleanup = .{ .finish = self };
-        runtime.dbgRecCleanup(3, @intFromPtr(self), executor.current_tick, @intFromPtr(executor));
         executor.switchOut(&self.coro);
         unreachable;
     }

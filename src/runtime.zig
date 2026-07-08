@@ -659,15 +659,17 @@ pub const Executor = struct {
     /// - yield resume (after yieldTo returns)
     /// - run loop (after step returns)
     pub fn processCleanup(self: *Executor) void {
+        // DEBUG(#460): capture the raw pending_cleanup before we consume it, so the
+        // bogus-task dump below can show exactly what was stored and where.
+        dbg_last_pc = self.pending_cleanup;
+        dbg_last_pc_exec = self;
         switch (self.pending_cleanup) {
             .none => {},
             .reschedule => |task| {
-                dbgRecCleanup(10, @intFromPtr(task), self.current_tick, @intFromPtr(self));
                 self.pending_cleanup = .none;
                 self.scheduleTaskLocal(task);
             },
             .park => |task| {
-                dbgRecCleanup(11, @intFromPtr(task), self.current_tick, @intFromPtr(self));
                 self.pending_cleanup = .none;
                 // Context is now saved — safe to make the task wakeable.
                 // Atomically check the awaken bit and either:
@@ -696,7 +698,6 @@ pub const Executor = struct {
                 }
             },
             .finish => |task| {
-                dbgRecCleanup(12, @intFromPtr(task), self.current_tick, @intFromPtr(self));
                 self.pending_cleanup = .none;
                 task.state.store(.{ .tag = .finished }, .release);
                 if (task.coro.context.stack_info.allocation_len > 0) {
@@ -726,28 +727,41 @@ pub const Executor = struct {
     }
 };
 
-// DEBUG(#460): low-overhead history ring for pending_cleanup set/process ops.
-// All calls happen on the single executor thread (yield/startFn/processCleanup),
-// so no synchronization is needed. Dumped from assertTaskPtr at the crash.
-const DbgCleanupRec = struct { site: u8 = 0, ptr: usize = 0, tick: u32 = 0, exec: usize = 0 };
-var dbg_cleanup_ring: [64]DbgCleanupRec = @splat(.{});
-var dbg_cleanup_pos: usize = 0;
-
-/// site codes: 1=yield set .park, 2=yield set .reschedule, 3=startFn set .finish,
-/// 10=proc .reschedule, 11=proc .park, 12=proc .finish, 13=proc .none
-pub fn dbgRecCleanup(site: u8, ptr: usize, tick: u32, exec: usize) void {
-    dbg_cleanup_ring[dbg_cleanup_pos & 63] = .{ .site = site, .ptr = ptr, .tick = tick, .exec = exec };
-    dbg_cleanup_pos +%= 1;
-}
+// DEBUG(#460): crash-time-only diagnostics (zero steady-state overhead). We record
+// the raw pending_cleanup and its executor at the top of processCleanup; on a bogus
+// task pointer we dump them plus neighboring executor bytes so we can identify what
+// the garbage value actually is (a saved context field, an adjacent struct field, a
+// contiguous stomp, etc.) without perturbing timing on the hot path.
+var dbg_last_pc: Executor.TaskCleanup = .none;
+var dbg_last_pc_exec: ?*Executor = null;
 
 fn dbgDumpCleanupHistory() void {
-    const n = @min(dbg_cleanup_pos, dbg_cleanup_ring.len);
-    std.log.info("=== pending_cleanup history (oldest→newest), {} entries ===", .{n});
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        const idx = (dbg_cleanup_pos -% n +% i) & 63;
-        const r = dbg_cleanup_ring[idx];
-        std.log.info("DBG site={} ptr=0x{x} tick={} exec=0x{x}", .{ r.site, r.ptr, r.tick, r.exec });
+    const exec = dbg_last_pc_exec orelse {
+        std.log.info("DBG: no executor recorded", .{});
+        return;
+    };
+    const tag = @intFromEnum(std.meta.activeTag(dbg_last_pc));
+    const payload: usize = switch (dbg_last_pc) {
+        .none => 0,
+        .reschedule, .park, .finish => |t| @intFromPtr(t),
+    };
+    std.log.info("DBG pending_cleanup: tag={} payload=0x{x}", .{ tag, payload });
+    std.log.info("DBG exec=0x{x} &pending_cleanup=0x{x} &main_task=0x{x} current_task=0x{x}", .{
+        @intFromPtr(exec),
+        @intFromPtr(&exec.pending_cleanup),
+        @intFromPtr(&exec.main_task),
+        @intFromPtr(exec.current_task),
+    });
+    // Dump the executor as raw u64 words around pending_cleanup so we can see if a
+    // neighbor was clobbered (contiguous stomp) and match the garbage to a field.
+    const base: [*]const u8 = @ptrCast(exec);
+    const pc_off = @intFromPtr(&exec.pending_cleanup) - @intFromPtr(exec);
+    const start = if (pc_off > 64) pc_off - 64 else 0;
+    var off = start & ~@as(usize, 7);
+    const end = @min(pc_off + 96, @sizeOf(Executor));
+    while (off < end) : (off += 8) {
+        const w = std.mem.readInt(u64, base[off..][0..8], .little);
+        std.log.info("DBG exec+0x{x}: 0x{x}", .{ off, w });
     }
 }
 
