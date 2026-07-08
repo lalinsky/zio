@@ -732,6 +732,13 @@ fn dbgDump(text_addr: usize, image_base: usize) void {
     };
     std.log.info("DBG text=0x{x} image_base=0x{x}", .{ text_addr, image_base });
     std.log.info("DBG pending_cleanup: tag={} payload=0x{x}", .{ tag, payload });
+    // Symbolize the bogus payload so we can see exactly what code it points to.
+    if (payload != 0) {
+        var addrs = [_]usize{payload};
+        const trace = std.debug.StackTrace{ .return_addresses = &addrs, .skipped = .none };
+        std.log.info("DBG symbolizing payload 0x{x}:", .{payload});
+        std.debug.dumpStackTrace(&trace);
+    }
     std.log.info("DBG &Waiter.callback=0x{x} Completion.callback_off=0x{x} Completion.op_off=0x{x} sizeof(Completion)=0x{x}", .{
         @intFromPtr(&Waiter.callback), @offsetOf(ev.Completion, "callback"), @offsetOf(ev.Completion, "op"), @sizeOf(ev.Completion),
     });
