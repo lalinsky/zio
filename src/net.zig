@@ -1464,16 +1464,13 @@ test "tcpConnectToHost: basic" {
             const server = try addr.listen(.{});
             defer server.close();
 
-            std.log.info("TASK ServerTask.run = {*}", .{getCurrentTask()});
             std.log.info("Server listening on port {}\n", .{server.socket.address.ip.getPort()});
 
             try server_port.send(server.socket.address.ip.getPort());
-            std.log.info("Accepting\n", .{});
 
             var stream = try server.accept(.{});
             defer stream.close();
 
-            std.log.info("Accepted\n", .{});
             var read_buffer: [256]u8 = undefined;
             var reader = stream.reader(&read_buffer);
 
@@ -1484,14 +1481,12 @@ test "tcpConnectToHost: basic" {
 
     const ClientTask = struct {
         fn run(server_port: *Channel(u16)) !void {
-            std.log.info("TASK ClientTask.run = {*}", .{getCurrentTask()});
             const port = try server_port.receive();
             std.log.info("Client connecting to port {}\n", .{port});
 
             var stream = try tcpConnectToHost("localhost", port, .{});
             defer stream.close();
 
-            std.log.info("Connected\n", .{});
             var write_buffer: [256]u8 = undefined;
             var writer = stream.writer(&write_buffer);
 

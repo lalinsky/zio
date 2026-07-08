@@ -538,21 +538,6 @@ pub const Executor = struct {
         return AnyTask.fromWaitNode(node).last_run_tick != self.current_tick;
     }
 
-    /// DEBUG(#460): detect a bogus task pointer that landed in the executable image.
-    /// Valid tasks live on the heap (e.g. 0x1e1…), far below the ASLR image base;
-    /// the corrupt pointers we see are code-segment addresses (0x7ff7…). Compare
-    /// against a known .text address (this fn) and panic with a backtrace at the
-    /// push site so we learn WHO scheduled the garbage, instead of crashing later
-    /// in getNextTask.
-    pub fn assertTaskPtr(task: *AnyTask, where: []const u8) void {
-        const text_addr = @intFromPtr(&assertTaskPtr);
-        const image_base = text_addr & ~@as(usize, 0x3FFF_FFFF); // align down 1 GiB
-        if (@intFromPtr(task) >= image_base) {
-            dbgDumpCleanupHistory();
-            std.debug.panic("{s}: bogus task ptr {*} (>= image_base 0x{x}, text 0x{x})", .{ where, task, image_base, text_addr });
-        }
-    }
-
     /// Schedule a task on this executor's local run queue. MUST run on the owning
     /// executor thread — the single-pusher invariant is what makes the ring pop
     /// (and, later, steal) protocols correct. The ring handles overflow to
@@ -565,8 +550,6 @@ pub const Executor = struct {
 
         std.debug.assert(getCurrentExecutorOrNull() == self);
 
-        assertTaskPtr(task, "scheduleTaskLocal");
-        std.log.info("PUSH local  task={*} exec={} tick={}", .{ task, self.id, self.current_tick });
         self.run_queue.push(&task.awaitable.wait_node);
     }
 
@@ -577,8 +560,6 @@ pub const Executor = struct {
     fn scheduleTaskRemote(self: *Executor, task: *AnyTask) void {
         std.debug.assert(task != &self.main_task);
 
-        assertTaskPtr(task, "scheduleTaskRemote");
-        std.log.info("PUSH remote task={*} exec={}", .{ task, self.id });
         self.run_queue.overflow.push(&task.awaitable.wait_node);
         self.loop.wake();
     }
@@ -587,7 +568,6 @@ pub const Executor = struct {
     /// Atomically transitions task state to .ready and schedules it for execution.
     /// May migrate the task to the current executor for cache locality.
     pub fn scheduleTask(task: *AnyTask) void {
-        assertTaskPtr(task, "scheduleTask");
         var old = task.state.load(.acquire);
         while (true) {
             switch (old.tag) {
@@ -659,19 +639,6 @@ pub const Executor = struct {
     /// - yield resume (after yieldTo returns)
     /// - run loop (after step returns)
     pub fn processCleanup(self: *Executor) void {
-        // DEBUG(#460): before consuming pending_cleanup, if its payload is bogus
-        // (points into the image), snapshot the executor bytes around the field so
-        // the crash dump shows the real stomp pattern + neighbors (not the post-
-        // consume .none). Near-zero cost on the normal path (one range check).
-        dbg_last_pc = self.pending_cleanup;
-        dbg_last_pc_exec = self;
-        switch (self.pending_cleanup) {
-            .reschedule, .park, .finish => |t| {
-                const image_base = @intFromPtr(&assertTaskPtr) & ~@as(usize, 0x3FFF_FFFF);
-                if (@intFromPtr(t) >= image_base) dbgSnapshotExecutor(self);
-            },
-            .none => {},
-        }
         switch (self.pending_cleanup) {
             .none => {},
             .reschedule => |task| {
@@ -735,62 +702,6 @@ pub const Executor = struct {
         }
     }
 };
-
-// DEBUG(#460): crash-time-only diagnostics (zero steady-state overhead). We record
-// the raw pending_cleanup and its executor at the top of processCleanup; on a bogus
-// task pointer we dump them plus neighboring executor bytes so we can identify what
-// the garbage value actually is (a saved context field, an adjacent struct field, a
-// contiguous stomp, etc.) without perturbing timing on the hot path.
-var dbg_last_pc: Executor.TaskCleanup = .none;
-var dbg_last_pc_exec: ?*Executor = null;
-// Snapshot of executor bytes around pending_cleanup, taken the moment a bogus
-// payload is first observed (before consume), so the dump shows the true stomp.
-const dbg_snap_span = 192;
-var dbg_snap: [dbg_snap_span]u8 = @splat(0);
-var dbg_snap_off: usize = 0; // executor offset the snapshot starts at
-var dbg_snapped = false;
-
-fn dbgSnapshotExecutor(exec: *Executor) void {
-    if (dbg_snapped) return;
-    const pc_off = @intFromPtr(&exec.pending_cleanup) - @intFromPtr(exec);
-    const start = (if (pc_off > 64) pc_off - 64 else 0) & ~@as(usize, 7);
-    const base: [*]const u8 = @ptrCast(exec);
-    const n = @min(dbg_snap_span, @sizeOf(Executor) - start);
-    @memcpy(dbg_snap[0..n], base[start..][0..n]);
-    dbg_snap_off = start;
-    dbg_snapped = true;
-}
-
-fn dbgDumpCleanupHistory() void {
-    const exec = dbg_last_pc_exec orelse {
-        std.log.info("DBG: no executor recorded", .{});
-        return;
-    };
-    const tag = @intFromEnum(std.meta.activeTag(dbg_last_pc));
-    const payload: usize = switch (dbg_last_pc) {
-        .none => 0,
-        .reschedule, .park, .finish => |t| @intFromPtr(t),
-    };
-    std.log.info("DBG pending_cleanup: tag={} payload=0x{x}", .{ tag, payload });
-    std.log.info("DBG exec=0x{x} runtime=0x{x} current_task=0x{x}", .{
-        @intFromPtr(exec), @intFromPtr(exec.runtime), @intFromPtr(exec.current_task),
-    });
-    // Comptime field offsets so we can map snapshot words to fields.
-    inline for (.{ "run_queue", "overflow", "tick_task_count", "current_tick", "last_tick_time", "pending_cleanup", "runtime", "main_task", "shutdown", "current_task" }) |f| {
-        std.log.info("DBG off {s} = 0x{x}", .{ f, @offsetOf(Executor, f) });
-    }
-    std.log.info("DBG sizeOf(Executor)=0x{x} sizeOf(Loop)=0x{x} runq.buffer off within run_queue", .{ @sizeOf(Executor), @sizeOf(ev.Loop) });
-    // Snapshot taken before consume (true stomp pattern + neighbors).
-    if (dbg_snapped) {
-        var i: usize = 0;
-        while (i + 8 <= dbg_snap_span) : (i += 8) {
-            const w = std.mem.readInt(u64, dbg_snap[i..][0..8], .little);
-            std.log.info("DBG snap exec+0x{x}: 0x{x}", .{ dbg_snap_off + i, w });
-        }
-    } else {
-        std.log.info("DBG: no snapshot", .{});
-    }
-}
 
 /// Get the current thread's executor, or null if not in executor context.
 pub noinline fn getCurrentExecutorOrNull() ?*Executor {
