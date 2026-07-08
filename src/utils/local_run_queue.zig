@@ -27,7 +27,10 @@ const SimpleQueue = @import("simple_queue.zig").SimpleQueue;
 const OsMutex = @import("../os/thread.zig").Mutex;
 
 /// Thread-safe FIFO overflow queue: a mutex-guarded intrusive list plus an atomic
-/// length so the drain fast-path can skip the lock when empty.
+/// length so the drain fast-path can skip the lock when empty. `count` is mutated
+/// only while holding the mutex, so it always equals the queue length whenever the
+/// lock is free; lock-free readers (isEmpty/len) may see a momentarily stale value
+/// but never one that lets a drainer's fetchSub underflow.
 pub fn OverflowQueue(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -39,8 +42,8 @@ pub fn OverflowQueue(comptime T: type) type {
         /// Push a single task (cross-thread wake). Thread-safe.
         pub fn push(self: *Self, node: *T) void {
             self.mutex.lock();
+            defer self.mutex.unlock();
             self.queue.push(node);
-            self.mutex.unlock();
             _ = self.count.fetchAdd(1, .release);
         }
 
@@ -48,8 +51,8 @@ pub fn OverflowQueue(comptime T: type) type {
         pub fn pushSlice(self: *Self, nodes: []*T) void {
             if (nodes.len == 0) return;
             self.mutex.lock();
+            defer self.mutex.unlock();
             for (nodes) |n| self.queue.push(n);
-            self.mutex.unlock();
             _ = self.count.fetchAdd(nodes.len, .release);
         }
 
@@ -57,11 +60,11 @@ pub fn OverflowQueue(comptime T: type) type {
         pub fn popBatch(self: *Self, out: []*T) usize {
             if (self.count.load(.acquire) == 0) return 0;
             self.mutex.lock();
+            defer self.mutex.unlock();
             var i: usize = 0;
             while (i < out.len) : (i += 1) {
                 out[i] = self.queue.pop() orelse break;
             }
-            self.mutex.unlock();
             if (i > 0) _ = self.count.fetchSub(i, .release);
             return i;
         }
