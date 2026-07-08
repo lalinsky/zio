@@ -732,6 +732,9 @@ fn dbgDump(text_addr: usize, image_base: usize) void {
     };
     std.log.info("DBG text=0x{x} image_base=0x{x}", .{ text_addr, image_base });
     std.log.info("DBG pending_cleanup: tag={} payload=0x{x}", .{ tag, payload });
+    std.log.info("DBG &Waiter.callback=0x{x} Completion.callback_off=0x{x} Completion.op_off=0x{x} sizeof(Completion)=0x{x}", .{
+        @intFromPtr(&Waiter.callback), @offsetOf(ev.Completion, "callback"), @offsetOf(ev.Completion, "op"), @sizeOf(ev.Completion),
+    });
     inline for (.{ "run_queue", "overflow", "tick_task_count", "current_tick", "last_tick_time", "pending_cleanup", "runtime", "main_task", "shutdown", "stack_pool_eviction_timer", "current_task" }) |f| {
         std.log.info("DBG off {s} = 0x{x}", .{ f, @offsetOf(Executor, f) });
     }
