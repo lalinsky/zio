@@ -456,7 +456,9 @@ pub const Executor = struct {
             while (self.getNextTask()) |next_task| {
                 @atomicStore(*Context, &next_task.coro.parent_context_ptr, &self.main_task.coro.context, .release);
                 self.current_task = next_task;
+                dbgCheckPC(self, "run:before-step");
                 next_task.coro.step();
+                dbgCheckPC(self, "run:after-step");
                 self.current_task = null;
                 self.processCleanup();
             }
@@ -710,7 +712,9 @@ pub const Executor = struct {
         // path it is set to the target task just before the switch; on the fall-back
         // path it stays null and the run loop keeps it null until it steps a task.
         self.current_task = null;
+        dbgCheckPC(self, "switchOut:before-getNextTask");
         if (self.getNextTask()) |next_task| {
+            dbgCheckPC(self, "switchOut:after-getNextTask");
             @atomicStore(*Context, &next_task.coro.parent_context_ptr, &self.main_task.coro.context, .release);
             self.current_task = next_task;
             coro.yieldTo(&next_task.coro);
@@ -723,6 +727,24 @@ pub const Executor = struct {
 // DEBUG(#460): captured at the top of processCleanup (2 writes; reliable repro).
 var dbg_last_pc: Executor.TaskCleanup = .none;
 var dbg_last_pc_exec: ?*Executor = null;
+
+/// Check pending_cleanup for a bogus (image-range) payload and panic at the first
+/// place it appears, so we can pinpoint which task-run/switch corrupted it.
+fn dbgCheckPC(self: *Executor, where: []const u8) void {
+    const p: usize = switch (self.pending_cleanup) {
+        .none => return,
+        .reschedule, .park, .finish => |t| @intFromPtr(t),
+    };
+    const text_addr = @intFromPtr(&Executor.assertTaskPtr);
+    const image_base = text_addr & ~@as(usize, 0x3FFF_FFFF);
+    if (p >= image_base) {
+        dbg_last_pc = self.pending_cleanup;
+        dbg_last_pc_exec = self;
+        std.log.info("DBG pending_cleanup corrupt at {s} (current_task=0x{x})", .{ where, @intFromPtr(self.current_task) });
+        dbgDump(text_addr, image_base);
+        std.debug.panic("pending_cleanup corrupt at {s}: payload=0x{x}", .{ where, p });
+    }
+}
 
 fn dbgDump(text_addr: usize, image_base: usize) void {
     const tag = @intFromEnum(std.meta.activeTag(dbg_last_pc));
