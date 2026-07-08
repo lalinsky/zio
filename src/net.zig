@@ -1464,6 +1464,7 @@ test "tcpConnectToHost: basic" {
             const server = try addr.listen(.{});
             defer server.close();
 
+            std.log.info("TASK ServerTask.run = {*}", .{getCurrentTask()});
             std.log.info("Server listening on port {}\n", .{server.socket.address.ip.getPort()});
 
             try server_port.send(server.socket.address.ip.getPort());
@@ -1483,6 +1484,7 @@ test "tcpConnectToHost: basic" {
 
     const ClientTask = struct {
         fn run(server_port: *Channel(u16)) !void {
+            std.log.info("TASK ClientTask.run = {*}", .{getCurrentTask()});
             const port = try server_port.receive();
             std.log.info("Client connecting to port {}\n", .{port});
 

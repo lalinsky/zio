@@ -550,6 +550,7 @@ pub const Executor = struct {
 
         std.debug.assert(getCurrentExecutorOrNull() == self);
 
+        std.log.info("PUSH local  task={*} exec={} tick={}", .{ task, self.id, self.current_tick });
         self.run_queue.push(&task.awaitable.wait_node);
     }
 
@@ -560,6 +561,7 @@ pub const Executor = struct {
     fn scheduleTaskRemote(self: *Executor, task: *AnyTask) void {
         std.debug.assert(task != &self.main_task);
 
+        std.log.info("PUSH remote task={*} exec={}", .{ task, self.id });
         self.run_queue.overflow.push(&task.awaitable.wait_node);
         self.loop.wake();
     }
