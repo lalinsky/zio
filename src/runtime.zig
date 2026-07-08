@@ -239,6 +239,38 @@ comptime {
     std.debug.assert(@alignOf(WaitNode) >= 4);
 }
 
+// A coroutine's parent_context_ptr points at the scheduler context to switch back
+// to when it yields, and is read cross-thread by fromCoroutine (to route a wake to
+// the task's home executor). With task migration a task can run on different
+// executors over its life, so the pointer changes and must be published/read
+// atomically. Without migration a task is pinned to its home executor, so the
+// value is constant from spawn: the initial store is plain, reads are plain, and
+// the per-dispatch re-publish is skipped entirely (it would only rewrite the same
+// value), making parent_context_ptr effectively write-once.
+inline fn storeParentContext(field: **Context, ctx: *Context) void {
+    if (zio_options.task_migration) {
+        @atomicStore(*Context, field, ctx, .release);
+    } else {
+        field.* = ctx;
+    }
+}
+inline fn updateParentContext(task: *AnyTask, ctx: *Context) void {
+    if (zio_options.task_migration) {
+        @atomicStore(*Context, &task.coro.parent_context_ptr, ctx, .release);
+    } else {
+        // Pinned task: parent_context_ptr is constant, so there is nothing to
+        // update. Assert that invariant in safe builds (plain load — there is no
+        // concurrent writer when migration is off).
+        assert(task.coro.parent_context_ptr == ctx);
+    }
+}
+inline fn loadParentContext(field: *const *Context) *Context {
+    return if (zio_options.task_migration)
+        @atomicLoad(*Context, field, .acquire)
+    else
+        field.*;
+}
+
 pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
     if (rt.shutting_down.load(.acquire)) {
         return error.RuntimeShutdown;
@@ -315,7 +347,7 @@ pub const Executor = struct {
     /// so we navigate: context -> coro -> main_task -> executor.
     /// Only valid on the executor thread that is currently running the coroutine.
     pub fn fromCoroutine(coro: *Coroutine) *Executor {
-        const parent_context_ptr = @atomicLoad(*Context, &coro.parent_context_ptr, .acquire);
+        const parent_context_ptr = loadParentContext(&coro.parent_context_ptr);
         const main_coro: *Coroutine = @fieldParentPtr("context", parent_context_ptr);
         const main_task: *AnyTask = @fieldParentPtr("coro", main_coro);
         return @alignCast(@fieldParentPtr("main_task", main_task));
@@ -347,7 +379,7 @@ pub const Executor = struct {
             .runtime = runtime,
             .closure = undefined, // main_task has no closure
         };
-        @atomicStore(*Context, &self.main_task.coro.parent_context_ptr, &self.main_task.coro.context, .release);
+        storeParentContext(&self.main_task.coro.parent_context_ptr, &self.main_task.coro.context);
 
         try setupStackGrowth();
         errdefer cleanupStackGrowth();
@@ -440,7 +472,7 @@ pub const Executor = struct {
         while (true) {
             // Process ready coroutines
             while (self.getNextTask()) |next_task| {
-                @atomicStore(*Context, &next_task.coro.parent_context_ptr, &self.main_task.coro.context, .release);
+                updateParentContext(next_task, &self.main_task.coro.context);
                 self.current_task = next_task;
                 next_task.coro.step();
                 self.current_task = null;
@@ -665,7 +697,7 @@ pub const Executor = struct {
         // path it stays null and the run loop keeps it null until it steps a task.
         self.current_task = null;
         if (self.getNextTask()) |next_task| {
-            @atomicStore(*Context, &next_task.coro.parent_context_ptr, &self.main_task.coro.context, .release);
+            updateParentContext(next_task, &self.main_task.coro.context);
             self.current_task = next_task;
             coro.yieldTo(&next_task.coro);
         } else {
