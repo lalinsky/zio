@@ -538,6 +538,20 @@ pub const Executor = struct {
         return AnyTask.fromWaitNode(node).last_run_tick != self.current_tick;
     }
 
+    /// DEBUG(#460): detect a bogus task pointer that landed in the executable image.
+    /// Valid tasks live on the heap (e.g. 0x1e1…), far below the ASLR image base;
+    /// the corrupt pointers we see are code-segment addresses (0x7ff7…). Compare
+    /// against a known .text address (this fn) and panic with a backtrace at the
+    /// push site so we learn WHO scheduled the garbage, instead of crashing later
+    /// in getNextTask.
+    fn assertTaskPtr(task: *AnyTask, where: []const u8) void {
+        const text_addr = @intFromPtr(&assertTaskPtr);
+        const image_base = text_addr & ~@as(usize, 0x3FFF_FFFF); // align down 1 GiB
+        if (@intFromPtr(task) >= image_base) {
+            std.debug.panic("{s}: bogus task ptr {*} (>= image_base 0x{x}, text 0x{x})", .{ where, task, image_base, text_addr });
+        }
+    }
+
     /// Schedule a task on this executor's local run queue. MUST run on the owning
     /// executor thread — the single-pusher invariant is what makes the ring pop
     /// (and, later, steal) protocols correct. The ring handles overflow to
@@ -550,6 +564,7 @@ pub const Executor = struct {
 
         std.debug.assert(getCurrentExecutorOrNull() == self);
 
+        assertTaskPtr(task, "scheduleTaskLocal");
         std.log.info("PUSH local  task={*} exec={} tick={}", .{ task, self.id, self.current_tick });
         self.run_queue.push(&task.awaitable.wait_node);
     }
@@ -561,6 +576,7 @@ pub const Executor = struct {
     fn scheduleTaskRemote(self: *Executor, task: *AnyTask) void {
         std.debug.assert(task != &self.main_task);
 
+        assertTaskPtr(task, "scheduleTaskRemote");
         std.log.info("PUSH remote task={*} exec={}", .{ task, self.id });
         self.run_queue.overflow.push(&task.awaitable.wait_node);
         self.loop.wake();
@@ -570,6 +586,7 @@ pub const Executor = struct {
     /// Atomically transitions task state to .ready and schedules it for execution.
     /// May migrate the task to the current executor for cache locality.
     pub fn scheduleTask(task: *AnyTask) void {
+        assertTaskPtr(task, "scheduleTask");
         var old = task.state.load(.acquire);
         while (true) {
             switch (old.tag) {
