@@ -12,7 +12,7 @@ jobs:
       fail-fast: false
       matrix:
         zig_version: ['0.16.0']
-        mode: [debug, release]
+        mode: [release]
         config:
           # DEBUG (#460): Windows-only to iterate on the IOCP release-mode crash.
           - { os: windows-latest, target: native, backends: 'iocp poll' }
