@@ -1599,6 +1599,14 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
     // Use @fieldParentPtr again to get from CompletionData to Completion
     const c: *Completion = @fieldParentPtr("internal", completion_data);
 
+    // DEBUG(#460): dump every completion we dispatch. A foreign/stale OVERLAPPED
+    // that isn't embedded in one of our Completions yields a bogus `c` here — its
+    // op will be an out-of-range integer and its address far from real completions.
+    // Log the raw integer op (NOT @tagName, which panics on an invalid tag).
+    std.log.info("COMPLETION overlapped={*} c={*} op_int={} bytes={} key={}", .{
+        overlapped, c, @intFromEnum(c.op), entry.dwNumberOfBytesTransferred, entry.lpCompletionKey,
+    });
+
     // Process based on operation type
     switch (c.op) {
         .net_connect => {
