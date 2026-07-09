@@ -95,6 +95,11 @@ pub const StackPool = struct {
     /// If the pool is full, frees the oldest stack and adds this one.
     /// If the stack's committed region is too small to store the FreeNode, the stack is freed instead.
     pub fn release(self: *StackPool, stack_info: StackInfo, timestamp: Timestamp) void {
+        // DEBUG(#460): never pool/reuse — decommit+guard every released stack so a
+        // dangling write to a freed stack faults at the writer instead of silently
+        // corrupting reused memory.
+        stack.stackFree(stack_info);
+        if (true) return;
         // Check if the stack has enough committed space to store the FreeNode
         // The FreeNode is stored at the base of the stack (aligned backward)
         const node_addr = std.mem.alignBackward(usize, stack_info.base - @sizeOf(FreeNode), @alignOf(FreeNode));
