@@ -987,6 +987,7 @@ pub const Runtime = struct {
             // pending_cleanup.tag (exec+0xbd8) — a dangling/aliased Awaitable.waiting_list
             // op there panics with the caller's backtrace.
             @import("utils/wait_queue.zig").dbg_watch_head = @intFromPtr(&self.main_executor.pending_cleanup) + 8;
+            @import("dbg_watch.zig").arm(@intFromPtr(&self.main_executor.pending_cleanup) + 8);
         }
         errdefer if (main_executor_initialized) self.main_executor.deinit();
 

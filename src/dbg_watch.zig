@@ -94,7 +94,7 @@ fn monitor(_: ?*anyopaque) callconv(.winapi) DWORD {
     }
 }
 
-const sentinel: usize = 0xD00DFEEDD00DFEED;
+var main_tid: DWORD = 0;
 
 fn veh(info: *win.EXCEPTION_POINTERS) callconv(.winapi) c_long {
     const rec = info.ExceptionRecord;
@@ -102,15 +102,14 @@ fn veh(info: *win.EXCEPTION_POINTERS) callconv(.winapi) c_long {
     const ctx = info.ContextRecord;
     if ((ctx.Dr6 & 0xf) == 0) return EXCEPTION_CONTINUE_SEARCH;
     ctx.Dr6 = 0; // clear detection bits
-    // The DR fires on EVERY write to pending_cleanup.tag, including legit yields
-    // (which write payload=self, tag=.park/.finish). The corrupt write sets the tag
-    // to 1 (.reschedule) while leaving the payload as our sentinel — filter for that.
-    const payload = @as(*const usize, @ptrFromInt(watch_addr - 8)).*;
-    const tag = @as(*const usize, @ptrFromInt(watch_addr)).*;
-    if (payload == sentinel and (tag & 0xff) == 1) {
+    // The DR fires on EVERY write to pending_cleanup.tag. Legit writes (yield /
+    // processCleanup / the create() memset) are all on the main/executor thread.
+    // The corruptor is a *background* thread — filter by thread id. No memory reads
+    // here (the address may be a freed runtime), just the instruction pointer.
+    if (GetCurrentThreadId() != main_tid) {
         const n = fired.fetchAdd(1, .monotonic);
         if (n < 8) {
-            std.log.info("CORRUPT WRITE thread={} rip=0x{x}", .{ GetCurrentThreadId(), ctx.Rip });
+            std.log.info("CORRUPT WRITE (bg thread={}) rip=0x{x}", .{ GetCurrentThreadId(), ctx.Rip });
             var addrs = [_]usize{ctx.Rip};
             const trace = std.debug.StackTrace{ .return_addresses = &addrs, .skipped = .none };
             std.debug.dumpStackTrace(&trace);
@@ -126,6 +125,7 @@ pub fn arm(addr: usize) void {
     if (builtin.os.tag != .windows) return;
     watch_addr = addr; // updated per-runtime; monitor/VEH use the latest
     if (installed.swap(true, .acq_rel)) return; // install VEH + monitor once
+    main_tid = GetCurrentThreadId();
     self_pid = GetCurrentProcessId();
     _ = AddVectoredExceptionHandler(1, veh);
     // The monitor thread arms DR0 on every thread (including this one and any
