@@ -937,19 +937,9 @@ pub const Runtime = struct {
         executor: Executor = undefined,
     };
 
-    // DEBUG(#460): allocate the Runtime on its own VirtualAlloc pages so that on
-    // deinit we can decommit+leak it; a dangling write to a freed Runtime (e.g. a
-    // cross-thread flag-set into a stale executor's pending_cleanup) then faults at
-    // the writer's site instead of silently corrupting the next runtime reusing the
-    // address.
-    const dbg_guard_runtime = builtin.os.tag == .windows;
-
     pub fn init(allocator: Allocator, options: RuntimeOptions) !*Runtime {
-        const self = if (dbg_guard_runtime) blk: {
-            const p = os.windows.VirtualAlloc(null, @sizeOf(Runtime), os.windows.MEM_COMMIT | os.windows.MEM_RESERVE, os.windows.PAGE_READWRITE) orelse return error.OutOfMemory;
-            break :blk @as(*Runtime, @ptrCast(@alignCast(p)));
-        } else try allocator.create(Runtime);
-        errdefer if (!dbg_guard_runtime) allocator.destroy(self);
+        const self = try allocator.create(Runtime);
+        errdefer allocator.destroy(self);
 
         try self.initStatic(allocator, options);
         self.own_self = true;
@@ -993,6 +983,8 @@ pub const Runtime = struct {
             try self.main_executor.init(self, 0);
             main_executor_initialized = true;
             self.executors.appendAssumeCapacity(&self.main_executor);
+            // DEBUG(#460): watch pending_cleanup.tag (the byte that gets stomped to 1).
+            @import("dbg_watch.zig").arm(@intFromPtr(&self.main_executor.pending_cleanup) + 8);
         }
         errdefer if (main_executor_initialized) self.main_executor.deinit();
 
@@ -1080,13 +1072,7 @@ pub const Runtime = struct {
 
         // Free the Runtime allocation
         if (self.own_self) {
-            if (dbg_guard_runtime) {
-                // Decommit + leak: keep the address reserved and faulting so a
-                // dangling write to this freed runtime crashes at the writer.
-                _ = os.windows.VirtualFree(@ptrCast(self), @sizeOf(Runtime), os.windows.MEM_DECOMMIT);
-            } else {
-                allocator.destroy(self);
-            }
+            allocator.destroy(self);
         }
     }
 
