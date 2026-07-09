@@ -957,6 +957,17 @@ pub const Runtime = struct {
     }
 
     pub fn initStatic(self: *Runtime, allocator: Allocator, options: RuntimeOptions) !void {
+        // DEBUG(#460): dump offsets of cross-thread-written executor fields vs
+        // pending_cleanup.tag (which corrupts at exec+0xbd8) to check for a layout
+        // collision the queue swap may have created.
+        {
+            const eoff = @offsetOf(Executor, "pending_cleanup") + 8; // tag word
+            const loop_off = @offsetOf(Executor, "loop");
+            const wr = loop_off + @offsetOf(ev.Loop, "state") + @offsetOf(@FieldType(ev.Loop, "state"), "wake_requested");
+            std.log.info("DBG offsets: pending_cleanup.tag=0x{x} loop=0x{x} wake_requested=0x{x} overflow=0x{x} run_queue=0x{x} main_task=0x{x}", .{
+                eoff, loop_off, wr, @offsetOf(Executor, "overflow"), @offsetOf(Executor, "run_queue"), @offsetOf(Executor, "main_task"),
+            });
+        }
         const num_executors = options.executors.resolve();
         const num_workers = if (options.enable_main_executor) num_executors - 1 else num_executors;
 
