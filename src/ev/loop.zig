@@ -958,6 +958,23 @@ pub const Loop = struct {
                     else => {},
                 }
 
+                // Ops a backend can handle natively only on some kernels (probed at
+                // runtime): if the backend advertises a runtime query and it says
+                // yes, use the native SQE path; otherwise fall through to the
+                // capability-based routing below (which sends it to the thread pool).
+                switch (completion.op) {
+                    .file_set_size => {
+                        if (comptime @hasDecl(Backend, "fileSetSizeSupported")) {
+                            if (self.backend.fileSetSizeSupported()) {
+                                self.state.incrInflight();
+                                self.backend.submit(&self.state, completion);
+                                return;
+                            }
+                        }
+                    },
+                    else => {},
+                }
+
                 // Regular backend operation
                 // Route file/dir ops to thread pool for backends without native support
                 switch (completion.op) {

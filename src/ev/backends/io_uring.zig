@@ -88,7 +88,11 @@ pub const capabilities: BackendCapabilities = .{
     .file_create = true,
     .file_close = true,
     .file_sync = true,
-    .file_set_size = true,
+    // Runtime-dispatched, not statically native: the native IORING_OP_FTRUNCATE
+    // needs Linux >= 6.9. `false` makes the completion carry a DelegatedWork so
+    // the thread-pool path is available; the Loop upgrades to the native SQE at
+    // runtime when `fileSetSizeSupported()` (probed once) says the kernel has it.
+    .file_set_size = false,
     .dir_create_dir = true,
     .dir_rename = true,
     .dir_rename_preserve = true,
@@ -102,9 +106,20 @@ pub const capabilities: BackendCapabilities = .{
     .native_wall_timers = true,
 };
 
+// Tri-state for the once-probed IORING_OP_FTRUNCATE support. `unknown` is treated
+// as `no` at the dispatch site, so a missed/failed probe is always safe (the
+// thread-pool fallback works on every kernel) — never a rejected SQE.
+const ftruncate_unknown: u8 = 0;
+const ftruncate_yes: u8 = 1;
+const ftruncate_no: u8 = 2;
+
 pub const SharedState = struct {
     master_fd: std.atomic.Value(c_int) = .init(-1),
     refcount: std.atomic.Value(usize) = .init(0),
+    /// Whether the running kernel supports IORING_OP_FTRUNCATE (Linux >= 6.9),
+    /// probed exactly once when the master ring is created (see `init`). Read by
+    /// `fileSetSizeSupported()`.
+    ftruncate_support: std.atomic.Value(u8) = .init(ftruncate_unknown),
 };
 
 pub const NetRecvData = struct {
@@ -214,6 +229,12 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
             break :blk try ringFromMasterFd(master_fd, flags, queue_size);
         } else {
             var ring = try linux.IoUring.init(queue_size, flags);
+            // Probe FTRUNCATE support once, on this fresh ring, and publish the
+            // verdict BEFORE master_fd. Any executor that later attaches sees a
+            // non-negative master_fd (seq_cst) and is thus guaranteed to observe
+            // the stored verdict. Racing creators store the same kernel-global
+            // value, so a redundant store by a CAS loser is harmless.
+            probeAndStoreFtruncate(&ring, shared_state);
             const old_fd = shared_state.master_fd.cmpxchgStrong(-1, ring.fd, .seq_cst, .seq_cst);
             if (old_fd != null) {
                 ring.deinit();
@@ -242,6 +263,25 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
     // never deaf to wake() — the SQE rides the first enter2, covering the first
     // poll and startup. wake() just writes the eventfd.
     _ = self.armWaker();
+}
+
+/// Probe (once, via IORING_REGISTER_PROBE) whether the kernel knows the
+/// IORING_OP_FTRUNCATE opcode (added in Linux 6.9) and record it in `SharedState`.
+/// A failed probe records "no", so file_set_size takes the always-correct
+/// thread-pool fallback rather than risk a rejected SQE.
+fn probeAndStoreFtruncate(ring: *linux.IoUring, shared_state: *SharedState) void {
+    const supported = blk: {
+        const probe = ring.get_probe() catch break :blk false;
+        break :blk probe.is_supported(.FTRUNCATE);
+    };
+    shared_state.ftruncate_support.store(if (supported) ftruncate_yes else ftruncate_no, .seq_cst);
+}
+
+/// Runtime capability query used by the Loop: may file_set_size use the native
+/// IORING_OP_FTRUNCATE SQE, or must it fall back to the thread pool? Probed once
+/// at ring creation; see `SharedState.ftruncate_support`.
+pub fn fileSetSizeSupported(self: *Self) bool {
+    return self.shared_state.ftruncate_support.load(.seq_cst) == ftruncate_yes;
 }
 
 fn ringFromMasterFd(master_fd: i32, flags: u32, queue_size: u16) !linux.IoUring {
