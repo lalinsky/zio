@@ -71,14 +71,18 @@ var fired: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
 var arm_count_logged: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
+// DR0 watches the tag word (watch_addr = pending_cleanup + 8); DR1 watches the
+// payload word (watch_addr - 8). Dr7: L0|L1 enabled, both RW=01 (write), LEN=10 (8B).
+const DR7_VALUE: u64 = 0x1 | 0x4 | (@as(u64, 0b01) << 16) | (@as(u64, 0b10) << 18) | (@as(u64, 0b01) << 20) | (@as(u64, 0b10) << 22);
+
 fn setDrOn(h: HANDLE) bool {
     var ctx: win.CONTEXT = std.mem.zeroes(win.CONTEXT);
     ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
     if (GetThreadContext(h, &ctx) == FALSE) return false;
-    if (ctx.Dr0 == watch_addr and (ctx.Dr7 & 0x1) != 0) return true; // already armed
-    ctx.Dr0 = watch_addr;
-    // L0 enable | RW0=01 (write) | LEN0=10 (8 bytes)
-    ctx.Dr7 = 0x1 | (@as(u64, 0b01) << 16) | (@as(u64, 0b10) << 18);
+    if (ctx.Dr0 == watch_addr and ctx.Dr7 == DR7_VALUE) return true; // already armed
+    ctx.Dr0 = watch_addr; // tag word (0xbd8)
+    ctx.Dr1 = watch_addr - 8; // payload word (0xbd0)
+    ctx.Dr7 = DR7_VALUE;
     ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
     return SetThreadContext(h, &ctx) != FALSE;
 }
@@ -126,26 +130,12 @@ var seen_mutex: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
 const sentinel: usize = 0xD00DFEEDD00DFEED;
 
-fn veh(info: *win.EXCEPTION_POINTERS) callconv(.winapi) c_long {
-    const rec = info.ExceptionRecord;
-    if (rec.ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
-    const ctx = info.ContextRecord;
-    if ((ctx.Dr6 & 0xf) == 0) return EXCEPTION_CONTINUE_SEARCH;
-    ctx.Dr6 = 0; // clear detection bits
-    const rip = ctx.Rip;
-    // Read the tag+payload (guarded by VirtualQuery so a stale/freed watch_addr
-    // can't fault the VEH). A write that leaves payload==sentinel & tag==1 is
-    // either the real corruptor OR a legit yield(.reschedule) caught between its
-    // tag-store and payload-store (false positive). We log each DISTINCT rip that
-    // produces this state exactly once (symbolized) — the legit yields all sit at
-    // task.zig:287; any OTHER rip is the corruptor.
-    var mbi: MEMORY_BASIC_INFORMATION = std.mem.zeroes(MEMORY_BASIC_INFORMATION);
-    if (VirtualQuery(@ptrFromInt(watch_addr), &mbi, @sizeOf(MEMORY_BASIC_INFORMATION)) == 0 or
-        mbi.State != 0x1000 or (mbi.Protect & 0x101) != 0) return EXCEPTION_CONTINUE_EXECUTION;
-    const tag = @as(*const usize, @ptrFromInt(watch_addr)).*;
-    const payload = @as(*const usize, @ptrFromInt(watch_addr - 8)).*;
-    if (payload != sentinel or (tag & 0xff) != 1) return EXCEPTION_CONTINUE_EXECUTION;
+const TF: u32 = 0x100; // EFLAGS trap flag (single-step)
+threadlocal var ss_active: bool = false;
+threadlocal var ss_candidate_rip: usize = 0;
+threadlocal var ss_steps: u32 = 0;
 
+fn reportCorruptor(rip: usize) void {
     while (seen_mutex.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
     var found = false;
     var i: usize = 0;
@@ -161,12 +151,49 @@ fn veh(info: *win.EXCEPTION_POINTERS) callconv(.winapi) c_long {
     }
     seen_mutex.store(0, .release);
     if (!found) {
-        std.log.info("!!! {{sentinel,1}} writer thread={} rip=0x{x}", .{ GetCurrentThreadId(), rip });
+        std.log.info("!!! CORRUPTOR (tag store, no payload store) thread={} rip=0x{x}", .{ GetCurrentThreadId(), rip });
         var addrs = [_]usize{rip};
         const trace = std.debug.StackTrace{ .return_addresses = &addrs, .skipped = .none };
         std.debug.dumpStackTrace(&trace);
     }
-    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+fn veh(info: *win.EXCEPTION_POINTERS) callconv(.winapi) c_long {
+    const rec = info.ExceptionRecord;
+    if (rec.ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
+    const ctx = info.ContextRecord;
+    const dr6 = ctx.Dr6;
+    ctx.Dr6 = 0;
+    // No memory reads here (a stale/reused watch_addr must never fault the VEH).
+    // A legit yield(.reschedule) stores the tag (DR0=0xbd8) and then IMMEDIATELY
+    // the payload (DR1=0xbd0). The corruptor stores only the tag. So after a tag
+    // store, single-step a few instructions: if the payload store fires (DR1),
+    // it's a legit yield; if not, it's the standalone corruptor.
+    if (ss_active) {
+        if ((dr6 & 0x2) != 0) { // payload store followed → legit yield
+            ss_active = false;
+            ctx.EFlags &= ~TF;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        ss_steps += 1;
+        if (ss_steps >= 6) { // no payload store → corruptor
+            reportCorruptor(ss_candidate_rip);
+            ss_active = false;
+            ctx.EFlags &= ~TF;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        ctx.EFlags |= TF; // keep single-stepping
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if ((dr6 & 0x1) != 0) { // tag store (0xbd8) — start the follow check
+        ss_candidate_rip = ctx.Rip;
+        ss_steps = 0;
+        ss_active = true;
+        ctx.EFlags |= TF;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if ((dr6 & 0xf) != 0) return EXCEPTION_CONTINUE_EXECUTION; // lone payload store, ignore
+    return EXCEPTION_CONTINUE_SEARCH;
 }
 
 var installed = std.atomic.Value(bool).init(false);
