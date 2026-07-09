@@ -5,6 +5,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
+const zio_options = @import("zio_options");
 
 const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
@@ -36,8 +37,6 @@ const dns = @import("dns/root.zig");
 const select = @import("select.zig");
 const Waiter = @import("common.zig").Waiter;
 const random_mod = @import("random.zig");
-
-const OsMutex = @import("os/thread.zig").Mutex;
 
 const mod = @This();
 
@@ -87,8 +86,11 @@ pub const RuntimeOptions = struct {
     /// Set to false when creating runtimes in background threads that should not block
     /// the creating thread in an event loop. Requires executors >= 1 to have any workers.
     enable_main_executor: bool = true,
-    /// Allow tasks to migrate between executors when true.
-    enable_task_migration: bool = true,
+    /// Allow tasks to migrate between executors when true. Requires migration
+    /// support to be compiled in (the `task-migration` build option, default on);
+    /// enabling it in a build compiled without support is an error at init.
+    /// Defaults to whether support is compiled in.
+    enable_task_migration: bool = zio_options.task_migration,
     /// DNS resolver configuration.
     dns: DnsOptions = .{},
 };
@@ -229,12 +231,46 @@ pub fn JoinHandle(comptime T: type) type {
 
 // Generic data structures (private)
 const WaitNode = @import("utils/wait_queue.zig").WaitNode;
-const ConcurrentStack = @import("utils/concurrent_stack.zig").ConcurrentStack;
 const SimpleQueue = @import("utils/simple_queue.zig").SimpleQueue;
+const LocalRunQueue = @import("utils/local_run_queue.zig").LocalRunQueue;
+const OverflowQueue = @import("utils/local_run_queue.zig").OverflowQueue;
+const OsMutex = @import("os/thread.zig").Mutex;
 
 comptime {
     // WaitNode needs at least 4-byte alignment for 2 spare bits in pointers
     std.debug.assert(@alignOf(WaitNode) >= 4);
+}
+
+// A coroutine's parent_context_ptr points at the scheduler context to switch back
+// to when it yields, and is read cross-thread by fromCoroutine (to route a wake to
+// the task's home executor). With task migration a task can run on different
+// executors over its life, so the pointer changes and must be published/read
+// atomically. Without migration a task is pinned to its home executor, so the
+// value is constant from spawn: the initial store is plain, reads are plain, and
+// the per-dispatch re-publish is skipped entirely (it would only rewrite the same
+// value), making parent_context_ptr effectively write-once.
+inline fn storeParentContext(field: **Context, ctx: *Context) void {
+    if (zio_options.task_migration) {
+        @atomicStore(*Context, field, ctx, .release);
+    } else {
+        field.* = ctx;
+    }
+}
+inline fn updateParentContext(task: *AnyTask, ctx: *Context) void {
+    if (zio_options.task_migration) {
+        @atomicStore(*Context, &task.coro.parent_context_ptr, ctx, .release);
+    } else {
+        // Pinned task: parent_context_ptr is constant, so there is nothing to
+        // update. Assert that invariant in safe builds (plain load — there is no
+        // concurrent writer when migration is off).
+        assert(task.coro.parent_context_ptr == ctx);
+    }
+}
+inline fn loadParentContext(field: *const *Context) *Context {
+    return if (zio_options.task_migration)
+        @atomicLoad(*Context, field, .acquire)
+    else
+        field.*;
 }
 
 pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
@@ -248,9 +284,7 @@ pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
 
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
-    // TODO: replace with atomic scoped based on architecture
     pub const max_executors = 64;
-    const num_stealable_stacks = 4;
 
     id: u6,
     loop: ev.Loop,
@@ -258,26 +292,35 @@ pub const Executor = struct {
     /// Per-executor random state (non-secure CSPRNG; later the secure-path fd/handle).
     random_state: random_mod.RandomState,
 
+    // Per-executor local run queue: bounded FIFO ring buffer (Go runq / Tokio
+    // style). Overflow and cross-thread wakes go to `run_queue.overflow`, which
+    // is wired at init to either the runtime global queue (migration on) or this
+    // executor's own `overflow` queue below (migration off).
+    run_queue: LocalRunQueue(WaitNode, zio_options.task_migration) = .{},
+
+    // This executor's own overflow queue, used ONLY when task migration is
+    // disabled — cross-thread wakes and ring overflow for this executor land here
+    // and are drained only by this executor, so tasks never leave their home.
+    // When migration is enabled, the runtime global queue is used instead and
+    // this stays empty.
+    overflow: OverflowQueue(WaitNode) = .{},
+
     // Tracks tasks run since last event loop tick.
     // After EVENT_INTERVAL tasks, getNextTask() returns null to force I/O processing.
     tick_task_count: u8 = 0,
 
-    // Monotonically increasing tick counter, incremented after each event loop tick.
+    // Monotonically increasing tick counter, bumped after each event loop tick.
+    // With task.last_run_tick it stops a task that re-readies itself from running
+    // again in the same tick, forcing an I/O poll first (responsiveness). Starts
+    // at 1 so new tasks (last_run_tick == 0) run immediately.
     current_tick: u32 = 1,
-
-    // Tracks tasks waiting in queue_pool.
-    ready_count: std.atomic.Value(u32) = .init(0),
 
     // Timestamp of last event loop tick, used for time-based yield decisions.
     last_tick_time: Timestamp = .zero,
 
     // Deferred cleanup for the task that just yielded away from this executor.
+    // Processed by the next coroutine to run (at landing sites: startFn, yield resume, run loop).
     pending_cleanup: TaskCleanup = .none,
-
-    // Local task support - lock-free LIFO stacks for cross-thread resumption and stealing.
-    queue_pool: [num_stealable_stacks]ConcurrentStack(WaitNode) = @splat(.{}),
-    pop_cursor: u8 = 0,
-    push_cursor: u8 = 0,
 
     // Back-reference to runtime for global coordination
     runtime: *Runtime,
@@ -312,7 +355,7 @@ pub const Executor = struct {
     /// so we navigate: context -> coro -> main_task -> executor.
     /// Only valid on the executor thread that is currently running the coroutine.
     pub fn fromCoroutine(coro: *Coroutine) *Executor {
-        const parent_context_ptr = @atomicLoad(*Context, &coro.parent_context_ptr, .acquire);
+        const parent_context_ptr = loadParentContext(&coro.parent_context_ptr);
         const main_coro: *Coroutine = @fieldParentPtr("context", parent_context_ptr);
         const main_task: *AnyTask = @fieldParentPtr("coro", main_coro);
         return @alignCast(@fieldParentPtr("main_task", main_task));
@@ -327,6 +370,16 @@ pub const Executor = struct {
             .runtime = runtime,
             .shutdown = ev.Async.init(),
         };
+
+        // Wire the run queue's overflow target: the shared global queue when task
+        // migration is on (load-balanced across executors), or this executor's own
+        // overflow queue when off (tasks stay on their home executor). Worker
+        // executors live in a pre-sized, non-reallocating list, so &self.overflow
+        // is a stable address.
+        self.run_queue.overflow = if (runtime.options.enable_task_migration)
+            &runtime.global_overflow
+        else
+            &self.overflow;
 
         // Initialize main_task - this serves as both the scheduler context and
         // the task context for async operations called from main.
@@ -344,7 +397,7 @@ pub const Executor = struct {
             .runtime = runtime,
             .closure = undefined, // main_task has no closure
         };
-        @atomicStore(*Context, &self.main_task.coro.parent_context_ptr, &self.main_task.coro.context, .release);
+        storeParentContext(&self.main_task.coro.parent_context_ptr, &self.main_task.coro.context);
 
         try setupStackGrowth();
         errdefer cleanupStackGrowth();
@@ -403,7 +456,7 @@ pub const Executor = struct {
     const yield_ready_threshold = 13;
 
     pub fn maybeYield(self: *Executor, comptime mode: AnyTask.YieldMode, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        if (self.ready_count.load(.acquire) >= yield_ready_threshold) {
+        if (self.run_queue.len() >= yield_ready_threshold) {
             return getCurrentTask().yield(mode, cancel_mode);
         }
     }
@@ -437,7 +490,7 @@ pub const Executor = struct {
         while (true) {
             // Process ready coroutines
             while (self.getNextTask()) |next_task| {
-                @atomicStore(*Context, &next_task.coro.parent_context_ptr, &self.main_task.coro.context, .release);
+                updateParentContext(next_task, &self.main_task.coro.context);
                 self.current_task = next_task;
                 next_task.coro.step();
                 self.current_task = null;
@@ -452,130 +505,42 @@ pub const Executor = struct {
                 @panic("event loop stopped while the main task was yielding");
             }
 
-            // Set ourselves as idle before scanning for work.
-            const my_bit = @as(u64, 1) << @as(u6, @intCast(self.id));
-
-            // Ensure there's no more work to be run
-            if (checkAboutForWork(self, check_ready)) {
-                try self.loop.run(.no_wait);
-            } else {
-                if (self.runtime.options.enable_task_migration) {
-                    self.runtime.idle_mask_mutex.lock();
-                    self.runtime.idle_mask |= my_bit;
-                    self.runtime.idle_mask_mutex.unlock();
-                }
-
-                // We've set ourselves to idle but work could still come in
-                // One more check
-                if (checkAboutForWork(self, check_ready)) {
-                    if (self.runtime.options.enable_task_migration) {
-                        self.runtime.idle_mask_mutex.lock();
-                        self.runtime.idle_mask &= ~my_bit;
-                        self.runtime.idle_mask_mutex.unlock();
-                        _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .acquire);
-                    }
-                    try self.loop.run(.no_wait);
-                } else {
-                    try self.loop.run(.once);
-                    if (self.runtime.options.enable_task_migration) {
-                        self.runtime.idle_mask_mutex.lock();
-                        self.runtime.idle_mask &= ~my_bit;
-                        self.runtime.idle_mask_mutex.unlock();
-                        _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .acquire);
-                    }
-                }
-            }
+            // Run event loop - non-blocking if there's local work, otherwise wait
+            // for I/O. Overflow-queue work needn't be checked here: any cross-thread
+            // push to the overflow queue also wakes this executor's loop, so .once
+            // returns promptly and the next iteration drains it.
+            const main_ready = check_ready and self.main_task.state.load(.acquire).tag == .ready;
+            // Overflow work counts too: if the ring is empty but the overflow queue
+            // still holds tasks (e.g. a local ring spill, which doesn't wake the
+            // loop), don't block — return promptly and refill from it below.
+            const has_work = main_ready or !self.run_queue.isEmpty() or !self.run_queue.overflow.isEmpty();
+            try self.loop.run(if (has_work) .no_wait else .once);
 
             // Reset task counter and update tick time after event loop tick
             self.tick_task_count = 0;
             self.current_tick +%= 1;
             self.last_tick_time = self.loop.now();
 
+            // Pull a fair batch from the overflow queue (global when migration is
+            // on, this executor's own when off) back into the ring.
+            const pending = self.run_queue.overflow.len();
+            if (pending != 0) {
+                // With migration on the overflow is the shared global queue, so
+                // take only a fair ~1/n_exec slice to avoid monopolizing it. With
+                // migration off it is this executor's own private queue and we are
+                // its sole drainer, so take as much as fits (refill caps it).
+                const batch = if (self.runtime.options.enable_task_migration)
+                    pending / @max(self.runtime.executors.items.len, 1) + 1
+                else
+                    pending;
+                self.run_queue.refill(batch);
+            }
+
             // Check again after I/O
             if (check_ready and self.main_task.state.load(.acquire).tag == .ready) {
                 return;
             }
         }
-    }
-
-    fn checkAboutForWork(self: *Executor, check_ready: bool) bool {
-        var has_work = false;
-        for (&self.queue_pool) |*stack| {
-            if (stack.head.load(.acquire) != null) {
-                has_work = true;
-                break;
-            }
-        }
-
-        if (!has_work) has_work = self.stealWork();
-
-        // Run event loop - non-blocking if there's work, otherwise wait for I/O
-        const main_ready = check_ready and self.main_task.state.load(.acquire).tag == .ready;
-        if (!has_work) has_work = main_ready;
-
-        if (self.runtime.options.enable_task_migration) {
-            // Last resort before going idle
-            if (!has_work) {
-                has_work = self.popWorkFromGlobal();
-            }
-        }
-        return has_work;
-    }
-
-    fn popWorkFromGlobal(self: *Executor) bool {
-        if (self.runtime.options.enable_task_migration) {
-            if (self.runtime.global_queue_count.load(.acquire) == 0) return false;
-
-            self.runtime.global_queue_mutex.lock();
-            defer self.runtime.global_queue_mutex.unlock();
-            var count: u32 = 0;
-            const pops = self.runtime.global_queue_count.load(.acquire) / self.runtime.executors.capacity;
-            const num_to_pop = if (pops < 1) 1 else pops;
-            for (0..num_to_pop) |_| {
-                if (self.runtime.global_queue.pop()) |node| {
-                    self.queue_pool[self.push_cursor].push(node);
-                    self.push_cursor = (self.push_cursor + 1) % num_stealable_stacks;
-                    count += 1;
-                } else break;
-            }
-            if (count > 0) {
-                _ = self.ready_count.fetchAdd(count, .acq_rel);
-                _ = self.runtime.global_queue_count.fetchSub(count, .acq_rel);
-                return true;
-            }
-        }
-        return false;
-    }
-
-    fn stealWork(self: *Executor) bool {
-        if (self.runtime.options.enable_task_migration) {
-            const num_executors = self.runtime.executors.items.len;
-            if (num_executors <= 1) return false;
-
-            const start_index = self.id % num_executors;
-            for (0..num_executors) |i| {
-                const index = (start_index + i) % num_executors;
-                const victim = self.runtime.executors.items[index];
-                if (victim == self) continue;
-
-                for (&victim.queue_pool) |*stack| {
-                    var drained = stack.popAll();
-                    var count: u32 = 0;
-                    while (drained.pop()) |task| {
-                        self.queue_pool[self.push_cursor].push(task);
-                        self.push_cursor = (self.push_cursor + 1) % num_stealable_stacks;
-                        count += 1;
-                    }
-
-                    _ = self.ready_count.fetchAdd(count, .acq_rel);
-                    if (count > 0) {
-                        _ = victim.ready_count.fetchSub(count, .acq_rel);
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
     }
 
     /// Get the next task to run from the ready queue.
@@ -585,54 +550,54 @@ pub const Executor = struct {
     fn getNextTask(self: *Executor) ?*AnyTask {
         // Maximum tasks to run before forcing an event loop tick (from Go's scheduler)
         const EVENT_INTERVAL = 61;
-        if (self.tick_task_count >= EVENT_INTERVAL) return null;
 
-        // Try to pop from the current cursor stack and rotate if empty
-        // We check all stacks to ensure we don't block on I/O while work is pending.
-        for (0..num_stealable_stacks) |_| {
-            const stack = &self.queue_pool[self.pop_cursor];
-            if (stack.pop()) |node| {
-                const task = AnyTask.fromWaitNode(node);
-                if (task.last_run_tick != self.current_tick) {
-                    task.last_run_tick = self.current_tick;
-                    self.tick_task_count += 1;
-                    _ = self.ready_count.fetchSub(1, .acq_rel);
-                    return task;
-                }
-                // Task already ran this tick, push back
-                stack.push(node);
-            }
-            // Rotate cursor
-            self.pop_cursor = (self.pop_cursor + 1) % num_stealable_stacks;
+        // Force event loop tick after running EVENT_INTERVAL tasks
+        if (self.tick_task_count >= EVENT_INTERVAL) {
+            return null;
         }
 
-        return null;
+        // Peek the head (via popIf) and only take it if it hasn't already run this
+        // tick. FIFO already keeps a re-queued task from jumping the line; this
+        // guard additionally forces an I/O poll before re-running a task that
+        // re-readied itself, so a self-looping task stays I/O-responsive. A task
+        // that isn't runnable is left in place and we return null (poll first).
+        const node = self.run_queue.popIf(self, isRunnableThisTick) orelse return null;
+        const task = AnyTask.fromWaitNode(node);
+        task.last_run_tick = self.current_tick;
+        self.tick_task_count += 1;
+        return task;
     }
 
+    /// Head-runnable predicate for getNextTask's peek: a task may run unless it has
+    /// already run in the current tick.
+    fn isRunnableThisTick(self: *Executor, node: *WaitNode) bool {
+        return AnyTask.fromWaitNode(node).last_run_tick != self.current_tick;
+    }
+
+    /// Schedule a task on this executor's local run queue. MUST run on the owning
+    /// executor thread — the single-pusher invariant is what makes the ring pop
+    /// (and, later, steal) protocols correct. The ring handles overflow to
+    /// `run_queue.overflow` internally when full.
     fn scheduleTaskLocal(self: *Executor, task: *AnyTask) void {
+        // Main task is never queued — its readiness is driven by its state field,
+        // which the run loop checks directly. processCleanup can reach here with the
+        // main task on the pre-woken park / reschedule paths.
         if (task == &self.main_task) return;
-        std.debug.assert(getCurrentExecutor() == self);
 
-        const wait_node = &task.awaitable.wait_node;
-        self.queue_pool[self.push_cursor].push(wait_node);
-        self.push_cursor = (self.push_cursor + 1) % num_stealable_stacks;
-        _ = self.ready_count.fetchAdd(1, .acq_rel);
+        std.debug.assert(getCurrentExecutorOrNull() == self);
+
+        self.run_queue.push(&task.awaitable.wait_node);
     }
 
-    /// Schedule a task to a remote executor (different executor or no current executor).
-    /// Uses the thread-safe remote queue and notifies the executor.
-    pub fn scheduleTaskRemote(self: *Executor, task: *AnyTask) void {
+    /// Schedule a task from another thread (or no executor context) onto its home
+    /// executor, and wake that executor's loop. Goes to the home executor's
+    /// `overflow` queue — the shared global one (migration on, any executor may
+    /// run it) or the home executor's own (migration off, stays home).
+    fn scheduleTaskRemote(self: *Executor, task: *AnyTask) void {
         std.debug.assert(task != &self.main_task);
-        std.debug.assert(self.runtime.options.enable_task_migration);
 
-        const wait_node = &task.awaitable.wait_node;
-        self.runtime.global_queue_mutex.lock();
-        self.runtime.global_queue.push(wait_node);
-        self.runtime.global_queue_mutex.unlock();
-        _ = self.runtime.global_queue_count.fetchAdd(1, .acq_rel);
-        if (self.runtime.options.enable_task_migration) {
-            self.runtime.wakeOne();
-        }
+        self.run_queue.overflow.push(&task.awaitable.wait_node);
+        self.loop.wake();
     }
 
     /// Schedule a task for execution.
@@ -675,15 +640,26 @@ pub const Executor = struct {
         }
 
         if (getCurrentExecutorOrNull()) |current_exec| {
-            current_exec.scheduleTaskLocal(task);
-            return;
+            if (current_exec == home_exec) {
+                // Schedule locally
+                current_exec.scheduleTaskLocal(task);
+                return;
+            }
+            // New tasks always go to their round-robin assigned home executor to
+            // distribute load across executors. Only already-running tasks may
+            // migrate to the current executor (for cache locality with the waker).
+            // The .new check can be removed once we have work stealing to rebalance
+            // load (see https://github.com/lalinsky/zio/issues/460).
+            if (zio_options.task_migration and old.tag != .new and current_exec.runtime == home_exec.runtime and home_exec.runtime.options.enable_task_migration) {
+                // Migrate to the current executor
+                task.last_run_tick = 0;
+                current_exec.scheduleTaskLocal(task);
+                return;
+            }
         }
 
-        if (home_exec.runtime.options.enable_task_migration) {
-            home_exec.scheduleTaskRemote(task);
-        } else {
-            home_exec.scheduleTaskLocal(task);
-        }
+        // Schedule on the home executor
+        home_exec.scheduleTaskRemote(task);
     }
 
     const TaskCleanup = union(enum) {
@@ -754,7 +730,7 @@ pub const Executor = struct {
         // path it stays null and the run loop keeps it null until it steps a task.
         self.current_task = null;
         if (self.getNextTask()) |next_task| {
-            @atomicStore(*Context, &next_task.coro.parent_context_ptr, &self.main_task.coro.context, .release);
+            updateParentContext(next_task, &self.main_task.coro.context);
             self.current_task = next_task;
             coro.yieldTo(&next_task.coro);
         } else {
@@ -881,13 +857,10 @@ pub const Runtime = struct {
     options: RuntimeOptions,
 
     executors: std.ArrayList(*Executor) = .empty,
-    global_queue: SimpleQueue(WaitNode) = .empty,
-    global_queue_count: std.atomic.Value(u32) = .init(0),
-    global_queue_mutex: OsMutex = .init(),
-    idle_mask: u64 = 0,
-    // TODO: replace with atomic scoped based on architecture
-    idle_mask_mutex: OsMutex = .init(),
-    searchers: std.atomic.Value(u32) = .init(0),
+    // Shared global run queue (used when task migration is on): external
+    // submissions, cross-thread wakes, and per-executor ring overflow land here,
+    // and every executor drains a fair batch from it once per tick.
+    global_overflow: OverflowQueue(WaitNode) = .{},
     loop_group: ev.LoopGroup = .{},
     main_executor: Executor,
     next_executor_index: std.atomic.Value(usize) = .init(0),
@@ -915,6 +888,11 @@ pub const Runtime = struct {
     }
 
     pub fn initStatic(self: *Runtime, allocator: Allocator, options: RuntimeOptions) !void {
+        // Task migration can only be enabled at runtime if it was compiled in.
+        if (!zio_options.task_migration and options.enable_task_migration) {
+            return error.TaskMigrationNotCompiledIn;
+        }
+
         const num_executors = options.executors.resolve();
         const num_workers = if (options.enable_main_executor) num_executors - 1 else num_executors;
 
@@ -1086,24 +1064,6 @@ pub const Runtime = struct {
             .awaitable = &task.awaitable,
             .result = undefined,
         };
-    }
-
-    pub fn wakeOne(self: *Runtime) void {
-        std.debug.assert(self.options.enable_task_migration);
-        self.idle_mask_mutex.lock();
-        const idle = self.idle_mask;
-        self.idle_mask_mutex.unlock();
-        if (idle == 0) return; // Everyone is busy
-
-        // Try to claim the "searcher" token so only one thread wakes up
-        if (self.searchers.cmpxchgStrong(0, 1, .acq_rel, .acquire) == null) {
-            // We armed a searcher. Now, pick an idle executor to wake.
-            // We use trailing zeros to pick the first bit set in the mask.
-            const target_id = @ctz(idle);
-            if (target_id < self.executors.items.len) {
-                self.executors.items[target_id].loop.wake();
-            }
-        }
     }
 
     /// Worker thread entry point. Initializes executor and runs until stopped.
@@ -1460,6 +1420,16 @@ test "runtime: sleep from main allows tasks to run" {
     try std.testing.expectEqual(10, counter);
 }
 
+test "runtime: enabling task migration at runtime errors when compiled out" {
+    // Only meaningful in a build without migration support; a normal build
+    // compiles migration in, so there is nothing to reject.
+    if (zio_options.task_migration) return error.SkipZigTest;
+    try std.testing.expectError(
+        error.TaskMigrationNotCompiledIn,
+        Runtime.init(std.testing.allocator, .{ .enable_task_migration = true }),
+    );
+}
+
 test "runtime: multi-threaded execution with 2 executors" {
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
@@ -1486,6 +1456,43 @@ test "runtime: multi-threaded execution with 2 executors" {
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expectEqual(4, TestContext.counter);
+}
+
+test "runtime: local ring overflow spills and drains with task migration disabled" {
+    // With migration disabled, spawn far more ready tasks than the local ring
+    // holds (capacity 256) so the ring spills into the executor's own overflow
+    // queue (the runqputslow path) and must drain every task back out. All are
+    // spawned before any drain, so the ring genuinely overflows. Two executors
+    // also covers the remote sub-path: tasks whose round-robin home is the other
+    // executor go straight to that executor's overflow queue.
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const H = struct {
+        const n_tasks = 2 * LocalRunQueue(WaitNode, zio_options.task_migration).capacity; // 512 >> 256
+
+        fn child(counter: *std.atomic.Value(u32)) void {
+            _ = counter.fetchAdd(1, .monotonic);
+        }
+    };
+
+    const runtime = try Runtime.init(std.testing.allocator, .{
+        .executors = .exact(2),
+        .enable_task_migration = false,
+    });
+    defer runtime.deinit();
+
+    var counter = std.atomic.Value(u32).init(0);
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    for (0..H.n_tasks) |_| {
+        try group.spawn(H.child, .{&counter});
+    }
+
+    try group.wait();
+    try std.testing.expect(!group.hasFailed());
+    try std.testing.expectEqual(@as(u32, H.n_tasks), counter.load(.monotonic));
 }
 
 test "runtime: multi-threaded execution with 64 executors" {

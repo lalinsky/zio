@@ -774,6 +774,17 @@ pub const Loop = struct {
                                 return;
                             }
                         }
+                        // file_set_size may have been submitted natively (the
+                        // FTRUNCATE SQE) when the runtime probe found kernel
+                        // support, so it must be canceled on the backend, not the
+                        // thread pool. The probe verdict is stable for the process,
+                        // so re-querying here agrees with the submission decision.
+                        if (comptime op == .file_set_size and @hasDecl(Backend, "fileSetSizeSupported")) {
+                            if (self.backend.fileSetSizeSupported()) {
+                                self.backend.cancel(&self.state, completion);
+                                return;
+                            }
+                        }
                         const thread_pool = self.thread_pool orelse unreachable;
                         const op_data = completion.cast(op.toType());
                         thread_pool.cancel(&op_data.internal.work);
@@ -953,6 +964,23 @@ pub const Loop = struct {
                                 self.submitFileOpToThreadPool(completion);
                             }
                             return;
+                        }
+                    },
+                    else => {},
+                }
+
+                // Ops a backend can handle natively only on some kernels (probed at
+                // runtime): if the backend advertises a runtime query and it says
+                // yes, use the native SQE path; otherwise fall through to the
+                // capability-based routing below (which sends it to the thread pool).
+                switch (completion.op) {
+                    .file_set_size => {
+                        if (comptime @hasDecl(Backend, "fileSetSizeSupported")) {
+                            if (self.backend.fileSetSizeSupported()) {
+                                self.state.incrInflight();
+                                self.backend.submit(&self.state, completion);
+                                return;
+                            }
                         }
                     },
                     else => {},
