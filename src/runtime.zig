@@ -989,6 +989,7 @@ pub const Runtime = struct {
                 const w = @intFromPtr(&self.main_executor.pending_cleanup) + 8;
                 os.thread.dbg_watch = w;
                 @import("ev/completion.zig").dbg_watch_pending = w;
+                @import("dbg_watch.zig").arm(w);
             }
         }
         errdefer if (main_executor_initialized) self.main_executor.deinit();

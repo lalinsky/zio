@@ -69,16 +69,18 @@ var watch_addr: usize = 0;
 var self_pid: DWORD = 0;
 var fired: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
-fn setDrOn(h: HANDLE) void {
+var arm_count_logged: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+
+fn setDrOn(h: HANDLE) bool {
     var ctx: win.CONTEXT = std.mem.zeroes(win.CONTEXT);
     ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-    if (GetThreadContext(h, &ctx) == FALSE) return;
-    if (ctx.Dr0 == watch_addr and (ctx.Dr7 & 0x1) != 0) return; // already armed
+    if (GetThreadContext(h, &ctx) == FALSE) return false;
+    if (ctx.Dr0 == watch_addr and (ctx.Dr7 & 0x1) != 0) return true; // already armed
     ctx.Dr0 = watch_addr;
     // L0 enable | RW0=01 (write) | LEN0=10 (8 bytes)
     ctx.Dr7 = 0x1 | (@as(u64, 0b01) << 16) | (@as(u64, 0b10) << 18);
     ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-    _ = SetThreadContext(h, &ctx);
+    return SetThreadContext(h, &ctx) != FALSE;
 }
 
 fn armAllThreads() void {
@@ -88,17 +90,25 @@ fn armAllThreads() void {
     var te: THREADENTRY32 = undefined;
     te.dwSize = @sizeOf(THREADENTRY32);
     const cur = GetCurrentThreadId();
+    var armed: u32 = 0;
+    var total: u32 = 0;
     if (Thread32First(snap, &te) == FALSE) return;
     while (true) {
         if (te.th32OwnerProcessID == self_pid and te.th32ThreadID != cur) {
+            total += 1;
             if (OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID)) |h| {
                 _ = SuspendThread(h);
-                setDrOn(h);
+                if (setDrOn(h)) armed += 1;
                 _ = ResumeThread(h);
                 _ = CloseHandle(h);
             }
         }
         if (Thread32Next(snap, &te) == FALSE) break;
+    }
+    // Log the armed/total once we've seen more than the main thread, so we know
+    // whether background threads (DNS thread pool etc.) actually get the DR.
+    if (total >= 2 and arm_count_logged.swap(1, .monotonic) == 0) {
+        std.log.info("DBG(#460) watchpoint armed {}/{} background threads", .{ armed, total });
     }
 }
 
