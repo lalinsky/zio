@@ -16,10 +16,12 @@
 //!   * migration on  -> the shared runtime global queue (load-balanced across all).
 //!   * migration off -> this executor's own queue (tasks never leave home).
 //!
-//! Concurrency: `head` is CAS'd by the owner pop and (phase 2) stealers; `tail` is
-//! written only by the owning thread (store-release) and read plain by the owner,
-//! acquire by stealers. `T` must have a `next: ?*T` field (for the overflow list)
-//! and, in debug, `in_list: bool` (managed by the overflow queue, not the ring).
+//! Concurrency (stealable queues): `head` is CAS'd by the owner pop and (phase 2)
+//! stealers; `tail` is written only by the owning thread (store-release) and read
+//! plain by the owner, acquire by stealers. When the queue is built non-stealable
+//! (task migration compiled out) it is single-owner, so the cursors are plain and
+//! `steal` is a compile error. `T` must have a `next: ?*T` field (for the overflow
+//! list) and, in debug, `in_list: bool` (managed by the overflow queue, not ring).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -79,7 +81,13 @@ pub fn OverflowQueue(comptime T: type) type {
     };
 }
 
-pub fn LocalRunQueue(comptime T: type) type {
+/// `stealable` selects the concurrency model:
+///   * true  -> another thread (a phase-2 thief) may race the owner on the ring,
+///              so the cursors are touched through atomic builtins.
+///   * false -> the ring is owned by a single thread (task migration compiled
+///              out), so the cursors are plain scalars and no atomics are emitted;
+///              `steal` becomes a compile error since it can never be called.
+pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
     return struct {
         const Self = @This();
 
@@ -88,10 +96,47 @@ pub fn LocalRunQueue(comptime T: type) type {
         const mask: u32 = capacity - 1;
 
         buffer: [capacity]*T = undefined,
-        head: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
-        tail: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+        // Ring cursors. `head` is advanced by the owner (pop) and, when stealable,
+        // by thieves; `tail` is written only by the owner. They are plain scalars —
+        // the accessors below apply atomic ordering only in the stealable build, so
+        // a single-owner queue pays no atomic cost.
+        head: u32 = 0,
+        tail: u32 = 0,
         /// Set once, at executor init, to the global or the executor-local queue.
         overflow: *OverflowQueue(T) = undefined,
+
+        // --- cursor accessors --------------------------------------------------
+        // Cross-thread reads acquire; the owner publishes `tail` with a release
+        // store so a thief's acquire-load of `tail` also sees the buffer slot. The
+        // owner reads its own `tail` plainly (`ownTail`) as the sole producer. When
+        // `stealable` is false these all collapse to plain loads/stores.
+
+        inline fn loadHead(self: *const Self) u32 {
+            return if (stealable) @atomicLoad(u32, &self.head, .acquire) else self.head;
+        }
+        inline fn loadTail(self: *const Self) u32 {
+            return if (stealable) @atomicLoad(u32, &self.tail, .acquire) else self.tail;
+        }
+        /// Owner-only read of its own `tail` (the owner is the sole producer).
+        inline fn ownTail(self: *const Self) u32 {
+            return self.tail;
+        }
+        inline fn storeTail(self: *Self, v: u32) void {
+            if (stealable) @atomicStore(u32, &self.tail, v, .release) else self.tail = v;
+        }
+        /// Advance `head` from `expected` to `new`. Returns true on success. A plain
+        /// store when not stealable (uncontended); a CAS against racing thieves
+        /// otherwise. `weak` selects cmpxchgWeak (retry loops) vs Strong.
+        inline fn casHead(self: *Self, expected: u32, new: u32, comptime weak: bool) bool {
+            if (!stealable) {
+                self.head = new;
+                return true;
+            }
+            return if (weak)
+                @cmpxchgWeak(u32, &self.head, expected, new, .acq_rel, .acquire) == null
+            else
+                @cmpxchgStrong(u32, &self.head, expected, new, .acq_rel, .acquire) == null;
+        }
 
         pub fn init(overflow: *OverflowQueue(T)) Self {
             return .{ .overflow = overflow };
@@ -101,11 +146,11 @@ pub fn LocalRunQueue(comptime T: type) type {
         /// ring plus this node to the overflow queue (Go's runqput/runqputslow).
         pub fn push(self: *Self, node: *T) void {
             while (true) {
-                const h = self.head.load(.acquire); // synchronize with consumers
-                const t = self.tail.raw; // owner is the sole producer
+                const h = self.loadHead(); // synchronize with consumers
+                const t = self.ownTail(); // owner is the sole producer
                 if (t -% h < capacity) {
                     self.buffer[t & mask] = node;
-                    self.tail.store(t +% 1, .release); // publish the slot
+                    self.storeTail(t +% 1); // publish the slot
                     return;
                 }
                 if (self.pushOverflow(node, h, t)) return;
@@ -119,7 +164,7 @@ pub fn LocalRunQueue(comptime T: type) type {
             var i: u32 = 0;
             while (i < n) : (i += 1) batch[i] = self.buffer[(h +% i) & mask];
             // Claim the grabbed half; a stealer may have raced the head.
-            if (self.head.cmpxchgStrong(h, h +% n, .acq_rel, .acquire) != null) return false;
+            if (!self.casHead(h, h +% n, false)) return false;
             batch[n] = node;
             self.overflow.pushSlice(batch[0 .. n + 1]);
             return true;
@@ -128,11 +173,11 @@ pub fn LocalRunQueue(comptime T: type) type {
         /// Owner-only pop (FIFO, from the head). CAS because stealers race the head.
         pub fn pop(self: *Self) ?*T {
             while (true) {
-                const h = self.head.load(.acquire);
-                const t = self.tail.raw;
+                const h = self.loadHead();
+                const t = self.ownTail();
                 if (h == t) return null; // empty
                 const node = self.buffer[h & mask];
-                if (self.head.cmpxchgWeak(h, h +% 1, .acq_rel, .acquire) == null) return node;
+                if (self.casHead(h, h +% 1, true)) return node;
                 // A stealer took slot h; retry with the new head.
             }
         }
@@ -144,12 +189,12 @@ pub fn LocalRunQueue(comptime T: type) type {
         /// retry, so a racing steal never causes an unchecked node to be popped.
         pub fn popIf(self: *Self, context: anytype, comptime runnable: fn (@TypeOf(context), *T) bool) ?*T {
             while (true) {
-                const h = self.head.load(.acquire);
-                const t = self.tail.raw;
+                const h = self.loadHead();
+                const t = self.ownTail();
                 if (h == t) return null; // empty
                 const node = self.buffer[h & mask];
                 if (!runnable(context, node)) return null; // head not runnable; leave it
-                if (self.head.cmpxchgWeak(h, h +% 1, .acq_rel, .acquire) == null) return node;
+                if (self.casHead(h, h +% 1, true)) return node;
                 // A stealer took slot h; retry and re-check the new head.
             }
         }
@@ -159,14 +204,18 @@ pub fn LocalRunQueue(comptime T: type) type {
         /// on the thief's thread — `self` is the thief's own queue. Mirrors Go's
         /// runqsteal/runqgrab. Returns null if the victim had nothing stealable
         /// (empty, or every claim lost the race) or this ring has no room.
+        ///
+        /// Only available on a stealable queue: with task migration compiled out no
+        /// thief exists, so calling this is a programming error and won't compile.
         pub fn steal(self: *Self, victim: *Self) ?*T {
-            const dst_tail = self.tail.raw; // the thief owns its own tail
-            const dst_space = capacity - (dst_tail -% self.head.load(.acquire));
+            if (!stealable) @compileError("steal() is unavailable: this queue was built without task migration / work stealing");
+            const dst_tail = self.ownTail(); // the thief owns its own tail
+            const dst_space = capacity - (dst_tail -% self.loadHead());
             if (dst_space == 0) return null;
 
             const stolen: u32 = while (true) {
-                const h = victim.head.load(.acquire); // sync with victim's consumers
-                const vt = victim.tail.load(.acquire); // sync with victim's producer
+                const h = victim.loadHead(); // sync with victim's consumers
+                const vt = victim.loadTail(); // sync with victim's producer
                 var take = vt -% h;
                 take -= take / 2; // ceil half
                 if (take == 0) return null; // victim empty
@@ -177,22 +226,22 @@ pub fn LocalRunQueue(comptime T: type) type {
                     self.buffer[(dst_tail +% i) & mask] = victim.buffer[(h +% i) & mask];
                 }
                 // Commit the claim by advancing the victim's head.
-                if (victim.head.cmpxchgStrong(h, h +% take, .acq_rel, .acquire) == null) break take;
+                if (victim.casHead(h, h +% take, false)) break take;
                 // Lost the race (an owner pop or another thief); retry the grab.
             };
 
             // Hand back the last stolen task; publish the rest into the thief's ring.
             const rest = stolen - 1;
             const task = self.buffer[(dst_tail +% rest) & mask];
-            if (rest > 0) self.tail.store(dst_tail +% rest, .release);
+            if (rest > 0) self.storeTail(dst_tail +% rest);
             return task;
         }
 
         /// Pull up to `max` tasks from the overflow queue into the ring (owner,
         /// once per tick). Only fills available space, so it never overflows.
         pub fn refill(self: *Self, max: usize) void {
-            const t = self.tail.raw;
-            const h = self.head.load(.acquire);
+            const t = self.ownTail();
+            const h = self.loadHead();
             const space: usize = capacity - (t -% h);
             var buf: [64]*T = undefined;
             const want = @min(space, @min(max, buf.len));
@@ -203,18 +252,18 @@ pub fn LocalRunQueue(comptime T: type) type {
                 self.buffer[tt & mask] = node;
                 tt +%= 1;
             }
-            if (got > 0) self.tail.store(tt, .release);
+            if (got > 0) self.storeTail(tt);
         }
 
         /// Number of tasks currently in the ring (used for maybeYield fairness).
         pub fn len(self: *const Self) u32 {
-            const t = self.tail.load(.acquire);
-            const h = self.head.load(.acquire);
+            const t = self.loadTail();
+            const h = self.loadHead();
             return t -% h;
         }
 
         pub fn isEmpty(self: *const Self) bool {
-            return self.head.load(.acquire) == self.tail.load(.acquire);
+            return self.loadHead() == self.loadTail();
         }
     };
 }
@@ -233,7 +282,8 @@ const TestNode = struct {
     id: usize = 0,
 };
 
-const TestQueue = LocalRunQueue(TestNode);
+const TestQueue = LocalRunQueue(TestNode, true);
+const TestLocalQueue = LocalRunQueue(TestNode, false);
 const TestOverflow = OverflowQueue(TestNode);
 
 test "LocalRunQueue: FIFO push and pop within capacity" {
@@ -334,6 +384,33 @@ test "LocalRunQueue: popIf leaves a non-runnable head in place" {
     const n = q.popIf(RejectCtx{ .reject_id = 999 }, notRejected) orelse return error.Unexpected;
     try testing.expectEqual(0, n.id);
     try testing.expectEqual(2, q.len());
+}
+
+test "LocalRunQueue: non-stealable variant pushes, pops, and overflows" {
+    // The single-owner build uses plain cursors (no atomics) and has no steal.
+    const cap = TestLocalQueue.capacity;
+    const total = cap + cap / 2; // force a spill
+    var ov: TestOverflow = .{};
+    var q = TestLocalQueue.init(&ov);
+
+    const nodes = try testing.allocator.alloc(TestNode, total);
+    defer testing.allocator.free(nodes);
+    for (nodes, 0..) |*n, i| {
+        n.* = .{ .id = i };
+        q.push(n);
+    }
+    try testing.expect(!ov.isEmpty()); // spilled to overflow
+
+    var count: usize = 0;
+    while (q.pop()) |_| count += 1;
+    var buf: [64]*TestNode = undefined;
+    while (true) {
+        const got = ov.popBatch(&buf);
+        if (got == 0) break;
+        count += got;
+    }
+    try testing.expectEqual(total, count);
+    try testing.expect(q.isEmpty());
 }
 
 test "LocalRunQueue: steal takes half into the thief and returns one" {

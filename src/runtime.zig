@@ -296,7 +296,7 @@ pub const Executor = struct {
     // style). Overflow and cross-thread wakes go to `run_queue.overflow`, which
     // is wired at init to either the runtime global queue (migration on) or this
     // executor's own `overflow` queue below (migration off).
-    run_queue: LocalRunQueue(WaitNode) = .{},
+    run_queue: LocalRunQueue(WaitNode, zio_options.task_migration) = .{},
 
     // This executor's own overflow queue, used ONLY when task migration is
     // disabled — cross-thread wakes and ring overflow for this executor land here
@@ -1468,7 +1468,7 @@ test "runtime: local ring overflow spills and drains with task migration disable
     if (builtin.single_threaded) return error.SkipZigTest;
 
     const H = struct {
-        const n_tasks = 2 * LocalRunQueue(WaitNode).capacity; // 512 >> 256
+        const n_tasks = 2 * LocalRunQueue(WaitNode, zio_options.task_migration).capacity; // 512 >> 256
 
         fn child(counter: *std.atomic.Value(u32)) void {
             _ = counter.fetchAdd(1, .monotonic);
