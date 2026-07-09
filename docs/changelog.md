@@ -4,6 +4,46 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Blocking operations running on thread-pool workers are now cancelable. Previously,
+  canceling a task stuck in a blocking syscall had to wait for the syscall to finish;
+  now the worker is interrupted with `SIGURG` and the operation returns `error.Canceled`.
+  This covers `blockInPlace` and all file/directory operations that are delegated to the
+  thread pool on backends without native async file I/O (kqueue, poll), including
+  path-based metadata operations and directory reads. `getaddrinfo` itself cannot be
+  interrupted, but a cancelation requested while the lookup was still queued is now
+  honored before it starts. On Windows/WASI this degrades gracefully: queued-but-not-started
+  work can still be canceled, in-progress syscalls run to completion as before.
+
+- Added a `direct` flag to `FileOpenFlags`/`FileCreateFlags` for direct I/O, bypassing
+  the OS page cache (`O_DIRECT` on Linux, `fcntl(F_NOCACHE)` on macOS,
+  `FILE_FLAG_NO_BUFFERING` on Windows). The caller is responsible for meeting the
+  platform's alignment requirements for buffers, offsets and transfer lengths.
+
+- Added `Dir.iterate()` for native directory iteration, returning entry names and file
+  kinds. The directory must be opened with `.iterate = true`.
+
+- `Group` can now be used with `zio.select()` and `zio.wait()`. The group completes
+  when its pending-task counter drains to zero. Unlike `Group.wait()`, this does not
+  close the group and does not participate in fail-fast handling, so you can race a
+  group against other futures and keep using it afterwards.
+
+- Added a top-level `zio.maybeYield()`, a cheap fairness check for long CPU-bound
+  loops: it yields only when enough other tasks are waiting on the current executor,
+  and is a no-op when called from a thread without an executor.
+
+- The io_uring backend now shares one kernel async worker pool across all executor
+  rings via `IORING_SETUP_ATTACH_WQ`, instead of each ring creating its own.
+
+- Task migration support can now be compiled out with the `task-migration` build option
+  (default on). `RuntimeOptions.enable_task_migration` now defaults to whether support
+  is compiled in, and enabling it at runtime in a build without support fails at init
+  with `error.TaskMigrationNotCompiledIn`. Compiling it out removes the atomics that
+  only exist to support cross-thread task movement.
+
+- Replaced the per-executor run queue with a fixed-size ring buffer modeled on the
+  local run queues in Go and Tokio, spilling into a shared overflow queue when full.
+  This is the first phase of work-stealing; no stealing happens yet.
+
 - `RuntimeOptions.executors = .auto` now honors the CPU limit of the current cgroup
   on Linux, in addition to the CPU affinity mask. Container CPU limits (Docker
   `--cpus`, Kubernetes `resources.limits.cpu`) and systemd `CPUQuota=` are enforced
@@ -11,6 +51,33 @@ All notable changes to this project will be documented in this file.
   Without this, `.auto` would size the executor pool to the host's CPU count and get
   throttled by the scheduler. The effective count is now `min(affinity, ceil(quota/period))`,
   mirroring Go's container-aware `GOMAXPROCS` default.
+
+- Reduced locking in the event loop's timer processing: ticks with no due timers now
+  skip the timer mutex entirely, and futex waits without a timeout skip the timer
+  setup and one bucket-lock acquisition per wait.
+
+- Fixed the coroutine context switch to clobber vector registers (`xmm`/`ymm` on
+  x86_64, NEON on aarch64, RVV on riscv, LSX/LASX on loongarch64). The clobber lists
+  only named the widest registers (e.g. `zmm` on x86_64), relying on them aliasing
+  the narrower ones, but when the target CPU lacks the feature (e.g. AVX-512),
+  LLVM silently drops such clobbers instead of applying them to the aliased
+  registers. The compiler was then free to keep a vector value live across a
+  context switch and read back another task's data. This surfaced on Windows, where
+  the calling convention keeps values in callee-saved `xmm` registers.
+
+- Fixed possible stack corruption in the IOCP backend on Windows. Overlapped I/O
+  submissions passed the kernel pointers to stack-local out-parameters, which the
+  kernel writes at completion time, after the submitting frame is gone. The
+  out-parameters now live next to the `OVERLAPPED` for the whole operation.
+
+- Fixed `File.setSize` on the io_uring backend with kernels older than 6.9, where
+  `IORING_OP_FTRUNCATE` is not available. The opcode is now probed once at startup
+  and older kernels transparently fall back to the thread pool.
+
+- Fixed panic messages not being printed when panicking from scheduler code or
+  signal handlers with `debug_io` enabled. I/O performed outside of a task context
+  now takes a blocking path instead of re-entering the event loop, which would
+  previously abort before writing the message.
 
 ## [0.15.0] - 2026-07-02
 
