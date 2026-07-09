@@ -133,26 +133,19 @@ fn veh(info: *win.EXCEPTION_POINTERS) callconv(.winapi) c_long {
     if ((ctx.Dr6 & 0xf) == 0) return EXCEPTION_CONTINUE_SEARCH;
     ctx.Dr6 = 0; // clear detection bits
     const rip = ctx.Rip;
-    // VALUE FILTER: read the tag+payload (guarded by VirtualQuery so a stale/freed
-    // watch_addr can't fault the VEH). The corrupt write leaves payload==sentinel
-    // and tag==1 (.reschedule) — flag it with rip+thread regardless of the rip.
+    // Read the tag+payload (guarded by VirtualQuery so a stale/freed watch_addr
+    // can't fault the VEH). A write that leaves payload==sentinel & tag==1 is
+    // either the real corruptor OR a legit yield(.reschedule) caught between its
+    // tag-store and payload-store (false positive). We log each DISTINCT rip that
+    // produces this state exactly once (symbolized) — the legit yields all sit at
+    // task.zig:287; any OTHER rip is the corruptor.
     var mbi: MEMORY_BASIC_INFORMATION = std.mem.zeroes(MEMORY_BASIC_INFORMATION);
-    if (VirtualQuery(@ptrFromInt(watch_addr), &mbi, @sizeOf(MEMORY_BASIC_INFORMATION)) != 0 and
-        mbi.State == 0x1000 and (mbi.Protect & 0x101) == 0)
-    {
-        const tag = @as(*const usize, @ptrFromInt(watch_addr)).*;
-        const payload = @as(*const usize, @ptrFromInt(watch_addr - 8)).*;
-        if (payload == sentinel and (tag & 0xff) == 1) {
-            const n = corrupt_fired.fetchAdd(1, .monotonic);
-            if (n < 8) {
-                std.log.info("!!! CORRUPT WRITE thread={} rip=0x{x} tag=0x{x}", .{ GetCurrentThreadId(), rip, tag });
-                var caddrs = [_]usize{rip};
-                const ctrace = std.debug.StackTrace{ .return_addresses = &caddrs, .skipped = .none };
-                std.debug.dumpStackTrace(&ctrace);
-            }
-        }
-    }
-    // Also log each UNIQUE writer once (dedup) for context.
+    if (VirtualQuery(@ptrFromInt(watch_addr), &mbi, @sizeOf(MEMORY_BASIC_INFORMATION)) == 0 or
+        mbi.State != 0x1000 or (mbi.Protect & 0x101) != 0) return EXCEPTION_CONTINUE_EXECUTION;
+    const tag = @as(*const usize, @ptrFromInt(watch_addr)).*;
+    const payload = @as(*const usize, @ptrFromInt(watch_addr - 8)).*;
+    if (payload != sentinel or (tag & 0xff) != 1) return EXCEPTION_CONTINUE_EXECUTION;
+
     while (seen_mutex.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
     var found = false;
     var i: usize = 0;
@@ -162,15 +155,13 @@ fn veh(info: *win.EXCEPTION_POINTERS) callconv(.winapi) c_long {
             break;
         }
     }
-    var idx: usize = 0;
     if (!found and seen_n < seen.len) {
-        idx = seen_n;
         seen[seen_n] = rip;
         seen_n += 1;
     }
     seen_mutex.store(0, .release);
-    if (!found and idx < seen.len) {
-        std.log.info("WP writer #{} thread={} rip=0x{x}", .{ idx, GetCurrentThreadId(), rip });
+    if (!found) {
+        std.log.info("!!! {{sentinel,1}} writer thread={} rip=0x{x}", .{ GetCurrentThreadId(), rip });
         var addrs = [_]usize{rip};
         const trace = std.debug.StackTrace{ .return_addresses = &addrs, .skipped = .none };
         std.debug.dumpStackTrace(&trace);
