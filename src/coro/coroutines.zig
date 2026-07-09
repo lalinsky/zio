@@ -234,6 +234,49 @@ pub inline fn switchContext(
               .mm5 = true,
               .mm6 = true,
               .mm7 = true,
+              // The context switch destroys all vector registers. The zmm* names
+              // below only correspond to real registers when the target has
+              // AVX-512; on a baseline (SSE2) build they are inert, leaving
+              // xmm0–xmm15 unmarked. The compiler then keeps live values in the
+              // callee-preserved xmm regs across the switch (Windows keeps values
+              // in xmm6–xmm15; SysV does not), and the switch corrupts them —
+              // e.g. a `.none` constant splatted into pending_cleanup (#460).
+              // Clobber the xmm regs explicitly so they are always covered.
+              .xmm0 = true,
+              .xmm1 = true,
+              .xmm2 = true,
+              .xmm3 = true,
+              .xmm4 = true,
+              .xmm5 = true,
+              .xmm6 = true,
+              .xmm7 = true,
+              .xmm8 = true,
+              .xmm9 = true,
+              .xmm10 = true,
+              .xmm11 = true,
+              .xmm12 = true,
+              .xmm13 = true,
+              .xmm14 = true,
+              .xmm15 = true,
+              // ymm/zmm cover the wider vector regs on AVX / AVX-512 builds; like
+              // the zmm entries they are simply inert on narrower targets. xmm
+              // above is what actually covers the baseline (SSE2) build.
+              .ymm0 = true,
+              .ymm1 = true,
+              .ymm2 = true,
+              .ymm3 = true,
+              .ymm4 = true,
+              .ymm5 = true,
+              .ymm6 = true,
+              .ymm7 = true,
+              .ymm8 = true,
+              .ymm9 = true,
+              .ymm10 = true,
+              .ymm11 = true,
+              .ymm12 = true,
+              .ymm13 = true,
+              .ymm14 = true,
+              .ymm15 = true,
               .zmm0 = true,
               .zmm1 = true,
               .zmm2 = true,
