@@ -133,6 +133,7 @@ pub fn WaitQueue(comptime T: type) type {
         /// Spins while mutation lock is held, then sets flag atomically.
         /// For the common pattern of set + pop loop, prefer popAndSetFlag().
         pub fn setFlag(self: *Self) void {
+            self.dbgCheck();
             var state = self.head.load(.monotonic);
             while (true) {
                 if (state & lock_bit != 0) {
@@ -153,6 +154,7 @@ pub fn WaitQueue(comptime T: type) type {
         ///
         /// Spins while mutation lock is held, then clears flag atomically.
         pub fn clearFlag(self: *Self) void {
+            self.dbgCheck();
             var state = self.head.load(.monotonic);
             while (true) {
                 if (state & lock_bit != 0) {
@@ -182,11 +184,22 @@ pub fn WaitQueue(comptime T: type) type {
         // Internal Helpers
         // =========================================================================
 
+        /// DEBUG(#460): software watchpoint — panic (with the caller's backtrace) if
+        /// a WaitQueue op runs on the watched head address (executor.pending_cleanup.tag),
+        /// i.e. a dangling/aliased WaitQueue whose head lands on pending_cleanup.
+        pub var dbg_watch_head: usize = 0;
+        inline fn dbgCheck(self: *const Self) void {
+            if (dbg_watch_head != 0 and @intFromPtr(&self.head) == dbg_watch_head) {
+                @panic("DEBUG(#460): WaitQueue op on executor.pending_cleanup.tag");
+            }
+        }
+
         /// Acquire exclusive access to manipulate the wait list.
         /// Spins until mutation lock is acquired. The critical section is a
         /// constant few pointer swaps on the linked list, so unbounded spinning is fine.
         /// Returns the state before mutation bit was set (with lock bit cleared).
         fn acquireMutationLock(self: *Self) usize {
+            self.dbgCheck();
             while (true) {
                 const old = self.head.fetchOr(lock_bit, .acquire);
 

@@ -983,8 +983,10 @@ pub const Runtime = struct {
             try self.main_executor.init(self, 0);
             main_executor_initialized = true;
             self.executors.appendAssumeCapacity(&self.main_executor);
-            // DEBUG(#460): watch pending_cleanup.tag (the byte that gets stomped to 1).
-            @import("dbg_watch.zig").arm(@intFromPtr(&self.main_executor.pending_cleanup) + 8);
+            // DEBUG(#460): software-watchpoint the WaitQueue whose head would land on
+            // pending_cleanup.tag (exec+0xbd8) — a dangling/aliased Awaitable.waiting_list
+            // op there panics with the caller's backtrace.
+            @import("utils/wait_queue.zig").WaitQueue(WaitNode).dbg_watch_head = @intFromPtr(&self.main_executor.pending_cleanup) + 8;
         }
         errdefer if (main_executor_initialized) self.main_executor.deinit();
 
