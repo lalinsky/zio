@@ -95,6 +95,9 @@ fn monitor(_: ?*anyopaque) callconv(.winapi) DWORD {
 }
 
 var main_tid: DWORD = 0;
+var seen: [32]usize = @splat(0);
+var seen_n: usize = 0;
+var seen_mutex: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
 fn veh(info: *win.EXCEPTION_POINTERS) callconv(.winapi) c_long {
     const rec = info.ExceptionRecord;
@@ -102,18 +105,31 @@ fn veh(info: *win.EXCEPTION_POINTERS) callconv(.winapi) c_long {
     const ctx = info.ContextRecord;
     if ((ctx.Dr6 & 0xf) == 0) return EXCEPTION_CONTINUE_SEARCH;
     ctx.Dr6 = 0; // clear detection bits
-    // The DR fires on EVERY write to pending_cleanup.tag. Legit writes (yield /
-    // processCleanup / the create() memset) are all on the main/executor thread.
-    // The corruptor is a *background* thread — filter by thread id. No memory reads
-    // here (the address may be a freed runtime), just the instruction pointer.
-    if (GetCurrentThreadId() != main_tid) {
-        const n = fired.fetchAdd(1, .monotonic);
-        if (n < 8) {
-            std.log.info("CORRUPT WRITE (bg thread={}) rip=0x{x}", .{ GetCurrentThreadId(), ctx.Rip });
-            var addrs = [_]usize{ctx.Rip};
-            const trace = std.debug.StackTrace{ .return_addresses = &addrs, .skipped = .none };
-            std.debug.dumpStackTrace(&trace);
+    // Log each UNIQUE writer of pending_cleanup.tag once (no memory reads → no
+    // faults). The legit writers are yield/processCleanup/startFn on the main
+    // thread; the corruptor is a distinct rip. Dedup with a tiny spinlocked set.
+    const rip = ctx.Rip;
+    while (seen_mutex.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    var found = false;
+    var i: usize = 0;
+    while (i < seen_n) : (i += 1) {
+        if (seen[i] == rip) {
+            found = true;
+            break;
         }
+    }
+    var idx: usize = 0;
+    if (!found and seen_n < seen.len) {
+        idx = seen_n;
+        seen[seen_n] = rip;
+        seen_n += 1;
+    }
+    seen_mutex.store(0, .release);
+    if (!found and idx < seen.len) {
+        std.log.info("WP writer #{} thread={} rip=0x{x}", .{ idx, GetCurrentThreadId(), rip });
+        var addrs = [_]usize{rip};
+        const trace = std.debug.StackTrace{ .return_addresses = &addrs, .skipped = .none };
+        std.debug.dumpStackTrace(&trace);
     }
     return EXCEPTION_CONTINUE_EXECUTION;
 }
