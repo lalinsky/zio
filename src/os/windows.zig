@@ -532,10 +532,26 @@ pub extern "ntdll" fn RtlFreeUserStack(
 // DEBUG(#460): used to decommit-and-leak freed coroutine stacks so a dangling
 // write to a freed stack faults (access violation) at the writer's site.
 pub const MEM_DECOMMIT: DWORD = 0x4000;
+pub const MEM_COMMIT: DWORD = 0x1000;
+pub const MEM_RESERVE: DWORD = 0x2000;
+pub const PAGE_READWRITE: DWORD = 0x04;
+pub const PAGE_NOACCESS: DWORD = 0x01;
 pub extern "kernel32" fn VirtualFree(
     lpAddress: PVOID,
     dwSize: SIZE_T,
     dwFreeType: DWORD,
+) callconv(.winapi) BOOL;
+pub extern "kernel32" fn VirtualAlloc(
+    lpAddress: ?PVOID,
+    dwSize: SIZE_T,
+    flAllocationType: DWORD,
+    flProtect: DWORD,
+) callconv(.winapi) ?PVOID;
+pub extern "kernel32" fn VirtualProtect(
+    lpAddress: PVOID,
+    dwSize: SIZE_T,
+    flNewProtect: DWORD,
+    lpflOldProtect: *DWORD,
 ) callconv(.winapi) BOOL;
 
 // Handle management
