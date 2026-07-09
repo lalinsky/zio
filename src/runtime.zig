@@ -461,6 +461,11 @@ pub const Executor = struct {
                 dbgCheckPC(self, "run:after-step");
                 self.current_task = null;
                 self.processCleanup();
+                // DEBUG(#460): stamp a sentinel into the payload slot while the tag
+                // is .none, so if a later corruption is observed we can tell whether
+                // the cross-thread write touched the payload (→ not the sentinel) or
+                // only flipped the tag (→ payload still the sentinel = residual reuse).
+                @as(*volatile usize, @ptrCast(&self.pending_cleanup)).* = dbg_sentinel;
             }
 
             // Exit if loop is stopped
@@ -731,6 +736,7 @@ pub const Executor = struct {
 // DEBUG(#460): captured at the top of processCleanup (2 writes; reliable repro).
 var dbg_last_pc: Executor.TaskCleanup = .none;
 var dbg_last_pc_exec: ?*Executor = null;
+const dbg_sentinel: usize = 0xD00DFEEDD00DFEED;
 
 /// Check pending_cleanup for a bogus (image-range) payload and panic at the first
 /// place it appears, so we can pinpoint which task-run/switch corrupted it.
