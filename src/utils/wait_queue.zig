@@ -82,6 +82,10 @@ pub const WaitNode = struct {
 /// };
 /// var queue: WaitQueue(MyNode) = .empty;
 /// ```
+// DEBUG(#460): shared across all WaitQueue instantiations so a single set covers
+// every WaitQueue(T) (Awaitable, Futex, Mutex, Semaphore, ...).
+pub var dbg_watch_head: usize = 0;
+
 pub fn WaitQueue(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -187,7 +191,6 @@ pub fn WaitQueue(comptime T: type) type {
         /// DEBUG(#460): software watchpoint — panic (with the caller's backtrace) if
         /// a WaitQueue op runs on the watched head address (executor.pending_cleanup.tag),
         /// i.e. a dangling/aliased WaitQueue whose head lands on pending_cleanup.
-        pub var dbg_watch_head: usize = 0;
         inline fn dbgCheck(self: *const Self) void {
             if (dbg_watch_head != 0 and @intFromPtr(&self.head) == dbg_watch_head) {
                 @panic("DEBUG(#460): WaitQueue op on executor.pending_cleanup.tag");
