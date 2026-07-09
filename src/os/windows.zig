@@ -102,6 +102,16 @@ pub const OVERLAPPED_ENTRY = extern struct {
     dwNumberOfBytesTransferred: DWORD,
 };
 
+// DEBUG(#460): the kernel writes the *real* layout into these; if our definitions
+// were undersized the kernel would overrun into adjacent fields. Prove the sizes.
+comptime {
+    std.debug.assert(@sizeOf(OVERLAPPED) == 32);
+    std.debug.assert(@alignOf(OVERLAPPED) == 8);
+    std.debug.assert(@offsetOf(OVERLAPPED, "InternalHigh") == 8);
+    std.debug.assert(@offsetOf(OVERLAPPED, "hEvent") == 24);
+    std.debug.assert(@sizeOf(OVERLAPPED_ENTRY) == 32);
+}
+
 // Constants
 pub const TRUE: BOOL = BOOL.TRUE;
 pub const FALSE: BOOL = .FALSE;

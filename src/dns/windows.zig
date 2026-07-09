@@ -66,12 +66,16 @@ const Query = struct {
 // caught (with its backtrace) instead of silently stomping reused memory.
 const DBG_MAGIC_LIVE: u64 = 0x460C_0DE0_460C_0DE0;
 const DBG_MAGIC_DEAD: u64 = 0x460D_EAD0_460D_EAD0;
+// DEBUG(#460): guard word right after the OVERLAPPED to catch a kernel write that
+// runs past a standard 32-byte OVERLAPPED into the following field (async_handle).
+const DBG_OVERLAPPED_CANARY: u64 = 0x460C_A6A0_460C_A6A0;
 
 /// Heap-allocated, reference-counted context for a loop-delivered async lookup.
 const LoopContext = struct {
     // DEBUG(#460): magic first so a stale callback reads it before anything else.
     magic: u64 = DBG_MAGIC_LIVE,
     overlapped: windows.OVERLAPPED = std.mem.zeroes(windows.OVERLAPPED),
+    overlapped_canary: u64 = DBG_OVERLAPPED_CANARY,
     async_handle: ev.Async,
     err: u32 = 0,
     refs: std.atomic.Value(u8),
@@ -103,6 +107,9 @@ fn loopCallback(dwError: u32, _: u32, lpOverlapped: ?*windows.OVERLAPPED) callco
     }
     if (ctx.must_not_fire) {
         std.debug.panic("DEBUG(#460): DNS loopCallback fired after a synchronous GetAddrInfoExW return (Hole A) ctx=0x{x} err={}", .{ @intFromPtr(ctx), dwError });
+    }
+    if (ctx.overlapped_canary != DBG_OVERLAPPED_CANARY) {
+        std.debug.panic("DEBUG(#460): GetAddrInfoExW over-wrote past OVERLAPPED (canary=0x{x}) ctx=0x{x}", .{ ctx.overlapped_canary, @intFromPtr(ctx) });
     }
     ctx.err = dwError;
     // Hand off to the loop; do NOT touch the waiter/task from this foreign thread.
@@ -158,6 +165,11 @@ fn lookupOnLoop(
         &cancel_handle,
     );
 
+    // DEBUG(#460): catch a synchronous over-write past the OVERLAPPED.
+    if (ctx.overlapped_canary != DBG_OVERLAPPED_CANARY) {
+        std.debug.panic("DEBUG(#460): GetAddrInfoExW (sync) over-wrote past OVERLAPPED (canary=0x{x}) rc={}", .{ ctx.overlapped_canary, rc });
+    }
+
     if (rc == 0) {
         // Completed synchronously — we ASSUME no callback will fire, so drop both
         // refs. DEBUG(#460): mark must_not_fire first so a callback that fires
@@ -211,12 +223,18 @@ fn lookupOnLoop(
 /// reclaimed by another task mid-signal.
 const BlockingContext = struct {
     overlapped: windows.OVERLAPPED = std.mem.zeroes(windows.OVERLAPPED),
+    // DEBUG(#460): guard between OVERLAPPED and waiter — a kernel over-write past
+    // the OVERLAPPED would land here rather than silently signaling the waiter.
+    overlapped_canary: u64 = DBG_OVERLAPPED_CANARY,
     waiter: Waiter,
     err: u32 = 0,
 };
 
 fn blockingCallback(dwError: u32, _: u32, lpOverlapped: ?*windows.OVERLAPPED) callconv(.winapi) void {
     const ctx: *BlockingContext = @fieldParentPtr("overlapped", lpOverlapped.?);
+    if (ctx.overlapped_canary != DBG_OVERLAPPED_CANARY) {
+        std.debug.panic("DEBUG(#460): GetAddrInfoExW over-wrote past OVERLAPPED into blocking waiter (canary=0x{x})", .{ctx.overlapped_canary});
+    }
     ctx.err = dwError;
     ctx.waiter.signal();
 }

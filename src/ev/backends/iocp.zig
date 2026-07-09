@@ -180,8 +180,15 @@ pub const capabilities: BackendCapabilities = .{
 };
 
 // Backend-specific data stored in Completion.internal
+// DEBUG(#460): guard word placed immediately after every OVERLAPPED. If the
+// kernel writes beyond a standard 32-byte OVERLAPPED at &overlapped (i.e. the API
+// expected it embedded in a larger structure), it lands here and we catch it at
+// completion instead of silently stomping the next field.
+const OVERLAPPED_CANARY: u64 = 0x460C_A6A0_460C_A6A0;
+
 pub const CompletionData = struct {
     overlapped: windows.OVERLAPPED = std.mem.zeroes(windows.OVERLAPPED),
+    overlapped_canary: u64 = OVERLAPPED_CANARY,
     /// Storage for the lpNumberOfBytes* out-parameter of overlapped WSARecv /
     /// WSASend / AcceptEx / etc. For overlapped I/O the kernel writes this at
     /// *completion* time — long after the submit* frame has returned — so it must
@@ -1658,6 +1665,12 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
 
     // Use @fieldParentPtr again to get from CompletionData to Completion
     const c: *Completion = @fieldParentPtr("internal", completion_data);
+
+    // DEBUG(#460): if the kernel over-wrote past the 32-byte OVERLAPPED, the guard
+    // word right after it is stomped — catch it here with the op type.
+    if (completion_data.overlapped_canary != OVERLAPPED_CANARY) {
+        std.debug.panic("DEBUG(#460): OVERLAPPED over-write detected op={s} canary=0x{x} at 0x{x}", .{ @tagName(c.op), completion_data.overlapped_canary, @intFromPtr(completion_data) });
+    }
 
     // Process based on operation type
     switch (c.op) {
