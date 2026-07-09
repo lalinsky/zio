@@ -758,22 +758,7 @@ pub const TaskPool = struct {
         self.pool.deinit();
     }
 
-    // DEBUG(#460): allocate every task on its own committed page via VirtualAlloc,
-    // and on free VirtualProtect it PAGE_NOACCESS and leak it (never reuse). A
-    // dangling write to a freed task (e.g. a cross-thread markComplete/flag-set on
-    // an already-freed awaitable) then faults at the writer's site instead of
-    // silently corrupting reused memory, and the backtrace names the culprit.
-    const dbg_guard_tasks = @import("builtin").os.tag == .windows;
-
     pub fn alloc(self: *TaskPool, rt: *Runtime, size: usize) ![]align(Closure.task_alignment) u8 {
-        if (dbg_guard_tasks) {
-            const w = os.windows;
-            const page: usize = 4096;
-            const n = std.mem.alignForward(usize, @max(size, 1), page);
-            const p = w.VirtualAlloc(null, n, w.MEM_COMMIT | w.MEM_RESERVE, w.PAGE_READWRITE) orelse return error.OutOfMemory;
-            const bytes: [*]align(Closure.task_alignment) u8 = @ptrCast(@alignCast(p));
-            return bytes[0..size];
-        }
         if (size <= pool_item_size) {
             self.mutex.lock();
             defer self.mutex.unlock();
@@ -785,15 +770,6 @@ pub const TaskPool = struct {
     }
 
     pub fn free(self: *TaskPool, rt: *Runtime, slice: []align(Closure.task_alignment) u8) void {
-        if (dbg_guard_tasks) {
-            const w = os.windows;
-            const page: usize = 4096;
-            const n = std.mem.alignForward(usize, @max(slice.len, 1), page);
-            // Decommit (not NOACCESS) so we don't hold commit charge across the
-            // whole suite; accessing a decommitted page still faults.
-            _ = w.VirtualFree(@ptrCast(slice.ptr), n, w.MEM_DECOMMIT);
-            return; // leak the reservation, keep it guarded
-        }
         if (slice.len <= pool_item_size) {
             self.mutex.lock();
             defer self.mutex.unlock();

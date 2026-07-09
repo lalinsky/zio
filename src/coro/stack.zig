@@ -273,16 +273,7 @@ fn stackAllocWindows(info: *StackInfo, maximum_size: usize, committed_size: usiz
 }
 
 fn stackFreeWindows(info: StackInfo) void {
-    // DEBUG(#460): instead of freeing (which returns the address to the OS for
-    // reuse), decommit the committed region and LEAK the reservation. Any dangling
-    // write to this freed stack then faults (access violation) at the writer's
-    // site — turning the silent "freed-then-reused" corruption into a loud crash
-    // whose backtrace names the culprit. Address space is only reserved (no
-    // physical memory), so leaking is fine for a debug repro run.
-    const committed_ptr: w.PVOID = @ptrFromInt(info.limit);
-    const committed_len = info.base - info.limit;
-    _ = w.VirtualFree(committed_ptr, committed_len, w.MEM_DECOMMIT);
-    // Intentionally do NOT RtlFreeUserStack — keep the reservation guarded.
+    w.RtlFreeUserStack(info.allocation_ptr);
 }
 
 /// Windows handles stack growth automatically via PAGE_GUARD mechanism
