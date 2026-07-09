@@ -485,7 +485,10 @@ pub const Executor = struct {
             // still holds tasks (e.g. a local ring spill, which doesn't wake the
             // loop), don't block — return promptly and refill from it below.
             const has_work = main_ready or !self.run_queue.isEmpty() or !self.run_queue.overflow.isEmpty();
+            dbgCheckPC(self, "run:before-loop.run");
+            @as(*volatile usize, @ptrCast(&self.pending_cleanup)).* = dbg_sentinel;
             try self.loop.run(if (has_work) .no_wait else .once);
+            dbgCheckPC(self, "run:after-loop.run");
 
             // Reset task counter and update tick time after event loop tick
             self.tick_task_count = 0;
