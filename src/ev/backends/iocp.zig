@@ -182,6 +182,18 @@ pub const capabilities: BackendCapabilities = .{
 // Backend-specific data stored in Completion.internal
 pub const CompletionData = struct {
     overlapped: windows.OVERLAPPED = std.mem.zeroes(windows.OVERLAPPED),
+    /// Storage for the lpNumberOfBytes* out-parameter of overlapped WSARecv /
+    /// WSASend / AcceptEx / etc. For overlapped I/O the kernel writes this at
+    /// *completion* time — long after the submit* frame has returned — so it must
+    /// NOT be a submit-frame stack local (that would be a cross-thread write into
+    /// a freed/reused stack; #460). It lives here, alongside the OVERLAPPED, for
+    /// the whole lifetime of the operation. The real byte count is read back via
+    /// WSAGetOverlappedResult in processCompletion, so this value is write-only.
+    bytes: windows.DWORD = 0,
+    /// Same story for the in/out lpFlags out-parameter of overlapped WSARecv /
+    /// WSARecvFrom / WSARecvMsg: the kernel writes it at completion time, so it
+    /// must persist with the op rather than being a submit-frame stack local.
+    flags: windows.DWORD = 0,
 };
 
 // Backend-specific data stored in ProcessWait.internal
@@ -740,7 +752,6 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
     data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
 
     // Call AcceptEx
-    var bytes_received: windows.DWORD = 0;
     const addr_size: windows.DWORD = NetAcceptData.addr_slot_size;
 
     const result = exts.acceptex(
@@ -750,7 +761,7 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
         0, // dwReceiveDataLength - we don't want any data, just connection
         addr_size, // local address length
         addr_size, // remote address length
-        &bytes_received,
+        &data.c.internal.bytes, // persistent (see CompletionData.bytes); NOT a stack local
         &data.c.internal.overlapped,
     );
 
@@ -784,17 +795,17 @@ fn submitPoll(self: *Self, state: *LoopState, data: *NetPoll) !void {
     var dummy: u8 = 0;
     var zero_buf = windows.WSABUF{ .len = 0, .buf = @ptrCast(&dummy) };
 
-    var bytes_transferred: windows.DWORD = 0;
-    var flags: windows.DWORD = 0;
+    data.c.internal.flags = 0;
 
-    // Choose WSARecv or WSASend based on which event is requested
+    // Choose WSARecv or WSASend based on which event is requested. The bytes/flags
+    // out-params live in the op (persistent), never a submit-frame stack local (#460).
     const result = switch (data.event) {
         .recv => windows.WSARecv(
             data.handle,
             @ptrCast(&zero_buf),
             1,
-            &bytes_transferred,
-            &flags,
+            &data.c.internal.bytes,
+            &data.c.internal.flags,
             &data.c.internal.overlapped,
             null,
         ),
@@ -802,8 +813,8 @@ fn submitPoll(self: *Self, state: *LoopState, data: *NetPoll) !void {
             data.handle,
             @ptrCast(&zero_buf),
             1,
-            &bytes_transferred,
-            flags,
+            &data.c.internal.bytes,
+            0,
             &data.c.internal.overlapped,
             null,
         ),
@@ -831,15 +842,16 @@ fn submitRecv(self: *Self, state: *LoopState, data: *NetRecv) !void {
     // iovecs are already WSABUF on Windows
     const wsabufs = data.buffers.iovecs;
 
-    var bytes_received: windows.DWORD = 0;
-    var flags: windows.DWORD = recvFlagsToMsg(data.flags);
+    // bytes/flags out-params live in the op (persistent), never a submit-frame
+    // stack local — the kernel writes them at completion time (#460).
+    data.c.internal.flags = recvFlagsToMsg(data.flags);
 
     const result = windows.WSARecv(
         data.handle,
         wsabufs.ptr,
         @intCast(wsabufs.len),
-        &bytes_received,
-        &flags,
+        &data.c.internal.bytes,
+        &data.c.internal.flags,
         &data.c.internal.overlapped,
         null, // No completion routine
     );
@@ -869,14 +881,15 @@ fn submitSend(self: *Self, state: *LoopState, data: *NetSend) !void {
     // iovecs are already WSABUF on Windows (need to cast away const)
     const wsabufs = data.buffer.iovecs;
 
-    var bytes_sent: windows.DWORD = 0;
     const flags: windows.DWORD = sendFlagsToMsg(data.flags);
 
+    // bytes out-param lives in the op (persistent), never a submit-frame stack
+    // local — the kernel writes it at completion time (#460).
     const result = windows.WSASend(
         data.handle,
         @constCast(wsabufs.ptr),
         @intCast(wsabufs.len),
-        &bytes_sent,
+        &data.c.internal.bytes,
         flags,
         &data.c.internal.overlapped,
         null, // No completion routine
@@ -906,15 +919,16 @@ fn submitRecvFrom(self: *Self, state: *LoopState, data: *NetRecvFrom) !void {
     // iovecs are already WSABUF on Windows
     const wsabufs = data.buffer.iovecs;
 
-    var bytes_received: windows.DWORD = 0;
-    var flags: windows.DWORD = recvFlagsToMsg(data.flags);
+    // bytes/flags out-params live in the op (persistent), never a submit-frame
+    // stack local — the kernel writes them at completion time (#460).
+    data.c.internal.flags = recvFlagsToMsg(data.flags);
 
     const result = windows.WSARecvFrom(
         data.handle,
         wsabufs.ptr,
         @intCast(wsabufs.len),
-        &bytes_received,
-        &flags,
+        &data.c.internal.bytes,
+        &data.c.internal.flags,
         if (data.addr) |addr| @ptrCast(addr) else null,
         if (data.addr_len) |len| len else null,
         &data.c.internal.overlapped,
@@ -945,14 +959,15 @@ fn submitSendTo(self: *Self, state: *LoopState, data: *NetSendTo) !void {
     // iovecs are already WSABUF on Windows (need to cast away const)
     const wsabufs = data.buffer.iovecs;
 
-    var bytes_sent: windows.DWORD = 0;
     const flags: windows.DWORD = sendFlagsToMsg(data.flags);
 
+    // bytes out-param lives in the op (persistent), never a submit-frame stack
+    // local — the kernel writes it at completion time (#460).
     const result = windows.WSASendTo(
         data.handle,
         @constCast(wsabufs.ptr),
         @intCast(wsabufs.len),
-        &bytes_sent,
+        &data.c.internal.bytes,
         flags,
         @ptrCast(data.addr),
         @intCast(data.addr_len),
@@ -1005,12 +1020,12 @@ fn submitRecvMsg(self: *Self, state: *LoopState, data: *NetRecvMsg) !void {
         .dwFlags = recvFlagsToMsg(data.flags),
     };
 
-    var bytes_received: windows.DWORD = 0;
-
+    // bytes out-param lives in the op (persistent), never a submit-frame stack
+    // local — the kernel writes it at completion time (#460).
     const result = exts.wsarecvmsg(
         data.handle,
         &data.internal.msg,
-        &bytes_received,
+        &data.c.internal.bytes,
         &data.c.internal.overlapped,
         null, // No completion routine
     );
@@ -1057,13 +1072,13 @@ fn submitSendMsg(self: *Self, state: *LoopState, data: *NetSendMsg) !void {
     // Load WSASendMsg extension function
     const exts = self.shared_state.exts;
 
-    var bytes_sent: windows.DWORD = 0;
-
+    // bytes out-param lives in the op (persistent), never a submit-frame stack
+    // local — the kernel writes it at completion time (#460).
     const result = exts.wsasendmsg(
         data.handle,
         &data.internal.msg,
         sendFlagsToMsg(data.flags),
-        &bytes_sent,
+        &data.c.internal.bytes,
         &data.c.internal.overlapped,
         null, // No completion routine
     );
@@ -1228,13 +1243,14 @@ fn submitFileRead(self: *Self, state: *LoopState, data: *FileRead) !void {
     // ReadFile only supports a single buffer, so we read into the first iovec
     // TODO: Handle multiple iovecs with multiple ReadFile calls
     const buffer = data.buffer.iovecs[0];
-    var bytes_read: windows.DWORD = 0;
 
+    // bytes out-param lives in the op (persistent), never a submit-frame stack
+    // local — the kernel writes it at completion time (#460).
     const result = windows.ReadFile(
         data.handle,
         buffer.buf,
         @intCast(buffer.len),
-        &bytes_read,
+        &data.c.internal.bytes,
         &data.c.internal.overlapped,
     );
 
@@ -1270,13 +1286,14 @@ fn submitFileWrite(self: *Self, state: *LoopState, data: *FileWrite) !void {
     // WriteFile only supports a single buffer, so we write from the first iovec
     // TODO: Handle multiple iovecs with multiple WriteFile calls
     const buffer = data.buffer.iovecs[0];
-    var bytes_written: windows.DWORD = 0;
 
+    // bytes out-param lives in the op (persistent), never a submit-frame stack
+    // local — the kernel writes it at completion time (#460).
     const result = windows.WriteFile(
         data.handle,
         buffer.buf,
         @intCast(buffer.len),
-        &bytes_written,
+        &data.c.internal.bytes,
         &data.c.internal.overlapped,
     );
 
@@ -1352,13 +1369,14 @@ fn submitFileReadStreaming(self: *Self, state: *LoopState, data: *FileReadStream
     // ReadFile only supports a single buffer, so we read into the first iovec
     // TODO: Handle multiple iovecs with multiple ReadFile calls
     const buffer = data.buffer.iovecs[0];
-    var bytes_read: windows.DWORD = 0;
 
+    // bytes out-param lives in the op (persistent), never a submit-frame stack
+    // local — the kernel writes it at completion time (#460).
     const result = windows.ReadFile(
         data.handle,
         buffer.buf,
         @intCast(buffer.len),
-        &bytes_read,
+        &data.c.internal.bytes,
         &data.c.internal.overlapped,
     );
 
@@ -1399,13 +1417,14 @@ fn submitFileWriteStreaming(self: *Self, state: *LoopState, data: *FileWriteStre
     // WriteFile only supports a single buffer, so we write from the first iovec
     // TODO: Handle multiple iovecs with multiple WriteFile calls
     const buffer = data.buffer.iovecs[0];
-    var bytes_written: windows.DWORD = 0;
 
+    // bytes out-param lives in the op (persistent), never a submit-frame stack
+    // local — the kernel writes it at completion time (#460).
     const result = windows.WriteFile(
         data.handle,
         buffer.buf,
         @intCast(buffer.len),
-        &bytes_written,
+        &data.c.internal.bytes,
         &data.c.internal.overlapped,
     );
 
