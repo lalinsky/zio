@@ -30,6 +30,21 @@ extern "kernel32" fn GetCurrentThreadId() callconv(.winapi) DWORD;
 extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) DWORD;
 extern "kernel32" fn Sleep(ms: DWORD) callconv(.winapi) void;
 extern "kernel32" fn CreateThread(attr: ?*anyopaque, stack: usize, start: *const fn (?*anyopaque) callconv(.winapi) DWORD, param: ?*anyopaque, flags: DWORD, id: ?*DWORD) callconv(.winapi) ?HANDLE;
+extern "kernel32" fn VirtualQuery(lpAddress: ?*const anyopaque, lpBuffer: *MEMORY_BASIC_INFORMATION, dwLength: usize) callconv(.winapi) usize;
+
+const MEMORY_BASIC_INFORMATION = extern struct {
+    BaseAddress: usize,
+    AllocationBase: usize,
+    AllocationProtect: DWORD,
+    __alignment1: DWORD,
+    RegionSize: usize,
+    State: DWORD,
+    Protect: DWORD,
+    Type: DWORD,
+    __alignment2: DWORD,
+};
+
+var corrupt_fired: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
 const THREADENTRY32 = extern struct {
     dwSize: DWORD,
@@ -90,7 +105,7 @@ fn armAllThreads() void {
 fn monitor(_: ?*anyopaque) callconv(.winapi) DWORD {
     while (true) {
         armAllThreads();
-        Sleep(5);
+        Sleep(1);
     }
 }
 
@@ -99,16 +114,35 @@ var seen: [32]usize = @splat(0);
 var seen_n: usize = 0;
 var seen_mutex: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
+const sentinel: usize = 0xD00DFEEDD00DFEED;
+
 fn veh(info: *win.EXCEPTION_POINTERS) callconv(.winapi) c_long {
     const rec = info.ExceptionRecord;
     if (rec.ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
     const ctx = info.ContextRecord;
     if ((ctx.Dr6 & 0xf) == 0) return EXCEPTION_CONTINUE_SEARCH;
     ctx.Dr6 = 0; // clear detection bits
-    // Log each UNIQUE writer of pending_cleanup.tag once (no memory reads → no
-    // faults). The legit writers are yield/processCleanup/startFn on the main
-    // thread; the corruptor is a distinct rip. Dedup with a tiny spinlocked set.
     const rip = ctx.Rip;
+    // VALUE FILTER: read the tag+payload (guarded by VirtualQuery so a stale/freed
+    // watch_addr can't fault the VEH). The corrupt write leaves payload==sentinel
+    // and tag==1 (.reschedule) — flag it with rip+thread regardless of the rip.
+    var mbi: MEMORY_BASIC_INFORMATION = std.mem.zeroes(MEMORY_BASIC_INFORMATION);
+    if (VirtualQuery(@ptrFromInt(watch_addr), &mbi, @sizeOf(MEMORY_BASIC_INFORMATION)) != 0 and
+        mbi.State == 0x1000 and (mbi.Protect & 0x101) == 0)
+    {
+        const tag = @as(*const usize, @ptrFromInt(watch_addr)).*;
+        const payload = @as(*const usize, @ptrFromInt(watch_addr - 8)).*;
+        if (payload == sentinel and (tag & 0xff) == 1) {
+            const n = corrupt_fired.fetchAdd(1, .monotonic);
+            if (n < 8) {
+                std.log.info("!!! CORRUPT WRITE thread={} rip=0x{x} tag=0x{x}", .{ GetCurrentThreadId(), rip, tag });
+                var caddrs = [_]usize{rip};
+                const ctrace = std.debug.StackTrace{ .return_addresses = &caddrs, .skipped = .none };
+                std.debug.dumpStackTrace(&ctrace);
+            }
+        }
+    }
+    // Also log each UNIQUE writer once (dedup) for context.
     while (seen_mutex.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
     var found = false;
     var i: usize = 0;
