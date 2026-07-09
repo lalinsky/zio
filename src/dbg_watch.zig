@@ -94,36 +94,38 @@ fn monitor(_: ?*anyopaque) callconv(.winapi) DWORD {
     }
 }
 
+const sentinel: usize = 0xD00DFEEDD00DFEED;
+
 fn veh(info: *win.EXCEPTION_POINTERS) callconv(.winapi) c_long {
     const rec = info.ExceptionRecord;
     if (rec.ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
     const ctx = info.ContextRecord;
     if ((ctx.Dr6 & 0xf) == 0) return EXCEPTION_CONTINUE_SEARCH;
     ctx.Dr6 = 0; // clear detection bits
-    // Only report the first several hits to avoid a flood.
-    const n = fired.fetchAdd(1, .monotonic);
-    if (n < 24) {
-        std.log.info("WATCHPOINT hit #{} thread={} rip=0x{x} rsp=0x{x} rbp=0x{x}", .{ n, GetCurrentThreadId(), ctx.Rip, ctx.Rsp, ctx.Rbp });
-        // Frame-pointer stack walk (best effort; ReleaseSafe keeps frame pointers).
-        var bp = ctx.Rbp;
-        var i: usize = 0;
-        while (i < 16 and bp != 0) : (i += 1) {
-            const frame: [*]const usize = @ptrFromInt(bp);
-            const ret = frame[1];
-            if (ret == 0) break;
-            std.log.info("  WP frame[{}] ret=0x{x}", .{ i, ret });
-            const next = frame[0];
-            if (next <= bp) break;
-            bp = next;
+    // The DR fires on EVERY write to pending_cleanup.tag, including legit yields
+    // (which write payload=self, tag=.park/.finish). The corrupt write sets the tag
+    // to 1 (.reschedule) while leaving the payload as our sentinel — filter for that.
+    const payload = @as(*const usize, @ptrFromInt(watch_addr - 8)).*;
+    const tag = @as(*const usize, @ptrFromInt(watch_addr)).*;
+    if (payload == sentinel and (tag & 0xff) == 1) {
+        const n = fired.fetchAdd(1, .monotonic);
+        if (n < 8) {
+            std.log.info("CORRUPT WRITE thread={} rip=0x{x}", .{ GetCurrentThreadId(), ctx.Rip });
+            var addrs = [_]usize{ctx.Rip};
+            const trace = std.debug.StackTrace{ .return_addresses = &addrs, .skipped = .none };
+            std.debug.dumpStackTrace(&trace);
         }
     }
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
+var installed = std.atomic.Value(bool).init(false);
+
 /// Arm a hardware write watchpoint on `addr` (8-byte). Windows-only, debug use.
 pub fn arm(addr: usize) void {
     if (builtin.os.tag != .windows) return;
-    watch_addr = addr;
+    watch_addr = addr; // updated per-runtime; monitor/VEH use the latest
+    if (installed.swap(true, .acq_rel)) return; // install VEH + monitor once
     self_pid = GetCurrentProcessId();
     _ = AddVectoredExceptionHandler(1, veh);
     // The monitor thread arms DR0 on every thread (including this one and any
