@@ -5,6 +5,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
+const zio_options = @import("zio_options");
 
 const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
@@ -85,8 +86,11 @@ pub const RuntimeOptions = struct {
     /// Set to false when creating runtimes in background threads that should not block
     /// the creating thread in an event loop. Requires executors >= 1 to have any workers.
     enable_main_executor: bool = true,
-    /// Allow tasks to migrate between executors when true.
-    enable_task_migration: bool = true,
+    /// Allow tasks to migrate between executors when true. Requires migration
+    /// support to be compiled in (the `task-migration` build option, default on);
+    /// enabling it in a build compiled without support is an error at init.
+    /// Defaults to whether support is compiled in.
+    enable_task_migration: bool = zio_options.task_migration,
     /// DNS resolver configuration.
     dns: DnsOptions = .{},
 };
@@ -235,6 +239,38 @@ comptime {
     std.debug.assert(@alignOf(WaitNode) >= 4);
 }
 
+// A coroutine's parent_context_ptr points at the scheduler context to switch back
+// to when it yields, and is read cross-thread by fromCoroutine (to route a wake to
+// the task's home executor). With task migration a task can run on different
+// executors over its life, so the pointer changes and must be published/read
+// atomically. Without migration a task is pinned to its home executor, so the
+// value is constant from spawn: the initial store is plain, reads are plain, and
+// the per-dispatch re-publish is skipped entirely (it would only rewrite the same
+// value), making parent_context_ptr effectively write-once.
+inline fn storeParentContext(field: **Context, ctx: *Context) void {
+    if (zio_options.task_migration) {
+        @atomicStore(*Context, field, ctx, .release);
+    } else {
+        field.* = ctx;
+    }
+}
+inline fn updateParentContext(task: *AnyTask, ctx: *Context) void {
+    if (zio_options.task_migration) {
+        @atomicStore(*Context, &task.coro.parent_context_ptr, ctx, .release);
+    } else {
+        // Pinned task: parent_context_ptr is constant, so there is nothing to
+        // update. Assert that invariant in safe builds (plain load — there is no
+        // concurrent writer when migration is off).
+        assert(task.coro.parent_context_ptr == ctx);
+    }
+}
+inline fn loadParentContext(field: *const *Context) *Context {
+    return if (zio_options.task_migration)
+        @atomicLoad(*Context, field, .acquire)
+    else
+        field.*;
+}
+
 pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
     if (rt.shutting_down.load(.acquire)) {
         return error.RuntimeShutdown;
@@ -311,7 +347,7 @@ pub const Executor = struct {
     /// so we navigate: context -> coro -> main_task -> executor.
     /// Only valid on the executor thread that is currently running the coroutine.
     pub fn fromCoroutine(coro: *Coroutine) *Executor {
-        const parent_context_ptr = @atomicLoad(*Context, &coro.parent_context_ptr, .acquire);
+        const parent_context_ptr = loadParentContext(&coro.parent_context_ptr);
         const main_coro: *Coroutine = @fieldParentPtr("context", parent_context_ptr);
         const main_task: *AnyTask = @fieldParentPtr("coro", main_coro);
         return @alignCast(@fieldParentPtr("main_task", main_task));
@@ -343,7 +379,7 @@ pub const Executor = struct {
             .runtime = runtime,
             .closure = undefined, // main_task has no closure
         };
-        @atomicStore(*Context, &self.main_task.coro.parent_context_ptr, &self.main_task.coro.context, .release);
+        storeParentContext(&self.main_task.coro.parent_context_ptr, &self.main_task.coro.context);
 
         try setupStackGrowth();
         errdefer cleanupStackGrowth();
@@ -436,7 +472,7 @@ pub const Executor = struct {
         while (true) {
             // Process ready coroutines
             while (self.getNextTask()) |next_task| {
-                @atomicStore(*Context, &next_task.coro.parent_context_ptr, &self.main_task.coro.context, .release);
+                updateParentContext(next_task, &self.main_task.coro.context);
                 self.current_task = next_task;
                 next_task.coro.step();
                 self.current_task = null;
@@ -581,7 +617,7 @@ pub const Executor = struct {
             // migrate to the current executor (for cache locality with the waker).
             // The .new check can be removed once we have work stealing to rebalance
             // load (see https://github.com/lalinsky/zio/issues/460).
-            if (old.tag != .new and current_exec.runtime == home_exec.runtime and home_exec.runtime.options.enable_task_migration) {
+            if (zio_options.task_migration and old.tag != .new and current_exec.runtime == home_exec.runtime and home_exec.runtime.options.enable_task_migration) {
                 // Migrate to the current executor
                 task.last_run_tick = 0;
                 current_exec.scheduleTaskLocal(task);
@@ -661,7 +697,7 @@ pub const Executor = struct {
         // path it stays null and the run loop keeps it null until it steps a task.
         self.current_task = null;
         if (self.getNextTask()) |next_task| {
-            @atomicStore(*Context, &next_task.coro.parent_context_ptr, &self.main_task.coro.context, .release);
+            updateParentContext(next_task, &self.main_task.coro.context);
             self.current_task = next_task;
             coro.yieldTo(&next_task.coro);
         } else {
@@ -815,6 +851,11 @@ pub const Runtime = struct {
     }
 
     pub fn initStatic(self: *Runtime, allocator: Allocator, options: RuntimeOptions) !void {
+        // Task migration can only be enabled at runtime if it was compiled in.
+        if (!zio_options.task_migration and options.enable_task_migration) {
+            return error.TaskMigrationNotCompiledIn;
+        }
+
         const num_executors = options.executors.resolve();
         const num_workers = if (options.enable_main_executor) num_executors - 1 else num_executors;
 
@@ -1340,6 +1381,16 @@ test "runtime: sleep from main allows tasks to run" {
     }
 
     try std.testing.expectEqual(10, counter);
+}
+
+test "runtime: enabling task migration at runtime errors when compiled out" {
+    // Only meaningful in a build without migration support; a normal build
+    // compiles migration in, so there is nothing to reject.
+    if (zio_options.task_migration) return error.SkipZigTest;
+    try std.testing.expectError(
+        error.TaskMigrationNotCompiledIn,
+        Runtime.init(std.testing.allocator, .{ .enable_task_migration = true }),
+    );
 }
 
 test "runtime: multi-threaded execution with 2 executors" {
