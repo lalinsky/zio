@@ -1049,6 +1049,17 @@ pub const Runtime = struct {
         // All tasks should be complete before deinit
         std.debug.assert(self.task_count.load(.acquire) == 0);
 
+        // DEBUG(#460): are overlapped I/O ops still pending in the kernel at
+        // teardown? If so their buffers (coro stacks) get freed while the kernel
+        // still holds a write to them → the late completion stomps reused memory.
+        if (@import("builtin").os.tag == .windows and self.options.enable_main_executor) {
+            const inflight = self.main_executor.loop.state.loadInflight();
+            const active = self.main_executor.loop.state.loadActive();
+            if (inflight != 0 or active != 0) {
+                std.log.err("DBG(#460) at deinit: inflight_io={} active={}", .{ inflight, active });
+            }
+        }
+
         // Clean up ThreadPool (worker threads already joined by stop()).
         self.thread_pool.deinit();
 
