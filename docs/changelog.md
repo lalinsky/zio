@@ -22,6 +22,11 @@ All notable changes to this project will be documented in this file.
 - Added `Dir.iterate()` for native directory iteration, returning entry names and file
   kinds. The directory must be opened with `.iterate = true`.
 
+- Added `Dir.deleteTree()` for recursively deleting a file or directory tree, ported
+  from `std.Io.Dir`. Symlinks are removed, not followed. There is also
+  `Dir.deleteTreeMinStackSize()`, a slower variant that keeps only one directory
+  iterator open at a time to minimize memory usage.
+
 - `Group` can now be used with `zio.select()` and `zio.wait()`. The group completes
   when its pending-task counter drains to zero. Unlike `Group.wait()`, this does not
   close the group and does not participate in fail-fast handling, so you can race a

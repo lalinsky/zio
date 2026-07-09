@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2025 Lukáš Lalinský
+// SPDX-FileCopyrightText: Zig contributors (deleteTree, ported from std.Io.Dir)
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
@@ -45,6 +46,11 @@ pub fn deleteDir(path: []const u8) Dir.DeleteDirError!void {
 pub fn deleteFile(path: []const u8) Dir.DeleteFileError!void {
     const cwd = Dir.cwd();
     return cwd.deleteFile(path);
+}
+
+pub fn deleteTree(path: []const u8) Dir.DeleteTreeError!void {
+    const cwd = Dir.cwd();
+    return cwd.deleteTree(path);
 }
 
 pub fn rename(old_path: []const u8, new_path: []const u8) Dir.RenameError!void {
@@ -361,6 +367,307 @@ pub const Dir = struct {
             }
         }
     };
+
+    pub const DeleteTreeError = error{
+        AccessDenied,
+        PermissionDenied,
+        FileBusy,
+        SymLinkLoop,
+        ProcessFdQuotaExceeded,
+        SystemFdQuotaExceeded,
+        NoDevice,
+        NameTooLong,
+        SystemResources,
+        ReadOnlyFileSystem,
+        /// One of the path components was not a directory.
+        /// This error is unreachable if `path` does not contain a path separator.
+        NotDir,
+        BadPathName,
+        NetworkNotFound,
+        Unsupported,
+        Unexpected,
+    } || Cancelable;
+
+    /// Whether `path` describes a symlink, file, or directory, this function
+    /// removes it. If it cannot be removed because it is a non-empty directory,
+    /// this function recursively removes its entries and then tries again.
+    ///
+    /// Symlinks are never followed: a symlink entry is removed itself, not the
+    /// tree it points to. This operation is not atomic on most file systems.
+    pub fn deleteTree(self: Dir, path: []const u8) DeleteTreeError!void {
+        const initial_iterable_dir = (try self.deleteTreeOpenInitialSubpath(path, .file)) orelse return;
+
+        const StackItem = struct {
+            name: []const u8,
+            parent_dir: Dir,
+            iter: Iterator,
+        };
+
+        // Each Iterator embeds an 8 KiB read buffer, making this the dominant
+        // stack cost of the function. Trees nested deeper than the stack
+        // capacity are handled by the O(1)-memory fallback below.
+        var stack_buffer: [16]StackItem = undefined;
+        var stack: std.ArrayList(StackItem) = .initBuffer(&stack_buffer);
+        defer for (stack.items) |*item| Dir.close(.{ .fd = item.iter.fd });
+
+        stack.appendAssumeCapacity(.{
+            .name = path,
+            .parent_dir = self,
+            .iter = initial_iterable_dir.iterate(),
+        });
+
+        process_stack: while (stack.items.len != 0) {
+            const top = &stack.items[stack.items.len - 1];
+            const top_dir: Dir = .{ .fd = top.iter.fd };
+            while (try top.iter.next()) |entry| {
+                var treat_as_dir = entry.kind == .directory;
+                handle_entry: while (true) {
+                    if (treat_as_dir) {
+                        if (stack.items.len < stack_buffer.len) {
+                            const iterable_dir = top_dir.openDir(entry.name, .{
+                                .follow_symlinks = false,
+                                .iterate = true,
+                            }) catch |err| switch (err) {
+                                error.NotDir => {
+                                    treat_as_dir = false;
+                                    continue :handle_entry;
+                                },
+                                error.FileNotFound => {
+                                    // That's fine, we were trying to remove this directory anyway.
+                                    break :handle_entry;
+                                },
+                                else => |e| return e,
+                            };
+                            // entry.name points into top's iterator buffer, which stays
+                            // untouched until this child is popped and the name is used
+                            // to delete the child directory from its parent.
+                            stack.appendAssumeCapacity(.{
+                                .name = entry.name,
+                                .parent_dir = top_dir,
+                                .iter = iterable_dir.iterate(),
+                            });
+                            continue :process_stack;
+                        } else {
+                            try top_dir.deleteTreeMinStackSizeWithKindHint(entry.name, entry.kind);
+                            break :handle_entry;
+                        }
+                    } else {
+                        if (top_dir.deleteFile(entry.name)) {
+                            break :handle_entry;
+                        } else |err| switch (err) {
+                            error.FileNotFound => break :handle_entry,
+
+                            // Impossible because we do not pass any path separators.
+                            error.NotDir => unreachable,
+
+                            error.IsDir => {
+                                treat_as_dir = true;
+                                continue :handle_entry;
+                            },
+
+                            else => |e| return e,
+                        }
+                    }
+                }
+            }
+
+            // On Windows, we can't delete until the dir's handle has been closed, so
+            // close it before we try to delete.
+            top_dir.close();
+
+            // In order to avoid double-closing the directory when cleaning up
+            // the stack in the case of an error, we save the relevant portions and
+            // pop the value from the stack.
+            const parent_dir = top.parent_dir;
+            const name = top.name;
+            stack.items.len -= 1;
+
+            var need_to_retry: bool = false;
+            parent_dir.deleteDir(name) catch |err| switch (err) {
+                error.FileNotFound => {},
+                error.DirNotEmpty => need_to_retry = true,
+                else => |e| return e,
+            };
+
+            if (need_to_retry) {
+                // Since we closed the handle that the previous iterator used, we
+                // need to re-open the dir and re-create the iterator.
+                var treat_as_dir = true;
+                const iterable_dir: Dir = handle_entry: while (true) {
+                    if (treat_as_dir) {
+                        break :handle_entry parent_dir.openDir(name, .{
+                            .follow_symlinks = false,
+                            .iterate = true,
+                        }) catch |err| switch (err) {
+                            error.NotDir => {
+                                treat_as_dir = false;
+                                continue :handle_entry;
+                            },
+                            error.FileNotFound => {
+                                // That's fine, we were trying to remove this directory anyway.
+                                continue :process_stack;
+                            },
+                            else => |e| return e,
+                        };
+                    } else {
+                        if (parent_dir.deleteFile(name)) {
+                            continue :process_stack;
+                        } else |err| switch (err) {
+                            error.FileNotFound => continue :process_stack,
+
+                            // Impossible because we do not pass any path separators.
+                            error.NotDir => unreachable,
+
+                            error.IsDir => {
+                                treat_as_dir = true;
+                                continue :handle_entry;
+                            },
+
+                            else => |e| return e,
+                        }
+                    }
+                };
+                // We know there is room on the stack since we are just re-adding
+                // the StackItem that we previously popped.
+                stack.appendAssumeCapacity(.{
+                    .name = name,
+                    .parent_dir = parent_dir,
+                    .iter = iterable_dir.iterate(),
+                });
+                continue :process_stack;
+            }
+        }
+    }
+
+    /// Like `deleteTree`, but keeps only one directory iterator open at a time,
+    /// to minimize memory usage. This is slower than `deleteTree`, because it
+    /// re-scans partially deleted directories from the top of the tree.
+    pub fn deleteTreeMinStackSize(self: Dir, path: []const u8) DeleteTreeError!void {
+        return self.deleteTreeMinStackSizeWithKindHint(path, .file);
+    }
+
+    fn deleteTreeMinStackSizeWithKindHint(parent: Dir, path: []const u8, kind_hint: os.fs.FileKind) DeleteTreeError!void {
+        start_over: while (true) {
+            var dir = (try parent.deleteTreeOpenInitialSubpath(path, kind_hint)) orelse return;
+            var cleanup_dir_parent: ?Dir = null;
+            defer if (cleanup_dir_parent) |d| d.close();
+
+            var cleanup_dir = true;
+            defer if (cleanup_dir) dir.close();
+
+            // Only ever holds a single path component returned by the iterator,
+            // which is at most NAME_MAX bytes (up to 3x that on Windows after
+            // conversion to UTF-8).
+            var dir_name_buf: [1024]u8 = undefined;
+            var dir_name: []const u8 = path;
+
+            // Here we must avoid recursion, in order to provide O(1) memory guarantee of this function.
+            // Go through each entry and if it is not a directory, delete it. If it is a directory,
+            // open it, and close the original directory. Repeat. Then start the entire operation over.
+
+            scan_dir: while (true) {
+                var dir_it = dir.iterate();
+                dir_it: while (try dir_it.next()) |entry| {
+                    var treat_as_dir = entry.kind == .directory;
+                    handle_entry: while (true) {
+                        if (treat_as_dir) {
+                            const new_dir = dir.openDir(entry.name, .{
+                                .follow_symlinks = false,
+                                .iterate = true,
+                            }) catch |err| switch (err) {
+                                error.NotDir => {
+                                    treat_as_dir = false;
+                                    continue :handle_entry;
+                                },
+                                error.FileNotFound => {
+                                    // That's fine, we were trying to remove this directory anyway.
+                                    continue :dir_it;
+                                },
+                                else => |e| return e,
+                            };
+                            if (cleanup_dir_parent) |d| d.close();
+                            cleanup_dir_parent = dir;
+                            dir = new_dir;
+                            const copied_name = dir_name_buf[0..entry.name.len];
+                            @memcpy(copied_name, entry.name);
+                            dir_name = copied_name;
+                            continue :scan_dir;
+                        } else {
+                            if (dir.deleteFile(entry.name)) {
+                                continue :dir_it;
+                            } else |err| switch (err) {
+                                error.FileNotFound => continue :dir_it,
+
+                                // Impossible because we do not pass any path separators.
+                                error.NotDir => unreachable,
+
+                                error.IsDir => {
+                                    treat_as_dir = true;
+                                    continue :handle_entry;
+                                },
+
+                                else => |e| return e,
+                            }
+                        }
+                    }
+                }
+                // Reached the end of the directory entries, which means we successfully deleted all of them.
+                // Now to remove the directory itself.
+                dir.close();
+                cleanup_dir = false;
+
+                if (cleanup_dir_parent) |d| {
+                    d.deleteDir(dir_name) catch |err| switch (err) {
+                        // These two things can happen due to file system race conditions.
+                        error.FileNotFound, error.DirNotEmpty => continue :start_over,
+                        else => |e| return e,
+                    };
+                    continue :start_over;
+                } else {
+                    parent.deleteDir(path) catch |err| switch (err) {
+                        error.FileNotFound => return,
+                        error.DirNotEmpty => continue :start_over,
+                        else => |e| return e,
+                    };
+                    return;
+                }
+            }
+        }
+    }
+
+    /// On successful delete, returns null.
+    fn deleteTreeOpenInitialSubpath(self: Dir, path: []const u8, kind_hint: os.fs.FileKind) DeleteTreeError!?Dir {
+        var treat_as_dir = kind_hint == .directory;
+        handle_entry: while (true) {
+            if (treat_as_dir) {
+                return self.openDir(path, .{
+                    .follow_symlinks = false,
+                    .iterate = true,
+                }) catch |err| switch (err) {
+                    error.NotDir => {
+                        treat_as_dir = false;
+                        continue :handle_entry;
+                    },
+                    error.FileNotFound => {
+                        // That's fine, we were trying to remove this directory anyway.
+                        return null;
+                    },
+                    else => |e| return e,
+                };
+            } else {
+                if (self.deleteFile(path)) {
+                    return null;
+                } else |err| switch (err) {
+                    error.FileNotFound => return null,
+                    error.IsDir => {
+                        treat_as_dir = true;
+                        continue :handle_entry;
+                    },
+                    else => |e| return e,
+                }
+            }
+        }
+    }
 };
 
 /// Whether the Reader/Writer issues positional (offset-based) or streaming
@@ -1455,4 +1762,103 @@ test "Dir: iterate" {
     }
     try std.testing.expectEqual(@as(usize, 3), count);
     try std.testing.expect(found_a and found_b and found_sub);
+}
+
+test "Dir: deleteTree" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const cwd = Dir.cwd();
+    const root_path = "test_dir_delete_tree";
+    try cwd.createDir(root_path, 0o755);
+    errdefer cwd.deleteTree(root_path) catch {};
+
+    // Close all handles into the tree before deleting; Windows cannot delete
+    // directories that still have open handles.
+    {
+        const root = try cwd.openDir(root_path, .{});
+        defer root.close();
+
+        (try root.createFile("a.txt", .{})).close();
+        try root.createDir("sub", 0o755);
+        const sub = try root.openDir("sub", .{});
+        defer sub.close();
+        (try sub.createFile("b.txt", .{})).close();
+        try sub.createDir("deeper", 0o755);
+        const deeper = try sub.openDir("deeper", .{});
+        defer deeper.close();
+        (try deeper.createFile("c.txt", .{})).close();
+
+        // A symlink inside the tree must be removed itself, not followed.
+        if (builtin.os.tag != .windows) {
+            (try root.createFile("target.txt", .{})).close();
+            try sub.symLink("../target.txt", "link", .{});
+        }
+    }
+
+    try cwd.deleteTree(root_path);
+    try std.testing.expectError(error.FileNotFound, cwd.openDir(root_path, .{}));
+}
+
+test "Dir: deleteTree on a file and on a missing path" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const cwd = Dir.cwd();
+    const file_path = "test_delete_tree_file.txt";
+    (try cwd.createFile(file_path, .{})).close();
+
+    try cwd.deleteTree(file_path);
+    try std.testing.expectError(error.FileNotFound, cwd.openFile(file_path, .{}));
+
+    // Deleting something that does not exist succeeds.
+    try cwd.deleteTree("test_delete_tree_does_not_exist");
+}
+
+test "Dir: deleteTree deeply nested tree" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const cwd = Dir.cwd();
+    const root_path = "test_dir_delete_tree_deep";
+    try cwd.createDir(root_path, 0o755);
+    errdefer cwd.deleteTree(root_path) catch {};
+
+    // Nest beyond deleteTree's internal stack capacity (16) to exercise the
+    // min-stack-size fallback.
+    var dir = try cwd.openDir(root_path, .{});
+    for (0..20) |_| {
+        try dir.createDir("nested", 0o755);
+        (try dir.createFile("file.txt", .{})).close();
+        const next = try dir.openDir("nested", .{});
+        dir.close();
+        dir = next;
+    }
+    dir.close();
+
+    try cwd.deleteTree(root_path);
+    try std.testing.expectError(error.FileNotFound, cwd.openDir(root_path, .{}));
+}
+
+test "Dir: deleteTreeMinStackSize" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const cwd = Dir.cwd();
+    const root_path = "test_dir_delete_tree_min_stack";
+    try cwd.createDir(root_path, 0o755);
+    errdefer cwd.deleteTree(root_path) catch {};
+
+    {
+        const root = try cwd.openDir(root_path, .{});
+        defer root.close();
+        (try root.createFile("a.txt", .{})).close();
+        try root.createDir("sub", 0o755);
+        const sub = try root.openDir("sub", .{});
+        defer sub.close();
+        (try sub.createFile("b.txt", .{})).close();
+    }
+
+    try cwd.deleteTreeMinStackSize(root_path);
+    try std.testing.expectError(error.FileNotFound, cwd.openDir(root_path, .{}));
 }
