@@ -326,7 +326,7 @@ pub const Dir = struct {
         started: bool = false,
         finished: bool = false,
 
-        const buffer_size = 8192;
+        const buffer_size = 2048;
 
         pub const Entry = os.fs.DirEntry;
         pub const Error = ev.DirRead.Error;
@@ -403,7 +403,7 @@ pub const Dir = struct {
             iter: Iterator,
         };
 
-        // Each Iterator embeds an 8 KiB read buffer, making this the dominant
+        // Each Iterator embeds a 2 KiB read buffer, making this the dominant
         // stack cost of the function. Trees nested deeper than the stack
         // capacity are handled by the O(1)-memory fallback below.
         var stack_buffer: [16]StackItem = undefined;
