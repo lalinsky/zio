@@ -774,6 +774,17 @@ pub const Loop = struct {
                                 return;
                             }
                         }
+                        // file_set_size may have been submitted natively (the
+                        // FTRUNCATE SQE) when the runtime probe found kernel
+                        // support, so it must be canceled on the backend, not the
+                        // thread pool. The probe verdict is stable for the process,
+                        // so re-querying here agrees with the submission decision.
+                        if (comptime op == .file_set_size and @hasDecl(Backend, "fileSetSizeSupported")) {
+                            if (self.backend.fileSetSizeSupported()) {
+                                self.backend.cancel(&self.state, completion);
+                                return;
+                            }
+                        }
                         const thread_pool = self.thread_pool orelse unreachable;
                         const op_data = completion.cast(op.toType());
                         thread_pool.cancel(&op_data.internal.work);
