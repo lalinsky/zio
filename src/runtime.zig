@@ -493,7 +493,9 @@ pub const Executor = struct {
             // Reset task counter and update tick time after event loop tick
             self.tick_task_count = 0;
             self.current_tick +%= 1;
+            dbgCheckPC(self, "run:after-tick++");
             self.last_tick_time = self.loop.now();
+            dbgCheckPC(self, "run:after-last_tick_time");
 
             // Pull a fair batch from the overflow queue (global when migration is
             // on, this executor's own when off) back into the ring.
@@ -509,6 +511,7 @@ pub const Executor = struct {
                     pending;
                 self.run_queue.refill(batch);
             }
+            dbgCheckPC(self, "run:after-refill");
 
             // Check again after I/O
             if (check_ready and self.main_task.state.load(.acquire).tag == .ready) {
