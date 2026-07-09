@@ -757,6 +757,9 @@ fn dbgCheckPC(self: *Executor, where: []const u8) void {
         dbg_last_pc = self.pending_cleanup;
         dbg_last_pc_exec = self;
         std.log.info("DBG pending_cleanup corrupt at {s} (current_task=0x{x})", .{ where, @intFromPtr(self.current_task) });
+        // DEBUG(#460): the exact address to watch under WinDbg — `ba w8 <this>` then
+        // `g-` (Time Travel) reverse-executes to the instruction that wrote the tag.
+        std.log.info("DBG WATCH ADDR (pending_cleanup.tag) = 0x{x}", .{@intFromPtr(&self.pending_cleanup) + 8});
         dbgDump(text_addr, image_base);
         std.debug.panic("pending_cleanup corrupt at {s}: payload=0x{x}", .{ where, p });
     }
