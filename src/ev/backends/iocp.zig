@@ -196,12 +196,38 @@ pub const CompletionData = struct {
     flags: windows.DWORD = 0,
 };
 
+// DEBUG(#460): canary values so a RegisterWaitForSingleObject callback firing on
+// a freed/reused context is caught (with its backtrace) rather than stomping
+// reused memory. Mirrors the DNS instrumentation.
+const DBG_MAGIC_LIVE: u64 = 0x460C_0DE0_460C_0DE0;
+const DBG_MAGIC_DEAD: u64 = 0x460D_EAD0_460D_EAD0;
+
+// DEBUG(#460): heap shadow (C-allocated, poison-and-leak on retire) that the
+// process-wait callback runs against, so a late callback never dereferences the
+// (coroutine-stack) op. Carries everything the callback needs directly.
+const ProcessWaitShadow = struct {
+    magic: u64 = DBG_MAGIC_LIVE,
+    freed: bool = false,
+    iocp: windows.HANDLE,
+    overlapped: *windows.OVERLAPPED,
+    posted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn retire(self: *ProcessWaitShadow) void {
+        // Poison + leak (C allocator: no leak-detector noise); a late callback
+        // then sees dead magic and panics instead of corrupting live memory.
+        self.freed = true;
+        self.magic = DBG_MAGIC_DEAD;
+    }
+};
+
 // Backend-specific data stored in ProcessWait.internal
 pub const ProcessWaitData = struct {
     wait_handle: windows.HANDLE = windows.INVALID_HANDLE_VALUE,
     iocp: windows.HANDLE = windows.INVALID_HANDLE_VALUE,
     /// Atomic flag to ensure only one path (callback or cancel) posts to IOCP.
     posted: std.atomic.Value(bool) = .init(false),
+    /// DEBUG(#460): heap shadow the thread-pool callback actually runs against.
+    shadow: ?*ProcessWaitShadow = null,
 };
 
 // AcceptEx needs an extra buffer for address data
@@ -1463,11 +1489,14 @@ fn submitPipeClose(self: *Self, state: *LoopState, data: *PipeClose) !void {
 /// Posts an IOCP completion so the event loop can process the result.
 fn processWaitCallback(lpParameter: windows.PVOID, TimerOrWaitFired: windows.BOOLEAN) callconv(.winapi) void {
     _ = TimerOrWaitFired;
-    const pw_internal: *ProcessWaitData = @ptrCast(@alignCast(lpParameter));
-    const pw: *ProcessWait = @fieldParentPtr("internal", pw_internal);
+    // DEBUG(#460): runs against the heap shadow, never the coroutine-stack op.
+    const shadow: *ProcessWaitShadow = @ptrCast(@alignCast(lpParameter));
+    if (shadow.magic != DBG_MAGIC_LIVE or shadow.freed) {
+        std.debug.panic("DEBUG(#460): processWaitCallback on freed/reused shadow=0x{x} magic=0x{x} freed={}", .{ @intFromPtr(shadow), shadow.magic, shadow.freed });
+    }
     // Use CAS to ensure only one path (callback or cancel) posts to IOCP
-    if (pw_internal.posted.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
-        _ = windows.PostQueuedCompletionStatus(pw_internal.iocp, 0, 0, &pw.c.internal.overlapped);
+    if (shadow.posted.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+        _ = windows.PostQueuedCompletionStatus(shadow.iocp, 0, 0, shadow.overlapped);
     }
 }
 
@@ -1477,11 +1506,15 @@ fn submitProcessWait(self: *Self, state: *LoopState, data: *ProcessWait) !void {
     // Zero the overlapped structure so IOCP can use it
     data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
 
-    // Reset the posted flag for this submission
-    data.internal.posted.store(false, .release);
-
     // Store the IOCP handle so the callback can post the completion
     data.internal.iocp = self.shared_state.iocp;
+
+    // DEBUG(#460): allocate the callback's context on the C allocator (poison +
+    // leak on retire; no leak-detector noise) so a late callback lands on dead
+    // magic instead of the reused op.
+    const shadow = std.heap.c_allocator.create(ProcessWaitShadow) catch return error.OutOfMemory;
+    shadow.* = .{ .iocp = self.shared_state.iocp, .overlapped = &data.c.internal.overlapped };
+    data.internal.shadow = shadow;
 
     // Register a wait: when the process handle is signaled (process exits),
     // the callback fires once and posts an IOCP completion packet.
@@ -1489,11 +1522,13 @@ fn submitProcessWait(self: *Self, state: *LoopState, data: *ProcessWait) !void {
         &data.internal.wait_handle,
         data.handle,
         processWaitCallback,
-        &data.internal,
+        shadow,
         windows.INFINITE,
         windows.WT_EXECUTEONLYONCE,
     );
     if (ok == windows.FALSE) {
+        shadow.retire();
+        data.internal.shadow = null;
         return error.Unexpected;
     }
 }
@@ -1568,9 +1603,15 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
                         // preventing a race where the callback posts after we do.
                         _ = windows.UnregisterWaitEx(data.internal.wait_handle, windows.INVALID_HANDLE_VALUE);
                         data.internal.wait_handle = windows.INVALID_HANDLE_VALUE;
-                        // If the callback didn't already post, post the completion ourselves
-                        if (data.internal.posted.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
-                            _ = windows.PostQueuedCompletionStatus(data.internal.iocp, 0, 0, &target.internal.overlapped);
+                        // If the callback didn't already post, post the completion ourselves.
+                        // DEBUG(#460): coordinate + post via the heap shadow, then retire it
+                        // (the UnregisterWaitEx above guarantees no callback runs after this).
+                        if (data.internal.shadow) |shadow| {
+                            if (shadow.posted.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+                                _ = windows.PostQueuedCompletionStatus(shadow.iocp, 0, 0, shadow.overlapped);
+                            }
+                            shadow.retire();
+                            data.internal.shadow = null;
                         }
                     }
                     return;
@@ -2063,6 +2104,11 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
             if (data.internal.wait_handle != windows.INVALID_HANDLE_VALUE) {
                 _ = windows.UnregisterWaitEx(data.internal.wait_handle, null);
                 data.internal.wait_handle = windows.INVALID_HANDLE_VALUE;
+            }
+            // DEBUG(#460): retire the heap shadow now the callback has fired.
+            if (data.internal.shadow) |shadow| {
+                shadow.retire();
+                data.internal.shadow = null;
             }
 
             if (c.cancel_state.load(.acquire).requested) {

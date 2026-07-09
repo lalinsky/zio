@@ -62,23 +62,48 @@ const Query = struct {
     }
 };
 
+// DEBUG(#460): canary values so a callback firing on a freed/reused context is
+// caught (with its backtrace) instead of silently stomping reused memory.
+const DBG_MAGIC_LIVE: u64 = 0x460C_0DE0_460C_0DE0;
+const DBG_MAGIC_DEAD: u64 = 0x460D_EAD0_460D_EAD0;
+
 /// Heap-allocated, reference-counted context for a loop-delivered async lookup.
 const LoopContext = struct {
+    // DEBUG(#460): magic first so a stale callback reads it before anything else.
+    magic: u64 = DBG_MAGIC_LIVE,
     overlapped: windows.OVERLAPPED = std.mem.zeroes(windows.OVERLAPPED),
     async_handle: ev.Async,
     err: u32 = 0,
     refs: std.atomic.Value(u8),
     allocator: std.mem.Allocator,
+    // DEBUG(#460): set true once the context is retired; a callback that sees it
+    // set (or magic != LIVE) fired after we thought we were done — the exact
+    // "unmonitored Windows thread writes freed memory" bug.
+    freed: bool = false,
+    // DEBUG(#460): set on the synchronous return paths, where we assume the
+    // completion callback will NOT fire (Hole A). If it fires anyway, panic.
+    must_not_fire: bool = false,
 
     fn unref(self: *LoopContext) void {
         if (self.refs.fetchSub(1, .acq_rel) == 1) {
-            self.allocator.destroy(self);
+            // DEBUG(#460): poison + LEAK (c_allocator, so no leak-detector noise)
+            // instead of destroy, so a late callback lands on the dead-magic
+            // context and panics rather than corrupting reused memory.
+            self.freed = true;
+            self.magic = DBG_MAGIC_DEAD;
         }
     }
 };
 
 fn loopCallback(dwError: u32, _: u32, lpOverlapped: ?*windows.OVERLAPPED) callconv(.winapi) void {
     const ctx: *LoopContext = @fieldParentPtr("overlapped", lpOverlapped.?);
+    // DEBUG(#460): a callback on a dead/reused context is the bug we're hunting.
+    if (ctx.magic != DBG_MAGIC_LIVE or ctx.freed) {
+        std.debug.panic("DEBUG(#460): DNS loopCallback on freed/reused ctx=0x{x} magic=0x{x} freed={} err={}", .{ @intFromPtr(ctx), ctx.magic, ctx.freed, dwError });
+    }
+    if (ctx.must_not_fire) {
+        std.debug.panic("DEBUG(#460): DNS loopCallback fired after a synchronous GetAddrInfoExW return (Hole A) ctx=0x{x} err={}", .{ @intFromPtr(ctx), dwError });
+    }
     ctx.err = dwError;
     // Hand off to the loop; do NOT touch the waiter/task from this foreign thread.
     // The loop thread performs the waiter signal + task resume.
@@ -105,7 +130,9 @@ fn lookupOnLoop(
 ) dns.LookupError!usize {
     var query = try Query.init(options);
 
-    const allocator = exec.runtime.allocator;
+    // DEBUG(#460): allocate the callback context with the C allocator so that
+    // poison-and-leak on retirement doesn't trip the test leak detector.
+    const allocator = std.heap.c_allocator;
     const ctx = allocator.create(LoopContext) catch return error.OutOfMemory;
     // Two references: one for us, one for the pending completion callback. If the
     // call completes synchronously (or fails), no callback fires and we drop both.
@@ -132,12 +159,16 @@ fn lookupOnLoop(
     );
 
     if (rc == 0) {
-        // Completed synchronously — no callback will fire, so drop both refs.
+        // Completed synchronously — we ASSUME no callback will fire, so drop both
+        // refs. DEBUG(#460): mark must_not_fire first so a callback that fires
+        // anyway (Hole A) panics instead of stomping the reused context.
+        ctx.must_not_fire = true;
         ctx.unref();
         ctx.unref();
         return fillBuffers(storage, options, result);
     }
     if (rc != windows.WSA_IO_PENDING) {
+        ctx.must_not_fire = true;
         ctx.unref();
         ctx.unref();
         return winsockToLookupError(rc);

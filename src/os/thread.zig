@@ -588,16 +588,10 @@ const NotifyFutex = struct {
     }
 
     pub fn signal(self: *NotifyFutex) void {
-        if (dbg_watch != 0 and @intFromPtr(&self.state) == dbg_watch) @panic("DEBUG(#460): Notify.signal on watched addr (pending_cleanup.tag)");
         _ = self.state.fetchAdd(1, .release);
         Futex.wake(&self.state, .one);
     }
 };
-
-/// DEBUG(#460): if a Notify.signal targets this address (executor.pending_cleanup.tag),
-/// panic with the caller's backtrace — catches a dangling/aliased Waiter signaled
-/// cross-thread whose notify.state lands on pending_cleanup.
-pub var dbg_watch: usize = 0;
 
 /// NetBSD notify using native _lwp_park/_lwp_unpark
 ///

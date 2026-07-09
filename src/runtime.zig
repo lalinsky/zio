@@ -983,14 +983,6 @@ pub const Runtime = struct {
             try self.main_executor.init(self, 0);
             main_executor_initialized = true;
             self.executors.appendAssumeCapacity(&self.main_executor);
-            // DEBUG(#460): software-watch the atomic-set-to-1 primitives for a
-            // dangling/aliased write to pending_cleanup.tag (exec+0xbd8).
-            if (@import("builtin").os.tag == .windows) {
-                const w = @intFromPtr(&self.main_executor.pending_cleanup) + 8;
-                os.thread.dbg_watch = w;
-                @import("ev/completion.zig").dbg_watch_pending = w;
-                @import("dbg_watch.zig").arm(w);
-            }
         }
         errdefer if (main_executor_initialized) self.main_executor.deinit();
 
