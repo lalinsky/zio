@@ -983,6 +983,13 @@ pub const Runtime = struct {
             try self.main_executor.init(self, 0);
             main_executor_initialized = true;
             self.executors.appendAssumeCapacity(&self.main_executor);
+            // DEBUG(#460): software-watch the atomic-set-to-1 primitives for a
+            // dangling/aliased write to pending_cleanup.tag (exec+0xbd8).
+            if (@import("builtin").os.tag == .windows) {
+                const w = @intFromPtr(&self.main_executor.pending_cleanup) + 8;
+                os.thread.dbg_watch = w;
+                @import("ev/completion.zig").dbg_watch_pending = w;
+            }
         }
         errdefer if (main_executor_initialized) self.main_executor.deinit();
 
@@ -1048,17 +1055,6 @@ pub const Runtime = struct {
 
         // All tasks should be complete before deinit
         std.debug.assert(self.task_count.load(.acquire) == 0);
-
-        // DEBUG(#460): are overlapped I/O ops still pending in the kernel at
-        // teardown? If so their buffers (coro stacks) get freed while the kernel
-        // still holds a write to them → the late completion stomps reused memory.
-        if (@import("builtin").os.tag == .windows and self.options.enable_main_executor) {
-            const inflight = self.main_executor.loop.state.loadInflight();
-            const active = self.main_executor.loop.state.loadActive();
-            if (inflight != 0 or active != 0) {
-                std.log.err("DBG(#460) at deinit: inflight_io={} active={}", .{ inflight, active });
-            }
-        }
 
         // Clean up ThreadPool (worker threads already joined by stop()).
         self.thread_pool.deinit();

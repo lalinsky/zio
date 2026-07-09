@@ -493,6 +493,11 @@ pub const Timer = struct {
     }
 };
 
+/// DEBUG(#460): if an Async.notify targets this address (executor.pending_cleanup.tag),
+/// panic with the caller's backtrace — catches a dangling/aliased Async notified
+/// cross-thread whose pending field lands on pending_cleanup.
+pub var dbg_watch_pending: usize = 0;
+
 pub const Async = struct {
     c: Completion,
     result_private_do_not_touch: void = {},
@@ -508,6 +513,7 @@ pub const Async = struct {
 
     /// Notify the loop to wake up and complete this async handle (thread-safe)
     pub fn notify(self: *Async) void {
+        if (dbg_watch_pending != 0 and @intFromPtr(&self.pending) == dbg_watch_pending) @panic("DEBUG(#460): Async.notify on watched addr (pending_cleanup.tag)");
         // Atomically set pending flag
         const was_pending = self.pending.swap(1, .release);
         if (was_pending == 0) {
