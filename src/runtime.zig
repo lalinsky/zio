@@ -284,7 +284,11 @@ pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
 
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
-    pub const max_executors = 64;
+    pub const max_executors = switch (@sizeOf(usize)) {
+        4 => 32,
+        8 => 64,
+        else => @compileError("Unsupported architecture"),
+    };
 
     id: u6,
     loop: ev.Loop,
@@ -520,25 +524,18 @@ pub const Executor = struct {
     }
 
     fn parkAndSearch(self: *Executor, check_ready: bool) !void {
-        const my_bit = @as(u64, 1) << self.id;
-        self.runtime.idle_mask_mutex.lock();
-        self.runtime.idle_mask |= my_bit;
-        self.runtime.idle_mask_mutex.unlock();
+        const my_bit = @as(usize, 1) << self.id;
+        _ = self.runtime.idle_mask.fetchOr(my_bit, .acq_rel);
 
         if (self.checkAboutForWork(check_ready)) {
-            self.runtime.idle_mask_mutex.lock();
-            self.runtime.idle_mask &= ~my_bit;
-            self.runtime.idle_mask_mutex.unlock();
+            _ = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel);
             try self.loop.run(.no_wait);
             return;
         }
 
         try self.loop.run(.once);
 
-        self.runtime.idle_mask_mutex.lock();
-        const was_already_clear = self.runtime.idle_mask & my_bit == 0;
-        self.runtime.idle_mask &= ~my_bit;
-        self.runtime.idle_mask_mutex.unlock();
+        const was_already_clear = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel) & my_bit == 0;
 
         if (was_already_clear) {
             if (self.main_task.state.load(.acquire).tag == .ready or !self.run_queue.isEmpty()) {
@@ -605,10 +602,8 @@ pub const Executor = struct {
             const victim = executors[(self.id + i) % executors.len];
             if (victim == self) continue;
 
-            const victim_bit = @as(u64, 1) << victim.id;
-            self.runtime.idle_mask_mutex.lock();
-            const victim_idle = self.runtime.idle_mask & victim_bit != 0;
-            self.runtime.idle_mask_mutex.unlock();
+            const victim_bit = @as(usize, 1) << victim.id;
+            const victim_idle = self.runtime.idle_mask.load(.acquire) & victim_bit != 0;
             if (victim_idle) continue;
 
             if (self.run_queue.steal(&victim.run_queue)) |node| {
@@ -941,9 +936,7 @@ pub const Runtime = struct {
     // submissions, cross-thread wakes, and per-executor ring overflow land here,
     // and every executor drains a fair batch from it once per tick.
     global_overflow: OverflowQueue(WaitNode) = .{},
-    idle_mask: u64 = 0,
-    // TODO: replace with atomic scoped based on architecture
-    idle_mask_mutex: OsMutex = .init(),
+    idle_mask: std.atomic.Value(usize) = .init(0),
     searchers: std.atomic.Value(u32) = .init(0),
     loop_group: ev.LoopGroup = .{},
     main_executor: Executor,
@@ -1179,15 +1172,20 @@ pub const Runtime = struct {
 
     fn armSearcher(self: *Runtime) void {
         if (self.searchers.cmpxchgStrong(0, 1, .acq_rel, .monotonic)) |_| return;
-        self.idle_mask_mutex.lock();
-        defer self.idle_mask_mutex.unlock();
-        if (self.idle_mask == 0) {
+        const idle_mask = self.idle_mask.load(.acquire);
+
+        if (idle_mask == 0) {
             _ = self.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
             return;
         }
-        const id: u6 = @intCast(@ctz(self.idle_mask));
-        const bit = @as(u64, 1) << id;
-        self.idle_mask &= ~bit;
+        const id: u6 = @intCast(@ctz(idle_mask));
+        const bit = @as(usize, 1) << id;
+        const previous_mask = self.idle_mask.fetchAnd(~bit, .acq_rel);
+
+        if (previous_mask & bit == 0) {
+            _ = self.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
+            return;
+        }
         self.executors.items[id].loop.wake();
     }
 
