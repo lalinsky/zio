@@ -398,12 +398,24 @@ pub const LoopState = struct {
         completion.state = .dead;
         self.decrActive();
 
-        // Notify group/queue owner if this completion belongs to one
-        if (completion.group.owner_callback) |cb| {
+        // Both callbacks below can free `completion`, so whichever may free it must
+        // run LAST, with nothing touching `completion` afterward. Cache the owner
+        // callback now, before `call` — for a standalone completion `call` wakes a
+        // waiter that may free `completion`, so we must not read it afterward.
+        const owner_callback = completion.group.owner_callback;
+
+        // The completion's own callback runs first: for a group member it reports
+        // the member's own result while the member is still alive; for a standalone
+        // completion (no owner) it is the last thing we do.
+        completion.call(self.loop);
+
+        // Then notify the group/queue owner. This can drive the group to completion
+        // and free the frame this member lives on (e.g. the last `.gather` member
+        // completing the group, whose callback frees the member), so it must run
+        // last — `completion` may be dangling after this returns.
+        if (owner_callback) |cb| {
             cb(self.loop, completion);
         }
-
-        completion.call(self.loop);
     }
 
     pub fn markRunning(self: *LoopState, completion: *Completion) void {

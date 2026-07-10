@@ -125,6 +125,45 @@ test "group: callback invoked when all complete" {
     try std.testing.expect(ctx.group_callback_order > ctx.timer2_callback_order);
 }
 
+test "group: gather member freed by the group callback is not used-after-free (#561)" {
+    // Regression for #561. finishCompletion used to run a member's own `call`
+    // AFTER notifying the group owner. The last `.gather` member completing drives
+    // the group to completion and runs the group's user callback, which in real
+    // code frees the frame the member's completion lives on — then the trailing
+    // `call` dereferenced the freed member (GP fault on the poisoned callback ptr).
+    // Inline callbacks (defer_callbacks=false) make the free happen mid-finish.
+    var loop: Loop = undefined;
+    try loop.init(.{ .defer_callbacks = false });
+    defer loop.deinit();
+
+    const Ctx = struct {
+        member: *Timer,
+        completed: bool = false,
+
+        fn onGroup(_: *Loop, c: *Completion) void {
+            const self: *@This() = @ptrCast(@alignCast(c.userdata.?));
+            self.completed = true;
+            // Simulate the member's frame being reclaimed/reused the instant the
+            // group completes. Pre-fix, finishCompletion touches this right after,
+            // and the 0xAA callback pointer faults.
+            @memset(std.mem.asBytes(self.member), 0xAA);
+        }
+    };
+
+    var member: Timer = .init(.{ .duration = .fromMilliseconds(1) });
+    var ctx: Ctx = .{ .member = &member };
+
+    var group: Group = .init(.gather);
+    group.c.userdata = &ctx;
+    group.c.callback = Ctx.onGroup;
+    group.add(&member.c);
+    loop.add(&group.c);
+
+    try loop.run(.until_done);
+
+    try std.testing.expect(ctx.completed);
+}
+
 test "group: cancel cancels all children" {
     var loop: Loop = undefined;
     try loop.init(.{});
