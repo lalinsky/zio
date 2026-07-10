@@ -38,7 +38,7 @@ const select = @import("select.zig");
 const Waiter = @import("common.zig").Waiter;
 const random_mod = @import("random.zig");
 
-const U5U6 = switch (@sizeOf(usize)) {
+const ExecutorId = switch (@sizeOf(usize)) {
     4 => u5,
     8 => u6,
     else => @compileError("Unsupported architecture"),
@@ -289,13 +289,9 @@ pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
 
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
-    pub const max_executors = switch (@sizeOf(usize)) {
-        4 => 32,
-        8 => 64,
-        else => @compileError("Unsupported architecture"),
-    };
+    pub const max_executors = std.math.maxInt(ExecutorId) + 1;
 
-    id: U5U6,
+    id: ExecutorId,
     loop: ev.Loop,
 
     /// Per-executor random state (non-secure CSPRNG; later the secure-path fd/handle).
@@ -370,7 +366,7 @@ pub const Executor = struct {
         return @alignCast(@fieldParentPtr("main_task", main_task));
     }
 
-    pub fn init(self: *Executor, runtime: *Runtime, id: U5U6) !void {
+    pub fn init(self: *Executor, runtime: *Runtime, id: ExecutorId) !void {
         self.* = .{
             .id = id,
             .loop = undefined,
@@ -1014,7 +1010,7 @@ pub const Runtime = struct {
                 const worker = self.workers.addOneAssumeCapacity();
                 errdefer _ = self.workers.pop();
                 worker.* = .{};
-                worker.thread = try std.Thread.spawn(.{}, runWorker, .{ self, worker, @as(U5U6, @intCast(i + worker_id_start)) });
+                worker.thread = try std.Thread.spawn(.{}, runWorker, .{ self, worker, @as(ExecutorId, @intCast(i + worker_id_start)) });
             }
 
             for (self.workers.items, 0..) |*worker, i| {
@@ -1150,7 +1146,7 @@ pub const Runtime = struct {
 
     /// Worker thread entry point. Initializes executor and runs until stopped.
     /// Signals worker.ready after initialization (success or failure).
-    fn runWorker(self: *Runtime, worker: *Worker, id: U5U6) void {
+    fn runWorker(self: *Runtime, worker: *Worker, id: ExecutorId) void {
         worker.executor.init(self, id) catch |e| {
             worker.err = e;
             worker.ready.set();
@@ -1183,7 +1179,7 @@ pub const Runtime = struct {
             _ = self.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
             return;
         }
-        const id: U5U6 = @intCast(@ctz(idle_mask));
+        const id: ExecutorId = @intCast(@ctz(idle_mask));
         const bit = @as(usize, 1) << id;
         const previous_mask = self.idle_mask.fetchAnd(~bit, .acq_rel);
 
@@ -1596,11 +1592,11 @@ test "runtime: local ring overflow spills and drains with task migration disable
     try std.testing.expectEqual(@as(u32, H.n_tasks), counter.load(.monotonic));
 }
 
-test "runtime: multi-threaded execution with 64 executors" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(64) });
+test "runtime: multi-threaded execution with max executors" {
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(Executor.max_executors) });
     defer runtime.deinit();
 
-    try std.testing.expectEqual(64, runtime.executors.items.len);
+    try std.testing.expectEqual(Executor.max_executors, runtime.executors.items.len);
 }
 
 test "Runtime: multi-threaded with task migration" {
