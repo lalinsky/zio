@@ -595,7 +595,7 @@ pub const Executor = struct {
     }
 
     fn stealWork(self: *Executor) bool {
-        if (!zio_options.task_migration) return false;
+        if (!zio_options.task_migration or !self.runtime.executors_stealable) return false;
         const executors = self.runtime.executors.items;
         if (executors.len <= 1) return false;
 
@@ -933,6 +933,7 @@ pub const Runtime = struct {
     options: RuntimeOptions,
 
     executors: std.ArrayList(*Executor) = .empty,
+    executors_stealable: bool = false,
     // Shared global run queue (used when task migration is on): external
     // submissions, cross-thread wakes, and per-executor ring overflow land here,
     // and every executor drains a fair batch from it once per tick.
@@ -1021,6 +1022,7 @@ pub const Runtime = struct {
                 }
                 self.executors.appendAssumeCapacity(&worker.executor);
             }
+            self.executors_stealable = true;
         }
     }
 
@@ -1040,6 +1042,7 @@ pub const Runtime = struct {
             worker.thread.join();
         }
         self.workers.deinit(self.allocator);
+        self.executors_stealable = false;
     }
 
     pub fn deinit(self: *Runtime) void {
