@@ -11,6 +11,7 @@ const assert = std.debug.assert;
 const StackInfo = @import("stack.zig").StackInfo;
 const stackAlloc = @import("stack.zig").stackAlloc;
 const stackFree = @import("stack.zig").stackFree;
+const tsan = @import("tsan.zig");
 
 /// Current coroutine context for this thread. Used by the SIGSEGV signal handler
 /// to determine if a fault is from a coroutine stack and to access stack metadata.
@@ -32,6 +33,7 @@ pub const Context = switch (builtin.cpu.arch) {
         rip: u64,
         fiber_data: if (builtin.os.tag == .windows) u64 else void = if (builtin.os.tag == .windows) 0 else {}, // Windows only (TEB offset 0x20)
         stack_info: StackInfo,
+        tsan_fiber: tsan.Fiber = tsan.none,
 
         pub const stack_alignment = 16;
     },
@@ -42,6 +44,7 @@ pub const Context = switch (builtin.cpu.arch) {
         pc: u64,
         fiber_data: if (builtin.os.tag == .windows) u64 else void = if (builtin.os.tag == .windows) 0 else {}, // Windows only (TEB offset 0x20)
         stack_info: StackInfo,
+        tsan_fiber: tsan.Fiber = tsan.none,
 
         pub const stack_alignment = 16;
     },
@@ -51,6 +54,7 @@ pub const Context = switch (builtin.cpu.arch) {
         lr: u32,  // r14 (link register) only saved beause of https://github.com/llvm/llvm-project/pull/179740 (can't be worked around in zig)
         pc: u32,  // r15 (program counter)
         stack_info: StackInfo,
+        tsan_fiber: tsan.Fiber = tsan.none,
 
         pub const stack_alignment = 8;  // AAPCS requires 8-byte alignment
     },
@@ -59,6 +63,7 @@ pub const Context = switch (builtin.cpu.arch) {
         fp: u64,
         pc: u64,
         stack_info: StackInfo,
+        tsan_fiber: tsan.Fiber = tsan.none,
 
         pub const stack_alignment = 16;
     },
@@ -67,6 +72,7 @@ pub const Context = switch (builtin.cpu.arch) {
         fp: u32,
         pc: u32,
         stack_info: StackInfo,
+        tsan_fiber: tsan.Fiber = tsan.none,
 
         pub const stack_alignment = 16;
     },
@@ -75,6 +81,7 @@ pub const Context = switch (builtin.cpu.arch) {
         fp: u64,
         pc: u64,
         stack_info: StackInfo,
+        tsan_fiber: tsan.Fiber = tsan.none,
 
         pub const stack_alignment = 16;
     },
@@ -83,6 +90,7 @@ pub const Context = switch (builtin.cpu.arch) {
         fp: u64,   // r31 (conventional frame pointer)
         pc: u64,
         stack_info: StackInfo,
+        tsan_fiber: tsan.Fiber = tsan.none,
 
         pub const stack_alignment = 16;
     },
@@ -93,6 +101,7 @@ pub const Context = switch (builtin.cpu.arch) {
         fp: u64,  // %i6 (frame pointer; used by coroEntry to locate the Entrypoint)
         pc: u64,
         stack_info: StackInfo,
+        tsan_fiber: tsan.Fiber = tsan.none,
 
         pub const stack_alignment = 16;
     },
@@ -163,6 +172,19 @@ pub inline fn switchContext(
     // Update current context pointer for SIGSEGV handler
     // After the switch, we'll be executing in new_context
     setCurrentContext(new_context);
+
+    // Hand the running fiber over to TSan before the stacks are swapped.
+    // We are still executing as `current_context`, so TSan's current fiber
+    // corresponds to it: record that handle (this also lazily captures the
+    // scheduler's native-thread context, whose fiber we never created), then
+    // switch TSan onto the target's fiber. `new_context.tsan_fiber` is always
+    // valid here: coroutine contexts get one in `setup`, and a scheduler
+    // context is only ever switched back into after it was first switched out
+    // of (which captured it just below). Compiles away when TSan is disabled.
+    if (tsan.enabled) {
+        current_context_param.tsan_fiber = tsan.currentFiber();
+        tsan.switchToFiber(new_context.tsan_fiber);
+    }
 
     const is_windows = builtin.os.tag == .windows;
     switch (builtin.cpu.arch) {
@@ -1482,6 +1504,19 @@ pub const Coroutine = struct {
 
         // Initialize the context with the entry point
         setupContext(&self.context, stack_top, &coroEntry);
+
+        // Register this coroutine as its own TSan fiber so races between it and
+        // other coroutines are detected and its private memory is not flagged
+        // when it migrates between OS threads. No-op unless built with TSan.
+        self.context.tsan_fiber = tsan.createFiber();
+    }
+
+    /// Retire the coroutine. Call once it has finished and control is no longer
+    /// on its stack (e.g. from the owning task's teardown). Currently this only
+    /// retires the TSan fiber; a no-op unless built with `-fsanitize-thread`.
+    pub fn deinit(self: *Coroutine) void {
+        tsan.destroyFiber(self.context.tsan_fiber);
+        self.context.tsan_fiber = tsan.none;
     }
 };
 

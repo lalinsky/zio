@@ -468,6 +468,7 @@ pub const AnyTask = struct {
         const rt = self.getRuntime();
         if (self.coro.context.stack_info.allocation_len > 0) {
             rt.stack_pool.release(self.coro.context.stack_info, rt.now());
+            self.coro.deinit();
         }
 
         self.closure.free(AnyTask, rt, self);
