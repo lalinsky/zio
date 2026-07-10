@@ -38,6 +38,11 @@ const select = @import("select.zig");
 const Waiter = @import("common.zig").Waiter;
 const random_mod = @import("random.zig");
 
+const U5U6 = switch (@sizeOf(usize)) {
+    4 => u5,
+    8 => u6,
+    else => @compileError("Unsupported architecture"),
+};
 const mod = @This();
 
 /// Number of executor threads to run (including main).
@@ -290,7 +295,7 @@ pub const Executor = struct {
         else => @compileError("Unsupported architecture"),
     };
 
-    id: u6,
+    id: U5U6,
     loop: ev.Loop,
 
     /// Per-executor random state (non-secure CSPRNG; later the secure-path fd/handle).
@@ -365,7 +370,7 @@ pub const Executor = struct {
         return @alignCast(@fieldParentPtr("main_task", main_task));
     }
 
-    pub fn init(self: *Executor, runtime: *Runtime, id: u6) !void {
+    pub fn init(self: *Executor, runtime: *Runtime, id: U5U6) !void {
         self.* = .{
             .id = id,
             .loop = undefined,
@@ -1009,7 +1014,7 @@ pub const Runtime = struct {
                 const worker = self.workers.addOneAssumeCapacity();
                 errdefer _ = self.workers.pop();
                 worker.* = .{};
-                worker.thread = try std.Thread.spawn(.{}, runWorker, .{ self, worker, @as(u6, @intCast(i + worker_id_start)) });
+                worker.thread = try std.Thread.spawn(.{}, runWorker, .{ self, worker, @as(U5U6, @intCast(i + worker_id_start)) });
             }
 
             for (self.workers.items, 0..) |*worker, i| {
@@ -1145,7 +1150,7 @@ pub const Runtime = struct {
 
     /// Worker thread entry point. Initializes executor and runs until stopped.
     /// Signals worker.ready after initialization (success or failure).
-    fn runWorker(self: *Runtime, worker: *Worker, id: u6) void {
+    fn runWorker(self: *Runtime, worker: *Worker, id: U5U6) void {
         worker.executor.init(self, id) catch |e| {
             worker.err = e;
             worker.ready.set();
@@ -1178,7 +1183,7 @@ pub const Runtime = struct {
             _ = self.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
             return;
         }
-        const id: u6 = @intCast(@ctz(idle_mask));
+        const id: U5U6 = @intCast(@ctz(idle_mask));
         const bit = @as(usize, 1) << id;
         const previous_mask = self.idle_mask.fetchAnd(~bit, .acq_rel);
 
