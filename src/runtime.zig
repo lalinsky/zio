@@ -1187,13 +1187,7 @@ pub const Runtime = struct {
         }
         const id: u6 = @intCast(@ctz(self.idle_mask));
         const bit = @as(u64, 1) << id;
-        const previous_mask = self.idle_mask;
         self.idle_mask &= ~bit;
-
-        if (previous_mask & bit == 0) {
-            _ = self.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
-            return;
-        }
         self.executors.items[id].loop.wake();
     }
 
