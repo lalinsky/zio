@@ -1172,21 +1172,19 @@ pub const Runtime = struct {
     fn armSearcher(self: *Runtime) void {
         if (!(zio_options.task_migration and self.options.enable_task_migration) or !self.executors_stealable.load(.acquire) or (self.searchers.load(.monotonic) != 0)) return;
         if (self.searchers.cmpxchgStrong(0, 1, .acq_rel, .monotonic)) |_| return;
-        const idle_mask = self.idle_mask.load(.acquire);
 
-        if (idle_mask == 0) {
-            _ = self.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
-            return;
+        var candidates = self.idle_mask.load(.acquire);
+        while (candidates != 0) {
+            const id: ExecutorId = @intCast(@ctz(candidates));
+            const bit = @as(usize, 1) << id;
+            const previous_mask = self.idle_mask.fetchAnd(~bit, .acq_rel);
+            if (previous_mask & bit != 0) {
+                self.executors.items[id].loop.wake();
+                return;
+            }
+            candidates &= ~bit;
         }
-        const id: ExecutorId = @intCast(@ctz(idle_mask));
-        const bit = @as(usize, 1) << id;
-        const previous_mask = self.idle_mask.fetchAnd(~bit, .acq_rel);
-
-        if (previous_mask & bit == 0) {
-            _ = self.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
-            return;
-        }
-        self.executors.items[id].loop.wake();
+        _ = self.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
     }
 
     // Convenience methods that operate on the current coroutine context
