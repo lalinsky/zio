@@ -527,7 +527,12 @@ pub const Executor = struct {
     fn parkAndSearch(self: *Executor, check_ready: bool) !void {
         const my_bit = @as(usize, 1) << self.id;
         _ = self.runtime.idle_mask.fetchOr(my_bit, .acq_rel);
-        errdefer _ = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel);
+        errdefer {
+            const previous_bit = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel);
+            if (previous_bit & my_bit == 0) {
+                _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
+            }
+        }
 
         const found_work = self.checkAboutForWork(check_ready);
         try self.loop.run(if (found_work) .no_wait else .once);
@@ -559,7 +564,7 @@ pub const Executor = struct {
             // being blocked behind a token we're about to give up anyway.
             _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
             if (self.stealWork()) return;
-            if (self.checkAboutForWork(true)) self.runtime.armSearcher();
+            if (self.checkAboutForWork(check_ready)) self.runtime.armSearcher();
         }
     }
 
@@ -1028,6 +1033,7 @@ pub const Runtime = struct {
 
     /// Stop worker executors and join threads. Used by deinit() and init() error path.
     fn shutdownWorkers(self: *Runtime) void {
+        self.executors_stealable.store(false, .release);
         // Wait for all workers to finish initialization, then stop their event loops.
         // Workers that failed to initialize (err != null) don't have valid executors.
         for (self.workers.items) |*worker| {
@@ -1042,7 +1048,6 @@ pub const Runtime = struct {
             worker.thread.join();
         }
         self.workers.deinit(self.allocator);
-        self.executors_stealable.store(false, .release);
     }
 
     pub fn deinit(self: *Runtime) void {
@@ -1176,6 +1181,8 @@ pub const Runtime = struct {
 
     fn armSearcher(self: *Runtime) void {
         if (!(zio_options.task_migration and self.options.enable_task_migration) or !self.executors_stealable.load(.acquire) or (self.searchers.load(.monotonic) != 0)) return;
+        if (self.idle_mask.load(.monotonic) == 0) return;
+        if (self.searchers.load(.monotonic) != 0) return;
         if (self.searchers.cmpxchgStrong(0, 1, .acq_rel, .monotonic)) |_| return;
 
         var candidates = self.idle_mask.load(.acquire);
