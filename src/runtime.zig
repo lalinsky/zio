@@ -602,7 +602,12 @@ pub const Executor = struct {
             const victim_idle = self.runtime.idle_mask.load(.acquire) & victim_bit != 0;
             if (victim_idle) continue;
 
-            if (self.run_queue.steal(&victim.run_queue)) |node| {
+            if (self.run_queue.steal(&victim.run_queue, struct {
+                fn reset(node: *WaitNode) void {
+                    const task = AnyTask.fromWaitNode(node);
+                    task.last_run_tick = 0;
+                }
+            }.reset)) |node| {
                 self.run_queue.push(node);
                 self.runtime.armSearcher();
                 return true;

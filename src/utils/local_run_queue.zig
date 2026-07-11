@@ -207,7 +207,7 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
         ///
         /// Only available on a stealable queue: with task migration compiled out no
         /// thief exists, so calling this is a programming error and won't compile.
-        pub fn steal(self: *Self, victim: *Self) ?*T {
+        pub fn steal(self: *Self, victim: *Self, comptime callbackFn: fn (*T) void) ?*T {
             if (!stealable) @compileError("steal() is unavailable: this queue was built without task migration / work stealing");
             const dst_tail = self.ownTail(); // the thief owns its own tail
             const dst_space = capacity - (dst_tail -% self.loadHead());
@@ -229,6 +229,9 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
                 if (victim.casHead(h, h +% take, false)) break take;
                 // Lost the race (an owner pop or another thief); retry the grab.
             };
+
+            var i: u32 = 0;
+            while (i < stolen) : (i += 1) callbackFn(self.buffer[(dst_tail +% i) & mask]);
 
             // Hand back the last stolen task; publish the rest into the thief's ring.
             const rest = stolen - 1;
@@ -427,7 +430,9 @@ test "LocalRunQueue: steal takes half into the thief and returns one" {
 
     // victim holds 0,1,2,3 (head=0). Steal ceil(4/2)=2 (ids 0,1): returns the last
     // stolen (id 1), keeps id 0 in the thief; victim left with 2,3.
-    const got = thief.steal(&victim) orelse return error.Unexpected;
+    const got = thief.steal(&victim, struct {
+        fn reset(_: *TestNode) void {}
+    }.reset) orelse return error.Unexpected;
     try testing.expectEqual(1, got.id);
     try testing.expectEqual(1, thief.len());
     try testing.expectEqual(2, victim.len());
@@ -451,7 +456,9 @@ test "LocalRunQueue: steal with an odd count takes the ceil half" {
     }
     // 7 tasks -> steal 7 - 7/2 = 4 (ids 0..3), return id 3, thief keeps 0,1,2;
     // victim left with 4,5,6.
-    const got = thief.steal(&victim) orelse return error.Unexpected;
+    const got = thief.steal(&victim, struct {
+        fn reset(_: *TestNode) void {}
+    }.reset) orelse return error.Unexpected;
     try testing.expectEqual(3, got.id);
     try testing.expectEqual(3, thief.len());
     try testing.expectEqual(3, victim.len());
@@ -462,7 +469,9 @@ test "LocalRunQueue: steal from an empty victim returns null" {
     var ov2: TestOverflow = .{};
     var victim = TestQueue.init(&ov1);
     var thief = TestQueue.init(&ov2);
-    try testing.expect(thief.steal(&victim) == null);
+    try testing.expect(thief.steal(&victim, struct {
+        fn reset(_: *TestNode) void {}
+    }.reset) == null);
 }
 
 test "LocalRunQueue: index cycling past capacity stays correct" {
@@ -510,7 +519,9 @@ test "LocalRunQueue: concurrent push/pop and steal loses or duplicates no task" 
     const stealer = try std.Thread.spawn(.{}, struct {
         fn run(c: *Ctx) void {
             while (!c.stop.load(.acquire) or !c.owner.isEmpty()) {
-                if (c.thief.steal(c.owner)) |n| c.mark(n);
+                if (c.thief.steal(c.owner, struct {
+                    fn reset(_: *TestNode) void {}
+                }.reset)) |n| c.mark(n);
                 while (c.thief.pop()) |n| c.mark(n);
             }
             while (c.thief.pop()) |n| c.mark(n);
@@ -587,7 +598,9 @@ test "LocalRunQueue: multiple concurrent stealers lose or duplicate no task" {
     const Thief = struct {
         fn run(c: *Ctx, thief: *TestQueue) void {
             while (!c.stop.load(.acquire) or !c.owner.isEmpty()) {
-                if (thief.steal(c.owner)) |n| c.mark(n);
+                if (thief.steal(c.owner, struct {
+                    fn reset(_: *TestNode) void {}
+                }.reset)) |n| c.mark(n);
                 while (thief.pop()) |n| c.mark(n);
             }
             while (thief.pop()) |n| c.mark(n);
