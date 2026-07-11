@@ -527,26 +527,26 @@ pub const Executor = struct {
     fn parkAndSearch(self: *Executor, check_ready: bool) !void {
         const my_bit = @as(usize, 1) << self.id;
         _ = self.runtime.idle_mask.fetchOr(my_bit, .acq_rel);
+        errdefer _ = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel);
 
-        if (self.checkAboutForWork(check_ready)) {
-            _ = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel);
-            try self.loop.run(.no_wait);
-            return;
-        }
+        const found_work = self.checkAboutForWork(check_ready);
+        try self.loop.run(if (found_work) .no_wait else .once);
 
-        try self.loop.run(.once);
+        const previous_bit = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel);
 
-        const was_already_clear = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel) & my_bit == 0;
-
-        if (was_already_clear) {
-            if (self.main_task.state.load(.acquire).tag == .ready or !self.run_queue.isEmpty()) {
+        if (previous_bit & my_bit == 0) {
+            if (found_work or (check_ready and self.main_task.state.load(.acquire).tag == .ready) or !self.run_queue.isEmpty()) {
                 _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
                 return;
             }
 
             const pending = self.run_queue.overflow.len();
             if (pending != 0) {
-                self.run_queue.refill(@min(pending, 64));
+                const batch = if (self.runtime.options.enable_task_migration)
+                    pending / @max(self.runtime.executors.items.len, 1) + 1
+                else
+                    pending;
+                self.run_queue.refill(batch);
                 if (!self.run_queue.isEmpty()) {
                     _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
                     if (!self.run_queue.overflow.isEmpty()) self.runtime.armSearcher();
@@ -554,22 +554,16 @@ pub const Executor = struct {
                 }
             }
 
-            _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
-            if (self.stealWork()) return;
-
             // Release the token before the final recheck. A concurrent
             // pusher that sees searchers == 0 can arm a fresh search instead of
             // being blocked behind a token we're about to give up anyway.
             _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
+            if (self.stealWork()) return;
             if (self.checkAboutForWork(true)) self.runtime.armSearcher();
         }
     }
 
     fn checkAboutForWork(self: *Executor, check_ready: bool) bool {
-        // Run event loop - non-blocking if there's local work, otherwise wait
-        // for I/O. Overflow-queue work needn't be checked here: any cross-thread
-        // push to the overflow queue also wakes this executor's loop, so .once
-        // returns promptly and the next iteration drains it.
         const main_ready = check_ready and self.main_task.state.load(.acquire).tag == .ready;
         // Overflow work counts too: if the ring is empty but the overflow queue
         // still holds tasks (e.g. a local ring spill, which doesn't wake the
@@ -595,12 +589,13 @@ pub const Executor = struct {
     }
 
     fn stealWork(self: *Executor) bool {
-        if (!zio_options.task_migration or !self.runtime.executors_stealable) return false;
+        if (!(zio_options.task_migration and self.runtime.options.enable_task_migration) or !self.runtime.executors_stealable.load(.acquire)) return false;
         const executors = self.runtime.executors.items;
         if (executors.len <= 1) return false;
 
+        const start = self.random_state.csprng.random().int(usize) % executors.len;
         for (0..executors.len) |i| {
-            const victim = executors[(self.id + i) % executors.len];
+            const victim = executors[(start + i) % executors.len];
             if (victim == self) continue;
 
             const victim_bit = @as(usize, 1) << victim.id;
@@ -608,8 +603,6 @@ pub const Executor = struct {
             if (victim_idle) continue;
 
             if (self.run_queue.steal(&victim.run_queue)) |node| {
-                const task = AnyTask.fromWaitNode(node);
-                task.last_run_tick = 0;
                 self.run_queue.push(node);
                 self.runtime.armSearcher();
                 return true;
@@ -663,6 +656,7 @@ pub const Executor = struct {
         std.debug.assert(getCurrentExecutorOrNull() == self);
 
         self.run_queue.push(&task.awaitable.wait_node);
+        self.runtime.armSearcher();
     }
 
     /// Schedule a task from another thread (or no executor context) onto its home
@@ -674,6 +668,7 @@ pub const Executor = struct {
 
         self.run_queue.overflow.push(&task.awaitable.wait_node);
         self.loop.wake();
+        self.runtime.armSearcher();
     }
 
     /// Schedule a task for execution.
@@ -933,7 +928,7 @@ pub const Runtime = struct {
     options: RuntimeOptions,
 
     executors: std.ArrayList(*Executor) = .empty,
-    executors_stealable: bool = false,
+    executors_stealable: std.atomic.Value(bool) = .init(false),
     // Shared global run queue (used when task migration is on): external
     // submissions, cross-thread wakes, and per-executor ring overflow land here,
     // and every executor drains a fair batch from it once per tick.
@@ -1005,7 +1000,7 @@ pub const Runtime = struct {
         errdefer self.shutdownWorkers();
 
         if (!builtin.single_threaded) {
-            const worker_id_start: u6 = if (options.enable_main_executor) 1 else 0;
+            const worker_id_start: ExecutorId = if (options.enable_main_executor) 1 else 0;
             for (0..num_workers) |i| {
                 log.debug("Spawning worker thread {}", .{i + worker_id_start});
                 const worker = self.workers.addOneAssumeCapacity();
@@ -1022,7 +1017,7 @@ pub const Runtime = struct {
                 }
                 self.executors.appendAssumeCapacity(&worker.executor);
             }
-            self.executors_stealable = true;
+            self.executors_stealable.store(true, .release);
         }
     }
 
@@ -1042,7 +1037,7 @@ pub const Runtime = struct {
             worker.thread.join();
         }
         self.workers.deinit(self.allocator);
-        self.executors_stealable = false;
+        self.executors_stealable.store(false, .release);
     }
 
     pub fn deinit(self: *Runtime) void {
@@ -1175,6 +1170,7 @@ pub const Runtime = struct {
     }
 
     fn armSearcher(self: *Runtime) void {
+        if (!(zio_options.task_migration and self.options.enable_task_migration) or !self.executors_stealable.load(.acquire) or (self.searchers.load(.monotonic) != 0)) return;
         if (self.searchers.cmpxchgStrong(0, 1, .acq_rel, .monotonic)) |_| return;
         const idle_mask = self.idle_mask.load(.acquire);
 
