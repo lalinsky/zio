@@ -20,6 +20,7 @@ const AnyTask = @import("task.zig").AnyTask;
 const Executor = @import("runtime.zig").Executor;
 const WaitNode = @import("utils/wait_queue.zig").WaitNode;
 const os = @import("os/root.zig");
+const syscall_cancel = os.syscall_cancel;
 
 /// Error set for operations that can be cancelled
 pub const Cancelable = error{
@@ -206,7 +207,7 @@ pub const Waiter = struct {
         if (d.task) |task| {
             return waitTask(d, task, expected, cancel_mode);
         } else {
-            return waitFutex(d, expected);
+            return waitFutex(d, expected, cancel_mode);
         }
     }
 
@@ -241,7 +242,7 @@ pub const Waiter = struct {
         }
 
         const d = &self.mode.direct;
-        const task = d.task orelse return timedWaitFutex(d, expected, futexTimeout(timeout, clock));
+        const task = d.task orelse return timedWaitFutex(d, expected, futexTimeout(timeout, clock), cancel_mode);
 
         // Drop a flag left behind by an earlier timed wait on this waiter.
         _ = d.notify.state.fetchAnd(~timeout_flag, .monotonic);
@@ -290,13 +291,22 @@ pub const Waiter = struct {
         task.wake();
     }
 
-    fn waitFutex(d: *Direct, expected: u32) void {
-        while (true) {
-            // The raw word is what the futex compares against; only the count
-            // half of it is the wait condition.
-            const current = d.notify.state.load(.acquire);
-            if (signalCount(current) >= expected) return;
-            d.notify.wait(current);
+    fn waitFutex(d: *Direct, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+        if (cancel_mode == .allow_cancel) {
+            const sc = try syscall_cancel.Syscall.begin();
+            defer sc.finish();
+            while (true) {
+                const current = d.notify.state.load(.acquire);
+                if (signalCount(current) >= expected) return;
+                d.notify.wait(current);
+                try sc.checkCancel();
+            }
+        } else {
+            while (true) {
+                const current = d.notify.state.load(.acquire);
+                if (signalCount(current) >= expected) return;
+                d.notify.wait(current);
+            }
         }
     }
 
@@ -317,23 +327,36 @@ pub const Waiter = struct {
         };
     }
 
-    fn timedWaitFutex(d: *Direct, expected: u32, timeout: Timeout) Timeoutable!void {
-        const deadline = timeout.toDeadline();
-        while (true) {
-            const current = d.notify.state.load(.acquire);
-            if (signalCount(current) >= expected) {
-                return;
+    fn timedWaitFutex(d: *Direct, expected: u32, timeout: Timeout, comptime cancel_mode: Executor.YieldCancelMode) TimedWaitError(cancel_mode)!void {
+        if (cancel_mode == .allow_cancel) {
+            const sc = try syscall_cancel.Syscall.begin();
+            defer sc.finish();
+            const deadline = timeout.toDeadline();
+            while (true) {
+                const current = d.notify.state.load(.acquire);
+                if (signalCount(current) >= expected) return;
+                const remaining = deadline.durationFromNow();
+                if (remaining.value <= 0) return error.Timeout;
+                d.notify.timedWait(current, remaining) catch {
+                    const final = d.notify.state.load(.acquire);
+                    if (signalCount(final) >= expected) return;
+                    return error.Timeout;
+                };
+                try sc.checkCancel();
             }
-            const remaining = deadline.durationFromNow();
-            if (remaining.value <= 0) {
-                return error.Timeout;
+        } else {
+            const deadline = timeout.toDeadline();
+            while (true) {
+                const current = d.notify.state.load(.acquire);
+                if (signalCount(current) >= expected) return;
+                const remaining = deadline.durationFromNow();
+                if (remaining.value <= 0) return error.Timeout;
+                d.notify.timedWait(current, remaining) catch {
+                    const final = d.notify.state.load(.acquire);
+                    if (signalCount(final) >= expected) return;
+                    return error.Timeout;
+                };
             }
-            d.notify.timedWait(current, remaining) catch {
-                // Deadline reached; one last look before calling it a timeout.
-                const final = d.notify.state.load(.acquire);
-                if (signalCount(final) >= expected) return;
-                return error.Timeout;
-            };
         }
     }
 
@@ -546,6 +569,51 @@ test "Waiter: futex-based timed wait with timeout" {
     // (wrong units, waiting forever). Loaded CI runners can delay the wakeup
     // by hundreds of milliseconds, so anything tighter is flaky.
     try std.testing.expect(elapsed.toMilliseconds() < 5000);
+}
+
+test "Waiter: cancelable futex park returns Canceled via the bound token" {
+    if (!syscall_cancel.enabled) return error.SkipZigTest;
+
+    // Normally the thread pool installs this; do it ourselves since the test
+    // drives a bare worker thread with no pool.
+    syscall_cancel.installHandler();
+    defer syscall_cancel.uninstallHandler();
+
+    var token: syscall_cancel.Token = .{};
+
+    // Parked on the futex and never signaled to completion (expected stays 1),
+    // so the only way out is cancellation.
+    var waiter: Waiter = .{
+        .mode = .{ .direct = .{ .task = null, .notify = .init() } },
+    };
+
+    const Worker = struct {
+        fn run(tok: *syscall_cancel.Token, w: *Waiter, canceled: *std.atomic.Value(bool)) void {
+            // Bind the token to this worker (as the pool does around a task's func),
+            // so the Waiter park can reach it through the threadlocal.
+            tok.enter();
+            defer tok.exit();
+            if (w.wait(1, .allow_cancel)) |_| {
+                // Unexpected completion; leave `canceled` false.
+            } else |err| {
+                if (err == error.Canceled) canceled.store(true, .release);
+            }
+        }
+    };
+
+    var canceled = std.atomic.Value(bool).init(false);
+    var thread = try std.Thread.spawn(.{}, Worker.run, .{ &token, &waiter, &canceled });
+
+    // Wait until the worker is inside the cancelable region (parked or about to).
+    while (token.state.load(.acquire) != .blocked) os.thread.yield();
+
+    // Request cancellation and resend SIGURG until the worker acknowledges,
+    // covering the gap between begin() and the kernel entering the futex.
+    _ = token.cancel();
+    while (token.signal()) os.thread.yield();
+
+    thread.join();
+    try std.testing.expect(canceled.load(.acquire));
 }
 
 /// Execute a blocking function on the thread pool, blocking the current task until completion.
