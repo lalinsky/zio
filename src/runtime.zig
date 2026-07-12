@@ -38,6 +38,11 @@ const select = @import("select.zig");
 const Waiter = @import("common.zig").Waiter;
 const random_mod = @import("random.zig");
 
+const ExecutorId = switch (@sizeOf(usize)) {
+    4 => u5,
+    8 => u6,
+    else => @compileError("Unsupported architecture"),
+};
 const mod = @This();
 
 /// Number of executor threads to run (including main).
@@ -284,9 +289,9 @@ pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
 
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
-    pub const max_executors = 64;
+    pub const max_executors = std.math.maxInt(ExecutorId) + 1;
 
-    id: u6,
+    id: ExecutorId,
     loop: ev.Loop,
 
     /// Per-executor random state (non-secure CSPRNG; later the secure-path fd/handle).
@@ -361,7 +366,7 @@ pub const Executor = struct {
         return @alignCast(@fieldParentPtr("main_task", main_task));
     }
 
-    pub fn init(self: *Executor, runtime: *Runtime, id: u6) !void {
+    pub fn init(self: *Executor, runtime: *Runtime, id: ExecutorId) !void {
         self.* = .{
             .id = id,
             .loop = undefined,
@@ -505,42 +510,116 @@ pub const Executor = struct {
                 @panic("event loop stopped while the main task was yielding");
             }
 
-            // Run event loop - non-blocking if there's local work, otherwise wait
-            // for I/O. Overflow-queue work needn't be checked here: any cross-thread
-            // push to the overflow queue also wakes this executor's loop, so .once
-            // returns promptly and the next iteration drains it.
-            const main_ready = check_ready and self.main_task.state.load(.acquire).tag == .ready;
-            // Overflow work counts too: if the ring is empty but the overflow queue
-            // still holds tasks (e.g. a local ring spill, which doesn't wake the
-            // loop), don't block — return promptly and refill from it below.
-            const has_work = main_ready or !self.run_queue.isEmpty() or !self.run_queue.overflow.isEmpty();
-            try self.loop.run(if (has_work) .no_wait else .once);
+            if (self.checkAboutForWork(check_ready)) try self.loop.run(.no_wait) else try self.parkAndSearch(check_ready);
 
             // Reset task counter and update tick time after event loop tick
             self.tick_task_count = 0;
             self.current_tick +%= 1;
             self.last_tick_time = self.loop.now();
 
-            // Pull a fair batch from the overflow queue (global when migration is
-            // on, this executor's own when off) back into the ring.
-            const pending = self.run_queue.overflow.len();
-            if (pending != 0) {
-                // With migration on the overflow is the shared global queue, so
-                // take only a fair ~1/n_exec slice to avoid monopolizing it. With
-                // migration off it is this executor's own private queue and we are
-                // its sole drainer, so take as much as fits (refill caps it).
-                const batch = if (self.runtime.options.enable_task_migration)
-                    pending / @max(self.runtime.executors.items.len, 1) + 1
-                else
-                    pending;
-                self.run_queue.refill(batch);
-            }
-
             // Check again after I/O
             if (check_ready and self.main_task.state.load(.acquire).tag == .ready) {
                 return;
             }
         }
+    }
+
+    fn parkAndSearch(self: *Executor, check_ready: bool) !void {
+        const my_bit = @as(usize, 1) << self.id;
+        _ = self.runtime.idle_mask.fetchOr(my_bit, .acq_rel);
+        errdefer {
+            const previous_bit = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel);
+            if (previous_bit & my_bit == 0) {
+                _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
+            }
+        }
+
+        const found_work = self.checkAboutForWork(check_ready);
+        try self.loop.run(if (found_work) .no_wait else .once);
+
+        const previous_bit = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel);
+
+        if (previous_bit & my_bit == 0) {
+            if (found_work or (check_ready and self.main_task.state.load(.acquire).tag == .ready) or !self.run_queue.isEmpty()) {
+                _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
+                return;
+            }
+
+            const pending = self.run_queue.overflow.len();
+            if (pending != 0) {
+                const batch = if (self.runtime.options.enable_task_migration)
+                    pending / @max(self.runtime.executors.items.len, 1) + 1
+                else
+                    pending;
+                self.run_queue.refill(batch);
+                if (!self.run_queue.isEmpty()) {
+                    _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
+                    if (!self.run_queue.overflow.isEmpty()) self.runtime.armSearcher();
+                    return;
+                }
+            }
+
+            // Release the token before the final recheck. A concurrent
+            // pusher that sees searchers == 0 can arm a fresh search instead of
+            // being blocked behind a token we're about to give up anyway.
+            _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
+            if (self.stealWork()) return;
+            if (self.checkAboutForWork(check_ready)) self.runtime.armSearcher();
+        }
+    }
+
+    fn checkAboutForWork(self: *Executor, check_ready: bool) bool {
+        const main_ready = check_ready and self.main_task.state.load(.acquire).tag == .ready;
+        // Overflow work counts too: if the ring is empty but the overflow queue
+        // still holds tasks (e.g. a local ring spill, which doesn't wake the
+        // loop), don't block — return promptly and refill from it below.
+        var has_work = main_ready or !self.run_queue.isEmpty();
+        // Pull a fair batch from the overflow queue (global when migration is
+        // on, this executor's own when off) back into the ring.
+        const pending = self.run_queue.overflow.len();
+        if (pending != 0 and !has_work) {
+            // With migration on the overflow is the shared global queue, so
+            // take only a fair ~1/n_exec slice to avoid monopolizing it. With
+            // migration off it is this executor's own private queue and we are
+            // its sole drainer, so take as much as fits (refill caps it).
+            const batch = if (self.runtime.options.enable_task_migration)
+                pending / @max(self.runtime.executors.items.len, 1) + 1
+            else
+                pending;
+            self.run_queue.refill(batch);
+            has_work = !self.run_queue.isEmpty();
+        }
+        if (!has_work) has_work = self.stealWork();
+        return has_work;
+    }
+
+    fn stealWork(self: *Executor) bool {
+        if (!(zio_options.task_migration and self.runtime.options.enable_task_migration) or !self.runtime.executors_stealable.load(.acquire)) return false;
+        const executors = self.runtime.executors.items;
+        if (executors.len <= 1) return false;
+
+        const start = self.random_state.csprng.random().int(usize) % executors.len;
+        for (0..executors.len) |i| {
+            const victim = executors[(start + i) % executors.len];
+            if (victim == self) continue;
+
+            const victim_bit = @as(usize, 1) << victim.id;
+            const victim_idle = self.runtime.idle_mask.load(.acquire) & victim_bit != 0;
+            if (victim_idle) continue;
+
+            if (self.run_queue.steal(&victim.run_queue, struct {
+                fn reset(node: *WaitNode) void {
+                    const task = AnyTask.fromWaitNode(node);
+                    task.last_run_tick = 0;
+                }
+            }.reset)) |node| {
+                self.run_queue.push(node);
+                self.runtime.armSearcher();
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// Get the next task to run from the ready queue.
@@ -587,6 +666,7 @@ pub const Executor = struct {
         std.debug.assert(getCurrentExecutorOrNull() == self);
 
         self.run_queue.push(&task.awaitable.wait_node);
+        self.runtime.armSearcher();
     }
 
     /// Schedule a task from another thread (or no executor context) onto its home
@@ -598,6 +678,7 @@ pub const Executor = struct {
 
         self.run_queue.overflow.push(&task.awaitable.wait_node);
         self.loop.wake();
+        self.runtime.armSearcher();
     }
 
     /// Schedule a task for execution.
@@ -857,10 +938,13 @@ pub const Runtime = struct {
     options: RuntimeOptions,
 
     executors: std.ArrayList(*Executor) = .empty,
+    executors_stealable: std.atomic.Value(bool) = .init(false),
     // Shared global run queue (used when task migration is on): external
     // submissions, cross-thread wakes, and per-executor ring overflow land here,
     // and every executor drains a fair batch from it once per tick.
     global_overflow: OverflowQueue(WaitNode) = .{},
+    idle_mask: std.atomic.Value(usize) = .init(0),
+    searchers: std.atomic.Value(u32) = .init(0),
     loop_group: ev.LoopGroup = .{},
     main_executor: Executor,
     next_executor_index: std.atomic.Value(usize) = .init(0),
@@ -926,13 +1010,13 @@ pub const Runtime = struct {
         errdefer self.shutdownWorkers();
 
         if (!builtin.single_threaded) {
-            const worker_id_start: u6 = if (options.enable_main_executor) 1 else 0;
+            const worker_id_start: ExecutorId = if (options.enable_main_executor) 1 else 0;
             for (0..num_workers) |i| {
                 log.debug("Spawning worker thread {}", .{i + worker_id_start});
                 const worker = self.workers.addOneAssumeCapacity();
                 errdefer _ = self.workers.pop();
                 worker.* = .{};
-                worker.thread = try std.Thread.spawn(.{}, runWorker, .{ self, worker, @as(u6, @intCast(i + worker_id_start)) });
+                worker.thread = try std.Thread.spawn(.{}, runWorker, .{ self, worker, @as(ExecutorId, @intCast(i + worker_id_start)) });
             }
 
             for (self.workers.items, 0..) |*worker, i| {
@@ -943,11 +1027,13 @@ pub const Runtime = struct {
                 }
                 self.executors.appendAssumeCapacity(&worker.executor);
             }
+            self.executors_stealable.store(true, .release);
         }
     }
 
     /// Stop worker executors and join threads. Used by deinit() and init() error path.
     fn shutdownWorkers(self: *Runtime) void {
+        self.executors_stealable.store(false, .release);
         // Wait for all workers to finish initialization, then stop their event loops.
         // Workers that failed to initialize (err != null) don't have valid executors.
         for (self.workers.items) |*worker| {
@@ -1068,7 +1154,7 @@ pub const Runtime = struct {
 
     /// Worker thread entry point. Initializes executor and runs until stopped.
     /// Signals worker.ready after initialization (success or failure).
-    fn runWorker(self: *Runtime, worker: *Worker, id: u6) void {
+    fn runWorker(self: *Runtime, worker: *Worker, id: ExecutorId) void {
         worker.executor.init(self, id) catch |e| {
             worker.err = e;
             worker.ready.set();
@@ -1091,6 +1177,26 @@ pub const Runtime = struct {
             };
             break;
         }
+    }
+
+    fn armSearcher(self: *Runtime) void {
+        if (!(zio_options.task_migration and self.options.enable_task_migration) or !self.executors_stealable.load(.acquire) or (self.searchers.load(.monotonic) != 0)) return;
+        if (self.idle_mask.load(.monotonic) == 0) return;
+        if (self.searchers.load(.monotonic) != 0) return;
+        if (self.searchers.cmpxchgStrong(0, 1, .acq_rel, .monotonic)) |_| return;
+
+        var candidates = self.idle_mask.load(.acquire);
+        while (candidates != 0) {
+            const id: ExecutorId = @intCast(@ctz(candidates));
+            const bit = @as(usize, 1) << id;
+            const previous_mask = self.idle_mask.fetchAnd(~bit, .acq_rel);
+            if (previous_mask & bit != 0) {
+                self.executors.items[id].loop.wake();
+                return;
+            }
+            candidates &= ~bit;
+        }
+        _ = self.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
     }
 
     // Convenience methods that operate on the current coroutine context
@@ -1495,11 +1601,11 @@ test "runtime: local ring overflow spills and drains with task migration disable
     try std.testing.expectEqual(@as(u32, H.n_tasks), counter.load(.monotonic));
 }
 
-test "runtime: multi-threaded execution with 64 executors" {
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(64) });
+test "runtime: multi-threaded execution with max executors" {
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(Executor.max_executors) });
     defer runtime.deinit();
 
-    try std.testing.expectEqual(64, runtime.executors.items.len);
+    try std.testing.expectEqual(Executor.max_executors, runtime.executors.items.len);
 }
 
 test "Runtime: multi-threaded with task migration" {
