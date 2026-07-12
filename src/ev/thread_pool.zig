@@ -30,6 +30,22 @@ pub const ThreadPool = struct {
     running_threads: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     idle_threads: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
 
+    /// Reserved jobs (see `Work.reserve_thread`) currently sitting in the queue,
+    /// each still needing a worker to pick it up. Guarded by `queue_mutex`, so it
+    /// is consistent with `idle_threads` and the queue when the spawn decision is
+    /// made. A reservation spawns a worker only when there aren't enough idle
+    /// workers to cover every pending reserved job — otherwise a parked worker
+    /// takes it, no new thread needed.
+    reserved_pending: usize = 0,
+
+    /// Reserved jobs currently occupying a worker (picked up, not yet finished).
+    /// `max_threads` is the budget for *regular* work; reserved work is additive,
+    /// so the effective ceiling for spawning is `max_threads + reserved_running`.
+    /// Without this, reserved jobs would eat the regular budget and starve
+    /// regular work once they occupy all `max_threads` workers. Atomic because it
+    /// is decremented off the queue lock, on the running worker at completion.
+    reserved_running: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+
     pub const Options = struct {
         min_threads: usize = 0,
         max_threads: ?usize = null,
@@ -68,15 +84,19 @@ pub const ThreadPool = struct {
         try self.workers.ensureTotalCapacity(allocator, max_threads);
 
         for (0..min_threads) |_| {
-            try self.spawnThread();
+            try self.spawnThread(false);
         }
     }
 
-    fn spawnThread(self: *ThreadPool) !void {
+    /// Spawn a worker thread. `forced` bypasses the `max_threads` cap, used for a
+    /// reservation that must add capacity beyond the configured maximum (the
+    /// extra worker is reaped back toward `min_threads` once idle, like any
+    /// other). Non-forced spawns (init, scale-up) respect the cap.
+    fn spawnThread(self: *ThreadPool, forced: bool) !void {
         self.workers_mutex.lock();
         defer self.workers_mutex.unlock();
 
-        if (self.workers.items.len >= self.max_threads) return;
+        if (!forced and self.workers.items.len >= self.max_threads + self.reserved_running.load(.monotonic)) return;
 
         _ = self.running_threads.fetchAdd(1, .monotonic);
         errdefer _ = self.running_threads.fetchSub(1, .monotonic);
@@ -86,7 +106,10 @@ pub const ThreadPool = struct {
 
         log.debug("Spawning thread {}", .{worker_id});
 
-        const worker = self.workers.addOneAssumeCapacity();
+        // Reservations can push the worker count past the init-time capacity, so
+        // this must allocate on demand rather than assume capacity.
+        const worker = try self.workers.addOne(self.allocator);
+        errdefer _ = self.workers.pop();
         worker.worker_id = worker_id;
         worker.thread = try std.Thread.spawn(.{}, run, .{ self, worker_id });
     }
@@ -136,6 +159,7 @@ pub const ThreadPool = struct {
             // completion_fn after shutdown and wake a loop being torn down.
             while (self.queue.pop()) |_| {}
             self.queue_size = 0;
+            self.reserved_pending = 0;
             self.queue_not_empty.broadcast();
         }
 
@@ -182,14 +206,43 @@ pub const ThreadPool = struct {
         self.queue.push(&work.c);
         self.queue_size += 1;
         const queued = self.queue_size;
+
+        // Decide, under queue_mutex, whether a reserved job needs a fresh worker.
+        // Both idle_threads and reserved_pending are only mutated while holding
+        // this lock, so the snapshot is race-free: a parked worker can't wake and
+        // claim work until we release the lock. Spawn only when the idle workers
+        // can't cover every pending reserved job; otherwise a parked worker takes
+        // it. This is the guarantee's headroom accounting — one spare (idle or
+        // freshly spawned) worker per outstanding reserved job.
+        var reservation_needs_spawn = false;
+        if (work.reserve_thread) {
+            self.reserved_pending += 1;
+            reservation_needs_spawn = self.idle_threads.load(.monotonic) < self.reserved_pending;
+        }
+
         self.queue_not_empty.signal();
         self.queue_mutex.unlock();
 
+        if (reservation_needs_spawn) {
+            // Forced: a reserved job may need capacity beyond max_threads. On
+            // failure the job stays queued (reserved_pending is dropped when a
+            // worker eventually picks it up) and runs once a worker frees up —
+            // the hard guarantee degrades, but nothing is lost.
+            self.spawnThread(true) catch |err| {
+                log.err("Failed to spawn reserved thread: {}", .{err});
+            };
+            return;
+        }
+
         const running = self.running_threads.load(.monotonic);
         const idle = self.idle_threads.load(.monotonic);
-        const should_spawn = running < self.min_threads or (idle == 0 and queued >= running * self.scale_threshold and running < self.max_threads);
+        // Ceiling is max_threads + reserved_running: reserved work is additive to
+        // the regular budget, so regular work can still scale to max_threads even
+        // when reserved jobs occupy workers.
+        const ceiling = self.max_threads + self.reserved_running.load(.monotonic);
+        const should_spawn = running < self.min_threads or (idle == 0 and queued >= running * self.scale_threshold and running < ceiling);
         if (should_spawn) {
-            self.spawnThread() catch |err| {
+            self.spawnThread(false) catch |err| {
                 log.err("Failed to spawn thread: {}", .{err});
             };
         }
@@ -219,6 +272,9 @@ pub const ThreadPool = struct {
         const removed = self.queue.remove(&work.c);
         if (removed) {
             self.queue_size -= 1;
+            // A reserved job leaving the queue without being picked up no longer
+            // needs a worker; drop its pending count under the same lock.
+            if (work.reserve_thread) self.reserved_pending -= 1;
         }
         self.queue_mutex.unlock();
 
@@ -260,10 +316,20 @@ pub const ThreadPool = struct {
             };
             self.queue_size -= 1;
 
+            const work = c.cast(Work);
+            // Snapshot before running: the completion callback below may free
+            // `work`, so we can't read `reserve_thread` off it afterwards.
+            const is_reserved = work.reserve_thread;
+            if (is_reserved) {
+                // This worker now owns the reserved job: drop its pending count
+                // (no longer queued) and count it as occupying a worker, which
+                // lifts the regular ceiling by one. Both under the queue lock.
+                self.reserved_pending -= 1;
+                _ = self.reserved_running.fetchAdd(1, .monotonic);
+            }
+
             self.queue_mutex.unlock();
             defer self.queue_mutex.lock();
-
-            const work = c.cast(Work);
 
             // Try to claim the work by transitioning from pending to running
             if (work.state.cmpxchgStrong(.pending, .running, .acq_rel, .acquire)) |state| {
@@ -278,6 +344,10 @@ pub const ThreadPool = struct {
                 work.c.setResult(.work, {});
                 work.state.store(.completed, .release);
             }
+
+            // Reserved job no longer occupies a worker; drop the ceiling before
+            // the completion callback, which may free `work`.
+            if (is_reserved) _ = self.reserved_running.fetchSub(1, .monotonic);
 
             // Notify via completion callback
             if (work.completion_fn) |completion_fn| {

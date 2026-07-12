@@ -540,6 +540,14 @@ pub const Work = struct {
     /// `ThreadPool.cancel` signals it to interrupt an in-progress syscall.
     cancel_token: ?*os.syscall_cancel.Token = null,
 
+    /// When set, the pool guarantees a worker will pick this job up: at submit it
+    /// reuses an idle worker if one is free, and only spawns a new worker (beyond
+    /// `max_threads` if needed) when idle workers can't cover every outstanding
+    /// reserved job. Used to honor std.Io's `concurrent` guarantee from a
+    /// saturated pool without deadlocking — a job queued behind blocked workers
+    /// that are themselves waiting on it. See issue #567.
+    reserve_thread: bool = false,
+
     /// Intrusive link + membership key for the loop's cancel-resend list
     /// (`Loop.cancel_resend`). A canceled-but-still-blocked worker is added here
     /// so `tick` re-sends `SIGURG` until it acknowledges. `resend_key` is the
