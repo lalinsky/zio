@@ -84,6 +84,10 @@ All notable changes to this project will be documented in this file.
   now takes a blocking path instead of re-entering the event loop, which would
   previously abort before writing the message.
 
+- Added instrumentation for ThreadSanitizer, so that it recognizes our custom
+  fiber context switching. You can now use `-fsanitize-thread` to detect
+  data races across coroutines.
+
 ## [0.15.0] - 2026-07-02
 
 - Overhaul of the `epoll` and `kqueue` backends, to make them comparable to the performance of
