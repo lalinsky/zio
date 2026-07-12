@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.16.0] - 2026-07-12
 
 - Blocking operations running on thread-pool workers are now cancelable. Previously,
   canceling a task stuck in a blocking syscall had to wait for the syscall to finish;
@@ -87,6 +87,11 @@ All notable changes to this project will be documented in this file.
 - Added instrumentation for ThreadSanitizer, so that it recognizes our custom
   fiber context switching. You can now use `-fsanitize-thread` to detect
   data races across coroutines.
+
+- Fixed a use-after-free in the event loop when the last operation in a completion
+  group finished. The group owner's callback, which may free the group members,
+  ran before the completed member's own callback, so the member was accessed after
+  being freed, crashing the process.
 
 ## [0.15.0] - 2026-07-02
 
