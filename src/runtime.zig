@@ -1276,6 +1276,51 @@ test "runtime: spawnBlocking smoke test" {
     try std.testing.expectEqual(42, result);
 }
 
+test "runtime: spawnBlocking cancel interrupts a blocking syscall on the worker" {
+    if (!os.syscall_cancel.enabled) return error.SkipZigTest;
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer runtime.deinit();
+
+    // The blocking function parks in a cancelable read on an empty pipe. When the
+    // task is canceled, SIGURG (first signal + loop-driven resend) must interrupt
+    // the read and surface as error.Canceled.
+    const worker = struct {
+        fn cancelableRead(fd: std.c.fd_t, ready: *std.atomic.Value(bool)) error{ Canceled, Unexpected }!void {
+            const sc = try os.syscall_cancel.Syscall.begin();
+            defer sc.finish();
+            ready.store(true, .release);
+            var buf: [1]u8 = undefined;
+            while (true) {
+                const rc = std.c.read(fd, &buf, buf.len);
+                if (rc >= 0) return error.Unexpected;
+                switch (std.posix.errno(rc)) {
+                    .INTR => {
+                        try sc.checkCancel();
+                        continue;
+                    },
+                    else => return error.Unexpected,
+                }
+            }
+        }
+    };
+
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(0, std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    var ready = std.atomic.Value(bool).init(false);
+    var handle = try runtime.spawnBlocking(worker.cancelableRead, .{ fds[0], &ready });
+
+    // Wait until the worker is inside the cancelable read (the pool has bound the
+    // task's token), then cancel the blocking task directly.
+    while (!ready.load(.acquire)) try runtime.sleep(.fromMicroseconds(100));
+
+    handle.cancel(); // requests cancellation and waits for completion
+    try std.testing.expectError(error.Canceled, handle.getResult());
+}
+
 test "Runtime: implicit run" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();

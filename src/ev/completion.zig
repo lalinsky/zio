@@ -558,6 +558,13 @@ pub const Work = struct {
     resend_next: ?*Work = null,
     resend_key: ?*Completion = null,
 
+    /// Optional hook fired when this work leaves the cancel-resend list (the
+    /// worker acknowledged the cancel). Used by pool-direct work that is not a
+    /// loop-managed completion — e.g. a blocking task — to drop the reference it
+    /// held to keep the work alive across the resend window. Called once, on the
+    /// loop thread, after the entry is unlinked. Null for loop-managed work.
+    resend_release: ?*const fn (work: *Work) void = null,
+
     pub const Error = error{NoThreadPool} || Cancelable;
 
     pub const State = enum(u8) {
