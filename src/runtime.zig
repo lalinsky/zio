@@ -510,7 +510,7 @@ pub const Executor = struct {
                 @panic("event loop stopped while the main task was yielding");
             }
 
-            if (self.checkAboutForWork(check_ready)) try self.loop.run(.no_wait) else try self.parkAndSearch(check_ready);
+            if (self.checkAboutForWork(check_ready, true)) try self.loop.run(.no_wait) else try self.parkAndSearch(check_ready);
 
             // Reset task counter and update tick time after event loop tick
             self.tick_task_count = 0;
@@ -534,7 +534,7 @@ pub const Executor = struct {
             }
         }
 
-        const found_work = self.checkAboutForWork(check_ready);
+        const found_work = self.checkAboutForWork(check_ready, true);
         try self.loop.run(if (found_work) .no_wait else .once);
 
         const previous_bit = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel);
@@ -564,12 +564,12 @@ pub const Executor = struct {
             // being blocked behind a token we're about to give up anyway.
             _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
             if (self.stealWork()) return;
-            if (self.checkAboutForWork(check_ready)) self.runtime.armSearcher();
+            if (self.checkAboutForWork(check_ready, false)) self.runtime.armSearcher();
         }
     }
 
-    fn checkAboutForWork(self: *Executor, check_ready: bool) bool {
-        const main_ready = check_ready and self.main_task.state.load(.acquire).tag == .ready;
+    fn checkAboutForWork(self: *Executor, check_ready: bool, include_main_ready: bool) bool {
+        const main_ready = include_main_ready and check_ready and self.main_task.state.load(.acquire).tag == .ready;
         // Overflow work counts too: if the ring is empty but the overflow queue
         // still holds tasks (e.g. a local ring spill, which doesn't wake the
         // loop), don't block — return promptly and refill from it below.
@@ -1180,9 +1180,7 @@ pub const Runtime = struct {
     }
 
     fn armSearcher(self: *Runtime) void {
-        if (!(zio_options.task_migration and self.options.enable_task_migration) or !self.executors_stealable.load(.acquire) or (self.searchers.load(.monotonic) != 0)) return;
-        if (self.idle_mask.load(.monotonic) == 0) return;
-        if (self.searchers.load(.monotonic) != 0) return;
+        if (!(zio_options.task_migration and self.options.enable_task_migration) or !self.executors_stealable.load(.acquire) or (self.idle_mask.load(.monotonic) == 0) or (self.searchers.load(.monotonic) != 0)) return;
         if (self.searchers.cmpxchgStrong(0, 1, .acq_rel, .monotonic)) |_| return;
 
         var candidates = self.idle_mask.load(.acquire);
