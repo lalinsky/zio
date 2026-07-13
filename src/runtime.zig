@@ -729,8 +729,6 @@ pub const Executor = struct {
             // New tasks always go to their round-robin assigned home executor to
             // distribute load across executors. Only already-running tasks may
             // migrate to the current executor (for cache locality with the waker).
-            // The .new check can be removed once we have work stealing to rebalance
-            // load (see https://github.com/lalinsky/zio/issues/460).
             if (zio_options.task_migration and old.tag != .new and current_exec.runtime == home_exec.runtime and home_exec.runtime.options.enable_task_migration) {
                 // Migrate to the current executor
                 task.last_run_tick = 0;
