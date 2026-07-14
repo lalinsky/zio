@@ -3,10 +3,11 @@
 
 //! A mutual exclusion primitive for protecting shared data in async contexts.
 //!
-//! This mutex is designed for use with the zio async runtime and provides
-//! cooperative locking that works with coroutines. When a coroutine attempts
-//! to acquire a locked mutex, it will suspend and yield to the executor,
-//! allowing other tasks to run.
+//! The lock is not handed off: woken waiters compete with running tasks for
+//! the lock (barging), which avoids serializing every transfer behind the
+//! scheduler. Tasks park in the mutex's own wait queue; foreign threads wait
+//! directly on the state word with a futex, so waking them needs no per-waiter
+//! bookkeeping.
 //!
 //! Lock operations are cancelable. If a task is cancelled while waiting
 //! for a mutex, it will properly handle cleanup and propagate the error.
@@ -25,20 +26,30 @@
 
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
+const Executor = @import("../runtime.zig").Executor;
+const getCurrentTaskOrNull = @import("../runtime.zig").getCurrentTaskOrNull;
 const Group = @import("../group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
 const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const Waiter = @import("../common.zig").Waiter;
+const os = @import("../os/root.zig");
 
 const Mutex = @This();
 
 pub const Recursive = @import("Mutex/Recursive.zig");
 
-/// FIFO wait queue with lock state encoded in flag:
-/// - flag set = unlocked
-/// - flag clear = locked (with or without waiters)
-queue: WaitQueue(WaitNode) = .empty_flagged,
+const unlocked: u32 = 0;
+const locked: u32 = 1;
+/// Set only by contended foreign threads; tasks are visible via the queue.
+const thread_contended: u32 = 2;
+
+const thread_futex = os.thread.Futex;
+const has_thread_futex = thread_futex != void;
+
+state: std.atomic.Value(u32) = .init(unlocked),
+/// Task waiters. Foreign threads wait on `state` itself.
+queue: WaitQueue(WaitNode) = .empty,
 
 /// Creates a new unlocked mutex.
 pub const init: Mutex = .{};
@@ -48,52 +59,21 @@ pub const init: Mutex = .{};
 /// is already locked by another coroutine.
 /// This function will never suspend the current task. If you need blocking behavior, use `lock()` instead.
 pub fn tryLock(self: *Mutex) bool {
-    // Only succeeds if flag is set (unlocked) AND no waiters
-    return self.queue.tryClearFlagIfEmpty();
+    return self.state.cmpxchgStrong(unlocked, locked, .acquire, .monotonic) == null;
 }
 
 /// Acquires the mutex, blocking if it is already locked.
 ///
-/// If the mutex is currently unlocked, this function acquires it immediately.
-/// If the mutex is locked by another coroutine, the current task will be
-/// suspended until the lock becomes available.
-///
 /// This function must be called from within a coroutine context managed by
-/// the zio runtime.
+/// the zio runtime, or from a foreign thread.
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting for the lock.
 pub fn lock(self: *Mutex) Cancelable!void {
-    // Fast path: try to acquire unlocked mutex (flag set, no waiters)
-    if (self.queue.tryClearFlagIfEmpty()) {
-        return;
+    if (self.tryLock()) return;
+    if (has_thread_futex and getCurrentTaskOrNull() == null) {
+        return self.lockThread();
     }
-
-    // Slow path: add to FIFO wait queue
-
-    // Stack-allocated waiter - separates operation wait node from task wait node
-    var waiter: Waiter = .init();
-
-    // Try to clear flag (acquire lock), or push to queue
-    const result = self.queue.pushOrClearFlag(&waiter.node);
-    if (result == .flag_cleared) {
-        // Mutex was unlocked, we acquired it
-        return;
-    }
-
-    // Wait for lock, handling spurious wakeups internally
-    waiter.wait(1, .allow_cancel) catch |err| {
-        // Cancellation - try to remove ourselves from queue
-        if (!self.queue.remove(&waiter.node)) {
-            // Already inherited the lock - wait for signal to complete, then unlock
-            waiter.wait(1, .no_cancel);
-            self.unlock();
-        }
-        return err;
-    };
-
-    // Acquire fence: synchronize-with unlock()'s .release in pop()
-    // Ensures visibility of all writes made by the previous lock holder
-    _ = self.queue.isFlagSet();
+    return self.lockSlow(.allow_cancel);
 }
 
 /// Acquires the mutex, ignoring cancellation.
@@ -101,46 +81,72 @@ pub fn lock(self: *Mutex) Cancelable!void {
 /// Like `lock()`, but cancellation requests are ignored during the lock
 /// acquisition. This always acquires the lock and never returns an error.
 ///
-/// This is useful in critical sections where you must hold the mutex regardless
-/// of cancellation (e.g., cleanup operations like close(), post()).
-///
 /// If you need to propagate cancellation after acquiring the lock, call
 /// `Runtime.checkCancel()` after this function returns.
 pub fn lockUncancelable(self: *Mutex) void {
-    // Fast path: try to acquire unlocked mutex
-    if (self.queue.tryClearFlagIfEmpty()) {
-        return;
+    if (self.tryLock()) return;
+    if (has_thread_futex and getCurrentTaskOrNull() == null) {
+        return self.lockThread();
     }
-
-    // Slow path: add to FIFO wait queue
-    var waiter: Waiter = .init();
-
-    // Try to clear flag (acquire lock), or push to queue
-    const result = self.queue.pushOrClearFlag(&waiter.node);
-    if (result == .flag_cleared) {
-        // Mutex was unlocked, we acquired it
-        return;
-    }
-
-    // Wait with .no_cancel - ignores cancellation
-    waiter.wait(1, .no_cancel);
-
-    // Acquire fence: synchronize-with unlock()'s .release in pop()
-    _ = self.queue.isFlagSet();
+    self.lockSlow(.no_cancel);
 }
 
 /// Releases the mutex.
 ///
-/// This function must be called by the coroutine that currently holds the lock.
-/// If there are tasks waiting for the lock, the next waiter will be woken and
-/// given ownership of the mutex. If there are no waiters, the mutex is released
-/// to the unlocked state.
+/// If there are waiters, one of each class is woken and competes for the
+/// lock with anyone arriving on the fast path.
 ///
 /// It is undefined behavior if the current coroutine does not hold the lock.
 pub fn unlock(self: *Mutex) void {
-    // Pop one waiter (they inherit the lock, flag stays clear) or set flag (unlock)
-    if (self.queue.popOrSetFlag()) |wait_node| {
-        Waiter.fromNode(wait_node).signal();
+    const prev = self.state.swap(unlocked, .seq_cst);
+    std.debug.assert(prev != unlocked);
+    if (has_thread_futex and prev == thread_contended) {
+        thread_futex.wake(&self.state, .one);
+    }
+    if (self.queue.hasWaiters()) {
+        if (self.queue.pop()) |node| Waiter.fromNode(node).signal();
+    }
+}
+
+fn lockThread(self: *Mutex) void {
+    while (self.state.swap(thread_contended, .acquire) != unlocked) {
+        thread_futex.wait(&self.state, thread_contended);
+    }
+}
+
+fn lockSlow(self: *Mutex, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+    while (true) {
+        var waiter: Waiter = .init();
+        self.queue.push(&waiter.node);
+
+        // Recheck after publishing the node, so an unlock that scanned an
+        // empty queue is caught here. The RMW makes the push totally ordered
+        // with unlock's swap; a plain failed CAS would only be a load.
+        if (self.state.fetchAdd(0, .seq_cst) == unlocked and
+            self.state.cmpxchgStrong(unlocked, locked, .acquire, .monotonic) == null)
+        {
+            if (!self.queue.remove(&waiter.node)) {
+                // Popped by an unlock; its signal is in flight, consume it.
+                waiter.wait(1, .no_cancel);
+            }
+            return;
+        }
+
+        if (cancel_mode == .allow_cancel) {
+            waiter.wait(1, .allow_cancel) catch |err| {
+                if (!self.queue.remove(&waiter.node)) {
+                    waiter.wait(1, .no_cancel);
+                    // The wake was meant for a competitor; pass it on.
+                    if (self.queue.pop()) |node| Waiter.fromNode(node).signal();
+                }
+                return err;
+            };
+        } else {
+            waiter.wait(1, .no_cancel);
+        }
+
+        // Woken: compete like everyone else.
+        if (self.state.cmpxchgStrong(unlocked, locked, .acquire, .monotonic) == null) return;
     }
 }
 
@@ -214,4 +220,66 @@ test "Mutex contention" {
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expectEqual(400, counter);
+}
+
+test "Mutex foreign threads" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+
+    var counter: u32 = 0;
+    var mutex = Mutex.init;
+
+    const TestFn = struct {
+        fn worker(ctr: *u32, mtx: *Mutex) void {
+            for (0..100) |_| {
+                mtx.lockUncancelable();
+                defer mtx.unlock();
+                ctr.* += 1;
+            }
+        }
+    };
+
+    var threads: [4]std.Thread = undefined;
+    for (&threads) |*t| t.* = try std.Thread.spawn(.{}, TestFn.worker, .{ &counter, &mutex });
+    for (threads) |t| t.join();
+
+    try std.testing.expectEqual(400, counter);
+}
+
+test "Mutex mixed tasks and threads" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    defer runtime.deinit();
+
+    var counter: u32 = 0;
+    var mutex = Mutex.init;
+
+    const TestFn = struct {
+        fn taskWorker(ctr: *u32, mtx: *Mutex) !void {
+            for (0..100) |_| {
+                try mtx.lock();
+                defer mtx.unlock();
+                ctr.* += 1;
+            }
+        }
+        fn threadWorker(ctr: *u32, mtx: *Mutex) void {
+            for (0..100) |_| {
+                mtx.lockUncancelable();
+                defer mtx.unlock();
+                ctr.* += 1;
+            }
+        }
+    };
+
+    var thread = try std.Thread.spawn(.{}, TestFn.threadWorker, .{ &counter, &mutex });
+
+    var group: Group = .init;
+    defer group.cancel();
+    try group.spawn(TestFn.taskWorker, .{ &counter, &mutex });
+    try group.spawn(TestFn.taskWorker, .{ &counter, &mutex });
+    try group.wait();
+
+    thread.join();
+
+    try std.testing.expectEqual(300, counter);
 }

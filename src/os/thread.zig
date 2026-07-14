@@ -56,7 +56,7 @@ pub const WakeCount = enum {
 /// - `wake(ptr, count)`: Wake waiting threads (one or all)
 ///
 /// The implementation is selected at compile time based on the target OS.
-const Futex = switch (builtin.os.tag) {
+pub const Futex = switch (builtin.os.tag) {
     .linux => FutexLinux,
     .windows => FutexWindows,
     .freebsd => FutexFreeBSD,
@@ -202,7 +202,7 @@ pub const ResetEvent = struct {
 const FutexLinux = struct {
     const linux = std.os.linux;
 
-    fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
+    pub fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
         _ = sys.futex(
             &ptr.raw,
             sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
@@ -213,7 +213,7 @@ const FutexLinux = struct {
         );
     }
 
-    fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
+    pub fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
         const timeout_ts = timeout.toTimespec();
 
         const rc = sys.futex(
@@ -227,7 +227,7 @@ const FutexLinux = struct {
         if (linux.errno(rc) == .TIMEDOUT) return error.Timeout;
     }
 
-    fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
+    pub fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
         const n: u32 = switch (count) {
             .one => 1,
             .all => std.math.maxInt(i32),
@@ -248,7 +248,7 @@ const FutexLinux = struct {
 // ============================================================================
 
 const FutexWindows = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), current: u32) void {
+    pub fn wait(ptr: *const std.atomic.Value(u32), current: u32) void {
         // RtlWaitOnAddress atomically checks if *ptr == current before sleeping
         _ = sys.RtlWaitOnAddress(
             &ptr.raw,
@@ -259,7 +259,7 @@ const FutexWindows = struct {
         // Return value doesn't matter - we handle spurious wakeups in the caller's loop
     }
 
-    fn timedWait(ptr: *const std.atomic.Value(u32), current: u32, timeout: Duration) error{Timeout}!void {
+    pub fn timedWait(ptr: *const std.atomic.Value(u32), current: u32, timeout: Duration) error{Timeout}!void {
         // RtlWaitOnAddress takes timeout in 100ns units (negative = relative)
         const ns = timeout.toNanoseconds();
         const units_100ns = ns / 100;
@@ -279,7 +279,7 @@ const FutexWindows = struct {
         }
     }
 
-    fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
+    pub fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
         switch (count) {
             .one => sys.RtlWakeAddressSingle(&ptr.raw),
             .all => sys.RtlWakeAddressAll(&ptr.raw),
@@ -292,7 +292,7 @@ const FutexWindows = struct {
 // ============================================================================
 
 const FutexDarwin = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
+    pub fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
         _ = sys.__ulock_wait(
             sys.UL_COMPARE_AND_WAIT | sys.ULF_NO_ERRNO,
             &ptr.raw,
@@ -301,7 +301,7 @@ const FutexDarwin = struct {
         );
     }
 
-    fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
+    pub fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
         const us = timeout.toMicroseconds();
         const timeout_us: u32 = @max(1, std.math.cast(u32, us) orelse std.math.maxInt(u32));
 
@@ -318,7 +318,7 @@ const FutexDarwin = struct {
         }
     }
 
-    fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
+    pub fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
         const flags: u32 = switch (count) {
             .one => sys.UL_COMPARE_AND_WAIT | sys.ULF_NO_ERRNO,
             .all => sys.UL_COMPARE_AND_WAIT | sys.ULF_NO_ERRNO | sys.ULF_WAKE_ALL,
@@ -332,7 +332,7 @@ const FutexDarwin = struct {
 // ============================================================================
 
 const FutexFreeBSD = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
+    pub fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
         _ = sys._umtx_op(
             &ptr.raw,
             sys.UMTX_OP_WAIT_UINT_PRIVATE,
@@ -342,7 +342,7 @@ const FutexFreeBSD = struct {
         );
     }
 
-    fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
+    pub fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
         const timeout_ts = timeout.toTimespec();
 
         const rc = sys._umtx_op(
@@ -359,7 +359,7 @@ const FutexFreeBSD = struct {
         }
     }
 
-    fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
+    pub fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
         const n: c_ulong = switch (count) {
             .one => 1,
             .all => std.math.maxInt(c_int),
@@ -487,7 +487,7 @@ const ConditionFreeBSD = struct {
 // ============================================================================
 
 const FutexOpenBSD = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
+    pub fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
         _ = sys.futex(
             &ptr.raw,
             sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
@@ -497,7 +497,7 @@ const FutexOpenBSD = struct {
         );
     }
 
-    fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
+    pub fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
         const timeout_ts = timeout.toTimespec();
 
         const rc = sys.futex(
@@ -514,7 +514,7 @@ const FutexOpenBSD = struct {
         }
     }
 
-    fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
+    pub fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
         const n: c_int = switch (count) {
             .one => 1,
             .all => std.math.maxInt(c_int),
@@ -534,7 +534,7 @@ const FutexOpenBSD = struct {
 // ============================================================================
 
 const FutexDragonFly = struct {
-    fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
+    pub fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
         _ = sys.umtx_sleep(
             &ptr.raw,
             @intCast(expected),
@@ -542,7 +542,7 @@ const FutexDragonFly = struct {
         );
     }
 
-    fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
+    pub fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
         const us = timeout.toMicroseconds();
         const timeout_us: c_int = @max(1, std.math.cast(c_int, us) orelse std.math.maxInt(c_int));
 
@@ -558,7 +558,7 @@ const FutexDragonFly = struct {
         }
     }
 
-    fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
+    pub fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
         const n: c_int = switch (count) {
             .one => 1,
             .all => std.math.maxInt(c_int),
