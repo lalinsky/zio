@@ -744,6 +744,23 @@ pub const Executor = struct {
         self.runtime.armSearcher();
     }
 
+    /// Schedule a task woken by the currently running task: it goes to the run
+    /// queue's next-up slot (Go's runnext) and runs here right after the
+    /// waker, keeping communicating tasks on one executor. The slot placement
+    /// itself is not announced — inviting a thief at that moment would just
+    /// scatter the pair, and a stalled slot can still be stolen (with backoff)
+    /// through the normal steal path. A previous occupant demoted to the ring
+    /// is ordinary queued work, though, and must be advertised.
+    fn scheduleTaskNext(self: *Executor, task: *AnyTask) void {
+        if (task == &self.main_task) return;
+
+        std.debug.assert(getCurrentExecutorOrNull() == self);
+
+        if (self.run_queue.pushNext(&task.awaitable.wait_node)) {
+            self.runtime.armSearcher();
+        }
+    }
+
     /// Schedule a task from another thread (or no executor context) onto its home
     /// executor, and wake that executor's loop. Goes to the home executor's
     /// `overflow` queue — the shared global one (migration on, any executor may
@@ -797,8 +814,13 @@ pub const Executor = struct {
 
         if (getCurrentExecutorOrNull()) |current_exec| {
             if (current_exec == home_exec) {
-                // Schedule locally
-                current_exec.scheduleTaskLocal(task);
+                // Schedule locally; a wake coming from the running task goes
+                // to the next-up slot so communicating tasks stay together.
+                if (old.tag != .new and current_exec.current_task != null) {
+                    current_exec.scheduleTaskNext(task);
+                } else {
+                    current_exec.scheduleTaskLocal(task);
+                }
                 return;
             }
             // Tasks spawned from an executor of this runtime are homed there and
@@ -807,8 +829,13 @@ pub const Executor = struct {
             // tasks may migrate to the current executor (cache locality with the
             // waker).
             if (zio_options.task_migration and old.tag != .new and current_exec.runtime == home_exec.runtime and home_exec.runtime.options.enable_task_migration) {
-                // Migrate to the current executor
-                current_exec.scheduleTaskLocal(task);
+                // Migrate to the current executor; a wake from the running
+                // task takes the next-up slot, like the local branch above.
+                if (current_exec.current_task != null) {
+                    current_exec.scheduleTaskNext(task);
+                } else {
+                    current_exec.scheduleTaskLocal(task);
+                }
                 return;
             }
         }

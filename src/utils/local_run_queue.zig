@@ -27,6 +27,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const SimpleQueue = @import("simple_queue.zig").SimpleQueue;
 const OsMutex = @import("../os/thread.zig").Mutex;
+const os_time = @import("../os/time.zig");
 
 /// Thread-safe FIFO overflow queue: a mutex-guarded intrusive list plus an atomic
 /// length so the drain fast-path can skip the lock when empty. `count` is mutated
@@ -102,6 +103,11 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
         // a single-owner queue pays no atomic cost.
         head: u32 = 0,
         tail: u32 = 0,
+        // Next-up slot (Go's runnext): a task that should run ahead of the
+        // ring, typically one just woken by the running task. The owner
+        // installs and pops it; a thief may CAS it out (after a short backoff)
+        // when the ring is empty, so a stalled owner can't sit on it.
+        next: ?*T = null,
         /// Set once, at executor init, to the global or the executor-local queue.
         overflow: *OverflowQueue(T) = undefined,
 
@@ -124,6 +130,28 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
         inline fn storeTail(self: *Self, v: u32) void {
             if (stealable) @atomicStore(u32, &self.tail, v, .release) else self.tail = v;
         }
+        inline fn loadNext(self: *const Self) ?*T {
+            return if (stealable) @atomicLoad(?*T, &self.next, .acquire) else self.next;
+        }
+        /// Owner-only: install a task in the next slot, returning the one it
+        /// displaced (if any).
+        inline fn swapNext(self: *Self, node: ?*T) ?*T {
+            if (!stealable) {
+                const prev = self.next;
+                self.next = node;
+                return prev;
+            }
+            return @atomicRmw(?*T, &self.next, .Xchg, node, .acq_rel);
+        }
+        /// Claim `expected` out of the next slot (owner pop or thief steal).
+        inline fn casNext(self: *Self, expected: *T) bool {
+            if (!stealable) {
+                self.next = null;
+                return true;
+            }
+            return @cmpxchgStrong(?*T, &self.next, expected, null, .acq_rel, .acquire) == null;
+        }
+
         /// Advance `head` from `expected` to `new`. Returns true on success. A plain
         /// store when not stealable (uncontended); a CAS against racing thieves
         /// otherwise. `weak` selects cmpxchgWeak (retry loops) vs Strong.
@@ -140,6 +168,15 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
 
         pub fn init(overflow: *OverflowQueue(T)) Self {
             return .{ .overflow = overflow };
+        }
+
+        /// Owner-only push into the next-up slot (Go's runqput with next=true).
+        /// A previous occupant is demoted to the ring tail; returns true when
+        /// that happened so the caller can announce the newly queued work.
+        pub fn pushNext(self: *Self, node: *T) bool {
+            const prev = self.swapNext(node) orelse return false;
+            self.push(prev);
+            return true;
         }
 
         /// Owner-only push (FIFO, to the tail). On a full ring, spills half the
@@ -170,8 +207,14 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
             return true;
         }
 
-        /// Owner-only pop (FIFO, from the head). CAS because stealers race the head.
+        /// Owner-only pop: the next-up slot first, then the ring head (Go's
+        /// runqget). CAS because stealers race both the slot and the head.
         pub fn pop(self: *Self) ?*T {
+            // One CAS attempt on the slot: only a thief can zero it, so on
+            // failure it's simply gone — fall through to the ring.
+            if (self.loadNext()) |node| {
+                if (self.casNext(node)) return node;
+            }
             while (true) {
                 const h = self.loadHead();
                 const t = self.ownTail();
@@ -218,7 +261,16 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
                 const vt = victim.loadTail(); // sync with victim's producer
                 var take = vt -% h;
                 take -= take / 2; // ceil half
-                if (take == 0) return null; // victim empty
+                if (take == 0) {
+                    // Empty ring: try the victim's next-up slot. Back off
+                    // first so a victim that just woke the task gets a chance
+                    // to run it itself, instead of us thrashing communicating
+                    // tasks between threads (Go's runqgrab).
+                    const node = victim.loadNext() orelse return null;
+                    os_time.sleep(.fromMicroseconds(3));
+                    if (victim.casNext(node)) return node;
+                    continue; // slot changed under us; re-examine the victim
+                }
                 if (take > capacity / 2) continue; // inconsistent h/t read; retry
                 if (take > dst_space) take = dst_space; // clamp to the thief's room
                 var i: u32 = 0;
@@ -255,15 +307,18 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
             if (got > 0) self.storeTail(tt);
         }
 
-        /// Number of tasks currently in the ring (used for maybeYield fairness).
+        /// Number of tasks currently queued, including the next-up slot.
         pub fn len(self: *const Self) u32 {
             const t = self.loadTail();
             const h = self.loadHead();
-            return t -% h;
+            return (t -% h) + @intFromBool(self.loadNext() != null);
         }
 
+        /// Owner-side emptiness check (ring and next-up slot). Callers are the
+        /// owning executor, which is the only mutator of `tail` and the only
+        /// installer of `next`, so no runqempty-style re-read is needed.
         pub fn isEmpty(self: *const Self) bool {
-            return self.loadHead() == self.loadTail();
+            return self.loadNext() == null and self.loadHead() == self.loadTail();
         }
     };
 }
@@ -285,6 +340,41 @@ const TestNode = struct {
 const TestQueue = LocalRunQueue(TestNode, true);
 const TestLocalQueue = LocalRunQueue(TestNode, false);
 const TestOverflow = OverflowQueue(TestNode);
+
+test "LocalRunQueue: next-up slot pops first, previous occupant demoted" {
+    var ov: TestOverflow = .{};
+    var q = TestQueue.init(&ov);
+
+    var a = TestNode{ .id = 1 };
+    var b = TestNode{ .id = 2 };
+    var c = TestNode{ .id = 3 };
+
+    q.push(&a);
+    try testing.expect(!q.pushNext(&b)); // empty slot: nothing demoted
+    try testing.expectEqual(2, q.len());
+    try testing.expect(q.pushNext(&c)); // demotes b to the ring tail
+
+    try testing.expectEqual(3, q.pop().?.id); // slot first
+    try testing.expectEqual(1, q.pop().?.id); // then ring FIFO
+    try testing.expectEqual(2, q.pop().?.id);
+    try testing.expect(q.pop() == null);
+    try testing.expect(q.isEmpty());
+}
+
+test "LocalRunQueue: steal takes the next-up slot when the ring is empty" {
+    var ov1: TestOverflow = .{};
+    var ov2: TestOverflow = .{};
+    var victim = TestQueue.init(&ov1);
+    var thief = TestQueue.init(&ov2);
+
+    var a = TestNode{ .id = 1 };
+    _ = victim.pushNext(&a);
+
+    const got = thief.steal(&victim) orelse return error.Unexpected;
+    try testing.expectEqual(1, got.id);
+    try testing.expect(victim.isEmpty());
+    try testing.expect(thief.isEmpty()); // handed back to run, not queued
+}
 
 test "LocalRunQueue: FIFO push and pop within capacity" {
     var ov: TestOverflow = .{};
