@@ -314,18 +314,30 @@ pub const Executor = struct {
     // this stays empty.
     overflow: OverflowQueue(WaitNode) = .{},
 
-    // Tracks tasks run since last event loop tick.
-    // After EVENT_INTERVAL tasks, getNextTask() returns null to force I/O processing.
-    tick_task_count: u8 = 0,
+    // Scheduling quanta (task runs, yield fast-paths, maybeYield checks) spent
+    // since the last event loop tick. Once it reaches tick_task_budget the
+    // executor forces an I/O poll.
+    tick_task_count: u32 = 0,
 
-    // Monotonically increasing tick counter, bumped after each event loop tick.
-    // With task.last_run_tick it stops a task that re-readies itself from running
-    // again in the same tick, forcing an I/O poll first (responsiveness). Starts
-    // at 1 so new tasks (last_run_tick == 0) run immediately.
-    current_tick: u32 = 1,
+    // How many quanta fit in tick_target_ns, re-estimated after each tick from
+    // task_ns_ewma. Counting against this approximates a time-based poll
+    // interval without reading the clock on the hot path.
+    tick_task_budget: u32 = initial_tick_budget,
 
-    // Timestamp of last event loop tick, used for time-based yield decisions.
-    last_tick_time: Timestamp = .zero,
+    // EWMA of nanoseconds per quantum, measured across each tick's batch.
+    task_ns_ewma: f64 = @as(f64, tick_target_ns) / initial_tick_budget,
+
+    // When the current tick's batch started running tasks.
+    tick_started_at: Timestamp = .zero,
+
+    // Set by the periodic checkpoint when the batch has already run past
+    // tick_target_ns (the budget was a misprediction); forces a poll like an
+    // exhausted budget, while tick_task_count stays truthful for the EWMA.
+    tick_expired: bool = false,
+
+    // Quanta left until the next clock checkpoint (cheaper than a modulo on
+    // the hot path).
+    tick_checkpoint_countdown: u32 = checkpoint_interval,
 
     // Deferred cleanup for the task that just yielded away from this executor.
     // Processed by the next coroutine to run (at landing sites: startFn, yield resume, run loop).
@@ -463,11 +475,55 @@ pub const Executor = struct {
 
     pub const YieldCancelMode = enum { allow_cancel, no_cancel };
 
-    /// Yield to other tasks only if many are waiting, to balance fairness vs. context-switch overhead.
-    const yield_ready_threshold = 13;
+    /// Aim to poll I/O roughly this often while running tasks back-to-back.
+    const tick_target_ns = 100_000;
+    /// Budget until the first measurement (Go's scheduler / tokio's event_interval).
+    const initial_tick_budget = 61;
+    /// Budget clamp: at least 2 to make progress between polls, capped so a
+    /// mis-measured EWMA can't defer polling indefinitely.
+    pub const max_tick_budget = 8192;
+    /// Weight of one quantum in the EWMA (tokio's value).
+    const task_ns_ewma_alpha = 0.1;
+    /// Quanta between clock checkpoints: a hard time backstop for budget
+    /// mispredictions. Prime (like Go's 61) to avoid resonating with periodic
+    /// workloads; also tokio's max tasks per global-queue interval.
+    const checkpoint_interval = 127;
+
+    /// True while the current tick may keep spending quanta without polling.
+    inline fn tickBudgetLeft(self: *const Executor) bool {
+        return self.tick_task_count < self.tick_task_budget and !self.tick_expired;
+    }
+
+    /// Account one scheduling quantum. Every checkpoint_interval quanta the
+    /// clock is read to catch budget mispredictions: if the batch has already
+    /// overrun tick_target_ns, the tick is expired so every budget check fails
+    /// until the next poll resets it.
+    fn spendQuantum(self: *Executor) void {
+        self.tick_task_count += 1;
+        self.tick_checkpoint_countdown -= 1;
+        if (self.tick_checkpoint_countdown == 0) {
+            self.tick_checkpoint_countdown = checkpoint_interval;
+            const elapsed = Timestamp.now(.monotonic).toNanoseconds() -| self.tick_started_at.toNanoseconds();
+            if (elapsed >= tick_target_ns) self.tick_expired = true;
+        }
+    }
 
     pub fn maybeYield(self: *Executor, comptime mode: AnyTask.YieldMode, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        if (self.run_queue.len() >= yield_ready_threshold) {
+        // Cancellation is observed even on the fast path, so a CPU-bound loop
+        // that only calls maybeYield() reacts to cancel promptly, like yield().
+        if (cancel_mode == .allow_cancel) {
+            const task = getCurrentTask();
+            task.checkCancel() catch |err| {
+                task.state.store(.{ .tag = .ready }, .release);
+                return err;
+            };
+        }
+        // Pure time-slice check: each call spends a quantum of the tick budget,
+        // and only when the slice is used up does a real yield happen (letting
+        // other tasks run and I/O get polled). Within the slice this returns
+        // immediately without looking at the queues.
+        self.spendQuantum();
+        if (!self.tickBudgetLeft()) {
             return getCurrentTask().yield(mode, cancel_mode);
         }
     }
@@ -498,6 +554,16 @@ pub const Executor = struct {
         // Process deferred cleanup (e.g. main task's park/reschedule)
         self.processCleanup();
 
+        // When entered with the tick budget already spent (e.g. the main task
+        // yielded because its slice ran out), ready tasks must get one
+        // fresh-budget batch after the next poll before control can return to
+        // the main task — otherwise they'd starve behind the exhausted budget.
+        var need_fresh_drain = !self.tickBudgetLeft();
+
+        // Start the batch window here: time spent in the main task between
+        // run() calls must not count toward the per-quantum estimate.
+        self.tick_started_at = Timestamp.now(.monotonic);
+
         while (true) {
             // Process ready coroutines
             while (self.getNextTask()) |next_task| {
@@ -516,12 +582,33 @@ pub const Executor = struct {
                 @panic("event loop stopped while the main task was yielding");
             }
 
-            if (self.checkAboutForWork(check_ready, true)) try self.loop.run(.no_wait) else try self.parkAndSearch(check_ready);
+            const has_work = self.checkAboutForWork(check_ready, true);
+            if (has_work) try self.loop.run(.no_wait) else try self.parkAndSearch(check_ready);
 
-            // Reset task counter and update tick time after event loop tick
+            // Retune the tick budget from this batch. Skipped when we may have
+            // slept in parkAndSearch — sleep time would poison the estimate.
+            const tick_now = Timestamp.now(.monotonic);
+            // Skip the retune on the fresh-drain entry pass: tick_task_count
+            // still holds quanta spent before run() was entered, while
+            // tick_started_at was just reset, so the pair would yield a bogus
+            // near-zero estimate and inflate the budget.
+            if (has_work and self.tick_task_count > 0 and self.tick_started_at.value != 0 and !need_fresh_drain) {
+                const elapsed: f64 = @floatFromInt(tick_now.toNanoseconds() -| self.tick_started_at.toNanoseconds());
+                const n: f64 = @floatFromInt(self.tick_task_count);
+                // One EWMA step per quantum, applied per batch (tokio's scheme).
+                const alpha = 1.0 - std.math.pow(f64, 1.0 - task_ns_ewma_alpha, n);
+                self.task_ns_ewma = alpha * (elapsed / n) + (1.0 - alpha) * self.task_ns_ewma;
+                self.tick_task_budget = @intFromFloat(std.math.clamp(tick_target_ns / self.task_ns_ewma, 2.0, max_tick_budget));
+            }
+            self.tick_started_at = tick_now;
             self.tick_task_count = 0;
-            self.current_tick +%= 1;
-            self.last_tick_time = self.loop.now();
+            self.tick_expired = false;
+            self.tick_checkpoint_countdown = checkpoint_interval;
+
+            if (need_fresh_drain) {
+                need_fresh_drain = false;
+                continue;
+            }
 
             // Check again after I/O
             if (check_ready and self.main_task.state.load(.acquire).tag == .ready) {
@@ -600,7 +687,7 @@ pub const Executor = struct {
     }
 
     fn stealWork(self: *Executor) bool {
-        if (!(zio_options.task_migration and self.runtime.options.enable_task_migration) or !self.runtime.executors_stealable.load(.acquire)) return false;
+        if (!self.runtime.stealingActive()) return false;
         const executors = self.runtime.executors.items;
         if (executors.len <= 1) return false;
 
@@ -613,12 +700,7 @@ pub const Executor = struct {
             const victim_idle = self.runtime.idle_mask.load(.acquire) & victim_bit != 0;
             if (victim_idle) continue;
 
-            if (self.run_queue.steal(&victim.run_queue, struct {
-                fn reset(node: *WaitNode) void {
-                    const task = AnyTask.fromWaitNode(node);
-                    task.last_run_tick = 0;
-                }
-            }.reset)) |node| {
+            if (self.run_queue.steal(&victim.run_queue)) |node| {
                 self.run_queue.push(node);
                 self.runtime.armSearcher();
                 return true;
@@ -630,33 +712,20 @@ pub const Executor = struct {
 
     /// Get the next task to run from the ready queue.
     ///
-    /// Returns null if no tasks are available, or if EVENT_INTERVAL tasks have
-    /// been run since the last event loop tick (to ensure I/O responsiveness).
+    /// Returns null if no tasks are available, or if the tick's quantum budget
+    /// is spent (to ensure I/O responsiveness).
     fn getNextTask(self: *Executor) ?*AnyTask {
-        // Maximum tasks to run before forcing an event loop tick (from Go's scheduler)
-        const EVENT_INTERVAL = 61;
-
-        // Force event loop tick after running EVENT_INTERVAL tasks
-        if (self.tick_task_count >= EVENT_INTERVAL) {
+        // The budget approximates tick_target_ns of task time (see the field
+        // docs): a re-readied task may run repeatedly within a tick, but once
+        // the budget is spent the executor polls I/O, so a self-looping task
+        // can't starve timers or I/O.
+        if (!self.tickBudgetLeft()) {
             return null;
         }
 
-        // Peek the head (via popIf) and only take it if it hasn't already run this
-        // tick. FIFO already keeps a re-queued task from jumping the line; this
-        // guard additionally forces an I/O poll before re-running a task that
-        // re-readied itself, so a self-looping task stays I/O-responsive. A task
-        // that isn't runnable is left in place and we return null (poll first).
-        const node = self.run_queue.popIf(self, isRunnableThisTick) orelse return null;
-        const task = AnyTask.fromWaitNode(node);
-        task.last_run_tick = self.current_tick;
-        self.tick_task_count += 1;
-        return task;
-    }
-
-    /// Head-runnable predicate for getNextTask's peek: a task may run unless it has
-    /// already run in the current tick.
-    fn isRunnableThisTick(self: *Executor, node: *WaitNode) bool {
-        return AnyTask.fromWaitNode(node).last_run_tick != self.current_tick;
+        const node = self.run_queue.pop() orelse return null;
+        self.spendQuantum();
+        return AnyTask.fromWaitNode(node);
     }
 
     /// Schedule a task on this executor's local run queue. MUST run on the owning
@@ -732,12 +801,13 @@ pub const Executor = struct {
                 current_exec.scheduleTaskLocal(task);
                 return;
             }
-            // New tasks always go to their round-robin assigned home executor to
-            // distribute load across executors. Only already-running tasks may
-            // migrate to the current executor (for cache locality with the waker).
+            // Tasks spawned from an executor of this runtime are homed there and
+            // take the local branch above; this remote path serves foreign-thread
+            // spawns and round-robin homes (migration off). Only already-running
+            // tasks may migrate to the current executor (cache locality with the
+            // waker).
             if (zio_options.task_migration and old.tag != .new and current_exec.runtime == home_exec.runtime and home_exec.runtime.options.enable_task_migration) {
                 // Migrate to the current executor
-                task.last_run_tick = 0;
                 current_exec.scheduleTaskLocal(task);
                 return;
             }
@@ -872,6 +942,23 @@ pub fn yield() Cancelable!void {
         os.thread.yield();
         return;
     };
+    const exec = getCurrentExecutor();
+    // Fast path: no other task is ready and there is tick budget left, so
+    // there is nothing to switch to and no poll due yet — spend a quantum and
+    // keep running. Budget exhaustion falls through to the real yield, which
+    // reaches the run loop and polls I/O, keeping timers and I/O bounded. The
+    // main task is not in the run queue, so its readiness is checked directly.
+    if (exec.tickBudgetLeft() and
+        exec.run_queue.isEmpty() and exec.run_queue.overflow.isEmpty() and
+        exec.main_task.state.load(.acquire).tag != .ready)
+    {
+        task.checkCancel() catch |err| {
+            task.state.store(.{ .tag = .ready }, .release);
+            return err;
+        };
+        exec.spendQuantum();
+        return;
+    }
     return task.yield(.reschedule, .allow_cancel);
 }
 
@@ -1031,7 +1118,9 @@ pub const Runtime = struct {
                 }
                 self.executors.appendAssumeCapacity(&worker.executor);
             }
-            self.executors_stealable.store(true, .release);
+            // With no workers there is nobody to steal from or to; leaving this
+            // false lets single-executor runtimes skip the steal machinery.
+            if (num_workers > 0) self.executors_stealable.store(true, .release);
         }
     }
 
@@ -1183,8 +1272,13 @@ pub const Runtime = struct {
         }
     }
 
+    /// Whether other executors can currently steal from this runtime's queues.
+    pub fn stealingActive(self: *Runtime) bool {
+        return zio_options.task_migration and self.options.enable_task_migration and self.executors_stealable.load(.acquire);
+    }
+
     fn armSearcher(self: *Runtime) void {
-        if (!(zio_options.task_migration and self.options.enable_task_migration) or !self.executors_stealable.load(.acquire) or (self.idle_mask.load(.monotonic) == 0) or (self.searchers.load(.monotonic) != 0)) return;
+        if (!self.stealingActive() or (self.idle_mask.load(.monotonic) == 0) or (self.searchers.load(.monotonic) != 0)) return;
         if (self.searchers.cmpxchgStrong(0, 1, .acq_rel, .monotonic)) |_| return;
 
         var candidates = self.idle_mask.load(.acquire);
@@ -1451,7 +1545,7 @@ test "runtime: maybeYield without an executor is a no-op" {
     try maybeYield();
 }
 
-test "runtime: maybeYield yields once the ready queue crosses the fairness threshold" {
+test "runtime: maybeYield yields once the tick budget is spent" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
@@ -1467,10 +1561,9 @@ test "runtime: maybeYield yields once the ready queue crosses the fairness thres
         }
     }.call;
 
-    // Spawn more waiters than Executor.yield_ready_threshold so that, once they're
-    // all woken at once, ready_count is high enough for maybeYield() to actually
-    // reschedule instead of no-op.
-    const task_count = Executor.yield_ready_threshold + 5;
+    // maybeYield() only does a real yield once the tick budget is spent, so the
+    // main loop below must be allowed at least one full budget of iterations.
+    const task_count = 18;
 
     var group: Group = .init;
     defer group.cancel();
@@ -1479,13 +1572,13 @@ test "runtime: maybeYield yields once the ready queue crosses the fairness thres
         try group.spawn(waiterTask, .{ &event, &counter });
     }
 
-    // Every task is now parked in event.wait(), so waking them all at once fills
-    // the ready queue past the fairness threshold.
+    // Every task is now parked in event.wait(); wake them all at once so the
+    // main loop's maybeYield() has ready work to hand control to.
     event.set();
 
     var iterations: usize = 0;
     while (counter < task_count) : (iterations += 1) {
-        if (iterations >= 100) {
+        if (iterations >= Executor.max_tick_budget * 2) {
             std.debug.print("maybeYield not working: counter={}, iterations={}\n", .{ counter, iterations });
             return error.TestExpectedEqual;
         }
