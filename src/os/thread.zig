@@ -702,18 +702,6 @@ const MutexFutex = struct {
     }
 
     fn lockSlow(self: *MutexFutex) void {
-        // First try spinning a bit
-        var spin: u32 = 0;
-        while (spin < 100) : (spin += 1) {
-            const state = self.state.load(.monotonic);
-            if (state == UNLOCKED) {
-                if (self.state.cmpxchgWeak(UNLOCKED, LOCKED, .acquire, .monotonic) == null) {
-                    return;
-                }
-            }
-            std.atomic.spinLoopHint();
-        }
-
         // Avoid doing an atomic swap below if we already know the state is contended.
         // An atomic swap unconditionally stores which marks the cache-line as modified unnecessarily.
         if (self.state.load(.monotonic) == LOCKED_WITH_WAITERS) {
