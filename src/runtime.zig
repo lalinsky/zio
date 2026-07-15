@@ -740,6 +740,18 @@ pub const Executor = struct {
 
         std.debug.assert(getCurrentExecutorOrNull() == self);
 
+        // Spill to the global queue when this executor is already backlogged
+        // and someone is idle. Tasks woken by I/O completions otherwise pile up
+        // forever on the executor that owns their ring: the steal window
+        // between wake and local pop is sub-microsecond, so an idle executor
+        // never catches them. One spill rebalances a connection permanently —
+        // its next ops are submitted wherever it runs.
+        if (!self.run_queue.isEmpty() and self.runtime.stealingActive() and self.runtime.idle_mask.load(.monotonic) != 0) {
+            self.run_queue.overflow.push(&task.awaitable.wait_node);
+            self.runtime.armSearcher();
+            return;
+        }
+
         self.run_queue.push(&task.awaitable.wait_node);
         self.runtime.armSearcher();
     }
