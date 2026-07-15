@@ -297,6 +297,10 @@ pub const Executor = struct {
     /// Per-executor random state (non-secure CSPRNG; later the secure-path fd/handle).
     random_state: random_mod.RandomState,
 
+    /// Cheap PRNG for steal victim selection; the CSPRNG is for user-facing
+    /// random() and too heavy for the park/steal path.
+    steal_prng: std.Random.DefaultPrng,
+
     // Per-executor local run queue: bounded FIFO ring buffer (Go runq / Tokio
     // style). Overflow and cross-thread wakes go to `run_queue.overflow`, which
     // is wired at init to either the runtime global queue (migration on) or this
@@ -371,6 +375,7 @@ pub const Executor = struct {
             .id = id,
             .loop = undefined,
             .random_state = undefined,
+            .steal_prng = undefined,
             .current_task = undefined,
             .runtime = runtime,
             .shutdown = ev.Async.init(),
@@ -409,6 +414,7 @@ pub const Executor = struct {
 
         // Initialize this executor's random state from OS entropy.
         try random_mod.setup(&self.random_state);
+        self.steal_prng = std.Random.DefaultPrng.init(self.random_state.csprng.random().int(u64));
 
         try self.loop.init(.{
             .allocator = self.runtime.allocator,
@@ -598,7 +604,7 @@ pub const Executor = struct {
         const executors = self.runtime.executors.items;
         if (executors.len <= 1) return false;
 
-        const start = self.random_state.csprng.random().int(usize) % executors.len;
+        const start = self.steal_prng.random().uintLessThan(usize, executors.len);
         for (0..executors.len) |i| {
             const victim = executors[(start + i) % executors.len];
             if (victim == self) continue;
