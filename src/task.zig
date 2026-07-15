@@ -185,7 +185,6 @@ pub const AnyTask = struct {
     // Cancellation status - tracks user cancel, timeout, pending errors, and shield count
     canceled_status: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
-    // Tracks which tick this task last ran on (per-executor).
     // Closure for the task
     closure: Closure,
 
@@ -688,8 +687,10 @@ pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
             // threshold, yield so new tasks start running instead of piling up
             // (distinct from maybeYield's time-slice check). Only needed when
             // no other executor can steal the backlog.
-            if (!task.runtime.stealingActive() and current_executor.run_queue.len() >= spawn_yield_threshold) {
-                runtime.getCurrentTask().yield(.reschedule, .no_cancel);
+            if (!rt.stealingActive() and current_executor.run_queue.len() >= spawn_yield_threshold) {
+                if (current_executor.current_task) |spawner| {
+                    spawner.yield(.reschedule, .no_cancel);
+                }
             }
         }
     }

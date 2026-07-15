@@ -503,6 +503,15 @@ pub const Executor = struct {
     }
 
     pub fn maybeYield(self: *Executor, comptime mode: AnyTask.YieldMode, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+        // Cancellation is observed even on the fast path, so a CPU-bound loop
+        // that only calls maybeYield() reacts to cancel promptly, like yield().
+        if (cancel_mode == .allow_cancel) {
+            const task = getCurrentTask();
+            task.checkCancel() catch |err| {
+                task.state.store(.{ .tag = .ready }, .release);
+                return err;
+            };
+        }
         // Pure time-slice check: each call spends a quantum of the tick budget,
         // and only when the slice is used up does a real yield happen (letting
         // other tasks run and I/O get polled). Within the slice this returns
@@ -573,7 +582,11 @@ pub const Executor = struct {
             // Retune the tick budget from this batch. Skipped when we may have
             // slept in parkAndSearch — sleep time would poison the estimate.
             const tick_now = Timestamp.now(.monotonic);
-            if (has_work and self.tick_task_count > 0 and self.tick_started_at.value != 0) {
+            // Skip the retune on the fresh-drain entry pass: tick_task_count
+            // still holds quanta spent before run() was entered, while
+            // tick_started_at was just reset, so the pair would yield a bogus
+            // near-zero estimate and inflate the budget.
+            if (has_work and self.tick_task_count > 0 and self.tick_started_at.value != 0 and !need_fresh_drain) {
                 const elapsed: f64 = @floatFromInt(tick_now.toNanoseconds() -| self.tick_started_at.toNanoseconds());
                 const n: f64 = @floatFromInt(self.tick_task_count);
                 // One EWMA step per quantum, applied per batch (tokio's scheme).
@@ -668,7 +681,7 @@ pub const Executor = struct {
     }
 
     fn stealWork(self: *Executor) bool {
-        if (!(zio_options.task_migration and self.runtime.options.enable_task_migration) or !self.runtime.executors_stealable.load(.acquire)) return false;
+        if (!self.runtime.stealingActive()) return false;
         const executors = self.runtime.executors.items;
         if (executors.len <= 1) return false;
 
@@ -693,8 +706,8 @@ pub const Executor = struct {
 
     /// Get the next task to run from the ready queue.
     ///
-    /// Returns null if no tasks are available, or if EVENT_INTERVAL tasks have
-    /// been run since the last event loop tick (to ensure I/O responsiveness).
+    /// Returns null if no tasks are available, or if the tick's quantum budget
+    /// is spent (to ensure I/O responsiveness).
     fn getNextTask(self: *Executor) ?*AnyTask {
         // The budget approximates tick_target_ns of task time (see the field
         // docs): a re-readied task may run repeatedly within a tick, but once
@@ -1259,7 +1272,7 @@ pub const Runtime = struct {
     }
 
     fn armSearcher(self: *Runtime) void {
-        if (!(zio_options.task_migration and self.options.enable_task_migration) or !self.executors_stealable.load(.acquire) or (self.idle_mask.load(.monotonic) == 0) or (self.searchers.load(.monotonic) != 0)) return;
+        if (!self.stealingActive() or (self.idle_mask.load(.monotonic) == 0) or (self.searchers.load(.monotonic) != 0)) return;
         if (self.searchers.cmpxchgStrong(0, 1, .acq_rel, .monotonic)) |_| return;
 
         var candidates = self.idle_mask.load(.acquire);
@@ -1526,7 +1539,7 @@ test "runtime: maybeYield without an executor is a no-op" {
     try maybeYield();
 }
 
-test "runtime: maybeYield yields once the ready queue crosses the fairness threshold" {
+test "runtime: maybeYield yields once the tick budget is spent" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
@@ -1553,8 +1566,8 @@ test "runtime: maybeYield yields once the ready queue crosses the fairness thres
         try group.spawn(waiterTask, .{ &event, &counter });
     }
 
-    // Every task is now parked in event.wait(), so waking them all at once fills
-    // the ready queue past the fairness threshold.
+    // Every task is now parked in event.wait(); wake them all at once so the
+    // main loop's maybeYield() has ready work to hand control to.
     event.set();
 
     var iterations: usize = 0;
