@@ -186,10 +186,6 @@ pub const AnyTask = struct {
     canceled_status: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     // Tracks which tick this task last ran on (per-executor).
-    // Used to prevent running the same task more than once per event loop tick.
-    // Reset to 0 when stolen, allowing immediate execution on the thief.
-    last_run_tick: u32 = 0,
-
     // Closure for the task
     closure: Closure,
 
@@ -669,6 +665,9 @@ pub fn TaskLocal(comptime T: type) type {
 
 const getNextExecutor = @import("runtime.zig").getNextExecutor;
 
+/// Ready-queue length past which a spawning task yields to let new tasks start.
+const spawn_yield_threshold = 13;
+
 /// Register a task with the runtime and schedule it for execution.
 /// Increments its reference count, adds the task to the runtime's task list,
 /// and schedules it on its executor.
@@ -685,7 +684,13 @@ pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
 
     if (runtime.getCurrentExecutorOrNull()) |current_executor| {
         if (current_executor.runtime == task.runtime) {
-            current_executor.maybeYield(.reschedule, .no_cancel);
+            // Backpressure for spawn loops: once the ready queue grows past the
+            // threshold, yield so new tasks start running instead of piling up
+            // (distinct from maybeYield's time-slice check). Only needed when
+            // no other executor can steal the backlog.
+            if (!task.runtime.stealingActive() and current_executor.run_queue.len() >= spawn_yield_threshold) {
+                runtime.getCurrentTask().yield(.reschedule, .no_cancel);
+            }
         }
     }
 }
