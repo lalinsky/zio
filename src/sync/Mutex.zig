@@ -283,3 +283,48 @@ test "Mutex mixed tasks and threads" {
 
     try std.testing.expectEqual(300, counter);
 }
+
+test "Mutex cancellation while parked under churn" {
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    defer runtime.deinit();
+
+    var mutex = Mutex.init;
+    var stop = std.atomic.Value(bool).init(false);
+    var churned: u64 = 0;
+
+    const TestFn = struct {
+        fn churner(mtx: *Mutex, stop_flag: *std.atomic.Value(bool), n: *u64) !void {
+            while (!stop_flag.load(.monotonic)) {
+                try mtx.lock();
+                n.* += 1;
+                mtx.unlock();
+            }
+        }
+        fn victim(mtx: *Mutex) !void {
+            // Parks over and over so cancellation keeps racing unlock's pop.
+            while (true) {
+                try mtx.lock();
+                mtx.unlock();
+            }
+        }
+    };
+
+    var churners: Group = .init;
+    defer churners.cancel();
+    for (0..2) |_| try churners.spawn(TestFn.churner, .{ &mutex, &stop, &churned });
+
+    var victims: Group = .init;
+    for (0..8) |_| try victims.spawn(TestFn.victim, .{&mutex});
+
+    os.time.sleep(.fromMilliseconds(50));
+    victims.cancel();
+
+    stop.store(true, .monotonic);
+    try churners.wait();
+    try std.testing.expect(!churners.hasFailed());
+
+    // The lock must still work after all the canceled waiters left.
+    try mutex.lock();
+    mutex.unlock();
+    try std.testing.expect(churned > 0);
+}
