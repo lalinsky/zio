@@ -85,13 +85,18 @@ test "Async: cross-thread notify storm with rearm never strands work" {
     loop.add(&work.c);
 
     var threads: [num_producers]std.Thread = undefined;
+    var spawned: usize = 0;
+    errdefer for (threads[0..spawned]) |t| t.join();
     for (&threads) |*t| {
         t.* = try std.Thread.spawn(.{}, producer, .{ &shared, &work, per_producer });
+        spawned += 1;
     }
 
-    try loop.run(.until_done);
-
+    // Join before propagating a loop error: the producers publish into
+    // stack-local state that must not be unwound under them.
+    const run_result = loop.run(.until_done);
     for (threads) |t| t.join();
+    try run_result;
 
     // The callback that saw the final count may have left a raced remainder;
     // one more explicit drain settles it.
@@ -125,6 +130,7 @@ test "Async: notify racing the rearm re-add is never lost" {
 
     const Ctx = struct {
         seen: std.atomic.Value(usize) = .init(0),
+        abort: std.atomic.Value(bool) = .init(false),
         stop: *Async,
 
         fn cb(l: *Loop, c: *Completion) void {
@@ -154,6 +160,7 @@ test "Async: notify racing the rearm re-add is never lost" {
                 while (true) {
                     const seen = c.seen.load(.acquire);
                     if (seen > last or seen >= rounds) break;
+                    if (c.abort.load(.acquire)) return; // loop died; stop spinning
                     std.atomic.spinLoopHint();
                 }
                 last = c.seen.load(.acquire);
@@ -161,8 +168,12 @@ test "Async: notify racing the rearm re-add is never lost" {
         }
     }.run, .{ &work, &ctx });
 
-    try loop.run(.until_done);
+    // On a loop error the producer would spin forever waiting for progress;
+    // signal it before joining, and only then propagate.
+    const run_result = loop.run(.until_done);
+    ctx.abort.store(true, .release);
     t.join();
+    try run_result;
 
     try std.testing.expect(ctx.seen.load(.acquire) >= rounds);
 }

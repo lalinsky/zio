@@ -412,7 +412,7 @@ pub const LoopState = struct {
         // waiter that may free `completion`, so we must not read it afterward.
         // (Rearm handles are exempt from the freeing contract by definition.)
         const owner_callback = completion.group.owner_callback;
-        const rearm = completion.flags.rearm;
+        const was_rearm = completion.flags.rearm;
 
         // The completion's own callback runs first: for a group member it reports
         // the member's own result while the member is still alive; for a standalone
@@ -422,8 +422,10 @@ pub const LoopState = struct {
         // Re-add persistent handles once their own callback has run. This runs
         // from processCompletions (rearm implies deferred finish), never nested
         // inside Loop.add, so an immediately-completing handle just loops back
-        // through the completions queue.
-        if (rearm) {
+        // through the completions queue. The flag is re-read so a callback can
+        // stop its own handle by clearing it — guarded by the cached value,
+        // since only rearm completions are guaranteed still alive here.
+        if (was_rearm and completion.flags.rearm) {
             self.loop.add(completion);
         }
 
