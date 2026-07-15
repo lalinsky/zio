@@ -426,6 +426,7 @@ pub const Group = struct {
         std.debug.assert(c.state == .new);
         std.debug.assert(self.c.state == .new); // Group must not be submitted yet
         std.debug.assert(c.group.owner == null);
+        std.debug.assert(!c.flags.rearm); // groups are single-shot
         c.group.next = self.head;
         c.group.owner = self;
         c.group.owner_callback = &groupCallback;
