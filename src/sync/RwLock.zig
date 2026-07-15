@@ -38,16 +38,22 @@ const Group = @import("../group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
 const Mutex = @import("Mutex.zig");
 const Condition = @import("Condition.zig");
+const Semaphore = @import("Semaphore.zig");
 const Stopwatch = @import("../time.zig").Stopwatch;
 
 const RwLock = @This();
 
-const max_permits: u32 = std.math.maxInt(u32);
+const Count = @Int(.unsigned, @divFloor(@bitSizeOf(usize) - 1, 2));
 
+const is_writing: usize = 1;
+const writer: usize = 1 << 1;
+const reader: usize = 1 << (1 + @bitSizeOf(Count));
+const writer_mask: usize = std.math.maxInt(Count) << @ctz(writer);
+const reader_mask: usize = std.math.maxInt(Count) << @ctz(reader);
+
+state: usize = 0,
 mutex: Mutex = Mutex.init,
-cond: Condition = Condition.init,
-permits: u32 = max_permits,
-writers_waiting: u32 = 0,
+semaphore: Semaphore = .{},
 
 /// Creates a new unlocked RwLock.
 pub const init: RwLock = .{};
@@ -56,14 +62,14 @@ pub const init: RwLock = .{};
 /// Returns `true` if the lock was successfully acquired, `false` if the lock
 /// is currently held by any reader or writer.
 pub fn tryLock(self: *RwLock) bool {
-    if (!self.mutex.tryLock()) return false;
-    defer self.mutex.unlock();
-
-    if (self.permits == max_permits) {
-        self.permits = 0;
-        return true;
+    if (self.mutex.tryLock()) {
+        const state = @atomicLoad(usize, &self.state, .seq_cst);
+        if (state & reader_mask == 0) {
+            _ = @atomicRmw(usize, &self.state, .Or, is_writing, .seq_cst);
+            return true;
+        }
+        self.mutex.unlock();
     }
-
     return false;
 }
 
@@ -74,21 +80,19 @@ pub fn tryLock(self: *RwLock) bool {
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn lock(self: *RwLock) Cancelable!void {
-    try self.mutex.lock();
-    defer self.mutex.unlock();
+    _ = @atomicRmw(usize, &self.state, .Add, writer, .seq_cst);
+    self.mutex.lock() catch |err| {
+        _ = @atomicRmw(usize, &self.state, .Sub, writer, .seq_cst);
+        return err;
+    };
 
-    self.writers_waiting += 1;
-
-    while (self.permits < max_permits) {
-        self.cond.wait(&self.mutex) catch {
-            self.writers_waiting -= 1;
-            self.cond.broadcast();
-            return error.Canceled;
+    const state = @atomicRmw(usize, &self.state, .Add, is_writing -% writer, .seq_cst);
+    if (state & reader_mask != 0) {
+        self.semaphore.wait() catch |err| {
+            self.unlock();
+            return err;
         };
     }
-
-    self.writers_waiting -= 1;
-    self.permits = 0;
 }
 
 /// Acquires the write lock, ignoring cancellation.
@@ -97,38 +101,42 @@ pub fn lock(self: *RwLock) Cancelable!void {
 /// This is useful for cleanup operations where exclusive access is required
 /// regardless of cancellation.
 pub fn lockUncancelable(self: *RwLock) void {
+    _ = @atomicRmw(usize, &self.state, .Add, writer, .seq_cst);
     self.mutex.lockUncancelable();
-    defer self.mutex.unlock();
 
-    self.writers_waiting += 1;
-
-    while (self.permits < max_permits) {
-        self.cond.waitUncancelable(&self.mutex);
+    const state = @atomicRmw(usize, &self.state, .Add, is_writing -% writer, .seq_cst);
+    if (state & reader_mask != 0) {
+        self.semaphore.waitUncancelable();
     }
-
-    self.writers_waiting -= 1;
-    self.permits = 0;
 }
 
 /// Releases the write lock.
 ///
 /// It is undefined behavior to call this without holding the write lock.
 pub fn unlock(self: *RwLock) void {
-    self.mutex.lockUncancelable();
-    self.permits = max_permits;
+    _ = @atomicRmw(usize, &self.state, .And, ~is_writing, .seq_cst);
     self.mutex.unlock();
-    self.cond.broadcast();
 }
 
 /// Attempts to acquire a read lock without blocking.
 /// Returns `true` if the lock was successfully acquired, `false` if it
 /// is currently held by a writer.
 pub fn tryLockShared(self: *RwLock) bool {
-    if (!self.mutex.tryLock()) return false;
-    defer self.mutex.unlock();
+    const state = @atomicLoad(usize, &self.state, .seq_cst);
+    if (state & (is_writing | writer_mask) == 0) {
+        _ = @cmpxchgStrong(
+            usize,
+            &self.state,
+            state,
+            state + reader,
+            .seq_cst,
+            .seq_cst,
+        ) orelse return true;
+    }
 
-    if (self.permits >= 1 and self.writers_waiting == 0) {
-        self.permits -= 1;
+    if (self.mutex.tryLock()) {
+        _ = @atomicRmw(usize, &self.state, .Add, reader, .seq_cst);
+        self.mutex.unlock();
         return true;
     }
 
@@ -142,14 +150,21 @@ pub fn tryLockShared(self: *RwLock) bool {
 ///
 /// Returns `error.Canceled` if the task is cancelled while waiting.
 pub fn lockShared(self: *RwLock) Cancelable!void {
-    try self.mutex.lock();
-    defer self.mutex.unlock();
-
-    while (self.permits < 1 or self.writers_waiting > 0) {
-        try self.cond.wait(&self.mutex);
+    var state = @atomicLoad(usize, &self.state, .seq_cst);
+    while (state & (is_writing | writer_mask) == 0) {
+        state = @cmpxchgWeak(
+            usize,
+            &self.state,
+            state,
+            state + reader,
+            .seq_cst,
+            .seq_cst,
+        ) orelse return;
     }
 
-    self.permits -= 1;
+    try self.mutex.lock();
+    _ = @atomicRmw(usize, &self.state, .Add, reader, .seq_cst);
+    self.mutex.unlock();
 }
 
 /// Acquires a read lock, ignoring cancellation.
@@ -158,24 +173,32 @@ pub fn lockShared(self: *RwLock) Cancelable!void {
 /// acquisition. This is useful for cleanup operations that need read access
 /// regardless of cancellation.
 pub fn lockSharedUncancelable(self: *RwLock) void {
-    self.mutex.lockUncancelable();
-    defer self.mutex.unlock();
-
-    while (self.permits < 1 or self.writers_waiting > 0) {
-        self.cond.waitUncancelable(&self.mutex);
+    var state = @atomicLoad(usize, &self.state, .seq_cst);
+    while (state & (is_writing | writer_mask) == 0) {
+        state = @cmpxchgWeak(
+            usize,
+            &self.state,
+            state,
+            state + reader,
+            .seq_cst,
+            .seq_cst,
+        ) orelse return;
     }
 
-    self.permits -= 1;
+    self.mutex.lockUncancelable();
+    _ = @atomicRmw(usize, &self.state, .Add, reader, .seq_cst);
+    self.mutex.unlock();
 }
 
 /// Releases a read lock.
 ///
 /// It is undefined behavior to call this without holding a read lock.
 pub fn unlockShared(self: *RwLock) void {
-    self.mutex.lockUncancelable();
-    self.permits += 1;
-    self.mutex.unlock();
-    self.cond.broadcast();
+    const state = @atomicRmw(usize, &self.state, .Sub, reader, .seq_cst);
+
+    if ((state & reader_mask == reader) and (state & is_writing != 0)) {
+        self.semaphore.post();
+    }
 }
 
 test "RwLock basic write lock/unlock" {
@@ -229,29 +252,15 @@ test "RwLock last reader wakes writer when reader is queued first" {
         }
     };
 
-    // Construct the queue shape that can occur after a previous writer
-    // releases: a reader is already asleep on the shared condition before the
-    // writer that needs the final reader's wake.
-    rwlock.mutex.lockUncancelable();
-    rwlock.writers_waiting += 1;
-    rwlock.mutex.unlock();
-
-    var reader_handle = try runtime.spawn(TestFn.reader, .{&rwlock});
-    while (!rwlock.cond.wait_queue.hasWaiters()) {
+    // Writer registers and parks on the semaphore, waiting for the reader
+    // count to drain; a second reader then queues behind it on the mutex.
+    var writer_handle = try runtime.spawn(TestFn.writer, .{ &rwlock, &writer_acquired });
+    while (@atomicLoad(usize, &rwlock.state, .acquire) & is_writing == 0) {
         try yield();
     }
-    // TestFn.reader is now blocked in lockSharedUncancelable().
 
-    rwlock.mutex.lockUncancelable();
-    rwlock.writers_waiting -= 1;
-    rwlock.mutex.unlock();
-
-    var writer_handle = try runtime.spawn(TestFn.writer, .{ &rwlock, &writer_acquired });
-    while (true) {
-        rwlock.mutex.lockUncancelable();
-        const writer_waiting = rwlock.writers_waiting > 0;
-        rwlock.mutex.unlock();
-        if (writer_waiting) break;
+    var reader_handle = try runtime.spawn(TestFn.reader, .{&rwlock});
+    while (!rwlock.mutex.queue.hasWaiters()) {
         try yield();
     }
     // TestFn.reader and TestFn.writer are now both blocked on lock acquisition.
@@ -259,9 +268,8 @@ test "RwLock last reader wakes writer when reader is queued first" {
     try std.testing.expect(!writer_acquired.load(.acquire));
 
     rwlock.unlockShared(); // Read Unlock A
-    // Read Unlock A fully releases the lock. Since a writer is waiting, it
-    // should be woken and acquire the write lock; waking only the queued
-    // reader would make it sleep again because writers_waiting > 0.
+    // Read Unlock A drops the reader count to zero; the writer must get the
+    // semaphore post and the write lock, ahead of the queued reader.
 
     var stopwatch = Stopwatch.start();
     while (!writer_acquired.load(.acquire) and stopwatch.read().toMilliseconds() < 500) {
@@ -272,7 +280,7 @@ test "RwLock last reader wakes writer when reader is queued first" {
     // If the assertion is going to fail, recover the blocked tasks before
     // leaving the test so Runtime.deinit() sees a clean task count.
     if (!writer_woke_from_last_reader) {
-        rwlock.cond.broadcast();
+        rwlock.semaphore.post();
         while (!writer_acquired.load(.acquire)) {
             try yield();
         }
@@ -383,19 +391,15 @@ test "RwLock cancel waiting writer" {
     // Spawn a writer that will block waiting for the read lock to release
     var handle = try runtime.spawn(TestFn.writer, .{&rwlock});
 
-    // Wait until the writer is actually waiting
-    while (true) {
-        rwlock.mutex.lockUncancelable();
-        const waiting = rwlock.writers_waiting > 0;
-        rwlock.mutex.unlock();
-        if (waiting) break;
+    // Wait until the writer is parked on the semaphore
+    while (@atomicLoad(usize, &rwlock.state, .acquire) & is_writing == 0) {
         try yield();
     }
 
     // Cancel the writer while it's waiting
     handle.cancel();
 
-    // writers_waiting should be back to 0, so readers can still acquire
+    // The writer must have backed out of the state, so readers can still acquire
     try std.testing.expect(rwlock.tryLockShared());
     rwlock.unlockShared();
 
