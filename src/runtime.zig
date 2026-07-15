@@ -734,7 +734,7 @@ pub const Executor = struct {
             if (victim_idle) continue;
 
             if (self.run_queue.steal(&victim.run_queue)) |node| {
-                self.run_queue.push(node);
+                _ = self.run_queue.push(node);
                 self.runtime.armSearcher();
                 return true;
             }
@@ -788,8 +788,16 @@ pub const Executor = struct {
             return;
         }
 
-        self.run_queue.push(&task.awaitable.wait_node);
-        self.runtime.armSearcher();
+        // A first task pushed onto an empty ring from scheduler context (an
+        // I/O completion wake) needs no searcher: this executor is inside its
+        // run loop and pops it right after completion processing — no thief
+        // can beat that, an announcement can only drag the task (and its I/O
+        // home) to another executor for nothing. Wakes from a running task
+        // still announce, since the waker may keep the executor busy.
+        const was_empty = self.run_queue.push(&task.awaitable.wait_node);
+        if (!was_empty or self.current_task != null) {
+            self.runtime.armSearcher();
+        }
     }
 
     /// Schedule a task from another thread (or no executor context) onto its home

@@ -144,16 +144,17 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
 
         /// Owner-only push (FIFO, to the tail). On a full ring, spills half the
         /// ring plus this node to the overflow queue (Go's runqput/runqputslow).
-        pub fn push(self: *Self, node: *T) void {
+        /// Returns true when the ring was empty before the push.
+        pub fn push(self: *Self, node: *T) bool {
             while (true) {
                 const h = self.loadHead(); // synchronize with consumers
                 const t = self.ownTail(); // owner is the sole producer
                 if (t -% h < capacity) {
                     self.buffer[t & mask] = node;
                     self.storeTail(t +% 1); // publish the slot
-                    return;
+                    return t == h;
                 }
-                if (self.pushOverflow(node, h, t)) return;
+                if (self.pushOverflow(node, h, t)) return false;
                 // Ring was full but a steal freed space; retry.
             }
         }
@@ -293,7 +294,7 @@ test "LocalRunQueue: FIFO push and pop within capacity" {
     var nodes: [10]TestNode = undefined;
     for (&nodes, 0..) |*n, i| {
         n.* = .{ .id = i };
-        q.push(n);
+        _ = q.push(n);
     }
     try testing.expect(ov.isEmpty());
     try testing.expectEqual(10, q.len());
@@ -315,7 +316,7 @@ test "LocalRunQueue: fills to capacity without overflow" {
     defer testing.allocator.free(nodes);
     for (nodes, 0..) |*n, i| {
         n.* = .{ .id = i };
-        q.push(n);
+        _ = q.push(n);
     }
     try testing.expect(ov.isEmpty()); // exactly full, nothing spilled
     try testing.expectEqual(cap, q.len());
@@ -335,7 +336,7 @@ test "LocalRunQueue: overflow spills to the overflow queue and everything drains
     defer testing.allocator.free(nodes);
     for (nodes, 0..) |*n, i| {
         n.* = .{ .id = i };
-        q.push(n);
+        _ = q.push(n);
     }
     try testing.expect(!ov.isEmpty()); // spilled
 
@@ -375,7 +376,7 @@ test "LocalRunQueue: popIf leaves a non-runnable head in place" {
     var nodes: [3]TestNode = undefined;
     for (&nodes, 0..) |*n, i| {
         n.* = .{ .id = i };
-        q.push(n);
+        _ = q.push(n);
     }
     // Head is id 0; reject it -> popIf returns null and leaves it in place.
     try testing.expect(q.popIf(RejectCtx{ .reject_id = 0 }, notRejected) == null);
@@ -397,7 +398,7 @@ test "LocalRunQueue: non-stealable variant pushes, pops, and overflows" {
     defer testing.allocator.free(nodes);
     for (nodes, 0..) |*n, i| {
         n.* = .{ .id = i };
-        q.push(n);
+        _ = q.push(n);
     }
     try testing.expect(!ov.isEmpty()); // spilled to overflow
 
@@ -422,7 +423,7 @@ test "LocalRunQueue: steal takes half into the thief and returns one" {
     var nodes: [4]TestNode = undefined;
     for (&nodes, 0..) |*n, i| {
         n.* = .{ .id = i };
-        victim.push(n);
+        _ = victim.push(n);
     }
 
     // victim holds 0,1,2,3 (head=0). Steal ceil(4/2)=2 (ids 0,1): returns the last
@@ -447,7 +448,7 @@ test "LocalRunQueue: steal with an odd count takes the ceil half" {
     var nodes: [7]TestNode = undefined;
     for (&nodes, 0..) |*n, i| {
         n.* = .{ .id = i };
-        victim.push(n);
+        _ = victim.push(n);
     }
     // 7 tasks -> steal 7 - 7/2 = 4 (ids 0..3), return id 3, thief keeps 0,1,2;
     // victim left with 4,5,6.
@@ -471,7 +472,7 @@ test "LocalRunQueue: index cycling past capacity stays correct" {
     var node: TestNode = .{ .id = 7 };
     // Cycle head/tail well past capacity to exercise the & mask indexing.
     for (0..10_000) |_| {
-        q.push(&node);
+        _ = q.push(&node);
         const n = q.pop() orelse return error.Unexpected;
         try testing.expectEqual(7, n.id);
     }
@@ -520,7 +521,7 @@ test "LocalRunQueue: concurrent push/pop and steal loses or duplicates no task" 
     var i: usize = 0;
     var buf: [64]*TestNode = undefined;
     while (i < N) : (i += 1) {
-        owner.push(&nodes[i]);
+        _ = owner.push(&nodes[i]);
         if (i % 64 == 0) {
             if (owner.pop()) |n| ctx.mark(n);
         }
@@ -600,7 +601,7 @@ test "LocalRunQueue: multiple concurrent stealers lose or duplicate no task" {
     }
 
     var i: usize = 0;
-    while (i < N) : (i += 1) owner.push(&nodes[i]);
+    while (i < N) : (i += 1) _ = owner.push(&nodes[i]);
     ctx.stop.store(true, .release);
     for (&threads) |*th| th.join();
 
