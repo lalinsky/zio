@@ -724,18 +724,11 @@ pub fn spawnTask(
     start: Closure.Start,
     group: ?*Group,
 ) !*AnyTask {
-    // With work stealing active, spawn onto the current executor: the task goes
-    // to the local ring (no global-queue push, no wake syscall) and stealing
-    // redistributes if load piles up. Round-robin is only needed to spread load
-    // when nobody can steal, or when spawning from outside the runtime.
-    const executor = blk: {
-        if (rt.stealingActive()) {
-            if (runtime.getCurrentExecutorOrNull()) |cur| {
-                if (cur.runtime == rt) break :blk cur;
-            }
-        }
-        break :blk try getNextExecutor(rt);
-    };
+    // New tasks are homed round-robin and scheduled through the global queue
+    // with a wake of the home executor. Initial spread matters: on epoll and
+    // kqueue backends a socket is pinned to the loop that registers it, so a
+    // task's first executor decides where its I/O lives.
+    const executor = try getNextExecutor(rt);
 
     const task = try AnyTask.create(
         executor,

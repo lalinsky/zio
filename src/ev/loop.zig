@@ -227,6 +227,8 @@ pub const LoopState = struct {
 
     active: usize = 0,
     /// I/O operations submitted to backend awaiting completion
+    // Plain counter mutated only by the owner thread, but read cross-thread
+    // by the scheduler's load shedding, hence the atomic accessors below.
     inflight_io: usize = 0,
 
     wake_requested: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
@@ -280,12 +282,13 @@ pub const LoopState = struct {
 
     /// Increment the inflight I/O counter. On multi-threaded backends
     /// (IOCP) this routes to a shared atomic; on single-threaded backends
-    /// it's a simple local increment.
+    /// only the owner thread mutates, but other executors read the count for
+    /// load shedding, so the access is a monotonic atomic either way.
     pub fn incrInflight(self: *LoopState) void {
         if (comptime Backend.capabilities.is_multi_threaded) {
             _ = self.loop.loop_group.shared.inflight_io.fetchAdd(1, .monotonic);
         } else {
-            self.inflight_io += 1;
+            @atomicStore(usize, &self.inflight_io, self.inflight_io + 1, .monotonic);
         }
     }
 
@@ -294,16 +297,16 @@ pub const LoopState = struct {
         if (comptime Backend.capabilities.is_multi_threaded) {
             _ = self.loop.loop_group.shared.inflight_io.fetchSub(1, .monotonic);
         } else {
-            self.inflight_io -= 1;
+            @atomicStore(usize, &self.inflight_io, self.inflight_io - 1, .monotonic);
         }
     }
 
-    /// Read the inflight I/O counter.
+    /// Read the inflight I/O counter (any thread).
     pub fn loadInflight(self: *const LoopState) usize {
         if (comptime Backend.capabilities.is_multi_threaded) {
             return @intCast(self.loop.loop_group.shared.inflight_io.load(.monotonic));
         } else {
-            return self.inflight_io;
+            return @atomicLoad(usize, &self.inflight_io, .monotonic);
         }
     }
 

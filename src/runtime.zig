@@ -339,6 +339,11 @@ pub const Executor = struct {
     // the hot path).
     tick_checkpoint_countdown: u32 = checkpoint_interval,
 
+    // How many wakes to shed to the global queue this tick, set by
+    // recomputeShedQuota() when this executor's I/O load is above the runtime
+    // average (see scheduleTaskLocal).
+    shed_quota: u32 = 0,
+
     // Deferred cleanup for the task that just yielded away from this executor.
     // Processed by the next coroutine to run (at landing sites: startFn, yield resume, run loop).
     pending_cleanup: TaskCleanup = .none,
@@ -604,6 +609,7 @@ pub const Executor = struct {
             self.tick_task_count = 0;
             self.tick_expired = false;
             self.tick_checkpoint_countdown = checkpoint_interval;
+            self.recomputeShedQuota();
 
             if (need_fresh_drain) {
                 need_fresh_drain = false;
@@ -614,6 +620,33 @@ pub const Executor = struct {
             if (check_ready and self.main_task.state.load(.acquire).tag == .ready) {
                 return;
             }
+        }
+    }
+
+    /// Maximum wakes shed to the global queue per tick; rebalancing a few
+    /// connections per ~100us converges quickly without turning the global
+    /// queue into the primary scheduling path.
+    const max_shed_per_tick = 4;
+
+    /// Once per tick, compare this executor's I/O-resident load (in-flight
+    /// ops == tasks parked on this ring) against the runtime average; the
+    /// excess becomes this tick's shed quota (see scheduleTaskLocal). Purely
+    /// decentralized: every executor reads the per-loop counters and makes
+    /// its own call.
+    fn recomputeShedQuota(self: *Executor) void {
+        self.shed_quota = 0;
+        if (!self.runtime.stealingActive()) return;
+
+        const executors = self.runtime.executors.items;
+        const mine = self.loop.state.loadInflight();
+        if (mine < 2) return; // nothing worth shedding
+        var total: usize = 0;
+        for (executors) |e| total += e.loop.state.loadInflight();
+        const avg = total / executors.len;
+        // The +1 keeps neighbors one apart from trading the same task back
+        // and forth forever.
+        if (mine > avg + 1) {
+            self.shed_quota = @intCast(@min(mine - avg, max_shed_per_tick));
         }
     }
 
@@ -701,7 +734,7 @@ pub const Executor = struct {
             if (victim_idle) continue;
 
             if (self.run_queue.steal(&victim.run_queue)) |node| {
-                self.run_queue.push(node);
+                _ = self.run_queue.push(node);
                 self.runtime.armSearcher();
                 return true;
             }
@@ -740,8 +773,31 @@ pub const Executor = struct {
 
         std.debug.assert(getCurrentExecutorOrNull() == self);
 
-        self.run_queue.push(&task.awaitable.wait_node);
-        self.runtime.armSearcher();
+        // Load shedding: I/O is sticky (a task's ops live on the ring of the
+        // executor it runs on — by preference on io_uring, by force on epoll
+        // and kqueue), so work stealing alone cannot rebalance I/O-bound
+        // tasks: their wakes are always local and the wake-to-pop window is
+        // too small for a thief. An executor that measured itself above the
+        // runtime's average I/O load at the last tick sheds the excess by
+        // routing that many wakes to the global queue; less loaded executors
+        // pull from it, and a shed task's I/O re-homes wherever it runs next.
+        if (self.shed_quota > 0) {
+            self.shed_quota -= 1;
+            self.run_queue.overflow.push(&task.awaitable.wait_node);
+            self.runtime.armSearcher();
+            return;
+        }
+
+        // A first task pushed onto an empty ring from scheduler context (an
+        // I/O completion wake) needs no searcher: this executor is inside its
+        // run loop and pops it right after completion processing — no thief
+        // can beat that, an announcement can only drag the task (and its I/O
+        // home) to another executor for nothing. Wakes from a running task
+        // still announce, since the waker may keep the executor busy.
+        const was_empty = self.run_queue.push(&task.awaitable.wait_node);
+        if (!was_empty or self.current_task != null) {
+            self.runtime.armSearcher();
+        }
     }
 
     /// Schedule a task from another thread (or no executor context) onto its home
