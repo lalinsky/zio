@@ -238,22 +238,31 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
             return task;
         }
 
-        /// Pull up to `max` tasks from the overflow queue into the ring (owner,
-        /// once per tick). Only fills available space, so it never overflows.
+        /// Pull up to `max` tasks from the wired overflow queue into the ring
+        /// (owner, once per tick). Only fills available space, so it never
+        /// overflows.
         pub fn refill(self: *Self, max: usize) void {
+            _ = self.refillFrom(self.overflow, max);
+        }
+
+        /// Pull up to `max` tasks from `source` into the ring (owner only).
+        /// Only fills available space, never spills back out; returns how many
+        /// were moved.
+        pub fn refillFrom(self: *Self, source: *OverflowQueue(T), max: usize) usize {
             const t = self.ownTail();
             const h = self.loadHead();
             const space: usize = capacity - (t -% h);
             var buf: [64]*T = undefined;
             const want = @min(space, @min(max, buf.len));
-            if (want == 0) return;
-            const got = self.overflow.popBatch(buf[0..want]);
+            if (want == 0) return 0;
+            const got = source.popBatch(buf[0..want]);
             var tt = t;
             for (buf[0..got]) |node| {
                 self.buffer[tt & mask] = node;
                 tt +%= 1;
             }
             if (got > 0) self.storeTail(tt);
+            return got;
         }
 
         /// Number of tasks currently in the ring (used for maybeYield fairness).

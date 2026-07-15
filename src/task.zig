@@ -724,10 +724,11 @@ pub fn spawnTask(
     start: Closure.Start,
     group: ?*Group,
 ) !*AnyTask {
-    // New tasks are homed round-robin and scheduled through the global queue
-    // with a wake of the home executor. Initial spread matters: on epoll and
-    // kqueue backends a socket is pinned to the loop that registers it, so a
-    // task's first executor decides where its I/O lives.
+    // New tasks are homed round-robin and delivered through the home
+    // executor's own spawn queue, so the assignment is deterministic. Initial
+    // spread matters: on epoll and kqueue backends a socket is pinned to the
+    // loop that registers it, so a task's first executor decides where its
+    // I/O lives.
     const executor = try getNextExecutor(rt);
 
     const task = try AnyTask.create(

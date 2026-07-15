@@ -307,11 +307,14 @@ pub const Executor = struct {
     // executor's own `overflow` queue below (migration off).
     run_queue: LocalRunQueue(WaitNode, zio_options.task_migration) = .{},
 
-    // This executor's own overflow queue, used ONLY when task migration is
-    // disabled — cross-thread wakes and ring overflow for this executor land here
+    // This executor's own overflow queue. With task migration disabled it is
+    // the ring's overflow target: cross-thread wakes and ring spills land here
     // and are drained only by this executor, so tasks never leave their home.
-    // When migration is enabled, the runtime global queue is used instead and
-    // this stays empty.
+    // With migration enabled the ring overflows to the runtime global queue
+    // instead, and this queue carries newly spawned tasks addressed to this
+    // executor (see scheduleTaskSpawn), drained by spawn_async's callback —
+    // that makes the round-robin home assignment deterministic instead of a
+    // wake hint anyone may race for.
     overflow: OverflowQueue(WaitNode) = .{},
 
     // Scheduling quanta (task runs, yield fast-paths, maybeYield checks) spent
@@ -361,6 +364,11 @@ pub const Executor = struct {
     // When notified, it calls loop.stop() to exit the event loop.
     shutdown: ev.Async = ev.Async.init(),
 
+    // Cross-thread spawn event: notified after a new task is pushed to this
+    // executor's `overflow` queue (migration on); the callback drains it into
+    // the local ring.
+    spawn_async: ev.Async = ev.Async.init(),
+
     // Periodic timer for evicting idle stacks from the shared stack pool.
     stack_pool_eviction_timer: ev.Timer = ev.Timer.init(.{ .duration = .fromSeconds(60) }),
 
@@ -396,6 +404,7 @@ pub const Executor = struct {
             .current_task = undefined,
             .runtime = runtime,
             .shutdown = ev.Async.init(),
+            .spawn_async = ev.Async.init(),
         };
 
         // Wire the run queue's overflow target: the shared global queue when task
@@ -445,6 +454,12 @@ pub const Executor = struct {
         self.shutdown.c.callback = shutdownCallback;
         self.loop.add(&self.shutdown.c);
 
+        // Register the spawn drain handle (see scheduleTaskSpawn).
+        if (runtime.options.enable_task_migration) {
+            self.spawn_async.c.callback = spawnDrainCallback;
+            self.loop.add(&self.spawn_async.c);
+        }
+
         // Register periodic stack pool eviction timer (skipped when max_age is zero)
         if (self.runtime.options.stack_pool.max_age.value > 0) {
             self.stack_pool_eviction_timer.c.callback = stackPoolEvictionCallback;
@@ -467,6 +482,20 @@ pub const Executor = struct {
 
     fn shutdownCallback(loop: *ev.Loop, _: *ev.Completion) void {
         loop.stop();
+    }
+
+    fn spawnDrainCallback(loop: *ev.Loop, c: *ev.Completion) void {
+        const async_handle: *ev.Async = c.cast(ev.Async);
+        const self: *Executor = @alignCast(@fieldParentPtr("spawn_async", async_handle));
+
+        // Re-arm before draining: a notify that lands after this drain then
+        // hits an armed handle, and anything pushed before it is drained here.
+        loop.add(c);
+
+        const got = self.run_queue.refillFrom(&self.overflow, LocalRunQueue(WaitNode, zio_options.task_migration).capacity);
+        if (got > 0) self.runtime.armSearcher();
+        // Ring full or a large burst: pick the rest up on the next pass.
+        if (!self.overflow.isEmpty()) self.spawn_async.notify();
     }
 
     fn stackPoolEvictionCallback(loop: *ev.Loop, c: *ev.Completion) void {
@@ -812,6 +841,18 @@ pub const Executor = struct {
         self.runtime.armSearcher();
     }
 
+    /// Schedule a newly spawned task onto its round-robin home executor
+    /// (migration on): push to the home's own overflow queue and notify its
+    /// spawn drain handle. Unlike the global queue, this makes the home
+    /// assignment deterministic — the task starts on the executor it was
+    /// assigned to, which is where its I/O will live.
+    fn scheduleTaskSpawn(self: *Executor, task: *AnyTask) void {
+        std.debug.assert(task != &self.main_task);
+
+        self.overflow.push(&task.awaitable.wait_node);
+        self.spawn_async.notify();
+    }
+
     /// Schedule a task for execution.
     /// Atomically transitions task state to .ready and schedules it for execution.
     /// May migrate the task to the current executor for cache locality.
@@ -857,16 +898,22 @@ pub const Executor = struct {
                 current_exec.scheduleTaskLocal(task);
                 return;
             }
-            // Tasks spawned from an executor of this runtime are homed there and
-            // take the local branch above; this remote path serves foreign-thread
-            // spawns and round-robin homes (migration off). Only already-running
-            // tasks may migrate to the current executor (cache locality with the
-            // waker).
+            // Only already-running tasks may migrate to the current executor
+            // (cache locality with the waker); new tasks go to their assigned
+            // home below.
             if (zio_options.task_migration and old.tag != .new and current_exec.runtime == home_exec.runtime and home_exec.runtime.options.enable_task_migration) {
                 // Migrate to the current executor
                 current_exec.scheduleTaskLocal(task);
                 return;
             }
+        }
+
+        // New tasks go to the home executor's own spawn queue (migration on)
+        // so the round-robin assignment sticks; wakes take the shared remote
+        // path.
+        if (zio_options.task_migration and old.tag == .new and home_exec.runtime.options.enable_task_migration) {
+            home_exec.scheduleTaskSpawn(task);
+            return;
         }
 
         // Schedule on the home executor
