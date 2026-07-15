@@ -89,7 +89,15 @@ pub fn lock(self: *RwLock) Cancelable!void {
     const state = @atomicRmw(usize, &self.state, .Add, is_writing -% writer, .seq_cst);
     if (state & reader_mask != 0) {
         self.semaphore.wait() catch |err| {
-            self.unlock();
+            // The final reader may post right as the wait is canceled. Clear
+            // is_writing first; if the readers are already gone, that post is
+            // guaranteed and has to be consumed here, or a later writer would
+            // take it while readers are active.
+            const prev = @atomicRmw(usize, &self.state, .And, ~is_writing, .seq_cst);
+            if (prev & reader_mask == 0) {
+                self.semaphore.waitUncancelable();
+            }
+            self.mutex.unlock();
             return err;
         };
     }
@@ -409,4 +417,45 @@ test "RwLock cancel waiting writer" {
     // Writer lock should also work now
     try std.testing.expect(rwlock.tryLock());
     rwlock.unlock();
+}
+
+test "RwLock canceled writer must not leave a semaphore permit" {
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    defer runtime.deinit();
+
+    var rwlock = RwLock.init;
+
+    const TestFn = struct {
+        fn writer(rw: *RwLock) !void {
+            rw.lock() catch return;
+            rw.unlock();
+        }
+    };
+
+    for (0..100) |i| {
+        try rwlock.lockShared();
+
+        var handle = try runtime.spawn(TestFn.writer, .{&rwlock});
+        while (@atomicLoad(usize, &rwlock.state, .acquire) & is_writing == 0) {
+            try yield();
+        }
+
+        // Race the cancellation against the final reader's post, both orders.
+        if (i % 2 == 0) {
+            handle.cancel();
+            rwlock.unlockShared();
+        } else {
+            rwlock.unlockShared();
+            handle.cancel();
+        }
+
+        // No permit may survive the round.
+        rwlock.semaphore.mutex.lockUncancelable();
+        const leftover = rwlock.semaphore.permits;
+        rwlock.semaphore.mutex.unlock();
+        try std.testing.expectEqual(0, leftover);
+
+        try std.testing.expect(rwlock.tryLock());
+        rwlock.unlock();
+    }
 }
