@@ -437,7 +437,6 @@ pub const Executor = struct {
             .allocator = self.runtime.allocator,
             .thread_pool = &self.runtime.thread_pool,
             .loop_group = &self.runtime.loop_group,
-            .defer_callbacks = false,
         });
         errdefer self.loop.deinit();
 
@@ -448,6 +447,7 @@ pub const Executor = struct {
         // Register periodic stack pool eviction timer (skipped when max_age is zero)
         if (self.runtime.options.stack_pool.max_age.value > 0) {
             self.stack_pool_eviction_timer.c.callback = stackPoolEvictionCallback;
+            self.stack_pool_eviction_timer.c.flags.rearm = true;
             self.loop.add(&self.stack_pool_eviction_timer.c);
         }
 
@@ -473,9 +473,6 @@ pub const Executor = struct {
         const timer = c.cast(ev.Timer);
         const self: *Executor = @alignCast(@fieldParentPtr("stack_pool_eviction_timer", timer));
         self.runtime.stack_pool.cleanup(loop.now(), 16);
-        if (self.runtime.options.stack_pool.max_age.value > 0) {
-            loop.add(c);
-        }
     }
 
     pub const YieldCancelMode = enum { allow_cancel, no_cancel };

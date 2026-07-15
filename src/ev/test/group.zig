@@ -131,9 +131,10 @@ test "group: gather member freed by the group callback is not used-after-free (#
     // the group to completion and runs the group's user callback, which in real
     // code frees the frame the member's completion lives on — then the trailing
     // `call` dereferenced the freed member (GP fault on the poisoned callback ptr).
-    // Inline callbacks (defer_callbacks=false) make the free happen mid-finish.
+    // The group opts out of deferred finishing so the free happens mid-finish,
+    // the shape the regression needs.
     var loop: Loop = undefined;
-    try loop.init(.{ .defer_callbacks = false });
+    try loop.init(.{});
     defer loop.deinit();
 
     const Ctx = struct {
@@ -156,6 +157,8 @@ test "group: gather member freed by the group callback is not used-after-free (#
     var group: Group = .init(.gather);
     group.c.userdata = &ctx;
     group.c.callback = Ctx.onGroup;
+    group.c.flags.defer_callback = false;
+    member.c.flags.defer_callback = false;
     group.add(&member.c);
     loop.add(&group.c);
 

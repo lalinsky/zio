@@ -258,6 +258,9 @@ pub fn waitForIo(c: *ev.Completion) Cancelable!void {
     var waiter = Waiter.init();
     c.userdata = &waiter;
     c.callback = Waiter.callback;
+    // The callback only wakes the parked task — nothing that needs the
+    // deferred-finish safety net, and the hot path skips the queue round trip.
+    c.flags = .{ .defer_callback = false }; // single-shot wait: no rearm either
 
     defer if (std.debug.runtime_safety) {
         c.callback = null;
@@ -273,6 +276,9 @@ pub fn waitForIo(c: *ev.Completion) Cancelable!void {
 
     // Async path: Submit to the event loop and wait for completion
     task.getExecutor().loop.add(c);
+    // Inline completions never park; charge the coop budget so they still
+    // hit a yield point.
+    const completed_inline = waiter.mode.direct.notify.state.load(.acquire) != 0;
     waiter.wait(1, .allow_cancel) catch |err| switch (err) {
         error.Canceled => {
             // On cancellation, cancel the I/O and wait for completion
@@ -290,6 +296,9 @@ pub fn waitForIo(c: *ev.Completion) Cancelable!void {
             return;
         },
     };
+    if (completed_inline) {
+        task.getExecutor().maybeYield(.reschedule, .no_cancel);
+    }
 }
 
 /// Runs an I/O operation to completion without allowing cancellation.
@@ -301,6 +310,7 @@ pub fn waitForIoUncancelable(c: *ev.Completion) void {
     var waiter = Waiter.init();
     c.userdata = &waiter;
     c.callback = Waiter.callback;
+    c.flags = .{ .defer_callback = false };
 
     defer if (std.debug.runtime_safety) {
         c.callback = null;
@@ -316,7 +326,11 @@ pub fn waitForIoUncancelable(c: *ev.Completion) void {
 
     // Async path: Submit to the event loop and wait for completion (no cancel)
     task.getExecutor().loop.add(c);
+    const completed_inline = waiter.mode.direct.notify.state.load(.acquire) != 0;
     waiter.wait(1, .no_cancel);
+    if (completed_inline) {
+        task.getExecutor().maybeYield(.reschedule, .no_cancel);
+    }
 }
 
 /// Runs an I/O operation to completion with a timeout.

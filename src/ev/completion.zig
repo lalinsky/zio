@@ -266,8 +266,24 @@ pub const Op = enum {
 };
 
 pub const Completion = struct {
+    pub const Flags = packed struct(u8) {
+        /// Finish through the completions queue instead of synchronously from
+        /// whatever context completed the op; a deferred callback may freely
+        /// chain further operations. Opt out only when the callback just
+        /// records a result or wakes a waiter (waitForIo does).
+        defer_callback: bool = true,
+        /// Re-add the completion after its callback returns (persistent
+        /// handles). Implies the deferred finish: a synchronous re-add can
+        /// recurse when the handle completes immediately. The callback must
+        /// not free the completion.
+        rearm: bool = false,
+        _reserved: u6 = 0,
+    };
+
     op: Op,
     state: State = .new,
+
+    flags: Flags = .{},
 
     userdata: ?*anyopaque = null,
     callback: ?*const CallbackFn = null,
@@ -333,7 +349,9 @@ pub const Completion = struct {
         c.state = .new;
         c.has_result = false;
         c.err = null;
-        c.loop = null;
+        // `loop` is kept: Async.notify() reads it cross-thread, and a null
+        // window during a rearm re-add loses the wake. A stale pointer only
+        // causes a spurious wake, and add() overwrites it.
         c.cancel_state.store(.{}, .release);
         c.cancel_next = null;
         c.group.next = null;
@@ -408,6 +426,7 @@ pub const Group = struct {
         std.debug.assert(c.state == .new);
         std.debug.assert(self.c.state == .new); // Group must not be submitted yet
         std.debug.assert(c.group.owner == null);
+        std.debug.assert(!c.flags.rearm); // groups are single-shot
         c.group.next = self.head;
         c.group.owner = self;
         c.group.owner_callback = &groupCallback;
@@ -512,8 +531,8 @@ pub const Async = struct {
         const was_pending = self.pending.swap(1, .release);
         if (was_pending == 0) {
             // Only notify loop if transitioning from not-pending to pending
-            // If loop is not set (not actively waiting), this is a no-op
-            if (self.c.loop) |loop| {
+            // If loop is not set (never added), this is a no-op
+            if (@atomicLoad(?*Loop, &self.c.loop, .acquire)) |loop| {
                 loop.wakeAsync();
             }
         }
