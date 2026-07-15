@@ -782,9 +782,11 @@ pub const Executor = struct {
                 current_exec.scheduleTaskLocal(task);
                 return;
             }
-            // New tasks always go to their round-robin assigned home executor to
-            // distribute load across executors. Only already-running tasks may
-            // migrate to the current executor (for cache locality with the waker).
+            // Tasks spawned from an executor of this runtime are homed there and
+            // take the local branch above; this remote path serves foreign-thread
+            // spawns and round-robin homes (migration off). Only already-running
+            // tasks may migrate to the current executor (cache locality with the
+            // waker).
             if (zio_options.task_migration and old.tag != .new and current_exec.runtime == home_exec.runtime and home_exec.runtime.options.enable_task_migration) {
                 // Migrate to the current executor
                 current_exec.scheduleTaskLocal(task);
