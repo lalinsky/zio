@@ -217,7 +217,7 @@ pub fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion
         shard.mutex.unlock();
         log.err("sock registration table OOM", .{});
         completion.setError(error.Unexpected);
-        state.markCompletedDeferredFromBackend(completion);
+        state.markCompletedFromBackend(completion);
         return .failed;
     };
     if (!gop.found_existing) gop.value_ptr.* = .{};
@@ -241,7 +241,7 @@ pub fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion
             if (created and entry.isEmpty()) _ = shard.map.remove(@as(u32, @bitCast(fd)));
             shard.mutex.unlock();
             completion.setError(error.Unexpected);
-            state.markCompletedDeferredFromBackend(completion);
+            state.markCompletedFromBackend(completion);
             return .failed;
         }
         owner.* = self_opaque;
@@ -299,13 +299,7 @@ pub fn service(self: anytype, state: anytype, fd: net.fd_t, dir: Dir, event: any
     shard.mutex.unlock();
 
     while (to_finish.pop()) |c| {
-        // Sends can be re-entered by the NetSendFile fallback (it re-submits a
-        // NetSend from inside its own send callback), so they must finish via the
-        // deferred queue rather than inline — same rule as submitIo.
-        switch (c.op) {
-            .net_send, .net_sendto, .net_sendmsg => state.markCompletedDeferredFromBackend(c),
-            else => state.markCompletedFromBackend(c),
-        }
+        state.markCompletedFromBackend(c);
     }
 }
 
@@ -352,16 +346,9 @@ pub fn submitIo(self: anytype, state: anytype, c: *Completion) void {
     while (true) {
         switch (Backend.checkCompletion(c, &probe)) {
             .completed => {
-                // Sends can be re-entered by the NetSendFile fallback (it
-                // re-submits a NetSend from inside its own send callback), so they
-                // must finish via the deferred queue. Reads/accepts cannot
-                // re-enter submit, so finishing them inline lets the consumer
-                // resume immediately - which keeps the producer/consumer in step
-                // and avoids an extra epoll_wait + EAGAIN per round trip.
-                switch (c.op) {
-                    .net_send, .net_sendto, .net_sendmsg => state.markCompletedDeferredFromBackend(c),
-                    else => state.markCompletedFromBackend(c),
-                }
+                // Inline finish (flags permitting) lets a bulk sender batch
+                // until WouldBlock instead of paying a poll per chunk (#525).
+                state.markCompletedFromBackend(c);
                 return;
             },
             .requeue => switch (park(self, state, fd, c)) {
@@ -377,13 +364,13 @@ pub fn submitConnect(self: anytype, state: anytype, c: *Completion) void {
     const data = c.cast(NetConnect);
     if (net.connect(data.handle, data.addr, data.addr_len)) |_| {
         c.setResult(.net_connect, {});
-        state.markCompletedDeferredFromBackend(c);
+        state.markCompletedFromBackend(c);
         return;
     } else |err| switch (err) {
         error.WouldBlock, error.ConnectionPending => {},
         else => {
             c.setError(err);
-            state.markCompletedDeferredFromBackend(c);
+            state.markCompletedFromBackend(c);
             return;
         },
     }
@@ -394,7 +381,7 @@ pub fn submitConnect(self: anytype, state: anytype, c: *Completion) void {
             if (net.getSockError(data.handle)) |se| {
                 if (se == 0) c.setResult(.net_connect, {}) else c.setError(net.errnoToConnectError(@enumFromInt(se)));
             } else |_| c.setError(error.Unexpected);
-            state.markCompletedDeferredFromBackend(c);
+            state.markCompletedFromBackend(c);
         },
     }
 }
@@ -413,7 +400,7 @@ pub fn submitPoll(self: anytype, state: anytype, c: *Completion) void {
         const ready = std.posix.poll(&pfd, 0) catch 0;
         if (ready > 0 and (pfd[0].revents & (want | std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
             c.setResult(.net_poll, {});
-            state.markCompletedDeferredFromBackend(c);
+            state.markCompletedFromBackend(c);
             return;
         }
         switch (park(self, state, data.handle, c)) {

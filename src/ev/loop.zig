@@ -341,31 +341,6 @@ pub const LoopState = struct {
         self.markCompleted(completion);
     }
 
-    /// Like markCompletedFromBackend, but always finishes via the deferred
-    /// completion queue instead of possibly running the callback inline. Used by
-    /// backends that complete an op synchronously inside `submit` (e.g. an
-    /// optimistic socket syscall that succeeds): finishing inline there would
-    /// re-enter the submit/add path of whatever driver issued the op.
-    pub fn markCompletedDeferredFromBackend(self: *LoopState, completion: *Completion) void {
-        self.decrInflight();
-
-        std.debug.assert(completion.state == .running);
-        std.debug.assert(completion.has_result);
-
-        var old = completion.cancel_state.load(.acquire);
-        while (true) {
-            var new = old;
-            new.completed = true;
-            old = completion.cancel_state.cmpxchgWeak(old, new, .acq_rel, .acquire) orelse break;
-        }
-        completion.state = .completed;
-
-        // If in_queue, cancel queue processing will call finishCompletion.
-        if (!old.in_queue) {
-            self.completions.push(completion);
-        }
-    }
-
     pub fn markCompleted(self: *LoopState, completion: *Completion) void {
         std.debug.assert(completion.state == .running);
         std.debug.assert(completion.has_result);
@@ -388,10 +363,8 @@ pub const LoopState = struct {
         }
     }
 
-    /// Finish a completed completion now, or queue it for processCompletions
-    /// when it opted into deferred finishing (rearm implies deferral: a
-    /// re-add from a synchronous finish could recurse when the handle
-    /// completes immediately).
+    /// Finish now, or queue for processCompletions when the completion uses
+    /// deferred finishing (rearm implies it).
     pub fn dispatchCompletion(self: *LoopState, completion: *Completion) void {
         if (completion.flags.defer_callback or completion.flags.rearm) {
             self.completions.push(completion);
@@ -419,12 +392,9 @@ pub const LoopState = struct {
         // completion (no owner) it is the last thing we do.
         completion.call(self.loop);
 
-        // Re-add persistent handles once their own callback has run. This runs
-        // from processCompletions (rearm implies deferred finish), never nested
-        // inside Loop.add, so an immediately-completing handle just loops back
-        // through the completions queue. The flag is re-read so a callback can
-        // stop its own handle by clearing it — guarded by the cached value,
-        // since only rearm completions are guaranteed still alive here.
+        // Re-add persistent handles. Re-reading the flag lets a callback stop
+        // its own handle; the cached value guards it, since only rearm
+        // completions are guaranteed still alive here.
         if (was_rearm and completion.flags.rearm) {
             self.loop.add(completion);
         }
@@ -1211,13 +1181,10 @@ pub const Loop = struct {
             self.state.markCompleted(completion);
         }
 
-        // Snapshot: drain only what was queued at entry. A rearm completion
-        // can re-complete itself from its own callback (a re-armed Async that
-        // was already notified again), and chasing those in the same loop
-        // would let a sustained notify stream pin us here. Deferrals created
-        // during this drain land on the fresh queue and run next tick, which
-        // stays non-blocking: a non-empty completions queue forces a zero
-        // poll timeout.
+        // Drain only what was queued at entry: a rearm completion can
+        // re-complete itself from its own callback, and chasing those here
+        // would let a notify storm pin the loop. The rest runs next tick
+        // (non-blocking; pending completions force a zero poll timeout).
         var snapshot = self.state.completions;
         self.state.completions = .{};
         while (snapshot.pop()) |completion| {
