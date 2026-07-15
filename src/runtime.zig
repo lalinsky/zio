@@ -339,6 +339,11 @@ pub const Executor = struct {
     // the hot path).
     tick_checkpoint_countdown: u32 = checkpoint_interval,
 
+    // Consecutive tasks taken from the next-up slot. At max_slot_streak the
+    // ring is serviced first, so a hot wake chain can't starve queued tasks
+    // (tokio's MAX_LIFO_POLLS_PER_TICK).
+    slot_streak: u8 = 0,
+
     // Deferred cleanup for the task that just yielded away from this executor.
     // Processed by the next coroutine to run (at landing sites: startFn, yield resume, run loop).
     pending_cleanup: TaskCleanup = .none,
@@ -714,6 +719,10 @@ pub const Executor = struct {
     ///
     /// Returns null if no tasks are available, or if the tick's quantum budget
     /// is spent (to ensure I/O responsiveness).
+    /// Consecutive next-up slot pops before the ring gets a turn (tokio's
+    /// MAX_LIFO_POLLS_PER_TICK).
+    const max_slot_streak = 3;
+
     fn getNextTask(self: *Executor) ?*AnyTask {
         // The budget approximates tick_target_ns of task time (see the field
         // docs): a re-readied task may run repeatedly within a tick, but once
@@ -723,9 +732,27 @@ pub const Executor = struct {
             return null;
         }
 
-        const node = self.run_queue.pop() orelse return null;
-        self.spendQuantum();
-        return AnyTask.fromWaitNode(node);
+        // The next-up slot wins over the ring, but not indefinitely: a pair of
+        // tasks waking each other re-fills the slot on every quantum, so after
+        // max_slot_streak consecutive slot pops the ring is serviced first.
+        if (self.slot_streak >= max_slot_streak) {
+            if (self.run_queue.popRing()) |node| {
+                self.slot_streak = 0;
+                self.spendQuantum();
+                return AnyTask.fromWaitNode(node);
+            }
+        }
+        if (self.run_queue.popNext()) |node| {
+            self.slot_streak +|= 1;
+            self.spendQuantum();
+            return AnyTask.fromWaitNode(node);
+        }
+        if (self.run_queue.popRing()) |node| {
+            self.slot_streak = 0;
+            self.spendQuantum();
+            return AnyTask.fromWaitNode(node);
+        }
+        return null;
     }
 
     /// Schedule a task on this executor's local run queue. MUST run on the owning

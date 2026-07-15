@@ -210,11 +210,20 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
         /// Owner-only pop: the next-up slot first, then the ring head (Go's
         /// runqget). CAS because stealers race both the slot and the head.
         pub fn pop(self: *Self) ?*T {
-            // One CAS attempt on the slot: only a thief can zero it, so on
-            // failure it's simply gone — fall through to the ring.
+            return self.popNext() orelse self.popRing();
+        }
+
+        /// Owner-only pop of just the next-up slot. One CAS attempt: only a
+        /// thief can zero it, so on failure the slot is simply gone.
+        pub fn popNext(self: *Self) ?*T {
             if (self.loadNext()) |node| {
                 if (self.casNext(node)) return node;
             }
+            return null;
+        }
+
+        /// Owner-only pop of just the ring head.
+        pub fn popRing(self: *Self) ?*T {
             while (true) {
                 const h = self.loadHead();
                 const t = self.ownTail();
