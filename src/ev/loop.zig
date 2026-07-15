@@ -384,11 +384,19 @@ pub const LoopState = struct {
         // Only call finish if not in cancel queue
         // If in_queue, cancel queue processing will call finishCompletion
         if (!old.in_queue) {
-            if (self.loop.defer_callbacks) {
-                self.completions.push(completion);
-            } else {
-                self.finishCompletion(completion);
-            }
+            self.dispatchCompletion(completion);
+        }
+    }
+
+    /// Finish a completed completion now, or queue it for processCompletions
+    /// when it opted into deferred finishing (rearm implies deferral: a
+    /// re-add from a synchronous finish could recurse when the handle
+    /// completes immediately).
+    pub fn dispatchCompletion(self: *LoopState, completion: *Completion) void {
+        if (completion.flags.defer_callback or completion.flags.rearm) {
+            self.completions.push(completion);
+        } else {
+            self.finishCompletion(completion);
         }
     }
 
@@ -402,12 +410,22 @@ pub const LoopState = struct {
         // run LAST, with nothing touching `completion` afterward. Cache the owner
         // callback now, before `call` — for a standalone completion `call` wakes a
         // waiter that may free `completion`, so we must not read it afterward.
+        // (Rearm handles are exempt from the freeing contract by definition.)
         const owner_callback = completion.group.owner_callback;
+        const rearm = completion.flags.rearm;
 
         // The completion's own callback runs first: for a group member it reports
         // the member's own result while the member is still alive; for a standalone
         // completion (no owner) it is the last thing we do.
         completion.call(self.loop);
+
+        // Re-add persistent handles once their own callback has run. This runs
+        // from processCompletions (rearm implies deferred finish), never nested
+        // inside Loop.add, so an immediately-completing handle just loops back
+        // through the completions queue.
+        if (rearm) {
+            self.loop.add(completion);
+        }
 
         // Then notify the group/queue owner. This can drive the group to completion
         // and free the frame this member lives on (e.g. the last `.gather` member
@@ -546,7 +564,6 @@ pub const Loop = struct {
     /// deadlines at least this often; this bounds how late such a timer can
     /// fire after a suspend/step. Unused once a backend arms them natively.
     wall_clock_cap: Duration = .fromSeconds(10),
-    defer_callbacks: bool = true,
 
     /// Cross-thread cancel queue (lock-free MPSC)
     cancel_queue: std.atomic.Value(?*Completion) = std.atomic.Value(?*Completion).init(null),
@@ -560,7 +577,6 @@ pub const Loop = struct {
         thread_pool: ?*ThreadPool = null,
         loop_group: ?*LoopGroup = null,
         queue_size: u16 = default_queue_size,
-        defer_callbacks: bool = true,
     };
 
     pub fn init(self: *Loop, options: Options) !void {
@@ -570,7 +586,6 @@ pub const Loop = struct {
             .allocator = options.allocator,
             .thread_pool = options.thread_pool,
             .loop_group = undefined,
-            .defer_callbacks = options.defer_callbacks,
         };
 
         if (options.loop_group) |group| {
@@ -718,7 +733,7 @@ pub const Loop = struct {
                 old = completion.cancel_state.cmpxchgWeak(old, new, .acq_rel, .acquire) orelse break;
             }
             if (old.completed) {
-                self.state.finishCompletion(completion);
+                self.state.dispatchCompletion(completion);
             }
         }
 
@@ -1194,7 +1209,16 @@ pub const Loop = struct {
             self.state.markCompleted(completion);
         }
 
-        while (self.state.completions.pop()) |completion| {
+        // Snapshot: drain only what was queued at entry. A rearm completion
+        // can re-complete itself from its own callback (a re-armed Async that
+        // was already notified again), and chasing those in the same loop
+        // would let a sustained notify stream pin us here. Deferrals created
+        // during this drain land on the fresh queue and run next tick, which
+        // stays non-blocking: a non-empty completions queue forces a zero
+        // poll timeout.
+        var snapshot = self.state.completions;
+        self.state.completions = .{};
+        while (snapshot.pop()) |completion| {
             self.state.finishCompletion(completion);
         }
     }

@@ -258,6 +258,9 @@ pub fn waitForIo(c: *ev.Completion) Cancelable!void {
     var waiter = Waiter.init();
     c.userdata = &waiter;
     c.callback = Waiter.callback;
+    // The callback only wakes the parked task — nothing that needs the
+    // deferred-finish safety net, and the hot path skips the queue round trip.
+    c.flags.defer_callback = false;
 
     defer if (std.debug.runtime_safety) {
         c.callback = null;
@@ -301,6 +304,7 @@ pub fn waitForIoUncancelable(c: *ev.Completion) void {
     var waiter = Waiter.init();
     c.userdata = &waiter;
     c.callback = Waiter.callback;
+    c.flags.defer_callback = false;
 
     defer if (std.debug.runtime_safety) {
         c.callback = null;

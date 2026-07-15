@@ -266,8 +266,28 @@ pub const Op = enum {
 };
 
 pub const Completion = struct {
+    pub const Flags = packed struct(u8) {
+        /// Finish this completion through the loop's completions queue instead
+        /// of synchronously from whatever context completed it. Callbacks run
+        /// at the end of the tick, never nested inside backend processing or
+        /// another callback — the safe default: a deferred callback may freely
+        /// chain further operations. Opt out only for callbacks that just
+        /// record a result or wake a waiter, where the queue round trip is
+        /// wasted (waitForIo does).
+        defer_callback: bool = true,
+        /// Re-add the completion after its callback returns (persistent
+        /// handles: recurring timers, notification handles). Implies the
+        /// deferred finish above — a re-add from a synchronous finish could
+        /// recurse when the handle completes immediately (e.g. an Async that
+        /// was notified again). The callback must not free the completion.
+        rearm: bool = false,
+        _reserved: u6 = 0,
+    };
+
     op: Op,
     state: State = .new,
+
+    flags: Flags = .{},
 
     userdata: ?*anyopaque = null,
     callback: ?*const CallbackFn = null,
