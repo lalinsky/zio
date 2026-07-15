@@ -842,7 +842,7 @@ pub const Loop = struct {
         std.debug.assert(completion.state == .new);
 
         // Set the loop reference for cross-thread cancellation
-        completion.loop = self;
+        @atomicStore(?*Loop, &completion.loop, self, .release);
 
         if (completion.cancel_state.load(.acquire).requested) {
             // Directly mark it as canceled
