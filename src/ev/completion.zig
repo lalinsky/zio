@@ -272,6 +272,12 @@ pub const Completion = struct {
     userdata: ?*anyopaque = null,
     callback: ?*const CallbackFn = null,
 
+    /// Opt-in: never finish this completion synchronously; queue it for
+    /// processCompletions instead. Required when the callback re-adds the
+    /// completion and the add may complete it on the spot (e.g. re-arming a
+    /// notified Async handle) — without deferral that would recurse.
+    defer_callback: bool = false,
+
     /// Loop this completion was submitted to (set by loop.add())
     loop: ?*Loop = null,
 

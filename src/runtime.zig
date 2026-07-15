@@ -454,9 +454,14 @@ pub const Executor = struct {
         self.shutdown.c.callback = shutdownCallback;
         self.loop.add(&self.shutdown.c);
 
-        // Register the spawn drain handle (see scheduleTaskSpawn).
+        // Register the spawn drain handle (see scheduleTaskSpawn). The
+        // callback re-adds the handle, and the add completes it on the spot
+        // when it was already notified again — defer_callback turns that
+        // into an iteration through the completions queue instead of
+        // recursion.
         if (runtime.options.enable_task_migration) {
             self.spawn_async.c.callback = spawnDrainCallback;
+            self.spawn_async.c.defer_callback = true;
             self.loop.add(&self.spawn_async.c);
         }
 
@@ -488,14 +493,24 @@ pub const Executor = struct {
         const async_handle: *ev.Async = c.cast(ev.Async);
         const self: *Executor = @alignCast(@fieldParentPtr("spawn_async", async_handle));
 
-        // Re-arm before draining: a notify that lands after this drain then
-        // hits an armed handle, and anything pushed before it is drained here.
+        // Re-arm first: a notify that already landed completes the handle
+        // again, deferred to the completions queue (defer_callback), so the
+        // drain repeats iteratively rather than recursing.
         loop.add(c);
 
-        const got = self.run_queue.refillFrom(&self.overflow, LocalRunQueue(WaitNode, zio_options.task_migration).capacity);
-        if (got > 0) self.runtime.armSearcher();
-        // Ring full or a large burst: pick the rest up on the next pass.
-        if (!self.overflow.isEmpty()) self.spawn_async.notify();
+        // refillFrom moves at most its internal batch size per call, so loop
+        // until the queue is empty or the ring is full; a notify is consumed
+        // exactly once, and anything left behind here would strand.
+        var drained: usize = 0;
+        while (true) {
+            const got = self.run_queue.refillFrom(&self.overflow, LocalRunQueue(WaitNode, zio_options.task_migration).capacity);
+            drained += got;
+            if (got == 0) break; // queue empty or ring full
+        }
+        if (drained > 0) self.runtime.armSearcher();
+        // If the ring filled up, checkAboutForWork treats the leftover spawn
+        // queue as pending work, so the executor keeps ticking (and the
+        // per-tick drain refills) instead of parking on top of it.
     }
 
     fn stackPoolEvictionCallback(loop: *ev.Loop, c: *ev.Completion) void {
@@ -640,6 +655,12 @@ pub const Executor = struct {
             self.tick_checkpoint_countdown = checkpoint_interval;
             self.recomputeShedQuota();
 
+            // Leftover spawns that didn't fit the ring when the drain callback
+            // ran (ring full) are picked up here once space frees up.
+            if (self.runtime.options.enable_task_migration) {
+                _ = self.run_queue.refillFrom(&self.overflow, LocalRunQueue(WaitNode, zio_options.task_migration).capacity);
+            }
+
             if (need_fresh_drain) {
                 need_fresh_drain = false;
                 continue;
@@ -742,6 +763,12 @@ pub const Executor = struct {
             else
                 pending;
             self.run_queue.refill(batch);
+            has_work = !self.run_queue.isEmpty();
+        }
+        // Spawns addressed to this executor waiting in the local queue (their
+        // notify was already consumed) count too, or we'd park on top of them.
+        if (!has_work and self.runtime.options.enable_task_migration and !self.overflow.isEmpty()) {
+            _ = self.run_queue.refillFrom(&self.overflow, 64);
             has_work = !self.run_queue.isEmpty();
         }
         if (!has_work) has_work = self.stealWork();

@@ -387,7 +387,7 @@ pub const LoopState = struct {
         // Only call finish if not in cancel queue
         // If in_queue, cancel queue processing will call finishCompletion
         if (!old.in_queue) {
-            if (self.loop.defer_callbacks) {
+            if (self.loop.defer_callbacks or completion.defer_callback) {
                 self.completions.push(completion);
             } else {
                 self.finishCompletion(completion);
@@ -1197,7 +1197,7 @@ pub const Loop = struct {
             self.state.markCompleted(completion);
         }
 
-        while (self.state.completions.pop()) |completion| {
+        while (self.state.completions.pop()) |completion| { // TEMP: no snapshot
             self.state.finishCompletion(completion);
         }
     }
