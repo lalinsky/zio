@@ -214,6 +214,12 @@ wall_generation: [2]u32 = .{ 0, 0 },
 /// Backing storage for the wall timeout `kernel_timespec`s; must outlive the
 /// SQE until the next `io_uring_enter2` reads it.
 wall_ts: [2]linux.kernel_timespec = undefined,
+/// Reusable batch buffer for draining ready CQEs each poll. Kept on the struct
+/// rather than as a per-poll stack array so safe builds poison it (0xAA) once
+/// at init instead of memset-ing 4 KB on every tick — that fill showed up as
+/// ~6% of a wake-heavy workload under ReleaseSafe. A single loop thread polls,
+/// so there is no aliasing concern.
+cqe_buf: [256]linux.io_uring_cqe = undefined,
 shared_state: *SharedState,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
@@ -941,8 +947,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
     };
 
     // Process all available completions
-    var cqes: [256]linux.io_uring_cqe = undefined;
-    const count = try self.ring.copy_cqes(&cqes, 0);
+    const count = try self.ring.copy_cqes(&self.cqe_buf, 0);
 
     if (count == 0) {
         self.drainPending(state);
@@ -950,7 +955,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
     }
 
     var wall_fired = false;
-    for (cqes[0..count]) |cqe| {
+    for (self.cqe_buf[0..count]) |cqe| {
         // Internal ops carry the special low bit; completions are pointers.
         if (udIsSpecial(cqe.user_data)) {
             switch (udKind(cqe.user_data)) {
