@@ -594,11 +594,17 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 /// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
 pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
     if (sockreg.isSocketOp(target.op)) {
-        // Sockets are parked in the shared (fd, dir) waiter queue of their owner
-        // loop. cancel routes to that owner (target.loop), so this runs on the
-        // owner's thread and just detaches from the waiter queue. The epoll
-        // registration is persistent and left in place for the fd's lifetime.
-        sockreg.detach(self, target);
+        // Sockets are parked in the shared (fd, dir) waiter queue of the loop that
+        // owns the poller registration, which need not be this one: the op stays
+        // owned by its submitting loop (see sockreg.park), so this cancel can run
+        // concurrently with the owner servicing the op on another thread. detach
+        // claims the op against that race; if it lost, the owner already produced
+        // a natural result, so leave the op alone rather than overwriting it with
+        // Canceled and completing it twice. cancel is advisory - the callback
+        // still fires exactly once, and cancelLocal's epilogue dispatches the
+        // completion once the owner marks it completed. The epoll registration is
+        // persistent and left in place for the fd's lifetime.
+        if (!sockreg.detach(self, target)) return;
     } else {
         const fd = getHandle(target);
         self.removeFromPollQueue(fd, target) catch |err| {

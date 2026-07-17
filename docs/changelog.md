@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+- Fixed a race on the epoll and kqueue backends where a socket operation whose timeout
+  expired at the exact moment its data arrived could be completed twice. A socket op is
+  serviced by the loop that owns the fd's poller registration, which is not necessarily
+  the loop that submitted it, so an expiring timeout could cancel the op from one thread
+  while another was already storing its result. In safe builds this tripped an assertion;
+  in `ReleaseFast` it overwrote the natural result, so a read reported `error.Timeout`
+  after the bytes had already been consumed from the socket, and the event loop's
+  completion accounting was corrupted. This only affected multi-executor runtimes where
+  a socket is used from more than one executor.
+
 ## [0.16.0] - 2026-07-12
 
 - Blocking operations running on thread-pool workers are now cancelable. Previously,

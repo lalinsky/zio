@@ -18,6 +18,7 @@ const waitForIo = common.waitForIo;
 const waitForIoUncancelable = common.waitForIoUncancelable;
 const timedWaitForIo = common.timedWaitForIo;
 const Timeout = @import("time.zig").Timeout;
+const Duration = @import("time.zig").Duration;
 const fillBuf = @import("utils/writer.zig").fillBuf;
 
 const Handle = ev.Backend.NetHandle;
@@ -2622,6 +2623,134 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
     try std.testing.expectEqual(@as(u32, 0), sh.errors.load(.monotonic));
     try std.testing.expectEqual(@as(u32, H.waves * H.per_wave), sh.conns.load(.monotonic));
     try std.testing.expectEqual(@as(u32, H.waves * H.per_wave), sh.verified.load(.monotonic));
+}
+
+// Regression test for the cancel/readiness race on cross-loop socket ops.
+//
+// A socket op parks in the (fd, dir) waiter queue of the loop that owns the fd's
+// poller registration, but stays owned by the loop that submitted it. So a recv
+// carrying a timeout gets cancelled by its timer on the submitting loop while the
+// owner services it on another thread. The owner runs the syscall and stores the
+// result under the shard lock but marks the op completed only after unlocking, so
+// a cancel landing in that window must not complete it a second time, and must
+// not discard bytes the kernel already moved out of the socket.
+//
+// Each pair writes one byte per jittered tick against a reader whose recv timeout
+// is drawn from the same distribution, so recvs park and their timers expire
+// alongside arriving data. The reader hops to another executor after every byte,
+// so the loop submitting the recv is usually not the loop owning the fd.
+//
+// The failure is asserted as byte loss rather than as a crash: a recv whose
+// result the racing cancel overwrote consumed bytes that nobody will ever
+// receive, so the reader runs out of input and sees EOF early. That holds in any
+// build mode, though safe builds usually trip the double-completion assertion
+// first.
+test "multi-executor: timeout cancel racing a cross-loop readiness edge" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const H = struct {
+        const pairs = 8;
+        const per_pair = 300;
+
+        const Shared = struct {
+            errors: std.atomic.Value(u32) = .init(0),
+            // u32, not u64: 32-bit targets have no lock-free 64-bit atomics, and
+            // the total (pairs * per_pair) is far below 2^32 anyway.
+            bytes: std.atomic.Value(u32) = .init(0),
+            timeouts: std.atomic.Value(u32) = .init(0),
+        };
+
+        fn nudge() void {}
+
+        /// Reader timeouts and writer ticks are drawn from this same
+        /// distribution, so an expiring timer and an arriving byte land together
+        /// often enough to hit the window.
+        fn delay(rand: std.Random) Duration {
+            return .fromMicroseconds(200 + rand.uintLessThan(u64, 2_000));
+        }
+
+        fn reader(stream: Stream, sh: *Shared, seed: u64) void {
+            defer stream.close();
+            var rng = std.Random.DefaultPrng.init(seed);
+            var buf: [64]u8 = undefined;
+            var got: usize = 0;
+            while (got < per_pair) {
+                const n = stream.read(&buf, .{ .duration = delay(rng.random()) }) catch |err| switch (err) {
+                    // The timer won the race: expected, and the whole point.
+                    error.Timeout => {
+                        _ = sh.timeouts.fetchAdd(1, .monotonic);
+                        continue;
+                    },
+                    else => {
+                        _ = sh.errors.fetchAdd(1, .monotonic);
+                        return;
+                    },
+                };
+                // The peer sends per_pair bytes before it closes, so EOF here means
+                // bytes went missing: a completed recv was overwritten by a cancel.
+                // This is also what terminates the loop if the race eats a byte,
+                // instead of hanging.
+                if (n == 0) {
+                    _ = sh.errors.fetchAdd(1, .monotonic);
+                    return;
+                }
+                got += n;
+                _ = sh.bytes.fetchAdd(@intCast(n), .monotonic);
+                // Hop to another executor, so the next recv is submitted from a
+                // loop other than the one owning this fd's registration.
+                var h = runtime_mod.spawn(nudge, .{}) catch {
+                    _ = sh.errors.fetchAdd(1, .monotonic);
+                    return;
+                };
+                h.join();
+            }
+        }
+
+        fn writer(stream: Stream, sh: *Shared, seed: u64) void {
+            defer stream.close();
+            var rng = std.Random.DefaultPrng.init(seed);
+            for (0..per_pair) |_| {
+                runtime_mod.sleep(delay(rng.random())) catch {
+                    _ = sh.errors.fetchAdd(1, .monotonic);
+                    return;
+                };
+                stream.writeAll("x", .none) catch {
+                    _ = sh.errors.fetchAdd(1, .monotonic);
+                    return;
+                };
+            }
+        }
+    };
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
+    defer runtime.deinit();
+
+    const listen_addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    const srv = try listen_addr.listen(.{ .reuse_address = true });
+    defer srv.close();
+    const connect_addr = try IpAddress.parseIp4("127.0.0.1", srv.socket.address.ip.getPort());
+
+    var sh: H.Shared = .{};
+    var tasks: Group = .init;
+    errdefer tasks.cancel();
+
+    // connect() returns once the handshake is queued in the backlog, so both ends
+    // can be built inline here: no acceptor task, and every task lives in one
+    // group, so a single join settles every counter read below.
+    for (0..H.pairs) |i| {
+        const client = try connect_addr.connect(.{ .timeout = Timeout.fromSeconds(5) });
+        const server = try srv.accept(.{ .timeout = Timeout.fromSeconds(5) });
+        try tasks.spawn(H.reader, .{ server, &sh, i * 2 });
+        try tasks.spawn(H.writer, .{ client, &sh, i * 2 + 1 });
+    }
+    try tasks.wait();
+
+    try std.testing.expectEqual(0, sh.errors.load(.monotonic));
+    try std.testing.expectEqual(H.pairs * H.per_pair, sh.bytes.load(.monotonic));
+    // The cancel path has to have been taken at all, or nothing above is evidence.
+    // How often it lands in the window is machine-dependent, so this asserts only
+    // the floor that means the same thing everywhere.
+    try std.testing.expect(sh.timeouts.load(.monotonic) > 0);
 }
 
 // Migration-disabled bypass: with enable_task_migration=false the executors do
