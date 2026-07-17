@@ -304,15 +304,34 @@ pub fn service(self: anytype, state: anytype, fd: net.fd_t, dir: Dir, event: any
 }
 
 /// Detach a parked socket completion from its owner's waiter queue (cancel).
-pub fn detach(self: anytype, target: *Completion) void {
+///
+/// Returns true if `target` was still parked and this call removed it, meaning
+/// the caller now owns it and must finish it. Returns false if it was already
+/// gone, i.e. `service` claimed it and is completing it with its natural result;
+/// the caller must then leave it alone.
+///
+/// The shard lock makes that answer exact rather than advisory: `service` runs
+/// the syscall and sets the result while holding the same lock it removes the
+/// waiter under, so "still in the queue" and "no result set yet" are the same
+/// condition. The reverse - inferring it from `cancel_state.completed` - would
+/// race, because `service` deliberately marks the op completed only after
+/// dropping the lock.
+pub fn detach(self: anytype, target: *Completion) bool {
     const fd = netHandle(target);
     const dir = dirForOp(target);
     const shard = self.shared.sock_table.shardForFd(fd);
     shard.mutex.lock();
-    if (shard.map.getPtr(@as(u32, @bitCast(fd)))) |entry| {
-        _ = entry.waiters(dir).remove(target);
-    }
-    shard.mutex.unlock();
+    defer shard.mutex.unlock();
+    // A live parked op always has an entry: detach only runs while the op is not
+    // yet completed (loop.cancel and cancelLocal both bail on cancel_state
+    // .completed), and an entry is only dropped by `unregister` on close, which
+    // cannot happen until the op completes and wakes its owner. So this branch is
+    // unreachable in practice. Return false anyway (not true): a missing entry
+    // could only mean the waiter was already removed - i.e. `service` is finishing
+    // the op - so claiming it here would double-complete an op that is already on
+    // its way out. Leaving it alone is the safe default.
+    const entry = shard.map.getPtr(@as(u32, @bitCast(fd))) orelse return false;
+    return entry.waiters(dir).remove(target);
 }
 
 /// Tear down the shared registration for a socket fd about to be closed. Closing
