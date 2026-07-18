@@ -683,6 +683,10 @@ const MutexFutex = struct {
     const LOCKED: u32 = 0b01;
     const LOCKED_WITH_WAITERS: u32 = 0b11; // must contain the `locked` bit for x86 optimization
 
+    // Acquisitions are seq_cst, not acquire: sync/Futex.zig rechecks the futex
+    // word under this lock and needs the caller's stores from before lock()
+    // ordered against that load (store->load), which acquire does not give.
+
     pub fn init() MutexFutex {
         return .{};
     }
@@ -693,7 +697,7 @@ const MutexFutex = struct {
 
     pub fn lock(self: *MutexFutex) void {
         // Fast path: try to acquire unlocked mutex
-        if (self.state.cmpxchgWeak(UNLOCKED, LOCKED, .acquire, .monotonic) == null) {
+        if (self.state.cmpxchgWeak(UNLOCKED, LOCKED, .seq_cst, .monotonic) == null) {
             return;
         }
 
@@ -715,9 +719,9 @@ const MutexFutex = struct {
         // The downside is that the last mutex unlocker will see `LOCKED_WITH_WAITERS` and do an unnecessary Futex wake
         // but this is better than having to wake all waiting threads on mutex unlock.
         //
-        // Acquire barrier ensures grabbing the lock happens before the critical section
+        // The barrier ensures grabbing the lock happens before the critical section
         // and that the previous lock holder's critical section happens before we grab the lock.
-        while (self.state.swap(LOCKED_WITH_WAITERS, .acquire) != UNLOCKED) {
+        while (self.state.swap(LOCKED_WITH_WAITERS, .seq_cst) != UNLOCKED) {
             Futex.wait(&self.state, LOCKED_WITH_WAITERS);
         }
     }
@@ -744,12 +748,12 @@ const MutexFutex = struct {
         // - `lock bts` is smaller instruction-wise which makes it better for inlining
         if (builtin.target.cpu.arch.isX86()) {
             const locked_bit = @ctz(LOCKED);
-            return self.state.bitSet(locked_bit, .acquire) == 0;
+            return self.state.bitSet(locked_bit, .seq_cst) == 0;
         }
 
-        // Acquire barrier ensures grabbing the lock happens before the critical section
+        // The barrier ensures grabbing the lock happens before the critical section
         // and that the previous lock holder's critical section happens before we grab the lock.
-        return self.state.cmpxchgStrong(UNLOCKED, LOCKED, .acquire, .monotonic) == null;
+        return self.state.cmpxchgStrong(UNLOCKED, LOCKED, .seq_cst, .monotonic) == null;
     }
 };
 
