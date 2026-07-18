@@ -1485,6 +1485,9 @@ pub fn renameatPreserve(allocator: std.mem.Allocator, old_dir: fd_t, old_path: [
                 .SUCCESS => return,
                 .INTR => continue,
                 .EXIST => return error.PathAlreadyExists,
+                // Some ZFS builds and pre-3.15 kernels lack RENAME_NOREPLACE
+                // (EINVAL/ENOSYS) — fall through to hardlink+delete.
+                .INVAL, .NOSYS => break,
                 else => |err| return errnoToDirRenameError(err),
             }
         }
@@ -1505,10 +1508,53 @@ pub fn renameatPreserve(allocator: std.mem.Allocator, old_dir: fd_t, old_path: [
         }
     }
 
-    // Fallback for other POSIX and Darwin filesystems that don't support renameatx_np(RENAME_EXCL):
-    // hardlink + delete
+    // Atomic no-replace rename unavailable on this platform/filesystem.
+    return renameatPreserveFallback(allocator, old_dir, old_path, new_dir, new_path);
+}
+
+/// No-replace rename via hardlink + delete for filesystems that reject the
+/// atomic renameat2(RENAME_NOREPLACE)/renameatx_np(RENAME_EXCL). The hardlink
+/// returns EEXIST -> error.PathAlreadyExists when the destination exists.
+/// Regular files only (a directory source fails the hardlink with EPERM).
+fn renameatPreserveFallback(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) DirRenamePreserveError!void {
     try dirHardLink(allocator, old_dir, old_path, new_dir, new_path, .{});
     dirDeleteFile(allocator, old_dir, old_path) catch {};
+}
+
+test renameatPreserveFallback {
+    const at_cwd = posix.AT.FDCWD;
+    const src = "zio_rnpf_src.tmp";
+    const dst = "zio_rnpf_dst.tmp";
+
+    const H = struct {
+        fn create(path: [*:0]const u8) !void {
+            const rc = posix.system.openat(posix.AT.FDCWD, path, .{ .ACCMODE = .WRONLY, .CLOEXEC = true, .CREAT = true }, @as(mode_t, 0o644));
+            if (posix.errno(rc) != .SUCCESS) return error.CreateFailed;
+            posix.close(@intCast(rc));
+        }
+        fn exists(path: [*:0]const u8) bool {
+            const rc = posix.system.openat(posix.AT.FDCWD, path, .{ .CLOEXEC = true }, @as(mode_t, 0));
+            if (posix.errno(rc) != .SUCCESS) return false;
+            posix.close(@intCast(rc));
+            return true;
+        }
+    };
+
+    dirDeleteFile(std.testing.allocator, at_cwd, src) catch {};
+    dirDeleteFile(std.testing.allocator, at_cwd, dst) catch {};
+    defer dirDeleteFile(std.testing.allocator, at_cwd, src) catch {};
+    defer dirDeleteFile(std.testing.allocator, at_cwd, dst) catch {};
+
+    // Free destination: source moves onto it.
+    try H.create(src);
+    try renameatPreserveFallback(std.testing.allocator, at_cwd, src, at_cwd, dst);
+    try std.testing.expect(!H.exists(src));
+    try std.testing.expect(H.exists(dst));
+
+    // Occupied destination: fails and leaves the source in place.
+    try H.create(src);
+    try std.testing.expectError(error.PathAlreadyExists, renameatPreserveFallback(std.testing.allocator, at_cwd, src, at_cwd, dst));
+    try std.testing.expect(H.exists(src));
 }
 
 /// Delete a file using unlinkat() syscall
