@@ -1485,6 +1485,11 @@ pub fn renameatPreserve(allocator: std.mem.Allocator, old_dir: fd_t, old_path: [
                 .SUCCESS => return,
                 .INTR => continue,
                 .EXIST => return error.PathAlreadyExists,
+                // RENAME_NOREPLACE needs per-filesystem support: EINVAL when
+                // the filesystem lacks it (out-of-tree ZFS; in-tree filesystems
+                // added it between 3.15 and 4.9), ENOSYS when renameat2 itself
+                // is absent (pre-3.15). Fall back to hardlink+delete.
+                .INVAL, .NOSYS => break,
                 else => |err| return errnoToDirRenameError(err),
             }
         }
@@ -1505,10 +1510,43 @@ pub fn renameatPreserve(allocator: std.mem.Allocator, old_dir: fd_t, old_path: [
         }
     }
 
-    // Fallback for other POSIX and Darwin filesystems that don't support renameatx_np(RENAME_EXCL):
-    // hardlink + delete
+    // Atomic no-replace rename unavailable on this platform/filesystem.
+    return renameatPreserveFallback(allocator, old_dir, old_path, new_dir, new_path);
+}
+
+/// No-replace rename via hardlink + delete for filesystems that reject the
+/// atomic renameat2(RENAME_NOREPLACE)/renameatx_np(RENAME_EXCL). The hardlink
+/// returns EEXIST -> error.PathAlreadyExists when the destination exists.
+/// Regular files only (a directory source fails the hardlink with EPERM).
+fn renameatPreserveFallback(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) DirRenamePreserveError!void {
     try dirHardLink(allocator, old_dir, old_path, new_dir, new_path, .{});
     dirDeleteFile(allocator, old_dir, old_path) catch {};
+}
+
+test renameatPreserveFallback {
+    // The fallback is unreachable on Windows (renameatPreserve uses MoveFileExW).
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    const at_cwd = posix.AT.FDCWD;
+    const src = "zio_rnpf_src.tmp";
+    const dst = "zio_rnpf_dst.tmp";
+
+    dirDeleteFile(allocator, at_cwd, src) catch {};
+    dirDeleteFile(allocator, at_cwd, dst) catch {};
+    defer dirDeleteFile(allocator, at_cwd, src) catch {};
+    defer dirDeleteFile(allocator, at_cwd, dst) catch {};
+
+    // Free destination: source moves onto it.
+    try close(try createat(allocator, at_cwd, src, .{}));
+    try renameatPreserveFallback(allocator, at_cwd, src, at_cwd, dst);
+    try std.testing.expectError(error.FileNotFound, dirAccess(allocator, at_cwd, src, .{}));
+    try dirAccess(allocator, at_cwd, dst, .{});
+
+    // Occupied destination: fails and leaves the source in place.
+    try close(try createat(allocator, at_cwd, src, .{}));
+    try std.testing.expectError(error.PathAlreadyExists, renameatPreserveFallback(allocator, at_cwd, src, at_cwd, dst));
+    try dirAccess(allocator, at_cwd, src, .{});
 }
 
 /// Delete a file using unlinkat() syscall
