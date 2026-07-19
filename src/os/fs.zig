@@ -3048,8 +3048,9 @@ pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
             }
         }
     } else {
-        // Other BSDs: not supported
-        return error.Unexpected;
+        // OpenBSD and other BSDs have no way to recover a path from an fd
+        // (no /proc, no F_GETPATH, no F_KINFO), so realPath by fd is unsupported.
+        return error.OperationUnsupported;
     }
 }
 
