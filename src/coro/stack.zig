@@ -50,6 +50,12 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
     // Ensure we allocate at least 2 pages (guard + usable space)
     const size = @max(aligned_max + page_size, page_size * 2);
 
+    // OpenBSD needs a different allocation strategy entirely (MAP_STACK, fully
+    // committed up front, no on-demand growth). See stackAllocOpenBSD.
+    if (builtin.os.tag == .openbsd) {
+        return stackAllocOpenBSD(info, size);
+    }
+
     // Reserve address space with PROT_NONE
     // On NetBSD/FreeBSD, we must declare future permissions upfront for security policies
     const prot_flags = posix.PROT.NONE | posix.PROT.MAX(posix.PROT.READ | posix.PROT.WRITE);
@@ -108,6 +114,57 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
         .allocation_ptr = allocation.ptr,
         .base = stack_top,
         .limit = initial_commit_start,
+        .allocation_len = allocation.len,
+    };
+}
+
+/// Allocate a coroutine stack on OpenBSD.
+///
+/// OpenBSD enforces that the stack pointer always lies within a region mapped
+/// with MAP_STACK: on every system call and trap the kernel checks the stack
+/// pointer and kills the process if it points outside such a region. This is
+/// incompatible with the PROT_NONE-reserve + mprotect-on-fault growth scheme
+/// used on other POSIX systems, because:
+///   - MAP_STACK can only be established at mmap time (mprotect cannot add it),
+///     so pages committed lazily via mprotect would not be MAP_STACK, and
+///   - MAP_STACK requires PROT_READ|PROT_WRITE, so the reservation cannot start
+///     out as PROT_NONE.
+///
+/// So on OpenBSD we map the whole usable stack as RW|MAP_STACK, fully committed
+/// up front (pages are still demand-zeroed by the kernel, so this reserves
+/// address space, not physical memory), and carve a single PROT_NONE guard page
+/// at the low end for overflow detection. There is no on-demand growth: a stack
+/// overflow faults on the guard page and crashes (no SIGSEGV growth handler is
+/// installed, see setupStackGrowth).
+fn stackAllocOpenBSD(info: *StackInfo, size: usize) error{OutOfMemory}!void {
+    const allocation = posix.mmap(
+        null,
+        size,
+        posix.PROT.READ | posix.PROT.WRITE,
+        posix.MAP.PRIVATE | posix.MAP.ANONYMOUS | posix.MAP.STACK,
+        -1,
+        0,
+    ) catch |err| {
+        log.err("Failed to mmap OpenBSD stack memory (size={d}): {}", .{ size, err });
+        return error.OutOfMemory;
+    };
+    errdefer posix.munmap(allocation) catch {};
+
+    // Turn the lowest page into a PROT_NONE guard page. The rest of the mapping
+    // keeps its MAP_STACK flag, so the stack pointer stays valid for syscalls.
+    const guard: [*]align(page_size) u8 = allocation.ptr;
+    posix.mprotect(guard[0..page_size], posix.PROT.NONE) catch |err| {
+        log.err("Failed to mprotect OpenBSD stack guard page: {}", .{err});
+        return error.OutOfMemory;
+    };
+
+    // Stack layout (grows downward): [guard_page (PROT_NONE)][committed (READ|WRITE)]
+    // The whole usable region is committed, so limit sits just above the guard page.
+    const alloc_base = @intFromPtr(allocation.ptr);
+    info.* = .{
+        .allocation_ptr = allocation.ptr,
+        .base = alloc_base + size,
+        .limit = alloc_base + page_size,
         .allocation_len = allocation.len,
     };
 }
@@ -180,6 +237,10 @@ pub fn stackExtend(info: *StackInfo, mode: StackExtendMode) error{StackOverflow}
 /// Mode .grow: Grow by 1.5x current size in 64KB chunks
 /// Mode .full: Commit all remaining uncommitted stack
 fn stackExtendPosix(info: *StackInfo, mode: StackExtendMode) error{StackOverflow}!void {
+    // OpenBSD stacks are fully committed at allocation time (MAP_STACK regions
+    // cannot be grown via mprotect), so there is nothing to extend.
+    if (builtin.os.tag == .openbsd) return;
+
     const guard_end = @intFromPtr(info.allocation_ptr) + page_size;
 
     // Calculate new limit based on mode
@@ -291,8 +352,11 @@ fn stackExtendWindows(_: *StackInfo) error{StackOverflow}!void {
 ///
 /// Must be called once per thread before using coroutines on that thread.
 pub fn setupStackGrowth() !void {
-    // Windows handles stack growth automatically
-    if (builtin.os.tag == .windows) return;
+    // Windows handles stack growth automatically via PAGE_GUARD.
+    // OpenBSD stacks are fully committed at allocation time (MAP_STACK cannot be
+    // grown on demand), so there is no growth handler to install; an overflow
+    // faults on the guard page and crashes.
+    if (builtin.os.tag == .windows or builtin.os.tag == .openbsd) return;
 
     const altstack_size = posix.SIGSTKSZ;
 
@@ -339,8 +403,8 @@ pub fn setupStackGrowth() !void {
 ///
 /// Should be called when a thread exits if setupStackGrowth() was called.
 pub fn cleanupStackGrowth() void {
-    // Windows has nothing to clean up
-    if (builtin.os.tag == .windows) return;
+    // Windows and OpenBSD install no growth handler / alternate stack.
+    if (builtin.os.tag == .windows or builtin.os.tag == .openbsd) return;
 
     if (altstack_installed) {
         // Disable alternate stack
@@ -380,6 +444,7 @@ inline fn getFaultAddress(info: *const posix.siginfo_t) usize {
         .macos, .ios, .tvos, .watchos, .visionos => info.addr,
         .freebsd, .dragonfly => info.addr,
         .netbsd => info.info.reason.fault.addr,
+        .openbsd => info.data.fault.addr,
         .illumos => info.reason.fault.addr,
         else => @compileError("Stack growth not supported on this platform"),
     });
@@ -534,8 +599,9 @@ test "Stack: fully committed" {
 }
 
 test "Stack: extend" {
-    // Skip on Windows - RtlCreateUserStack handles automatic growth
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    // Skip on Windows - RtlCreateUserStack handles automatic growth.
+    // Skip on OpenBSD - stacks are fully committed at allocation time.
+    if (builtin.os.tag == .windows or builtin.os.tag == .openbsd) return error.SkipZigTest;
 
     const maximum_size = 256 * 1024;
     const initial_commit = 64 * 1024;

@@ -2945,8 +2945,10 @@ fn dirReadPosix(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
             // the old dirent layout (32-bit d_fileno), which does not match the
             // modern std.c.dirent we parse with. getdents(2) (__getdents30) returns
             // the modern layout, matching std's own directory iteration.
-            .netbsd => posix.system.getdents(handle, buffer.ptr, buffer.len),
-            .freebsd, .openbsd, .dragonfly => blk: {
+            // OpenBSD removed the getdirentries(2) libc wrapper; getdents(2) is
+            // the only interface and returns the modern dirent layout std parses.
+            .netbsd, .openbsd => posix.system.getdents(handle, buffer.ptr, buffer.len),
+            .freebsd, .dragonfly => blk: {
                 var basep: c_long = 0;
                 break :blk posix.system.getdirentries(handle, buffer.ptr, buffer.len, &basep);
             },
@@ -3102,8 +3104,9 @@ pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
             }
         }
     } else {
-        // Other BSDs: not supported
-        return error.Unexpected;
+        // OpenBSD and other BSDs have no way to recover a path from an fd
+        // (no /proc, no F_GETPATH, no F_KINFO), so realPath by fd is unsupported.
+        return error.OperationUnsupported;
     }
 }
 

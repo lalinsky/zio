@@ -3820,7 +3820,10 @@ test "io: dir realPath and realPathFile" {
     file.close(io);
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_len = try dir.realPath(io, &cwd_buf);
+    const cwd_len = dir.realPath(io, &cwd_buf) catch |err| switch (err) {
+        error.OperationUnsupported => return error.SkipZigTest,
+        else => return err,
+    };
     try std.testing.expect(cwd_len > 0);
 
     var file_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -3867,7 +3870,10 @@ test "io: file hardLink" {
     defer file.close(io);
     _ = try file.writePositional(io, &.{"linked"}, 0);
 
-    try file.hardLink(io, dir, link, .{});
+    file.hardLink(io, dir, link, .{}) catch |err| switch (err) {
+        error.OperationUnsupported => return error.SkipZigTest,
+        else => return err,
+    };
 
     var opened = try dir.openFile(io, link, .{});
     defer opened.close(io);
