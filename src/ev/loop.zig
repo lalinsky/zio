@@ -274,6 +274,10 @@ pub const LoopState = struct {
     async_handles: Queue(Completion) = .{},
 
     completions: Queue(Completion) = .{},
+    /// Finished standalone completions awaiting user-callback dispatch, when the
+    /// loop was created with `do_not_call_callbacks`. Drained by
+    /// `Loop.nextDispatched`.
+    dispatched: Queue(Completion) = .{},
     work_completions: AtomicStack(Completion) = .{},
 
     pub const wake_loop: u32 = 1;
@@ -389,6 +393,16 @@ pub const LoopState = struct {
         // (Rearm handles are exempt from the freeing contract by definition.)
         const owner_callback = completion.group.owner_callback;
         const was_rearm = completion.flags.rearm;
+
+        // Deferred dispatch: a standalone (non-rearm, no owner) completion is
+        // queued for the driver to call itself via `nextDispatched`, rather than
+        // invoked here. `completion` was just popped from `completions`, so its
+        // queue link is free to reuse. Rearm/group completions fall through and
+        // run inline, since their machinery must stay synchronous.
+        if (self.loop.do_not_call_callbacks and !was_rearm and owner_callback == null) {
+            self.dispatched.push(completion);
+            return;
+        }
 
         // The completion's own callback runs first: for a group member it reports
         // the member's own result while the member is still alive; for a standalone
@@ -545,6 +559,14 @@ pub const Loop = struct {
 
     in_add: if (in_safe_mode) bool else void = if (in_safe_mode) false else {},
 
+    /// When true, `tick` does not dispatch finished standalone completions to
+    /// their callbacks; it queues them instead, and the driver drains them with
+    /// `nextDispatched`, invoking the callbacks itself. This lets an embedder
+    /// (e.g. a CPython asyncio event loop) run the blocking poll with the GIL
+    /// released and then invoke callbacks with the GIL held. Rearm handles and
+    /// group-owner callbacks are unaffected (they still run inline).
+    do_not_call_callbacks: bool = false,
+
     const default_queue_size = 256;
 
     pub const Options = struct {
@@ -552,6 +574,7 @@ pub const Loop = struct {
         thread_pool: ?*ThreadPool = null,
         loop_group: ?*LoopGroup = null,
         queue_size: u16 = default_queue_size,
+        do_not_call_callbacks: bool = false,
     };
 
     pub fn init(self: *Loop, options: Options) !void {
@@ -561,6 +584,7 @@ pub const Loop = struct {
             .allocator = options.allocator,
             .thread_pool = options.thread_pool,
             .loop_group = undefined,
+            .do_not_call_callbacks = options.do_not_call_callbacks,
         };
 
         if (options.loop_group) |group| {
@@ -592,6 +616,13 @@ pub const Loop = struct {
 
     pub fn stop(self: *Loop) void {
         self.state.stopped = true;
+    }
+
+    /// Pop the next finished standalone completion awaiting user-callback
+    /// dispatch (only populated when created with `do_not_call_callbacks`).
+    /// Returns null when drained; the caller invokes `completion.call(loop)`.
+    pub fn nextDispatched(self: *Loop) ?*Completion {
+        return self.state.dispatched.pop();
     }
 
     pub fn stopped(self: *const Loop) bool {
