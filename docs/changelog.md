@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Added `Dir.createFileAtomic()` and `AtomicFile` to the native API, mirroring the
+  equivalent `std.Io` interface. The data is written to a randomly named temporary file
+  in the destination's directory and then moved into place with an atomic rename:
+  `AtomicFile.replace()` overwrites an existing destination, `AtomicFile.link()` fails
+  with `error.PathAlreadyExists` instead. Abandoned temporary files are cleaned up by
+  `AtomicFile.deinit()`, which runs even when the task is canceled.
+
 - Fixed a race on the epoll and kqueue backends where a socket operation whose timeout
   expired at the exact moment its data arrived could be completed twice. A socket op is
   serviced by the loop that owns the fd's poller registration, which is not necessarily

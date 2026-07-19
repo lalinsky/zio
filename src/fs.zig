@@ -14,6 +14,7 @@ const waitForIo = @import("common.zig").waitForIo;
 const waitForIoUncancelable = @import("common.zig").waitForIoUncancelable;
 const timedWaitForIo = @import("common.zig").timedWaitForIo;
 const fillBuf = @import("utils/writer.zig").fillBuf;
+const random = @import("random.zig").random;
 const probePollable = @import("ev/backends/common.zig").probePollable;
 const Timeout = @import("time.zig").Timeout;
 
@@ -66,6 +67,11 @@ pub fn createDir(path: []const u8, mode: os.fs.mode_t) Dir.CreateDirError!void {
 pub fn createFile(path: []const u8, flags: os.fs.FileCreateFlags) Dir.CreateFileError!File {
     const cwd = Dir.cwd();
     return cwd.createFile(path, flags);
+}
+
+pub fn createFileAtomic(dest_path: []const u8, options: Dir.CreateFileAtomicOptions) Dir.CreateFileAtomicError!AtomicFile {
+    const cwd = Dir.cwd();
+    return cwd.createFileAtomic(dest_path, options);
 }
 
 pub const PipePair = struct {
@@ -174,6 +180,33 @@ pub const Dir = struct {
         try waitForIo(&op.c);
         const result = try op.getResult();
         return .{ .fd = result.fd, .pollable = result.pollable };
+    }
+
+    pub const CreateFileAtomicOptions = struct {
+        /// Permission bits for the created file.
+        mode: os.fs.mode_t = 0o664,
+        /// Open the temporary file for reading as well as writing.
+        read: bool = false,
+    };
+
+    pub const CreateFileAtomicError = CreateFileError || OpenDirError;
+
+    /// Create a randomly named temporary file that can later be atomically
+    /// moved to `dest_path` with `AtomicFile.link` or `AtomicFile.replace`.
+    /// The temporary file is created in the destination's directory, so the
+    /// final move is a rename, never a copy.
+    ///
+    /// The returned `AtomicFile` references the basename of `dest_path`, so
+    /// `dest_path` must remain valid until `link`/`replace`. Always call
+    /// `AtomicFile.deinit` to release resources, even after a successful
+    /// `link`/`replace`.
+    pub fn createFileAtomic(self: Dir, dest_path: []const u8, options: CreateFileAtomicOptions) CreateFileAtomicError!AtomicFile {
+        if (std.Io.Dir.path.dirname(dest_path)) |dirname| {
+            const parent = try self.openDir(dirname, .{});
+            errdefer parent.close();
+            return atomicFileInit(std.Io.Dir.path.basename(dest_path), parent, true, options);
+        }
+        return atomicFileInit(dest_path, self, false, options);
     }
 
     pub const DeleteDirError = os.fs.DirDeleteDirError || Cancelable;
@@ -669,6 +702,99 @@ pub const Dir = struct {
         }
     }
 };
+
+/// A file that is atomically materialized at its destination path when `link`
+/// or `replace` is called. The data is first written to a randomly named
+/// temporary file in the destination's directory, then moved into place with
+/// an atomic rename. Created by `Dir.createFileAtomic`.
+///
+/// Always call `deinit` to release resources, even after a successful `link`
+/// or `replace`; if the file was not moved into place, it is deleted.
+pub const AtomicFile = struct {
+    /// The open temporary file. Write the data here.
+    file: File,
+    file_basename_hex: u64,
+    file_open: bool,
+    file_exists: bool,
+
+    dir: Dir,
+    close_dir_on_deinit: bool,
+
+    dest_sub_path: []const u8,
+
+    pub fn deinit(self: *AtomicFile) void {
+        if (self.file_open) {
+            self.file.close();
+            self.file_open = false;
+        }
+        if (self.file_exists) {
+            const tmp_sub_path = std.fmt.hex(self.file_basename_hex);
+            // Cleanup must run even when the task is being canceled, like close().
+            var op = ev.DirDeleteFile.init(self.dir.fd, &tmp_sub_path);
+            waitForIoUncancelable(&op.c);
+            op.getResult() catch {};
+            self.file_exists = false;
+        }
+        if (self.close_dir_on_deinit) {
+            self.dir.close();
+            self.close_dir_on_deinit = false;
+        }
+        self.* = undefined;
+    }
+
+    pub const LinkError = Dir.RenamePreserveError;
+
+    /// Atomically move the temporary file to the destination path, failing
+    /// with `error.PathAlreadyExists` if something already exists there.
+    pub fn link(self: *AtomicFile) LinkError!void {
+        if (self.file_open) {
+            self.file.close();
+            self.file_open = false;
+        }
+        const tmp_sub_path = std.fmt.hex(self.file_basename_hex);
+        try self.dir.renamePreserve(&tmp_sub_path, self.dir, self.dest_sub_path);
+        self.file_exists = false;
+    }
+
+    pub const ReplaceError = Dir.RenameError;
+
+    /// Atomically move the temporary file to the destination path, replacing
+    /// any file already there.
+    pub fn replace(self: *AtomicFile) ReplaceError!void {
+        if (self.file_open) {
+            self.file.close();
+            self.file_open = false;
+        }
+        const tmp_sub_path = std.fmt.hex(self.file_basename_hex);
+        try self.dir.rename(&tmp_sub_path, self.dir, self.dest_sub_path);
+        self.file_exists = false;
+    }
+};
+
+fn atomicFileInit(dest_sub_path: []const u8, dir: Dir, close_dir_on_deinit: bool, options: Dir.CreateFileAtomicOptions) Dir.CreateFileAtomicError!AtomicFile {
+    while (true) {
+        var random_integer: u64 = undefined;
+        random(std.mem.asBytes(&random_integer));
+        const tmp_sub_path = std.fmt.hex(random_integer);
+        const file = dir.createFile(&tmp_sub_path, .{
+            .read = options.read,
+            .exclusive = true,
+            .mode = options.mode,
+        }) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => |e| return e,
+        };
+        return .{
+            .file = file,
+            .file_basename_hex = random_integer,
+            .file_open = true,
+            .file_exists = true,
+            .dir = dir,
+            .close_dir_on_deinit = close_dir_on_deinit,
+            .dest_sub_path = dest_sub_path,
+        };
+    }
+}
 
 /// Whether the Reader/Writer issues positional (offset-based) or streaming
 /// (current-position) I/O ops. Independent of `File.pollable`, which decides
@@ -1614,6 +1740,122 @@ test "Dir: renamePreserve" {
     defer dir.deleteFile(old_path) catch {};
 
     try std.testing.expectError(error.PathAlreadyExists, dir.renamePreserve(old_path, dir, new_path));
+}
+
+test "Dir: createFileAtomic link" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+    const dest_path = "test_atomic_file_link.txt";
+    defer dir.deleteFile(dest_path) catch {};
+
+    var af = try dir.createFileAtomic(dest_path, .{});
+    defer af.deinit();
+
+    _ = try af.file.write("atomic", 0);
+    try af.link();
+
+    var file = try dir.openFile(dest_path, .{ .mode = .read_only });
+    defer file.close();
+    var buffer: [16]u8 = undefined;
+    const n = try file.read(&buffer, 0);
+    try std.testing.expectEqualStrings("atomic", buffer[0..n]);
+}
+
+test "Dir: createFileAtomic link to existing destination" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+    const dest_path = "test_atomic_file_link_existing.txt";
+    defer dir.deleteFile(dest_path) catch {};
+
+    var dest = try dir.createFile(dest_path, .{});
+    _ = try dest.write("old", 0);
+    dest.close();
+
+    var af = try dir.createFileAtomic(dest_path, .{});
+    const tmp_sub_path = std.fmt.hex(af.file_basename_hex);
+    defer dir.deleteFile(&tmp_sub_path) catch {};
+
+    _ = try af.file.write("new", 0);
+    try std.testing.expectError(error.PathAlreadyExists, af.link());
+    af.deinit();
+
+    // The temporary file was cleaned up and the destination is unchanged.
+    try std.testing.expectError(error.FileNotFound, dir.access(&tmp_sub_path, .{}));
+
+    var file = try dir.openFile(dest_path, .{ .mode = .read_only });
+    defer file.close();
+    var buffer: [16]u8 = undefined;
+    const n = try file.read(&buffer, 0);
+    try std.testing.expectEqualStrings("old", buffer[0..n]);
+}
+
+test "Dir: createFileAtomic replace existing destination" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+    const dest_path = "test_atomic_file_replace.txt";
+    defer dir.deleteFile(dest_path) catch {};
+
+    var dest = try dir.createFile(dest_path, .{});
+    _ = try dest.write("old", 0);
+    dest.close();
+
+    var af = try dir.createFileAtomic(dest_path, .{});
+    defer af.deinit();
+
+    _ = try af.file.write("new", 0);
+    try af.replace();
+
+    var file = try dir.openFile(dest_path, .{ .mode = .read_only });
+    defer file.close();
+    var buffer: [16]u8 = undefined;
+    const n = try file.read(&buffer, 0);
+    try std.testing.expectEqualStrings("new", buffer[0..n]);
+}
+
+test "Dir: createFileAtomic in subdirectory" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+    const sub_dir_path = "test_atomic_file_subdir.tmp";
+    try dir.createDir(sub_dir_path, 0o755);
+    defer dir.deleteTree(sub_dir_path) catch {};
+
+    var af = try dir.createFileAtomic(sub_dir_path ++ "/dest.txt", .{});
+    defer af.deinit();
+
+    _ = try af.file.write("atomic", 0);
+    try af.link();
+
+    var file = try dir.openFile(sub_dir_path ++ "/dest.txt", .{ .mode = .read_only });
+    defer file.close();
+    var buffer: [16]u8 = undefined;
+    const n = try file.read(&buffer, 0);
+    try std.testing.expectEqualStrings("atomic", buffer[0..n]);
+}
+
+test "Dir: createFileAtomic deinit without link removes temporary file" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+    const dest_path = "test_atomic_file_abandoned.txt";
+
+    var af = try dir.createFileAtomic(dest_path, .{});
+    const tmp_sub_path = std.fmt.hex(af.file_basename_hex);
+    defer dir.deleteFile(&tmp_sub_path) catch {};
+
+    _ = try af.file.write("abandoned", 0);
+    af.deinit();
+
+    try std.testing.expectError(error.FileNotFound, dir.access(&tmp_sub_path, .{}));
+    try std.testing.expectError(error.FileNotFound, dir.access(dest_path, .{}));
 }
 
 test "Dir: access" {
