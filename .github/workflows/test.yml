@@ -100,6 +100,9 @@ jobs:
       with:
         envs: 'TEST_VERBOSE'
         run: |
+          # OpenBSD's default per-process fd limit is low; the max-executors
+          # test opens a loop (and waker fds) per executor and needs more.
+          ulimit -n 4096
           for test in zig-out/bin/test-*; do
             echo "Running $test"
             ./$test
