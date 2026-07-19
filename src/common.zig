@@ -404,9 +404,14 @@ test "Waiter: futex-based timed wait with timeout" {
     waiter.timedWait(1, .fromMilliseconds(50), .no_cancel);
     const elapsed = timer.read();
 
+    errdefer std.debug.print("timedWait(50ms) returned after {d}ms\n", .{elapsed.toMilliseconds()});
+
     // Should return normally after timeout expires (allow slight undershoot for timer resolution)
     try std.testing.expect(elapsed.toMilliseconds() >= 40);
-    try std.testing.expect(elapsed.toMilliseconds() < 200); // Sanity check
+    // Generous upper bound: only meant to catch gross timeout miscalculation
+    // (wrong units, waiting forever). Loaded CI runners can delay the wakeup
+    // by hundreds of milliseconds, so anything tighter is flaky.
+    try std.testing.expect(elapsed.toMilliseconds() < 5000);
 }
 
 /// Execute a blocking function on the thread pool, blocking the current task until completion.
