@@ -1524,39 +1524,29 @@ fn renameatPreserveFallback(allocator: std.mem.Allocator, old_dir: fd_t, old_pat
 }
 
 test renameatPreserveFallback {
+    // The fallback is unreachable on Windows (renameatPreserve uses MoveFileExW).
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
     const at_cwd = posix.AT.FDCWD;
     const src = "zio_rnpf_src.tmp";
     const dst = "zio_rnpf_dst.tmp";
 
-    const H = struct {
-        fn create(path: [*:0]const u8) !void {
-            const rc = posix.system.openat(posix.AT.FDCWD, path, .{ .ACCMODE = .WRONLY, .CLOEXEC = true, .CREAT = true }, @as(mode_t, 0o644));
-            if (posix.errno(rc) != .SUCCESS) return error.CreateFailed;
-            posix.close(@intCast(rc));
-        }
-        fn exists(path: [*:0]const u8) bool {
-            const rc = posix.system.openat(posix.AT.FDCWD, path, .{ .CLOEXEC = true }, @as(mode_t, 0));
-            if (posix.errno(rc) != .SUCCESS) return false;
-            posix.close(@intCast(rc));
-            return true;
-        }
-    };
-
-    dirDeleteFile(std.testing.allocator, at_cwd, src) catch {};
-    dirDeleteFile(std.testing.allocator, at_cwd, dst) catch {};
-    defer dirDeleteFile(std.testing.allocator, at_cwd, src) catch {};
-    defer dirDeleteFile(std.testing.allocator, at_cwd, dst) catch {};
+    dirDeleteFile(allocator, at_cwd, src) catch {};
+    dirDeleteFile(allocator, at_cwd, dst) catch {};
+    defer dirDeleteFile(allocator, at_cwd, src) catch {};
+    defer dirDeleteFile(allocator, at_cwd, dst) catch {};
 
     // Free destination: source moves onto it.
-    try H.create(src);
-    try renameatPreserveFallback(std.testing.allocator, at_cwd, src, at_cwd, dst);
-    try std.testing.expect(!H.exists(src));
-    try std.testing.expect(H.exists(dst));
+    try close(try createat(allocator, at_cwd, src, .{}));
+    try renameatPreserveFallback(allocator, at_cwd, src, at_cwd, dst);
+    try std.testing.expectError(error.FileNotFound, dirAccess(allocator, at_cwd, src, .{}));
+    try dirAccess(allocator, at_cwd, dst, .{});
 
     // Occupied destination: fails and leaves the source in place.
-    try H.create(src);
-    try std.testing.expectError(error.PathAlreadyExists, renameatPreserveFallback(std.testing.allocator, at_cwd, src, at_cwd, dst));
-    try std.testing.expect(H.exists(src));
+    try close(try createat(allocator, at_cwd, src, .{}));
+    try std.testing.expectError(error.PathAlreadyExists, renameatPreserveFallback(allocator, at_cwd, src, at_cwd, dst));
+    try dirAccess(allocator, at_cwd, src, .{});
 }
 
 /// Delete a file using unlinkat() syscall
