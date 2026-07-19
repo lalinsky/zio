@@ -27,6 +27,7 @@ jobs:
           - { os: ubuntu-latest, target: powerpc64le-linux, qemu: true, backends: 'epoll poll' }
           - { os: ubuntu-latest, target: x86_64-freebsd, vm: freebsd, backends: 'kqueue poll' }
           - { os: ubuntu-latest, target: x86_64-netbsd, vm: netbsd, backends: 'kqueue poll' }
+          - { os: ubuntu-latest, target: x86_64-openbsd, vm: openbsd, backends: 'kqueue poll' }
 
     runs-on: ${{ matrix.config.os }}
 
@@ -83,6 +84,20 @@ jobs:
       timeout-minutes: 20
       with:
         release: '10.1'
+        envs: 'TEST_VERBOSE'
+        run: |
+          for test in zig-out/bin/test-*; do
+            echo "Running $test"
+            ./$test
+          done
+      env:
+        TEST_VERBOSE: 2
+
+    - name: Run tests (OpenBSD VM)
+      if: matrix.config.vm == 'openbsd'
+      uses: vmactions/openbsd-vm@v1
+      timeout-minutes: 20
+      with:
         envs: 'TEST_VERBOSE'
         run: |
           for test in zig-out/bin/test-*; do
