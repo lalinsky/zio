@@ -1518,9 +1518,24 @@ pub fn renameatPreserve(allocator: std.mem.Allocator, old_dir: fd_t, old_path: [
 /// atomic renameat2(RENAME_NOREPLACE)/renameatx_np(RENAME_EXCL). The hardlink
 /// returns EEXIST -> error.PathAlreadyExists when the destination exists.
 /// Regular files only (a directory source fails the hardlink with EPERM).
+/// All-or-nothing: if the source cannot be deleted after linking, the link is
+/// removed again and the error is returned.
 fn renameatPreserveFallback(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) DirRenamePreserveError!void {
     try dirHardLink(allocator, old_dir, old_path, new_dir, new_path, .{});
-    dirDeleteFile(allocator, old_dir, old_path) catch {};
+    dirDeleteFile(allocator, old_dir, old_path) catch |err| switch (err) {
+        // The source vanished after the link was made, so the rename is
+        // complete; rolling back would delete the only name left for the data.
+        error.FileNotFound => {},
+        else => {
+            // Only undo the link while the source is verifiably still in
+            // place; if we can't confirm that, the new link may be the only
+            // name left for the data, so keep it.
+            if (dirAccess(allocator, old_dir, old_path, .{ .follow_symlinks = false })) |_| {
+                dirDeleteFile(allocator, new_dir, new_path) catch {};
+            } else |_| {}
+            return err;
+        },
+    };
 }
 
 test renameatPreserveFallback {
@@ -1547,6 +1562,47 @@ test renameatPreserveFallback {
     try close(try createat(allocator, at_cwd, src, .{}));
     try std.testing.expectError(error.PathAlreadyExists, renameatPreserveFallback(allocator, at_cwd, src, at_cwd, dst));
     try dirAccess(allocator, at_cwd, src, .{});
+}
+
+test "renameatPreserveFallback: rollback when source cannot be deleted" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    // Root bypasses the directory permission check the test relies on.
+    if (posix.system.geteuid() == 0) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    const at_cwd = posix.AT.FDCWD;
+    const src_dir_path = "zio_rnpf_rollback_dir.tmp";
+    const src = "src";
+    const dst = "zio_rnpf_rollback_dst.tmp";
+
+    dirDeleteFile(allocator, at_cwd, dst) catch {};
+    defer dirDeleteFile(allocator, at_cwd, dst) catch {};
+
+    try mkdirat(allocator, at_cwd, src_dir_path, 0o755);
+    defer {
+        dirSetFilePermissions(allocator, at_cwd, src_dir_path, 0o755, .{}) catch {};
+        dirDeleteFile(allocator, at_cwd, src_dir_path ++ "/" ++ src) catch {};
+        dirDeleteDir(allocator, at_cwd, src_dir_path) catch {};
+    }
+
+    const src_dir = try dirOpen(allocator, at_cwd, src_dir_path, .{});
+    defer posix.close(src_dir);
+
+    try close(try createat(allocator, src_dir, src, .{}));
+
+    // Make the source directory read-only so the post-link unlink fails.
+    try dirSetFilePermissions(allocator, at_cwd, src_dir_path, 0o555, .{});
+
+    if (renameatPreserveFallback(allocator, src_dir, src, at_cwd, dst)) |_| {
+        return error.TestUnexpectedResult;
+    } else |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => {},
+        else => return err,
+    }
+
+    // Nothing changed: source still present, destination link rolled back.
+    try dirAccess(allocator, src_dir, src, .{});
+    try std.testing.expectError(error.FileNotFound, dirAccess(allocator, at_cwd, dst, .{}));
 }
 
 /// Delete a file using unlinkat() syscall
