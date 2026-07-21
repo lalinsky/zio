@@ -593,3 +593,24 @@ test "Group: wait() future protocol drains without closing" {
     try group.spawn(quick, .{});
     _ = try waitFuture(&group);
 }
+
+test "Group: failed spawnBlocking frees the task exactly once" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    // Make registerBlockingTask fail after the task has already been pushed
+    // into the group, which is the state a spawn racing with shutdown ends up
+    // in. The group's cleanup and spawnBlockingTask's errdefer must not both
+    // free the task. A large context takes the direct allocator path (over
+    // TaskPool.pool_item_size), so testing.allocator catches a double free.
+    rt.shutting_down.store(true, .release);
+
+    const bigWork = struct {
+        fn call(_: [3000]u8) void {}
+    }.call;
+
+    try std.testing.expectError(error.RuntimeShutdown, group.spawnBlocking(bigWork, .{[_]u8{0} ** 3000}));
+}
