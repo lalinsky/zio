@@ -17,6 +17,7 @@ const Group = @import("group.zig").Group;
 const registerGroupTask = @import("group.zig").registerGroupTask;
 const unregisterGroupTask = @import("group.zig").unregisterGroupTask;
 const os = @import("os/root.zig");
+const Timestamp = @import("time.zig").Timestamp;
 
 pub const Closure = struct {
     start: Start,
@@ -459,12 +460,24 @@ pub const AnyTask = struct {
         Executor.scheduleTask(self);
     }
 
+    /// Return the coroutine's stack to the pool and retire its TSan fiber.
+    ///
+    /// Both are owned by the coroutine, not by the task, so they are reclaimed
+    /// as soon as the coroutine is done rather than when the last reference to
+    /// the task goes away: the executor calls this from its finish cleanup,
+    /// once control has left the coroutine's stack. `destroy` calls it again
+    /// for tasks that were created but never ran. Idempotent, with a zeroed
+    /// `allocation_len` marking the resources as already released.
+    pub fn releaseCoro(self: *AnyTask, rt: *Runtime, now: Timestamp) void {
+        if (self.coro.context.stack_info.allocation_len == 0) return;
+        rt.stack_pool.release(self.coro.context.stack_info, now);
+        self.coro.context.stack_info.allocation_len = 0;
+        self.coro.deinit();
+    }
+
     pub fn destroy(self: *AnyTask) void {
         const rt = self.getRuntime();
-        if (self.coro.context.stack_info.allocation_len > 0) {
-            rt.stack_pool.release(self.coro.context.stack_info, rt.now());
-        }
-        self.coro.deinit();
+        self.releaseCoro(rt, rt.now());
 
         self.closure.free(AnyTask, rt, self);
     }
