@@ -162,13 +162,14 @@ pub fn spawnBlockingTask(
     );
     errdefer task.destroy();
 
-    if (group) |g| try registerGroupTask(g, &task.awaitable);
-    errdefer if (group) |g| unregisterGroupTask(g, &task.awaitable);
-
-    // +1 ref for the caller (JoinHandle) before scheduling, to prevent
-    // race where task completes before caller can take ownership
+    // +1 ref before the task is reachable by anyone else, to prevent a race
+    // where it completes before the caller can take ownership. See spawnTask
+    // for why this has to come before registerGroupTask.
     task.awaitable.ref_count.incr();
     errdefer _ = task.awaitable.ref_count.decr();
+
+    if (group) |g| try registerGroupTask(g, &task.awaitable);
+    errdefer if (group) |g| unregisterGroupTask(g, &task.awaitable);
 
     try registerBlockingTask(rt, task);
 

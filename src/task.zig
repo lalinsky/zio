@@ -740,13 +740,18 @@ pub fn spawnTask(
     );
     errdefer task.destroy();
 
-    if (group) |g| try registerGroupTask(g, &task.awaitable);
-    errdefer if (group) |g| unregisterGroupTask(g, &task.awaitable);
-
-    // +1 ref for the caller (JoinHandle) before scheduling, to prevent
-    // race where task completes before caller can take ownership
+    // +1 ref before the task is reachable by anyone else, to prevent a race
+    // where it completes before the caller can take ownership. For a task with
+    // a JoinHandle this is the caller's ref; for a group task, which returns no
+    // handle, it is the group's, dropped by unregisterGroupTask or by cancel
+    // popping the node. Taking it before registerGroupTask matters: once the
+    // node is in the group's list, a concurrent cancel() can pop it and release,
+    // and with no ref of our own that would free the task under us.
     task.awaitable.ref_count.incr();
     errdefer _ = task.awaitable.ref_count.decr();
+
+    if (group) |g| try registerGroupTask(g, &task.awaitable);
+    errdefer if (group) |g| unregisterGroupTask(g, &task.awaitable);
 
     try registerTask(rt, task);
 
