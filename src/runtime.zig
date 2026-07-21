@@ -920,10 +920,7 @@ pub const Executor = struct {
             .finish => |task| {
                 self.pending_cleanup = .none;
                 task.state.store(.{ .tag = .finished }, .release);
-                if (task.coro.context.stack_info.allocation_len > 0) {
-                    self.runtime.stack_pool.release(task.coro.context.stack_info, self.loop.now());
-                    task.coro.context.stack_info.allocation_len = 0;
-                }
+                task.releaseCoro(self.runtime, self.loop.now());
                 finishTask(self.runtime, &task.awaitable);
             },
         }
