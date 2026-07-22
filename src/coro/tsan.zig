@@ -31,9 +31,26 @@ pub inline fn createFiber() Fiber {
 
 /// Retire a coroutine's fiber. Must not be called while `fiber` is the running
 /// fiber (destroy from a different context after the coroutine has finished).
+///
+/// Destroying a fiber that never recorded a trace event walks uninitialized
+/// memory in TSan and segfaults once its allocator starts handing back reused
+/// blocks. Fixed upstream by llvm/llvm-project#171766, which is in LLVM 22 but
+/// not in the 21.x that Zig 0.16 bundles, so this can go once we require a
+/// newer toolchain. We reach it with tasks that are created and then torn down
+/// without ever running, so make the fiber current for an instant first.
+///
+/// flags must be 0 here; the no-sync form records nothing and does not help.
+/// The pair is otherwise harmless: nothing ever runs as this fiber, so the only
+/// clock it can hand back is the one we just gave it, and the previously
+/// current fiber is restored before the destroy.
 pub inline fn destroyFiber(fiber: Fiber) void {
     if (enabled) {
-        if (fiber) |f| c.__tsan_destroy_fiber(f);
+        if (fiber) |f| {
+            const current = c.__tsan_get_current_fiber();
+            c.__tsan_switch_to_fiber(f, 0);
+            if (current) |cur| c.__tsan_switch_to_fiber(cur, 0);
+            c.__tsan_destroy_fiber(f);
+        }
     }
 }
 
