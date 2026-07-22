@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed writing to a terminal on macOS crashing with an unexpected `ENXIO` error. A
+  reader or writer starts in positional mode and expects the first `pread`/`pwrite` to
+  fail with `ESPIPE` if the file turns out not to be seekable, which is how it learns to
+  switch to streaming reads and writes. macOS reports a terminal as `ENXIO` instead, so
+  the fallback never happened and the error escaped to the caller as `error.Unexpected`,
+  with a stack trace dumped to stderr. `ENXIO` and `EOVERFLOW` are now both translated to
+  `error.Unseekable`, matching `std.Io.Threaded`.
+
 - Added `Dir.createFileAtomic()` and `AtomicFile` to the native API, mirroring the
   equivalent `std.Io` interface. The data is written to a randomly named temporary file
   in the destination's directory and then moved into place with an atomic rename:
