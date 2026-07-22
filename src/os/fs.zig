@@ -1827,7 +1827,10 @@ pub fn errnoToFileReadError(err: E) FileReadError {
                 .PIPE => error.BrokenPipe,
                 .NOMEM => error.SystemResources,
                 .BADF => error.NotOpenForReading,
-                .SPIPE => error.Unseekable,
+                // ESPIPE is the usual "not seekable" answer for a positional
+                // read, but macOS returns ENXIO for a tty, and EOVERFLOW when
+                // the offset is past what the device can represent.
+                .SPIPE, .NXIO, .OVERFLOW => error.Unseekable,
                 else => |e| unexpectedError(e),
             };
         },
@@ -1863,7 +1866,10 @@ pub fn errnoToFileWriteError(err: E) FileWriteError {
                 .BADF => error.NotOpenForWriting,
                 .DQUOT => error.DiskQuota,
                 .FBIG => error.FileTooBig,
-                .SPIPE => error.Unseekable,
+                // ESPIPE is the usual "not seekable" answer for a positional
+                // write, but macOS returns ENXIO for a tty, and EOVERFLOW when
+                // the offset is past what the device can represent.
+                .SPIPE, .NXIO, .OVERFLOW => error.Unseekable,
                 else => |e| unexpectedError(e),
             };
         },
