@@ -21,6 +21,14 @@ All notable changes to this project will be documented in this file.
   completion accounting was corrupted. This only affected multi-executor runtimes where
   a socket is used from more than one executor.
 
+- `Group.wait()` no longer closes the group. Waiting used to close it permanently, so
+  every spawn afterwards failed with `error.Closed`, and through the `std.Io` vtable,
+  where `Group.async` cannot report an error, those spawns silently ran their work
+  synchronously on the calling task instead of concurrently. A group can now be spawned
+  into again after `wait()` returns, and a wait covers tasks spawned while it is in
+  progress, as long as the spawn happens before the group drains. This matches
+  `std.Io.Threaded` and the `select`-based wait.
+
 ## [0.16.0] - 2026-07-12
 
 - Blocking operations running on thread-pool workers are now cancelable. Previously,
