@@ -7,6 +7,7 @@ const Clock = @import("../../time.zig").Clock;
 const common = @import("common.zig");
 
 const unexpectedError = @import("../../os/base.zig").unexpectedError;
+const Loop = @import("../loop.zig").Loop;
 const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
 const Op = @import("../completion.zig").Op;
@@ -470,10 +471,21 @@ pub fn registerSocket(self: *Self, fd: NetHandle, dir: sockreg.Dir, other_owned_
     }
 }
 
-/// Drop this loop's epoll entry for `fd` (best-effort: ENOENT if owned elsewhere;
-/// the kernel drops the rest when the fd is closed). Called by sockreg.unregister.
-pub fn unregisterCleanup(self: *Self, fd: NetHandle) void {
-    _ = linux.epoll_ctl(self.epoll_fd, linux.EPOLL.CTL_DEL, fd, null);
+/// Remove a closing socket's registration from the pollers that actually hold
+/// it: the direction owners. Must run while the fd is still open - an epoll
+/// subscription is keyed to the file description, and the fd is the only
+/// handle for removing it. Relying on close-time eviction instead would leave
+/// an unremovable registration firing events forever whenever another
+/// reference (dup, fork, SCM_RIGHTS) keeps the description alive. epoll_ctl
+/// is thread-safe, so deleting from another loop's epoll is fine. Called by
+/// sockreg.unregister.
+pub fn unregisterCleanup(self: *Self, fd: NetHandle, owners: [2]?*Loop) void {
+    _ = self;
+    for (owners, 0..) |maybe_owner, i| {
+        const owner = maybe_owner orelse continue;
+        if (i == 1 and owners[0] == owner) continue; // both directions, one loop
+        _ = linux.epoll_ctl(owner.backend.epoll_fd, linux.EPOLL.CTL_DEL, fd, null);
+    }
 }
 
 /// A no-error event for the optimistic (pre-park) checkCompletion attempt.

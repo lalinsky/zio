@@ -8,6 +8,7 @@ const Clock = @import("../../time.zig").Clock;
 const common = @import("common.zig");
 
 const unexpectedError = @import("../../os/base.zig").unexpectedError;
+const Loop = @import("../loop.zig").Loop;
 const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
 const Queue = @import("../queue.zig").Queue;
@@ -424,7 +425,15 @@ pub fn registerSocket(self: *Self, fd: NetHandle, dir: sockreg.Dir, other_owned_
 /// pending changes for this fd so they cannot outlive it. (We deliberately do not
 /// enqueue an EV_DELETE: a buffered delete flushes after the close and could hit a
 /// reused fd, reintroducing the same hazard.) Called by sockreg.unregister.
-pub fn unregisterCleanup(self: *Self, fd: NetHandle) void {
+/// The owners are unused: kqueue knotes are fd-keyed and close() removes
+/// applied ones from every kqueue regardless of other references to the
+/// description; only this loop's un-flushed buffered changes need scrubbing.
+/// (A cross-loop park whose ADD is still buffered on the owner is a known
+/// remaining gap - the owner's buffer is single-threaded, so it cannot be
+/// scrubbed from here; planned fix is registering sockets eagerly instead of
+/// buffering.)
+pub fn unregisterCleanup(self: *Self, fd: NetHandle, owners: [2]?*Loop) void {
+    _ = owners;
     const ident: usize = @intCast(fd);
     var i: usize = 0;
     while (i < self.change_buffer.items.len) {

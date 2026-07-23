@@ -48,26 +48,32 @@ pub fn other(dir: Dir) Dir {
     };
 }
 
-/// Per-fd registration record. `owner`/`ready`/`waiters` are split per direction
-/// but kept in one entry so a single shard lock covers the whole fd and a close
-/// drops both directions at once.
+/// Per-fd registration record. The two directions are kept in one entry so a
+/// single shard lock covers the whole fd and a close drops both at once.
 pub const Entry = struct {
-    /// The loop (opaque `*Loop`) whose poller has this fd registered for the
-    /// direction, or null if no loop is registered for it yet.
-    read_owner: ?*anyopaque = null,
-    write_owner: ?*anyopaque = null,
-    /// Edge-triggered readiness latch: set when an edge fired but no waiter
-    /// consumed it, so a parker that raced the edge retries instead of sleeping.
+    /// Edge-triggered readiness latches: set when an edge fired but no waiter
+    /// consumed it, so a parker that raced the edge retries instead of
+    /// sleeping. Kept outside the per-direction state because an edge can be
+    /// latched for a direction nobody owns yet (ERR/HUP is serviced for both
+    /// directions regardless of registration).
     read_ready: bool = false,
     write_ready: bool = false,
-    /// Completions parked on this fd/direction, serviced by the owner.
-    read_waiters: Queue(Completion) = .{},
-    write_waiters: Queue(Completion) = .{},
+    /// Present iff the direction is registered with an owner's poller; a
+    /// waiter can only exist under an owner, structurally.
+    read: ?Owned = null,
+    write: ?Owned = null,
 
-    pub fn ownerPtr(self: *Entry, dir: Dir) *?*anyopaque {
+    /// A registered direction: the loop whose poller holds the registration
+    /// and the completions parked on it, serviced by that loop.
+    pub const Owned = struct {
+        owner: *Loop,
+        waiters: Queue(Completion) = .{},
+    };
+
+    pub fn dirPtr(self: *Entry, dir: Dir) *?Owned {
         return switch (dir) {
-            .read => &self.read_owner,
-            .write => &self.write_owner,
+            .read => &self.read,
+            .write => &self.write,
         };
     }
 
@@ -78,17 +84,9 @@ pub const Entry = struct {
         };
     }
 
-    pub fn waiters(self: *Entry, dir: Dir) *Queue(Completion) {
-        return switch (dir) {
-            .read => &self.read_waiters,
-            .write => &self.write_waiters,
-        };
-    }
-
     /// Whether the entry has nothing left to track and can be dropped.
     pub fn isEmpty(self: *const Entry) bool {
-        return self.read_owner == null and self.write_owner == null and
-            self.read_waiters.head == null and self.write_waiters.head == null;
+        return self.read == null and self.write == null;
     }
 };
 
@@ -208,7 +206,6 @@ pub fn netHandle(c: *Completion) net.fd_t {
 pub fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion) ParkResult {
     const dir = dirForOp(completion);
     const self_loop: *Loop = state.loop;
-    const self_opaque: *anyopaque = @ptrCast(self_loop);
     const table = &self.shared.sock_table;
     const shard = table.shardForFd(fd);
 
@@ -234,9 +231,9 @@ pub fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion
         return .retry;
     }
 
-    const owner = entry.ownerPtr(dir);
-    if (owner.* == null) {
-        const other_owned_here = entry.ownerPtr(other(dir)).* == self_opaque;
+    const slot = entry.dirPtr(dir);
+    if (slot.* == null) {
+        const other_owned_here = if (entry.dirPtr(other(dir)).*) |o| o.owner == self_loop else false;
         if (!self.registerSocket(fd, dir, other_owned_here)) {
             if (created and entry.isEmpty()) _ = shard.map.remove(@as(u32, @bitCast(fd)));
             shard.mutex.unlock();
@@ -244,8 +241,9 @@ pub fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion
             state.markCompletedFromBackend(completion);
             return .failed;
         }
-        owner.* = self_opaque;
+        slot.* = .{ .owner = self_loop };
     }
+    const owned = &slot.*.?;
 
     // The completion stays owned by its submitting loop: its `loop` field, timeout
     // timer, and cancel routing are unchanged. The owner loop only holds the
@@ -257,14 +255,10 @@ pub fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion
     // its poller is the one that will produce this completion.
     completion.prev = null;
     completion.next = null;
-    entry.waiters(dir).push(completion);
-    loopFromOpaque(owner.*.?).backend.incrParked();
+    owned.waiters.push(completion);
+    owned.owner.backend.incrParked();
     shard.mutex.unlock();
     return .parked;
-}
-
-fn loopFromOpaque(ptr: *anyopaque) *Loop {
-    return @ptrCast(@alignCast(ptr));
 }
 
 /// Service ready waiters for one (fd, dir) on the owner loop. Runs each waiter's
@@ -281,22 +275,24 @@ pub fn service(self: anytype, state: anytype, fd: net.fd_t, dir: Dir, event: any
 
     var serviced_waiter = false;
     var to_finish: Queue(Completion) = .{};
-    var iter: ?*Completion = entry.waiters(dir).head;
-    while (iter) |c| {
-        iter = c.next;
-        if (c.state == .completed or c.state == .dead) {
-            _ = entry.waiters(dir).remove(c);
-            self.decrParked();
-            continue;
-        }
-        serviced_waiter = true;
-        switch (Backend.checkCompletion(c, event)) {
-            .completed => {
-                _ = entry.waiters(dir).remove(c);
+    if (entry.dirPtr(dir).*) |*owned| {
+        var iter: ?*Completion = owned.waiters.head;
+        while (iter) |c| {
+            iter = c.next;
+            if (c.state == .completed or c.state == .dead) {
+                _ = owned.waiters.remove(c);
                 self.decrParked();
-                to_finish.push(c);
-            },
-            .requeue => break, // drained to EAGAIN for this direction
+                continue;
+            }
+            serviced_waiter = true;
+            switch (Backend.checkCompletion(c, event)) {
+                .completed => {
+                    _ = owned.waiters.remove(c);
+                    self.decrParked();
+                    to_finish.push(c);
+                },
+                .requeue => break, // drained to EAGAIN for this direction
+            }
         }
     }
     // Latch a readiness edge that no live waiter consumed so a racing parker
@@ -339,31 +335,42 @@ pub fn detach(self: anytype, target: *Completion) bool {
     // the op - so claiming it here would double-complete an op that is already on
     // its way out. Leaving it alone is the safe default.
     const entry = shard.map.getPtr(@as(u32, @bitCast(fd))) orelse return false;
-    if (!entry.waiters(dir).remove(target)) return false;
+    const owned = if (entry.dirPtr(dir).*) |*o| o else return false;
+    if (!owned.waiters.remove(target)) return false;
     // The waiter left the owner's queue; drop it from the owner's parked count
     // (the canceling loop calling this need not be the owner).
-    loopFromOpaque(entry.ownerPtr(dir).*.?).backend.decrParked();
+    owned.owner.backend.decrParked();
     return true;
 }
 
-/// Tear down the shared registration for a socket fd about to be closed. Closing
-/// the fd removes it from every poller at the kernel level, so this only drops
-/// the software bookkeeping (for all loops at once) plus this loop's poller entry.
+/// Tear down the shared registration for a socket fd about to be closed. Must
+/// run while the fd is still open: the backend's cleanup may need the fd to
+/// deregister it from the owners' pollers (see epoll's unregisterCleanup - an
+/// epoll subscription is keyed to the file description and the fd is the only
+/// handle for removing it; after close, a description kept alive by another
+/// reference would leave an unremovable registration firing events forever).
 pub fn unregister(self: anytype, fd: net.fd_t) void {
     const shard = self.shared.sock_table.shardForFd(fd);
     shard.mutex.lock();
+    var owners: [2]?*Loop = .{ null, null };
     if (shard.map.getPtr(@as(u32, @bitCast(fd)))) |entry| {
         // Closing an fd with ops still parked on it would orphan those
         // completions (removed here without finishing) and leak their
         // active/inflight accounting. The contract is that callers cancel or
         // await outstanding socket ops before closing the fd; assert it so a
         // violation surfaces in safe builds rather than silently leaking.
-        std.debug.assert(entry.waiters(.read).head == null);
-        std.debug.assert(entry.waiters(.write).head == null);
+        if (entry.read) |*r| {
+            std.debug.assert(r.waiters.head == null);
+            owners[0] = r.owner;
+        }
+        if (entry.write) |*w| {
+            std.debug.assert(w.waiters.head == null);
+            owners[1] = w.owner;
+        }
     }
     _ = shard.map.remove(@as(u32, @bitCast(fd)));
     shard.mutex.unlock();
-    self.unregisterCleanup(fd);
+    self.unregisterCleanup(fd, owners);
 }
 
 /// Generic submit for socket read/write/accept-family ops: try the syscall
