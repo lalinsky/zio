@@ -1324,7 +1324,7 @@ pub const Runtime = struct {
     }
 
     /// Whether other executors can currently steal from this runtime's queues.
-    pub fn stealingActive(self: *Runtime) bool {
+    pub inline fn stealingActive(self: *Runtime) bool {
         return zio_options.task_migration and self.options.enable_task_migration and self.executors_stealable.load(.acquire);
     }
 
