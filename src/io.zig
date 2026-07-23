@@ -916,7 +916,7 @@ fn batchCancelPending(batch: *Io.Batch, state: *BatchState) void {
         if (data_ptr & 1 == 0) {
             const data: *BatchCompletionData = @ptrFromInt(data_ptr);
             const completion = data.getCompletion();
-            if (completion.loop) |l| l.cancel(completion);
+            getCurrentExecutor().loop.cancel(completion);
         }
         index = storage.pending.node.next;
     }

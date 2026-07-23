@@ -510,6 +510,14 @@ pub const LoopState = struct {
     }
 };
 
+/// The loop owned by the current thread: claimed at init, refreshed at every
+/// tick, released at deinit. Used to enforce `Loop.cancel`'s receiver contract
+/// in safe builds: cancel must be invoked on the loop the calling thread
+/// drives, because its same-loop fast path touches single-threaded loop state
+/// directly. A nested loop run (e.g. executeBlocking) shadows the outer loop
+/// for its duration and the outer loop's next tick reclaims it.
+threadlocal var current_loop: ?*Loop = null;
+
 pub const Loop = struct {
     state: LoopState,
     backend: Backend,
@@ -581,10 +589,15 @@ pub const Loop = struct {
         );
         errdefer self.backend.deinit();
 
+        // Claim this thread as the loop's driver (init and tick are
+        // same-thread by contract), so the init->add->cancel pattern passes
+        // cancel's receiver check before the first tick.
+        current_loop = self;
         self.state.initialized = true;
     }
 
     pub fn deinit(self: *Loop) void {
+        if (current_loop == self) current_loop = null;
         self.backend.deinit();
     }
 
@@ -683,6 +696,14 @@ pub const Loop = struct {
     /// invoked when the operation completes (either with error.Canceled or its natural result).
     /// Thread-safe: can be called from any thread.
     pub fn cancel(self: *Loop, completion: *Completion) void {
+        // Contract: `self` is the loop the calling thread drives - the
+        // `self == target` fast path below runs cancelLocal, which touches the
+        // target's single-threaded state, so the receiver being the target
+        // must mean the caller is on its thread. Enforced here in safe builds;
+        // `current_loop == null` (a thread that has not driven any loop yet)
+        // is permitted for the single-threaded init->add->cancel->run pattern,
+        // where nothing else can be driving the target concurrently.
+        std.debug.assert(current_loop == self or current_loop == null);
         // Check if completion has been added to a loop
         // (loop is set once by addInternal and never changes)
         const target = completion.loop orelse {
@@ -709,7 +730,8 @@ pub const Loop = struct {
         }
 
         if (self == target) {
-            // Same loop - cancel directly
+            // Same loop - cancel directly (the assert above guarantees the
+            // calling thread drives it).
             self.cancelLocal(completion);
         } else {
             // Push to target's cancel queue (lock-free Treiber stack)
@@ -1465,6 +1487,11 @@ pub const Loop = struct {
     }
 
     pub fn tick(self: *Loop, wait: bool) !void {
+        // Re-claim this thread's driver slot (see `current_loop`): another
+        // loop on this thread may have claimed it since - a nested loop run,
+        // or an earlier loop's lifetime on the same thread.
+        current_loop = self;
+
         if (self.done()) return;
 
         const timer_result = self.checkTimers();

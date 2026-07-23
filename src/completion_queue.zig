@@ -205,7 +205,7 @@ pub const CompletionQueue = struct {
         while (node) |n| {
             const next_node = n.next;
             const c = completionFromGroup(n);
-            if (c.loop) |loop| loop.cancel(c);
+            getCurrentExecutor().loop.cancel(c);
             node = next_node;
         }
     }
