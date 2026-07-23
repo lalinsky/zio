@@ -225,11 +225,13 @@ pub const LoopState = struct {
     running: bool = false,
     stopped: bool = false,
 
-    active: usize = 0,
-    /// I/O operations submitted to backend awaiting completion
-    // Plain counter mutated only by the owner thread, but read cross-thread
-    // by the scheduler's load shedding, hence the atomic accessors below.
-    inflight_io: usize = 0,
+    /// Not-yet-finished completions owned by this loop. The count lives on the
+    /// completion's owning loop (`completion.loop`): incremented at the submit
+    /// sites, decremented in `finishCompletion` routed through
+    /// `completion.loop`, which may run on a different loop's thread (epoll
+    /// single-owner servicing, the shared IOCP port) - hence the atomic. The
+    /// scheduler's load shedding also reads other loops' counters.
+    active: std.atomic.Value(usize) = .init(0),
 
     wake_requested: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
@@ -284,67 +286,30 @@ pub const LoopState = struct {
     pub const wake_async: u32 = 2;
     pub const wake_cancel: u32 = 4;
 
-    /// Increment the inflight I/O counter. On multi-threaded backends
-    /// (IOCP) this routes to a shared atomic; on single-threaded backends
-    /// only the owner thread mutates, but other executors read the count for
-    /// load shedding, so the access is a monotonic atomic either way.
-    pub fn incrInflight(self: *LoopState) void {
-        if (comptime Backend.capabilities.is_multi_threaded) {
-            _ = self.loop.loop_group.shared.inflight_io.fetchAdd(1, .monotonic);
-        } else {
-            @atomicStore(usize, &self.inflight_io, self.inflight_io + 1, .monotonic);
-        }
-    }
-
-    /// Decrement the inflight I/O counter.
-    pub fn decrInflight(self: *LoopState) void {
-        if (comptime Backend.capabilities.is_multi_threaded) {
-            _ = self.loop.loop_group.shared.inflight_io.fetchSub(1, .monotonic);
-        } else {
-            @atomicStore(usize, &self.inflight_io, self.inflight_io - 1, .monotonic);
-        }
-    }
-
-    /// Read the inflight I/O counter (any thread).
-    pub fn loadInflight(self: *const LoopState) usize {
-        if (comptime Backend.capabilities.is_multi_threaded) {
-            return @intCast(self.loop.loop_group.shared.inflight_io.load(.monotonic));
-        } else {
-            return @atomicLoad(usize, &self.inflight_io, .monotonic);
-        }
-    }
-
-    /// Increment the active (not-yet-finished) completion counter.
+    /// Increment this loop's active completion counter. Counted by the loop at
+    /// every submit site (backends do no accounting).
     pub fn incrActive(self: *LoopState) void {
-        if (comptime Backend.capabilities.is_multi_threaded) {
-            _ = self.loop.loop_group.shared.active.fetchAdd(1, .monotonic);
-        } else {
-            self.active += 1;
-        }
+        _ = self.active.fetchAdd(1, .monotonic);
     }
 
-    /// Decrement the active (not-yet-finished) completion counter.
+    /// Decrement this loop's active completion counter. Callers must invoke
+    /// this on the completion's owning loop (`completion.loop`), not on
+    /// whichever loop happens to run the finish (see `finishCompletion`).
     pub fn decrActive(self: *LoopState) void {
-        if (comptime Backend.capabilities.is_multi_threaded) {
-            _ = self.loop.loop_group.shared.active.fetchSub(1, .monotonic);
-        } else {
-            self.active -= 1;
-        }
+        _ = self.active.fetchSub(1, .monotonic);
     }
 
-    /// Read the active completion counter.
+    /// Read this loop's active completion counter (any thread).
     pub fn loadActive(self: *const LoopState) usize {
-        if (comptime Backend.capabilities.is_multi_threaded) {
-            return @intCast(self.loop.loop_group.shared.active.load(.monotonic));
-        } else {
-            return self.active;
-        }
+        return self.active.load(.monotonic);
     }
 
-    /// Called by backends when an I/O operation completes.
-    /// Decrements inflight_io counter and marks the completion done.
+    /// Called by backends when an operation they accepted completes. Tells the
+    /// backend to drop its inflight count (the backend of the loop running the
+    /// completion, whose storage covers the op on every backend) and marks the
+    /// completion done.
     pub fn markCompletedFromBackend(self: *LoopState, completion: *Completion) void {
-        self.decrInflight();
+        self.loop.backend.decrInflight();
         self.markCompleted(completion);
     }
 
@@ -384,7 +349,10 @@ pub const LoopState = struct {
         std.debug.assert(completion.state == .completed);
 
         completion.state = .dead;
-        self.decrActive();
+        // Route the decrement to the loop that owns the completion: `self` here
+        // can be a different loop (epoll single-owner servicing, the shared
+        // IOCP port, a group finished by the loop that ran its last member).
+        completion.loop.?.state.decrActive();
 
         // Both callbacks below can free `completion`, so whichever may free it must
         // run LAST, with nothing touching `completion` afterward. Cache the owner
@@ -629,6 +597,12 @@ pub const Loop = struct {
         return self.state.stopped;
     }
 
+    /// Whether this loop has nothing left to do: every completion it owns
+    /// (`completion.loop == this`) has finished. An op may be *serviced* by
+    /// another loop of the group, but the active count stays with the owning
+    /// loop until the op finishes, so `done()` cannot report true early.
+    /// Completions handed out via `nextDispatched` are already finished and do
+    /// not keep the loop running.
     pub fn done(self: *const Loop) bool {
         return self.state.stopped or (self.state.loadActive() == 0 and self.state.completions.empty());
     }
@@ -957,7 +931,6 @@ pub const Loop = struct {
                 completion.state = .running;
                 self.state.incrActive();
                 if (comptime Backend.capabilities.net_send_file) {
-                    self.state.incrInflight();
                     self.backend.submit(&self.state, completion);
                 } else {
                     netSendFileStart(self, op);
@@ -991,7 +964,7 @@ pub const Loop = struct {
                             // Route pollable fds to the backend readiness/overlapped path;
                             // seekable fds (regular files, block devices) to the thread pool.
                             if (pollable) {
-                                self.state.incrInflight();
+                                self.state.incrActive();
                                 self.backend.submit(&self.state, completion);
                             } else {
                                 self.submitFileOpToThreadPool(completion);
@@ -1010,7 +983,7 @@ pub const Loop = struct {
                     .file_set_size => {
                         if (comptime @hasDecl(Backend, "fileSetSizeSupported")) {
                             if (self.backend.fileSetSizeSupported()) {
-                                self.state.incrInflight();
+                                self.state.incrActive();
                                 self.backend.submit(&self.state, completion);
                                 return;
                             }
@@ -1032,7 +1005,7 @@ pub const Loop = struct {
                     },
                 }
 
-                self.state.incrInflight();
+                self.state.incrActive();
                 self.backend.submit(&self.state, completion);
                 return;
             },
@@ -1493,7 +1466,7 @@ pub const Loop = struct {
 
         // Skip backend poll in no_wait mode if there's nothing to retrieve.
         // This avoids syscall overhead for pure CPU-bound workloads.
-        const should_poll = wait or self.state.loadInflight() > 0;
+        const should_poll = wait or self.backend.hasInflight();
         const wake_flags = self.state.wake_requested.swap(0, .acq_rel);
         const timed_out = if (should_poll) try self.backend.poll(&self.state, if (wake_flags != 0) .zero else timeout) else false;
 

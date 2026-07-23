@@ -625,20 +625,21 @@ pub const Executor = struct {
     /// queue into the primary scheduling path.
     const max_shed_per_tick = 4;
 
-    /// Once per tick, compare this executor's I/O-resident load (in-flight
-    /// ops == tasks parked on this ring) against the runtime average; the
-    /// excess becomes this tick's shed quota (see scheduleTaskLocal). Purely
-    /// decentralized: every executor reads the per-loop counters and makes
-    /// its own call.
+    /// Once per tick, compare this executor's resident load (active ops
+    /// submitted on this loop, mostly tasks parked on I/O) against the
+    /// runtime average; the excess becomes this tick's shed quota (see
+    /// scheduleTaskLocal). Purely decentralized: every executor reads the
+    /// per-loop counters and makes its own call. Every executor carries the
+    /// same +1 baseline (its shutdown handle), so comparisons are unaffected.
     fn recomputeShedQuota(self: *Executor) void {
         self.shed_quota = 0;
         if (!self.runtime.stealingActive()) return;
 
         const executors = self.runtime.executors.items;
-        const mine = self.loop.state.loadInflight();
+        const mine = self.loop.state.loadActive();
         if (mine < 2) return; // nothing worth shedding
         var total: usize = 0;
-        for (executors) |e| total += e.loop.state.loadInflight();
+        for (executors) |e| total += e.loop.state.loadActive();
         const avg = total / executors.len;
         // The +1 keeps neighbors one apart from trading the same task back
         // and forth forever.

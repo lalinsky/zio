@@ -62,6 +62,11 @@ waker_read_fd: net.fd_t = undefined,
 waker_write_fd: net.fd_t = undefined,
 queue_size: u16,
 pending_changes: usize = 0,
+/// Backend-internal inflight count: ops accepted by submit() and not yet
+/// completed. This backend is strictly per-loop (submit and completion on the
+/// owner thread), so a plain counter suffices. Read by hasInflight() to skip
+/// the poll syscall when nothing can arrive.
+inflight: usize = 0,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
     _ = shared_state;
@@ -279,9 +284,24 @@ fn getHandle(completion: *Completion) NetHandle {
 
 /// Submit a completion to the backend - infallible.
 /// On error, completes the operation immediately with error.Unexpected.
+/// Drop one inflight op. Called via LoopState.markCompletedFromBackend on the
+/// owner thread.
+pub fn decrInflight(self: *Self) void {
+    self.inflight -= 1;
+}
+
+/// Whether poll() could produce completions. Used by the loop to skip the
+/// wait syscall in no-wait ticks when nothing can arrive.
+pub fn hasInflight(self: *const Self) bool {
+    return self.inflight > 0;
+}
+
 pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
     c.state = .running;
-    state.incrActive();
+    // Counted for every accepted op (sync completers decrement right back via
+    // markCompletedFromBackend), mirroring the decrInflight in every completion
+    // path so the balance needs no per-path reasoning.
+    self.inflight += 1;
 
     switch (c.op) {
         .group, .timer, .async, .work => unreachable, // Managed by the loop
