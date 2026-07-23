@@ -282,8 +282,6 @@ fn getHandle(completion: *Completion) NetHandle {
     };
 }
 
-/// Submit a completion to the backend - infallible.
-/// On error, completes the operation immediately with error.Unexpected.
 /// Drop one inflight op. Called via LoopState.markCompletedFromBackend on the
 /// owner thread.
 pub fn decrInflight(self: *Self) void {
@@ -296,6 +294,8 @@ pub fn hasInflight(self: *const Self) bool {
     return self.inflight > 0;
 }
 
+/// Submit a completion to the backend - infallible.
+/// On error, completes the operation immediately with error.Unexpected.
 pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
     c.state = .running;
     // Counted for every accepted op (sync completers decrement right back via
