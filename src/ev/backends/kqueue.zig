@@ -71,7 +71,7 @@ pub const NetShutdownError = error{
 const Self = @This();
 
 pub const NetSendFileData = struct {
-    offset: usize = 0,
+    offset: u64 = 0,
     remaining: usize = 0,
     // Total bytes sent so far
     sbytes: usize = 0,
@@ -553,10 +553,15 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             const data = c.cast(NetSendFile);
 
             if(data.internal.sbytes == 0 and data.internal.offset == 0 and data.internal.remaining == 0) {
-                const file_size = fs.fileSize(data.file) catch |err| switch (err) {
-                    error.PermissionDenied => return c.setError(error.AccessDenied),
-                    else => |e| return c.setError(e),
+                const file_size = fs.fileSize(data.file) catch |err| {
+                    switch(err) { 
+                        error.PermissionDenied => c.setError(error.AccessDenied),
+                        else => |e| c.setError(e),
+                    }
+                    state.markCompletedFromBackend(c);
+                    return;
                 };
+
                 const avail: u64 = if (data.offset >= file_size) 0 else file_size - data.offset;
                 data.internal.remaining = @min(@as(u64, data.remaining), avail);
                 data.internal.offset = data.offset;
@@ -583,7 +588,9 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                     return;
                 }
 
-                return c.setError(unexpectedError(err));
+                c.setError(unexpectedError(err));
+                state.markCompletedFromBackend(c);                
+                return;
             }
             
             if(data.internal.remaining > 0) {
