@@ -42,12 +42,6 @@ pub const capabilities: BackendCapabilities = .{
 };
 
 pub const SharedState = struct {
-    /// Backend-internal inflight count: ops accepted by submit() and not yet
-    /// completed. A completion submitted on one loop may be finished by the
-    /// loop that owns the fd registration, so the count is a group-shared
-    /// atomic (either loop's decrInflight hits the same storage). Read by
-    /// hasInflight() to skip the poll syscall when nothing can arrive.
-    inflight_io: std.atomic.Value(usize) = .init(0),
     /// Cross-loop single-owner socket registration table, shared by every loop
     /// in the group. See sockreg.zig.
     sock_table: sockreg.Table = .{},
@@ -120,6 +114,13 @@ events: []std.c.Kevent,
 /// Currently-armed absolute deadline (ns in the clock's epoch) for the boot/real
 /// EVFILT_TIMER, or null if disarmed. Index 0 = boot, 1 = real. Darwin only.
 wall_armed: [2]?u64 = .{ null, null },
+/// The number of parked ops THIS poller instance will produce completions for
+/// (socket waiters on fds whose registration this loop owns, plus poll_queue
+/// entries). Maintained at the queue-membership points: sockreg
+/// park/service/detach for sockets (under the shard lock; a cross-loop park
+/// counts on the owner) and addToPollQueue/removeFromPollQueue for the rest.
+/// Read lock-free by hasInflight(), hence the atomic.
+inflight: std.atomic.Value(usize) = .init(0),
 
 fn makeKey(ident: usize, filter: i32) u64 {
     std.debug.assert(ident <= std.math.maxInt(u32));
@@ -357,6 +358,7 @@ fn addToPollQueue(self: *Self, state: *LoopState, completion: *Completion) void 
     }
 
     gop.value_ptr.completions.push(completion);
+    self.incrParked();
 }
 
 fn removeFromPollQueue(self: *Self, completion: *Completion) void {
@@ -365,7 +367,7 @@ fn removeFromPollQueue(self: *Self, completion: *Completion) void {
     const key = makeKey(ident, filter);
     const entry = self.poll_queue.getPtr(key) orelse return;
 
-    _ = entry.completions.remove(completion);
+    if (entry.completions.remove(completion)) self.decrParked();
 
     if (entry.completions.head == null) {
         const change = self.reserveChange() catch {
@@ -453,27 +455,36 @@ pub fn probeEvent(fd: NetHandle, dir: sockreg.Dir) std.c.Kevent {
     };
 }
 
-/// Drop one inflight op. Called via LoopState.markCompletedFromBackend from
-/// whichever loop finishes the op; the storage is group-shared, so any
-/// instance's decrement balances any instance's increment.
-pub fn decrInflight(self: *Self) void {
-    _ = self.shared.inflight_io.fetchSub(1, .monotonic);
+/// A parked op entered a queue this instance's poller services. Called by
+/// sockreg.park (under the shard lock, possibly from another loop's thread)
+/// and by addToPollQueue.
+pub fn incrParked(self: *Self) void {
+    _ = self.inflight.fetchAdd(1, .monotonic);
 }
 
-/// Whether poll() could produce completions. Used by the loop to skip the
-/// wait syscall in no-wait ticks when nothing can arrive.
+/// A parked op left a queue this instance's poller services.
+pub fn decrParked(self: *Self) void {
+    _ = self.inflight.fetchSub(1, .monotonic);
+}
+
+/// No-op: this backend counts parked ops at the queue-membership points (see
+/// `inflight`) instead of mirroring submit/complete, because an op it accepts
+/// may be parked on - and produced by - another instance's poller.
+pub fn decrInflight(self: *Self) void {
+    _ = self;
+}
+
+/// Whether poll() on THIS instance could produce completions. Used by the
+/// loop to skip the wait syscall in no-wait ticks; a loop with nothing of its
+/// own parked skips it even when other loops in the group have work.
 pub fn hasInflight(self: *const Self) bool {
-    return self.shared.inflight_io.load(.monotonic) > 0;
+    return self.inflight.load(.monotonic) > 0;
 }
 
 /// Submit a completion to the backend - infallible.
 /// On error, completes the operation immediately with error.Unexpected.
 pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
     c.state = .running;
-    // Counted for every accepted op (sync completers decrement right back via
-    // markCompletedFromBackend), mirroring the decrInflight in every completion
-    // path so the balance needs no per-path reasoning.
-    _ = self.shared.inflight_io.fetchAdd(1, .monotonic);
 
     switch (c.op) {
         .group, .timer, .async, .work => unreachable, // Managed by the loop

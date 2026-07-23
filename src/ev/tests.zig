@@ -25,6 +25,7 @@ test {
     _ = @import("test/dgram_server_msg.zig");
     _ = @import("test/fs.zig");
     _ = @import("test/timer.zig");
+    _ = @import("test/sockreg.zig");
     _ = @import("test/cancel.zig");
     _ = @import("test/group.zig");
     _ = @import("test/blocking_sockets.zig");

@@ -251,14 +251,20 @@ pub fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion
     // timer, and cancel routing are unchanged. The owner loop only holds the
     // poller registration and services the op in place when its edge fires,
     // completing it cross-thread through the synchronized completion machinery.
-    // Accounting balances regardless of which loop finishes the op (the owner on
-    // a readiness edge, or the submitter on cancel/timeout): the active decrement
-    // is routed to `completion.loop` and the inflight storage is group-shared.
+    // The active decrement is routed to `completion.loop`, so it balances
+    // regardless of which loop finishes the op (the owner on a readiness edge,
+    // or the submitter on cancel/timeout). The parked count goes to the owner:
+    // its poller is the one that will produce this completion.
     completion.prev = null;
     completion.next = null;
     entry.waiters(dir).push(completion);
+    loopFromOpaque(owner.*.?).backend.incrParked();
     shard.mutex.unlock();
     return .parked;
+}
+
+fn loopFromOpaque(ptr: *anyopaque) *Loop {
+    return @ptrCast(@alignCast(ptr));
 }
 
 /// Service ready waiters for one (fd, dir) on the owner loop. Runs each waiter's
@@ -280,12 +286,14 @@ pub fn service(self: anytype, state: anytype, fd: net.fd_t, dir: Dir, event: any
         iter = c.next;
         if (c.state == .completed or c.state == .dead) {
             _ = entry.waiters(dir).remove(c);
+            self.decrParked();
             continue;
         }
         serviced_waiter = true;
         switch (Backend.checkCompletion(c, event)) {
             .completed => {
                 _ = entry.waiters(dir).remove(c);
+                self.decrParked();
                 to_finish.push(c);
             },
             .requeue => break, // drained to EAGAIN for this direction
@@ -331,7 +339,11 @@ pub fn detach(self: anytype, target: *Completion) bool {
     // the op - so claiming it here would double-complete an op that is already on
     // its way out. Leaving it alone is the safe default.
     const entry = shard.map.getPtr(@as(u32, @bitCast(fd))) orelse return false;
-    return entry.waiters(dir).remove(target);
+    if (!entry.waiters(dir).remove(target)) return false;
+    // The waiter left the owner's queue; drop it from the owner's parked count
+    // (the canceling loop calling this need not be the owner).
+    loopFromOpaque(entry.ownerPtr(dir).*.?).backend.decrParked();
+    return true;
 }
 
 /// Tear down the shared registration for a socket fd about to be closed. Closing
