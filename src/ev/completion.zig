@@ -56,9 +56,6 @@ pub const BackendCapabilities = struct {
     net_send_file: bool = false,
     device_io_control: bool = false,
     process_wait: bool = false,
-    /// When true, completions submitted to one loop in a group may be completed
-    /// on another loop's thread. Timer operations are protected by a mutex.
-    is_multi_threaded: bool = false,
     /// When true, the backend arms boot/real (wall-clock) timers natively via
     /// `syncWallTimers`, so the loop must not fold them into the poll timeout.
     /// When false, the loop falls back to the capped poll-timeout re-evaluation.

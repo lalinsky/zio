@@ -221,6 +221,12 @@ wall_ts: [2]linux.kernel_timespec = undefined,
 /// so there is no aliasing concern.
 cqe_buf: [256]linux.io_uring_cqe = undefined,
 shared_state: *SharedState,
+/// Backend-internal inflight count: ops accepted by submit() and not yet
+/// completed (in the SQ/kernel or parked on `pending`). This backend is
+/// strictly per-loop (submit, poll, and completion on the owner thread), so a
+/// plain counter suffices. Read by hasInflight() to skip the enter syscall
+/// when nothing can arrive.
+inflight: usize = 0,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
     var flags: u32 = 0;
@@ -343,6 +349,18 @@ fn drainWaker(self: *Self, cqe: linux.io_uring_cqe) void {
     if (cqe.flags & linux.IORING_CQE_F_MORE == 0) self.waker_needs_rearm = true;
 }
 
+/// Drop one inflight op. Called via LoopState.markCompletedFromBackend on the
+/// owner thread.
+pub fn decrInflight(self: *Self) void {
+    self.inflight -= 1;
+}
+
+/// Whether poll() could produce completions. Used by the loop to skip the
+/// wait syscall in no-wait ticks when nothing can arrive.
+pub fn hasInflight(self: *const Self) bool {
+    return self.inflight > 0;
+}
+
 /// Submit a completion to the backend - infallible.
 /// On error, completes the operation immediately with error.Unexpected.
 /// Can be called for initial submission (state == .new) or resubmission after EINTR (state == .running).
@@ -350,7 +368,10 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
     const is_new = c.state == .new;
     if (is_new) {
         c.state = .running;
-        state.incrActive();
+        // Counted once per accepted op (sync completers decrement right back
+        // via markCompletedFromBackend); EINTR resubmissions are not new and
+        // stay counted from their first submit.
+        self.inflight += 1;
     } else {
         std.debug.assert(c.state == .running);
     }
