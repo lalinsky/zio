@@ -108,10 +108,6 @@ pub const Group = struct {
         return (@atomicLoad(u32, self.getState(), .acquire) & fail_fast_bit) != 0;
     }
 
-    fn setClosed(self: *Group) void {
-        _ = @atomicRmw(u32, self.getState(), .Or, closed_bit, .acq_rel);
-    }
-
     fn isClosed(self: *Group) bool {
         return (@atomicLoad(u32, self.getState(), .acquire) & closed_bit) != 0;
     }
@@ -172,8 +168,18 @@ pub const Group = struct {
         return groupSpawnBlockingTask(self, rt, std.mem.asBytes(&context), .fromByteUnits(@alignOf(Context)), &Wrapper.start);
     }
 
+    /// Wait for every task currently in the group to finish.
+    ///
+    /// The group stays usable: it can be spawned into again afterwards, and
+    /// waited on again, which matches `std.Io.Threaded` and the `select`-based
+    /// wait. Tasks spawned while this is running are waited for too, though the
+    /// caller has to make sure such a spawn happens before the group drains,
+    /// otherwise the wait can return without having seen it.
+    ///
+    /// Neither this nor `cancel` closes a group permanently: `cancel` clears the
+    /// flag again on its way out, so a canceled group is reusable too. Only a
+    /// failure or cancelation with `fail_fast` set leaves a group closed.
     pub fn wait(group: *Group) Cancelable!void {
-        group.setClosed();
         errdefer group.cancel();
 
         // Wait for all tasks to complete
@@ -592,4 +598,80 @@ test "Group: wait() future protocol drains without closing" {
     // Not closed: can spawn again and drain a second time.
     try group.spawn(quick, .{});
     _ = try waitFuture(&group);
+}
+
+test "Group: failed spawnBlocking frees the task exactly once" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    // Make registerBlockingTask fail after the task has already been pushed
+    // into the group, which is the state a spawn racing with shutdown ends up
+    // in. The group's cleanup and spawnBlockingTask's errdefer must not both
+    // free the task. A large context takes the direct allocator path (over
+    // TaskPool.pool_item_size), so testing.allocator catches a double free.
+    rt.shutting_down.store(true, .release);
+
+    const bigWork = struct {
+        fn call(_: [3000]u8) void {}
+    }.call;
+
+    try std.testing.expectError(error.RuntimeShutdown, group.spawnBlocking(bigWork, .{[_]u8{0} ** 3000}));
+}
+
+test "Group: reusable after wait" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var counter: usize = 0;
+    const bump = struct {
+        fn call(c: *usize) void {
+            sleep(.fromMilliseconds(1)) catch {};
+            c.* += 1;
+        }
+    }.call;
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    // wait() used to close the group, which turned every later spawn into
+    // error.Closed (and, through the std.Io vtable, into silently running the
+    // work synchronously).
+    try group.spawn(bump, .{&counter});
+    try group.spawn(bump, .{&counter});
+    try group.wait();
+    try std.testing.expectEqual(2, counter);
+
+    try group.spawn(bump, .{&counter});
+    try group.wait();
+    try std.testing.expectEqual(3, counter);
+}
+
+test "Group: spawning while waiting" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var counter: usize = 0;
+    const spawner = struct {
+        fn bump(c: *usize) void {
+            c.* += 1;
+        }
+
+        fn call(group: *Group, c: *usize) void {
+            // Spawned into the group that our caller is waiting on. The wait
+            // must cover this task too, so the count is 2 when it returns.
+            sleep(.fromMilliseconds(1)) catch {};
+            group.spawn(bump, .{c}) catch {};
+            c.* += 1;
+        }
+    };
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(spawner.call, .{ &group, &counter });
+    try group.wait();
+    try std.testing.expectEqual(2, counter);
 }

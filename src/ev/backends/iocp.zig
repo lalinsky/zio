@@ -170,7 +170,6 @@ pub const capabilities: BackendCapabilities = .{
     // Loop routes pollable fds here; seekable fds go to the thread pool.
     .file_read_streaming = false,
     .file_write_streaming = false,
-    .is_multi_threaded = true,
     .process_wait = true,
     // Zero-copy file-to-socket transfer via the TransmitFile extension.
     .net_send_file = true,
@@ -251,10 +250,11 @@ pub const SharedState = struct {
     refcount: usize = 0,
     iocp: windows.HANDLE = windows.INVALID_HANDLE_VALUE,
 
-    /// Multi-threaded counters: multiple loops may submit and
-    /// complete I/O on the same IOCP port, so active/inflight_io
-    /// are shared atomics rather than per-LoopState fields.
-    active: std.atomic.Value(u64) = .init(0),
+    /// Backend-internal inflight count: ops accepted by submit() and not yet
+    /// completed. Any loop of the group may dequeue any completion from the
+    /// shared port, so the count is a group-shared atomic (any instance's
+    /// decrInflight balances any instance's increment). Read by hasInflight()
+    /// to skip the wait syscall when nothing can arrive.
     inflight_io: std.atomic.Value(u64) = .init(0),
 
     // Extension functions loaded once globally (family-independent)
@@ -282,7 +282,6 @@ pub const SharedState = struct {
 
             // Reset shared accounting in case this SharedState is being
             // reused after a previous teardown that left stale counters.
-            self.active.store(0, .release);
             self.inflight_io.store(0, .release);
 
             // Load all extension functions using a temporary socket
@@ -450,9 +449,25 @@ pub fn wake(self: *Self, state: *LoopState) void {
     }
 }
 
+/// Drop one inflight op. Called via LoopState.markCompletedFromBackend from
+/// whichever loop dequeues the completion; the storage is group-shared, so
+/// any instance's decrement balances any instance's increment.
+pub fn decrInflight(self: *Self) void {
+    _ = self.shared_state.inflight_io.fetchSub(1, .monotonic);
+}
+
+/// Whether poll() could produce completions. Used by the loop to skip the
+/// wait syscall in no-wait ticks when nothing can arrive.
+pub fn hasInflight(self: *const Self) bool {
+    return self.shared_state.inflight_io.load(.monotonic) > 0;
+}
+
 pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
     c.state = .running;
-    state.incrActive();
+    // Counted for every accepted op (sync completers decrement right back via
+    // markCompletedFromBackend), mirroring the decrInflight in every completion
+    // path so the balance needs no per-path reasoning.
+    _ = self.shared_state.inflight_io.fetchAdd(1, .monotonic);
 
     switch (c.op) {
         .group, .timer, .async, .work => unreachable, // Managed by the loop

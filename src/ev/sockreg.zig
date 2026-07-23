@@ -251,9 +251,9 @@ pub fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion
     // timer, and cancel routing are unchanged. The owner loop only holds the
     // poller registration and services the op in place when its edge fires,
     // completing it cross-thread through the synchronized completion machinery.
-    // Accounting is group-shared (is_multi_threaded), so it balances regardless of
-    // which loop finishes the op (the owner on a readiness edge, or the submitter
-    // on cancel/timeout).
+    // Accounting balances regardless of which loop finishes the op (the owner on
+    // a readiness edge, or the submitter on cancel/timeout): the active decrement
+    // is routed to `completion.loop` and the inflight storage is group-shared.
     completion.prev = null;
     completion.next = null;
     entry.waiters(dir).push(completion);

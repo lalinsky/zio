@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed writing to a terminal on macOS crashing with an unexpected `ENXIO` error. A
+  reader or writer starts in positional mode and expects the first `pread`/`pwrite` to
+  fail with `ESPIPE` if the file turns out not to be seekable, which is how it learns to
+  switch to streaming reads and writes. macOS reports a terminal as `ENXIO` instead, so
+  the fallback never happened and the error escaped to the caller as `error.Unexpected`,
+  with a stack trace dumped to stderr. `ENXIO` and `EOVERFLOW` are now both translated to
+  `error.Unseekable`, matching `std.Io.Threaded`.
+
 - Added `Dir.createFileAtomic()` and `AtomicFile` to the native API, mirroring the
   equivalent `std.Io` interface. The data is written to a randomly named temporary file
   in the destination's directory and then moved into place with an atomic rename:
@@ -20,6 +28,14 @@ All notable changes to this project will be documented in this file.
   after the bytes had already been consumed from the socket, and the event loop's
   completion accounting was corrupted. This only affected multi-executor runtimes where
   a socket is used from more than one executor.
+
+- `Group.wait()` no longer closes the group. Waiting used to close it permanently, so
+  every spawn afterwards failed with `error.Closed`, and through the `std.Io` vtable,
+  where `Group.async` cannot report an error, those spawns silently ran their work
+  synchronously on the calling task instead of concurrently. A group can now be spawned
+  into again after `wait()` returns, and a wait covers tasks spawned while it is in
+  progress, as long as the spawn happens before the group drains. This matches
+  `std.Io.Threaded` and the `select`-based wait.
 
 ## [0.16.0] - 2026-07-12
 

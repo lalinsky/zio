@@ -40,19 +40,15 @@ pub const capabilities: BackendCapabilities = .{
     // The BSDs' EVFILT_TIMER absolute clock is monotonic-only and underspecified
     // with no CLOCK_REALTIME timer, so they keep the capped poll-timeout fallback.
     .native_wall_timers = builtin.os.tag.isDarwin(),
-    // A socket fd is registered in exactly one loop's kqueue (per direction), but
-    // the op can be submitted from another loop and is serviced/completed by the
-    // registering loop when its edge fires - completions finish on a thread other
-    // than the submitter. That makes active/inflight accounting shared, like IOCP.
     .net_send_file = builtin.os.tag == .freebsd or builtin.os.tag == .dragonfly,
-    .is_multi_threaded = true,
 };
 
 pub const SharedState = struct {
-    /// Group-shared accounting: a completion submitted on one loop may be
-    /// finished by the loop that owns the fd registration, so active/inflight_io
-    /// are shared atomics rather than per-LoopState fields (see LoopState).
-    active: std.atomic.Value(usize) = .init(0),
+    /// Backend-internal inflight count: ops accepted by submit() and not yet
+    /// completed. A completion submitted on one loop may be finished by the
+    /// loop that owns the fd registration, so the count is a group-shared
+    /// atomic (either loop's decrInflight hits the same storage). Read by
+    /// hasInflight() to skip the poll syscall when nothing can arrive.
     inflight_io: std.atomic.Value(usize) = .init(0),
     /// Cross-loop single-owner socket registration table, shared by every loop
     /// in the group. See sockreg.zig.
@@ -468,11 +464,27 @@ pub fn probeEvent(fd: NetHandle, dir: sockreg.Dir) std.c.Kevent {
     };
 }
 
+/// Drop one inflight op. Called via LoopState.markCompletedFromBackend from
+/// whichever loop finishes the op; the storage is group-shared, so any
+/// instance's decrement balances any instance's increment.
+pub fn decrInflight(self: *Self) void {
+    _ = self.shared.inflight_io.fetchSub(1, .monotonic);
+}
+
+/// Whether poll() could produce completions. Used by the loop to skip the
+/// wait syscall in no-wait ticks when nothing can arrive.
+pub fn hasInflight(self: *const Self) bool {
+    return self.shared.inflight_io.load(.monotonic) > 0;
+}
+
 /// Submit a completion to the backend - infallible.
 /// On error, completes the operation immediately with error.Unexpected.
 pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
     c.state = .running;
-    state.incrActive();
+    // Counted for every accepted op (sync completers decrement right back via
+    // markCompletedFromBackend), mirroring the decrInflight in every completion
+    // path so the balance needs no per-path reasoning.
+    _ = self.shared.inflight_io.fetchAdd(1, .monotonic);
 
     switch (c.op) {
         .group, .timer, .async, .work => unreachable, // Managed by the loop
