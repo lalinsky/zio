@@ -19,6 +19,7 @@ const NetRecvFrom = @import("../completion.zig").NetRecvFrom;
 const NetSendTo = @import("../completion.zig").NetSendTo;
 const NetRecvMsg = @import("../completion.zig").NetRecvMsg;
 const NetSendMsg = @import("../completion.zig").NetSendMsg;
+const NetSendFile = @import("../completion.zig").NetSendFile;
 const NetPoll = @import("../completion.zig").NetPoll;
 const NetClose = @import("../completion.zig").NetClose;
 const PipePoll = @import("../completion.zig").PipePoll;
@@ -43,6 +44,7 @@ pub const capabilities: BackendCapabilities = .{
     // the op can be submitted from another loop and is serviced/completed by the
     // registering loop when its edge fires - completions finish on a thread other
     // than the submitter. That makes active/inflight accounting shared, like IOCP.
+    .net_send_file = builtin.os.tag == .freebsd or builtin.os.tag == .dragonfly,
     .is_multi_threaded = true,
 };
 
@@ -67,6 +69,13 @@ pub const NetShutdownError = error{
 };
 
 const Self = @This();
+
+pub const NetSendFileData = struct {
+    offset: usize = 0,
+    remaining: usize = 0,
+    // Total bytes sent so far
+    sbytes: usize = 0,
+};
 
 const log = @import("../../common.zig").log;
 
@@ -274,6 +283,7 @@ fn getFilter(completion: *Completion) i16 {
         .net_sendto => std.c.EVFILT.WRITE,
         .net_recvmsg => std.c.EVFILT.READ,
         .net_sendmsg => std.c.EVFILT.WRITE,
+        .net_send_file => std.c.EVFILT.WRITE,
         .net_poll => blk: {
             const poll_data = completion.cast(NetPoll);
             break :blk switch (poll_data.event) {
@@ -311,6 +321,7 @@ fn getIdent(completion: *Completion) usize {
         inline .file_read_streaming, .file_write_streaming => |op| @intCast(completion.cast(op.toType()).handle),
         .pipe_close => @intCast(completion.cast(PipeClose).handle),
         .process_wait => @intCast(completion.cast(ProcessWait).handle),
+        .net_send_file => @intCast(completion.cast(NetSendFile).handle),
         .mach_port => completion.cast(MachPort).port,
         else => unreachable,
     };
@@ -538,7 +549,51 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         // File operations are handled by Loop via thread pool
         .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_size, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .file_stat, .dir_open, .dir_close, .dir_read, .dir_create_dir, .dir_rename, .dir_rename_preserve, .dir_delete_file, .dir_delete_dir, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps, .dir_sym_link, .dir_read_link, .dir_hard_link, .dir_access, .dir_real_path, .dir_real_path_file, .file_real_path, .file_hard_link, .device_io_control => unreachable,
         // Driven by Loop's generic read/write fallback, never reaches the backend.
-        .net_send_file => unreachable,
+        .net_send_file => {      
+            const data = c.cast(NetSendFile);
+
+            if(data.internal.sbytes == 0 and data.internal.offset == 0 and data.internal.remaining == 0) {
+                const file_size = fs.fileSize(data.file) catch |err| switch (err) {
+                    error.PermissionDenied => return c.setError(error.AccessDenied),
+                    else => |e| return c.setError(e),
+                };
+                const avail: u64 = if (data.offset >= file_size) 0 else file_size - data.offset;
+                data.internal.remaining = @min(@as(u64, data.remaining), avail);
+                data.internal.offset = data.offset;
+
+                if(data.internal.remaining == 0)  {
+                    data.c.setResult(.net_send_file, 0);
+                    state.markCompletedFromBackend(&data.c);
+                    return;
+                }
+            }
+
+            var sbytes: std.posix.off_t = 0;
+            const rc = std.c.sendfile(data.file, data.handle, @intCast(data.internal.offset), @intCast(data.internal.remaining), null, &sbytes, 0);
+
+            const sent: usize = @intCast(sbytes);
+            data.internal.offset += sent;
+            data.internal.remaining -= sent;
+            data.internal.sbytes += sent;
+            
+            if(rc == -1) {
+                const err = std.posix.errno(rc);
+                if(err == .AGAIN) {
+                    _ = registerSocket(self, data.handle, .write, false);
+                    return;
+                }
+
+                return c.setError(unexpectedError(err));
+            }
+            
+            if(data.internal.remaining > 0) {
+                _ = registerSocket(self, data.handle, .write, false);
+                return;
+            }
+
+            data.c.setResult(.net_send_file, data.internal.sbytes);
+            state.markCompletedFromBackend(&data.c);
+        },
     }
 }
 
