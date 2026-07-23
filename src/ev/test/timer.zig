@@ -194,20 +194,28 @@ test "clearTimer racing a firing timer (cross-thread)" {
     var loop: Loop = undefined;
     var ready = std.atomic.Value(bool).init(false);
     var stop = std.atomic.Value(bool).init(false);
+    var wake_done = std.atomic.Value(bool).init(false);
     const runner = try std.Thread.spawn(.{}, struct {
-        fn run(l: *Loop, r: *std.atomic.Value(bool), s: *std.atomic.Value(bool)) void {
+        fn run(l: *Loop, r: *std.atomic.Value(bool), s: *std.atomic.Value(bool), w: *std.atomic.Value(bool)) void {
             l.init(.{}) catch @panic("loop init failed");
+            defer {
+                // Deinit belongs to this thread, but must not race the main
+                // thread's final wake(): a stale wake from the last clearTimer
+                // can pop run(.once) before that wake() is issued.
+                while (!w.load(.acquire)) std.Thread.yield() catch {};
+                l.deinit();
+            }
             r.store(true, .release);
             while (!s.load(.acquire)) {
                 l.run(.once) catch return;
             }
         }
-    }.run, .{ &loop, &ready, &stop });
-    defer loop.deinit();
+    }.run, .{ &loop, &ready, &stop, &wake_done });
     defer runner.join();
     defer {
         stop.store(true, .release);
         loop.wake();
+        wake_done.store(true, .release);
     }
     while (!ready.load(.acquire)) std.Thread.yield() catch {};
 

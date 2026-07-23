@@ -907,6 +907,7 @@ fn batchCancelPending(batch: *Io.Batch, state: *BatchState) void {
     batchDrainReady(batch, state);
 
     // Cancel all pending operations (only those not yet ready)
+    const loop = &getCurrentExecutor().loop;
     var index = batch.pending.head;
     while (index != .none) {
         const storage = &batch.storage[index.toIndex()];
@@ -916,7 +917,7 @@ fn batchCancelPending(batch: *Io.Batch, state: *BatchState) void {
         if (data_ptr & 1 == 0) {
             const data: *BatchCompletionData = @ptrFromInt(data_ptr);
             const completion = data.getCompletion();
-            if (completion.loop) |l| l.cancel(completion);
+            loop.cancel(completion);
         }
         index = storage.pending.node.next;
     }

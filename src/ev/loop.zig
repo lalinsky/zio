@@ -28,6 +28,12 @@ const common = @import("backends/common.zig");
 const log = @import("../common.zig").log;
 
 const in_safe_mode = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
+const in_debug_mode = builtin.mode == .Debug;
+
+/// The loop bound to the current thread (debug builds only), used by
+/// `assertOwnThread`. Set by `Loop.init`, cleared by `Loop.deinit`.
+threadlocal var current_loop: if (in_debug_mode) ?*Loop else void =
+    if (in_debug_mode) null else {};
 
 /// How the NetSendFile fallback lays out its scratch from the (up to two)
 /// caller-provided buffers.
@@ -582,10 +588,19 @@ pub const Loop = struct {
         errdefer self.backend.deinit();
 
         self.state.initialized = true;
+
+        if (in_debug_mode) current_loop = self;
     }
 
     pub fn deinit(self: *Loop) void {
+        self.assertOwnThread();
+        if (in_debug_mode) current_loop = null;
         self.backend.deinit();
+    }
+
+    /// Debug-only: assert we're on the thread that owns this loop.
+    inline fn assertOwnThread(self: *const Loop) void {
+        if (in_debug_mode) std.debug.assert(current_loop == self);
     }
 
     pub fn stop(self: *Loop) void {
@@ -683,6 +698,8 @@ pub const Loop = struct {
     /// invoked when the operation completes (either with error.Canceled or its natural result).
     /// Thread-safe: can be called from any thread.
     pub fn cancel(self: *Loop, completion: *Completion) void {
+        self.assertOwnThread();
+
         // Check if completion has been added to a loop
         // (loop is set once by addInternal and never changes)
         const target = completion.loop orelse {
@@ -856,6 +873,7 @@ pub const Loop = struct {
     }
 
     pub fn add(self: *Loop, completion: *Completion) void {
+        self.assertOwnThread();
         if (in_safe_mode) {
             if (self.in_add) {
                 @panic("recursive call to Loop.add() is not allowed");
