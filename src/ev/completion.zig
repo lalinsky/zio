@@ -285,7 +285,9 @@ pub const Completion = struct {
     userdata: ?*anyopaque = null,
     callback: ?*const CallbackFn = null,
 
-    /// Loop this completion was submitted to (set by loop.add())
+    /// Loop this completion was submitted to. Set by `Loop.add`/`Loop.setTimer`,
+    /// cleared by `reset`. Read cross-thread (`Async.notify`, cancel routing,
+    /// finish routing), so always access through `setLoop`/`getLoop`.
     loop: ?*Loop = null,
 
     /// Cross-thread cancellation state (atomic for thread-safe cancel)
@@ -342,13 +344,21 @@ pub const Completion = struct {
         return .{ .op = op };
     }
 
+    pub fn setLoop(c: *Completion, loop: ?*Loop) void {
+        @atomicStore(?*Loop, &c.loop, loop, .release);
+    }
+
+    pub fn getLoop(c: *const Completion) ?*Loop {
+        return @atomicLoad(?*Loop, &c.loop, .acquire);
+    }
+
     pub fn reset(c: *Completion) void {
         c.state = .new;
         c.has_result = false;
         c.err = null;
-        // `loop` is kept: Async.notify() reads it cross-thread, and a null
-        // window during a rearm re-add loses the wake. A stale pointer only
-        // causes a spurious wake, and add() overwrites it.
+        // An Async.notify() landing in the null window between this and the
+        // re-add's setLoop is picked up by add() via the `pending` flag.
+        c.setLoop(null);
         c.cancel_state.store(.{}, .release);
         c.cancel_next = null;
         c.group.next = null;
@@ -524,12 +534,15 @@ pub const Async = struct {
 
     /// Notify the loop to wake up and complete this async handle (thread-safe)
     pub fn notify(self: *Async) void {
-        // Atomically set pending flag
-        const was_pending = self.pending.swap(1, .release);
+        // Pairs with the `pending` swap in Loop.add: both are acq_rel RMWs on
+        // the same variable, so they order against each other. If add's swap
+        // came first, the acquire here makes its setLoop visible and we wake
+        // the loop; if ours came first, add sees `pending` set and completes
+        // the handle itself. Reading a null loop therefore proves add will
+        // handle it.
+        const was_pending = self.pending.swap(1, .acq_rel);
         if (was_pending == 0) {
-            // Only notify loop if transitioning from not-pending to pending
-            // If loop is not set (never added), this is a no-op
-            if (@atomicLoad(?*Loop, &self.c.loop, .acquire)) |loop| {
+            if (self.c.getLoop()) |loop| {
                 loop.wakeAsync();
             }
         }

@@ -45,7 +45,7 @@ const time = @import("../time.zig");
 /// Timer and async/work/group operations are not supported (require event loop).
 pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
     // Mark completion as having no loop
-    c.loop = null;
+    c.setLoop(null);
 
     switch (c.op) {
         .file_open => common.handleFileOpen(c, allocator),

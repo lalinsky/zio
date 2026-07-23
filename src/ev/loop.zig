@@ -358,7 +358,7 @@ pub const LoopState = struct {
         // Route the decrement to the loop that owns the completion: `self` here
         // can be a different loop (epoll single-owner servicing, the shared
         // IOCP port, a group finished by the loop that ran its last member).
-        completion.loop.?.state.decrActive();
+        completion.getLoop().?.state.decrActive();
 
         // Both callbacks below can free `completion`, so whichever may free it must
         // run LAST, with nothing touching `completion` afterward. Cache the owner
@@ -663,7 +663,7 @@ pub const Loop = struct {
         // Advance the scan so this timer's deadline is computed against a fresh
         // `now` in its own clock (via `nowFor` in `setTimer`).
         self.state.updateNow();
-        timer.c.loop = self;
+        timer.c.setLoop(self);
         timer.timeout = timeout;
         self.state.setTimer(timer);
     }
@@ -701,8 +701,7 @@ pub const Loop = struct {
         self.assertOwnThread();
 
         // Check if completion has been added to a loop
-        // (loop is set once by addInternal and never changes)
-        const target = completion.loop orelse {
+        const target = completion.getLoop() orelse {
             // Not yet submitted - just set requested, addInternal will handle it
             var old = completion.cancel_state.load(.acquire);
             while (true) {
@@ -895,7 +894,7 @@ pub const Loop = struct {
         std.debug.assert(completion.state == .new);
 
         // Set the loop reference for cross-thread cancellation
-        @atomicStore(?*Loop, &completion.loop, self, .release);
+        completion.setLoop(self);
 
         if (completion.cancel_state.load(.acquire).requested) {
             // Directly mark it as canceled
@@ -1174,7 +1173,10 @@ pub const Loop = struct {
     /// Returns true if the async was pending and had its result set.
     /// Caller is responsible for managing queues and calling markCompleted.
     fn checkAndSetAsyncResult(async_handle: *Async) bool {
-        const was_pending = async_handle.pending.swap(0, .acquire);
+        // acq_rel: pairs with the swap in Async.notify (see the comment there).
+        // The release half publishes addInternal's setLoop to a notifier that
+        // misses this pending flag.
+        const was_pending = async_handle.pending.swap(0, .acq_rel);
         if (was_pending != 0) {
             async_handle.c.setResult(.async, {});
             return true;
