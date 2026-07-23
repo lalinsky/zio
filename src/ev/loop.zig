@@ -430,6 +430,12 @@ pub const LoopState = struct {
 
     pub fn setTimer(self: *LoopState, timer: *Timer) void {
         const idx = clockIndex(timer.clock);
+        // Rearming a timer that is mid-fire (out of the heap, result set, its
+        // markCompleted still pending outside this lock) cannot work: the timer
+        // is already completing and inserting it would double-complete it.
+        // Callers must rearm from the completion callback (or after it), never
+        // concurrently with the fire.
+        std.debug.assert(!(timer.c.state == .running and timer.c.has_result));
         // `.running` means the timer is already in its heap (resetting it);
         // anything else means it's newly activated. Don't key this off
         // `deadline.value`, which can legitimately be 0 for an absolute
@@ -632,6 +638,13 @@ pub const Loop = struct {
     pub fn setTimer(self: *Loop, timer: *Timer, timeout: Timeout) void {
         self.state.lockTimers();
         defer self.state.unlockTimers();
+        // Rearming a fired (completed/dead) timer: drop the stale result so
+        // that a running timer with a result set unambiguously means "mid-fire"
+        // (the limbo state clearTimer must leave alone).
+        if (timer.c.state != .running) {
+            timer.c.has_result = false;
+            timer.c.err = null;
+        }
         // Advance the scan so this timer's deadline is computed against a fresh
         // `now` in its own clock (via `nowFor` in `setTimer`).
         self.state.updateNow();
@@ -640,10 +653,20 @@ pub const Loop = struct {
         self.state.setTimer(timer);
     }
 
-    /// Clear a timer without completing it (works immediately, no cancellation completion required)
+    /// Clear a timer without completing it (works immediately, no cancellation
+    /// completion required). Thread-safe: may be called from a thread that does
+    /// not own the loop (a migrated task clearing its sleep timer).
     pub fn clearTimer(self: *Loop, timer: *Timer) void {
         self.state.lockTimers();
         defer self.state.unlockTimers();
+        // A running timer that already has its result is in the fired/canceled
+        // limbo window: checkTimers (or cancelLocal) removed it from the heap
+        // and set its result under this lock, but its markCompleted runs after
+        // unlocking. Touching it here would remove a non-member from the heap
+        // (corrupting it), clear the result that markCompleted asserts on, and
+        // decrement active a second time (finishCompletion will decrement for
+        // the same timer). It is already on its way to completion; leave it be.
+        if (timer.c.state == .running and timer.c.has_result) return;
         const was_active = timer.c.state == .running;
         self.state.clearTimer(timer);
         if (was_active) {
@@ -735,8 +758,12 @@ pub const Loop = struct {
             },
             .timer => {
                 const timer = completion.cast(Timer);
-                timer.c.setError(error.Canceled);
                 self.state.lockTimers();
+                // Set the result under the timer lock: a cross-thread
+                // Loop.clearTimer keys "already fired/canceled, hands off" on
+                // (.running and has_result) under this lock, so the result must
+                // never appear outside it while the timer is running.
+                timer.c.setError(error.Canceled);
                 self.state.clearTimer(timer);
                 self.state.unlockTimers();
                 self.state.markCompleted(&timer.c);

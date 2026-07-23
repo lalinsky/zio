@@ -179,3 +179,65 @@ test "timer on real clock fires (absolute deadline)" {
     try std.testing.expect(elapsed.toMilliseconds() <= 250);
     std.log.info("real timer: expected=100ms, actual={f}", .{elapsed});
 }
+
+test "clearTimer racing a firing timer (cross-thread)" {
+    // Regression test: a task migrated to another executor clears its sleep
+    // timer on the loop that armed it, racing the owner thread's checkTimers.
+    // A fired timer sits in a limbo window (out of the heap, result set, its
+    // markCompleted pending outside the timer lock); clearTimer touching it
+    // there corrupted the heap, double-decremented active, and cleared the
+    // result markCompleted asserts on.
+    // The loop is initialized and driven entirely on the runner thread (an
+    // io_uring SINGLE_ISSUER ring must be entered by its creating thread);
+    // this thread only uses the thread-safe setTimer/clearTimer/wake APIs,
+    // exactly like a migrated task's timedWaitClock does.
+    var loop: Loop = undefined;
+    var ready = std.atomic.Value(bool).init(false);
+    var stop = std.atomic.Value(bool).init(false);
+    const runner = try std.Thread.spawn(.{}, struct {
+        fn run(l: *Loop, r: *std.atomic.Value(bool), s: *std.atomic.Value(bool)) void {
+            l.init(.{}) catch @panic("loop init failed");
+            r.store(true, .release);
+            while (!s.load(.acquire)) {
+                l.run(.once) catch return;
+            }
+        }
+    }.run, .{ &loop, &ready, &stop });
+    defer loop.deinit();
+    defer runner.join();
+    defer {
+        stop.store(true, .release);
+        loop.wake();
+    }
+    while (!ready.load(.acquire)) std.Thread.yield() catch {};
+
+    const callback = struct {
+        fn cb(_: *Loop, c: *@import("../completion.zig").Completion) void {
+            const fired: *std.atomic.Value(bool) = @ptrCast(@alignCast(c.userdata.?));
+            fired.store(true, .release);
+        }
+    }.cb;
+
+    var i: usize = 0;
+    while (i < 2000) : (i += 1) {
+        var fired = std.atomic.Value(bool).init(false);
+        var timer: Timer = .init(.{ .duration = .zero });
+        timer.c.userdata = &fired;
+        timer.c.callback = callback;
+
+        // Arm with a tiny, varying delay so the clear below lands at different
+        // points relative to the fire: before it, after it, and inside the
+        // limbo window.
+        loop.setTimer(&timer, .{ .duration = .fromNanoseconds((i % 64) * 1000) });
+        if (i % 2 == 0) std.Thread.yield() catch {};
+        loop.clearTimer(&timer);
+
+        // If the clear won, the timer is ours again (.new, written by this
+        // thread under the lock). Anything else means the fire got there
+        // first (or is mid-flight): wait for its callback before the stack
+        // timer goes out of scope.
+        if (@atomicLoad(@TypeOf(timer.c.state), &timer.c.state, .acquire) != .new) {
+            while (!fired.load(.acquire)) std.Thread.yield() catch {};
+        }
+    }
+}
