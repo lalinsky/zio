@@ -576,7 +576,7 @@ pub const Timeout = union(enum) {
     pub fn asyncCancelWait(self: *const Timeout, waiter: *Waiter, ctx: *WaitContext) bool {
         _ = self;
         _ = waiter;
-        const loop = ctx.timer.c.loop orelse return true;
+        const loop = ctx.timer.c.getLoop() orelse return true;
         ctx.waiter = null; // Prevent callback from waking a stale/reused waiter
         loop.clearTimer(&ctx.timer);
         return true; // Timer operations don't have values to re-add if we lost the race

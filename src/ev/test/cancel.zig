@@ -31,7 +31,7 @@ test "cancel: timer with loop.cancel()" {
     try loop.run(.until_done);
     const elapsed_ms = wall_timer.read().toMilliseconds();
 
-    try std.testing.expectEqual(.dead, timer.c.state);
+    try std.testing.expectEqual(.dead, timer.c.loadState().phase);
     try std.testing.expectError(error.Canceled, timer.getResult());
     try std.testing.expect(elapsed_ms < 50);
 }
@@ -62,7 +62,7 @@ test "cancel: cancel completed operation is no-op" {
 
     // Wait for timer to complete
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, timer.c.state);
+    try std.testing.expectEqual(.dead, timer.c.loadState().phase);
     try timer.getResult();
 
     // Cancel after completion is no-op
@@ -98,7 +98,7 @@ test "cancel: async handle with loop.cancel()" {
 
     try loop.run(.until_done);
 
-    try std.testing.expectEqual(.dead, async_handle.c.state);
+    try std.testing.expectEqual(.dead, async_handle.c.loadState().phase);
     try std.testing.expectError(error.Canceled, async_handle.getResult());
 }
 
@@ -136,14 +136,14 @@ test "cancel: net_accept with loop.cancel()" {
     loop.add(&accept_comp.c);
 
     try loop.run(.no_wait);
-    try std.testing.expectEqual(.running, accept_comp.c.state);
+    try std.testing.expectEqual(.running, accept_comp.c.loadState().phase);
 
     // Cancel with loop.cancel()
     loop.cancel(&accept_comp.c);
 
     try loop.run(.until_done);
 
-    try std.testing.expectEqual(.dead, accept_comp.c.state);
+    try std.testing.expectEqual(.dead, accept_comp.c.loadState().phase);
     try std.testing.expectError(error.Canceled, accept_comp.getResult());
 
     // Close server socket
@@ -207,14 +207,14 @@ test "cancel: net_recv with loop.cancel()" {
     loop.add(&recv.c);
 
     try loop.run(.no_wait);
-    try std.testing.expectEqual(.running, recv.c.state);
+    try std.testing.expectEqual(.running, recv.c.loadState().phase);
 
     // Cancel with loop.cancel()
     loop.cancel(&recv.c);
 
     try loop.run(.until_done);
 
-    try std.testing.expectEqual(.dead, recv.c.state);
+    try std.testing.expectEqual(.dead, recv.c.loadState().phase);
     try std.testing.expectError(error.Canceled, recv.getResult());
 
     // Close sockets
@@ -227,7 +227,7 @@ test "cancel: net_recv with loop.cancel()" {
     try loop.run(.until_done);
 }
 
-test "cancel: cancel_state.requested flag is set on completion" {
+test "cancel: cancel_requested flag is set on completion" {
     var loop: Loop = undefined;
     try loop.init(.{});
     defer loop.deinit();
@@ -235,11 +235,11 @@ test "cancel: cancel_state.requested flag is set on completion" {
     var timer: Timer = .init(.{ .duration = .fromMilliseconds(100) });
     loop.add(&timer.c);
 
-    try std.testing.expect(!timer.c.cancel_state.load(.acquire).requested);
+    try std.testing.expect(!timer.c.loadState().cancel_requested);
 
     loop.cancel(&timer.c);
 
-    try std.testing.expect(timer.c.cancel_state.load(.acquire).requested);
+    try std.testing.expect(timer.c.loadState().cancel_requested);
 
     try loop.run(.until_done);
 }
@@ -257,7 +257,7 @@ test "cancel: callback is invoked on canceled operation" {
             _ = l;
             const self: *@This() = @ptrCast(@alignCast(c.userdata.?));
             self.called = true;
-            self.was_canceled = c.cancel_state.load(.acquire).requested;
+            self.was_canceled = c.loadState().cancel_requested;
         }
     };
 
@@ -286,7 +286,7 @@ test "cancel: race - operation completes before cancel" {
 
     // Wait for it to complete
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, timer.c.state);
+    try std.testing.expectEqual(.dead, timer.c.loadState().phase);
     try timer.getResult(); // Should succeed
 
     // Cancel after completion is no-op
@@ -349,7 +349,7 @@ test "cancel: work after completion is no-op" {
 
     // Wait for work to complete
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, work.c.state);
+    try std.testing.expectEqual(.dead, work.c.loadState().phase);
     try work.getResult();
     try std.testing.expect(test_fn.called);
 
@@ -420,7 +420,7 @@ test "cancel: work before run" {
 
     try loop.run(.until_done);
 
-    try std.testing.expectEqual(.dead, work.c.state);
+    try std.testing.expectEqual(.dead, work.c.loadState().phase);
     try std.testing.expectError(error.Canceled, work.getResult());
     try std.testing.expect(!test_fn.called);
 }
@@ -601,6 +601,6 @@ test "cancel: cross-thread cancellation" {
 
     cancel_thread.join();
 
-    try std.testing.expectEqual(.dead, timer.c.state);
+    try std.testing.expectEqual(.dead, timer.c.loadState().phase);
     try std.testing.expectError(error.Canceled, timer.getResult());
 }

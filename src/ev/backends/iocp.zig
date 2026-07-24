@@ -463,7 +463,6 @@ pub fn hasInflight(self: *const Self) bool {
 }
 
 pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
-    c.state = .running;
     // Counted for every accepted op (sync completers decrement right back via
     // markCompletedFromBackend), mirroring the decrInflight in every completion
     // path so the balance needs no per-path reasoning.
@@ -1496,10 +1495,9 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
     _ = self;
     _ = state;
 
-    switch (target.state) {
+    switch (target.loadState().phase) {
         .new => {
-            // UNREACHABLE: When cancel is added via loop.add() and target.state == .new,
-            // loop.add() handles it directly and doesn't call backend.cancel().
+            // UNREACHABLE: cancelLocal only forwards running completions.
             unreachable;
         },
         .running => {
@@ -1806,7 +1804,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                     // Whole requested range sent.
                     c.setResult(.net_send_file, data.internal.total);
                     state.markCompletedFromBackend(c);
-                } else if (c.cancel_state.load(.acquire).requested) {
+                } else if (c.loadState().cancel_requested) {
                     // Cancel was requested between this chunk completing and the
                     // re-arm. CancelIoEx already returned NOT_FOUND (the chunk
                     // had already completed), so we must check the flag here to
@@ -2057,7 +2055,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 data.internal.wait_handle = windows.INVALID_HANDLE_VALUE;
             }
 
-            if (c.cancel_state.load(.acquire).requested) {
+            if (c.loadState().cancel_requested) {
                 c.setError(error.Canceled);
             } else {
                 var exit_code: windows.DWORD = 0;

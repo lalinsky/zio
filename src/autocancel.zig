@@ -23,8 +23,8 @@ pub const AutoCancel = struct {
     pub const init: AutoCancel = .{};
 
     pub fn clear(self: *AutoCancel) void {
-        const loop = self.timer.c.loop orelse return;
-        if (self.timer.c.state != .running) return;
+        const loop = self.timer.c.getLoop() orelse return;
+        if (self.timer.c.loadState().phase != .running) return;
 
         loop.clearTimer(&self.timer);
         self.task = null;

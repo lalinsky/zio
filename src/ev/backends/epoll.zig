@@ -495,7 +495,6 @@ pub fn hasInflight(self: *const Self) bool {
 /// Submit a completion to the backend - infallible.
 /// On error, completes the operation immediately with error.Unexpected.
 pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
-    c.state = .running;
     // Counted for every accepted op (sync completers decrement right back via
     // markCompletedFromBackend), mirroring the decrInflight in every completion
     // path so the balance needs no per-path reasoning.
@@ -717,7 +716,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
             iter = completion.next;
 
             // Skip if already completed (can happen with cancellations)
-            if (completion.state == .completed or completion.state == .dead) {
+            if (completion.loadState().phase != .running) {
                 continue;
             }
 

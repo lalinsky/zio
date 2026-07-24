@@ -278,7 +278,7 @@ pub fn service(self: anytype, state: anytype, fd: net.fd_t, dir: Dir, event: any
     var iter: ?*Completion = entry.waiters(dir).head;
     while (iter) |c| {
         iter = c.next;
-        if (c.state == .completed or c.state == .dead) {
+        if (c.loadState().phase != .running) {
             _ = entry.waiters(dir).remove(c);
             continue;
         }
@@ -313,7 +313,7 @@ pub fn service(self: anytype, state: anytype, fd: net.fd_t, dir: Dir, event: any
 /// The shard lock makes that answer exact rather than advisory: `service` runs
 /// the syscall and sets the result while holding the same lock it removes the
 /// waiter under, so "still in the queue" and "no result set yet" are the same
-/// condition. The reverse - inferring it from `cancel_state.completed` - would
+/// condition. The reverse - inferring it from the `.completed` phase - would
 /// race, because `service` deliberately marks the op completed only after
 /// dropping the lock.
 pub fn detach(self: anytype, target: *Completion) bool {
@@ -323,8 +323,8 @@ pub fn detach(self: anytype, target: *Completion) bool {
     shard.mutex.lock();
     defer shard.mutex.unlock();
     // A live parked op always has an entry: detach only runs while the op is not
-    // yet completed (loop.cancel and cancelLocal both bail on cancel_state
-    // .completed), and an entry is only dropped by `unregister` on close, which
+    // yet completed (loop.cancel and cancelLocal both bail on the `.completed`
+    // phase), and an entry is only dropped by `unregister` on close, which
     // cannot happen until the op completes and wakes its owner. So this branch is
     // unreachable in practice. Return false anyway (not true): a missing entry
     // could only mean the waiter was already removed - i.e. `service` is finishing

@@ -28,6 +28,12 @@ const common = @import("backends/common.zig");
 const log = @import("../common.zig").log;
 
 const in_safe_mode = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
+const in_debug_mode = builtin.mode == .Debug;
+
+/// The loop bound to the current thread (debug builds only), used by
+/// `assertOwnThread`. Set by `Loop.init`, cleared by `Loop.deinit`.
+threadlocal var current_loop: if (in_debug_mode) ?*Loop else void =
+    if (in_debug_mode) null else {};
 
 /// How the NetSendFile fallback lays out its scratch from the (up to two)
 /// caller-provided buffers.
@@ -314,23 +320,10 @@ pub const LoopState = struct {
     }
 
     pub fn markCompleted(self: *LoopState, completion: *Completion) void {
-        std.debug.assert(completion.state == .running);
         std.debug.assert(completion.has_result);
-
-        // Atomically set completed flag
-        var old = completion.cancel_state.load(.acquire);
-        while (true) {
-            var new = old;
-            new.completed = true;
-            old = completion.cancel_state.cmpxchgWeak(old, new, .acq_rel, .acquire) orelse break;
-        }
-
-        // Always set state
-        completion.state = .completed;
-
-        // Only call finish if not in cancel queue
-        // If in_queue, cancel queue processing will call finishCompletion
-        if (!old.in_queue) {
+        const old = completion.enterCompleted();
+        // With a cancel pass in flight, that pass owns the dispatch.
+        if (!old.cancel_inflight) {
             self.dispatchCompletion(completion);
         }
     }
@@ -346,13 +339,11 @@ pub const LoopState = struct {
     }
 
     pub fn finishCompletion(self: *LoopState, completion: *Completion) void {
-        std.debug.assert(completion.state == .completed);
-
-        completion.state = .dead;
+        completion.enterDead();
         // Route the decrement to the loop that owns the completion: `self` here
         // can be a different loop (epoll single-owner servicing, the shared
         // IOCP port, a group finished by the loop that ran its last member).
-        completion.loop.?.state.decrActive();
+        completion.getLoop().?.state.decrActive();
 
         // Both callbacks below can free `completion`, so whichever may free it must
         // run LAST, with nothing touching `completion` afterward. Cache the owner
@@ -393,11 +384,6 @@ pub const LoopState = struct {
         }
     }
 
-    pub fn markRunning(self: *LoopState, completion: *Completion) void {
-        _ = self;
-        completion.state = .running;
-    }
-
     /// Advance the scan counter and refresh the awake snapshot. Bumping `tick`
     /// invalidates the lazily-cached boot/real values for the new scan.
     pub fn updateNow(self: *LoopState) void {
@@ -428,37 +414,20 @@ pub const LoopState = struct {
         self.timer_mutex.unlock();
     }
 
-    pub fn setTimer(self: *LoopState, timer: *Timer) void {
-        const idx = clockIndex(timer.clock);
-        // Rearming a timer that is mid-fire (out of the heap, result set, its
-        // markCompleted still pending outside this lock) cannot work: the timer
-        // is already completing and inserting it would double-complete it.
-        // Callers must rearm from the completion callback (or after it), never
-        // concurrently with the fire.
-        std.debug.assert(!(timer.c.state == .running and timer.c.has_result));
-        // `.running` means the timer is already in its heap (resetting it);
-        // anything else means it's newly activated. Don't key this off
-        // `deadline.value`, which can legitimately be 0 for an absolute
-        // deadline at/at-before the epoch and would then leak/double-fire.
-        if (timer.c.state == .running) {
-            self.timers[idx].remove(timer);
-        } else {
-            self.incrActive();
-        }
+    /// Compute the deadline from `timer.timeout` and insert into the heap.
+    /// The timer must not be in a heap.
+    pub fn armTimer(self: *LoopState, timer: *Timer) void {
         switch (timer.timeout) {
             .none => timer.deadline = .{ .value = std.math.maxInt(time.TimeInt) },
             .duration => |d| timer.deadline = self.nowFor(timer.clock).addDuration(d),
             .deadline => |ts| timer.deadline = ts,
         }
-        timer.c.state = .running;
-        self.timers[idx].insert(timer);
+        self.timers[clockIndex(timer.clock)].insert(timer);
     }
 
-    pub fn clearTimer(self: *LoopState, timer: *Timer) void {
-        const was_active = timer.c.state == .running;
-        if (was_active) {
-            self.timers[clockIndex(timer.clock)].remove(timer);
-        }
+    /// Remove from the heap. The timer must be in it (armed and not mid-fire).
+    pub fn disarmTimer(self: *LoopState, timer: *Timer) void {
+        self.timers[clockIndex(timer.clock)].remove(timer);
         timer.deadline = .zero;
     }
 
@@ -582,10 +551,19 @@ pub const Loop = struct {
         errdefer self.backend.deinit();
 
         self.state.initialized = true;
+
+        if (in_debug_mode) current_loop = self;
     }
 
     pub fn deinit(self: *Loop) void {
+        self.assertOwnThread();
+        if (in_debug_mode) current_loop = null;
         self.backend.deinit();
+    }
+
+    /// Debug-only: assert we're on the thread that owns this loop.
+    inline fn assertOwnThread(self: *const Loop) void {
+        if (in_debug_mode) std.debug.assert(current_loop == self);
     }
 
     pub fn stop(self: *Loop) void {
@@ -638,19 +616,29 @@ pub const Loop = struct {
     pub fn setTimer(self: *Loop, timer: *Timer, timeout: Timeout) void {
         self.state.lockTimers();
         defer self.state.unlockTimers();
-        // Rearming a fired (completed/dead) timer: drop the stale result so
-        // that a running timer with a result set unambiguously means "mid-fire"
-        // (the limbo state clearTimer must leave alone).
-        if (timer.c.state != .running) {
+        const st = timer.c.loadState();
+        // A running timer sits in its owning loop's heap; re-arming it here
+        // would remove it from this loop's heap instead and leak the owner's
+        // active count. Clear it on the owning loop first.
+        std.debug.assert(st.phase != .running or timer.c.getLoop() == self);
+        // A running timer with a result set is mid-fire (out of the heap, its
+        // markCompleted pending outside this lock); rearm from the callback
+        // (or after it), never concurrently with the fire.
+        std.debug.assert(!(st.phase == .running and timer.c.has_result));
+        // Advance the scan so this timer's deadline is computed against a fresh
+        // `now` in its own clock (via `nowFor` in `armTimer`).
+        self.state.updateNow();
+        timer.timeout = timeout;
+        if (st.phase == .running) {
+            self.state.disarmTimer(timer);
+        } else {
             timer.c.has_result = false;
             timer.c.err = null;
+            timer.c.setLoop(self);
+            _ = timer.c.enterRunning();
+            self.state.incrActive();
         }
-        // Advance the scan so this timer's deadline is computed against a fresh
-        // `now` in its own clock (via `nowFor` in `setTimer`).
-        self.state.updateNow();
-        timer.c.loop = self;
-        timer.timeout = timeout;
-        self.state.setTimer(timer);
+        self.state.armTimer(timer);
     }
 
     /// Clear a timer without completing it (works immediately, no cancellation
@@ -659,23 +647,15 @@ pub const Loop = struct {
     pub fn clearTimer(self: *Loop, timer: *Timer) void {
         self.state.lockTimers();
         defer self.state.unlockTimers();
+        if (timer.c.loadState().phase != .running) return;
         // A running timer that already has its result is in the fired/canceled
         // limbo window: checkTimers (or cancelLocal) removed it from the heap
         // and set its result under this lock, but its markCompleted runs after
-        // unlocking. Touching it here would remove a non-member from the heap
-        // (corrupting it), clear the result that markCompleted asserts on, and
-        // decrement active a second time (finishCompletion will decrement for
-        // the same timer). It is already on its way to completion; leave it be.
-        if (timer.c.state == .running and timer.c.has_result) return;
-        const was_active = timer.c.state == .running;
-        self.state.clearTimer(timer);
-        if (was_active) {
-            // Reset state so timer can be reused
-            timer.c.state = .new;
-            timer.c.has_result = false;
-            timer.c.err = null;
-            self.state.decrActive();
-        }
+        // unlocking. It is already on its way to completion; leave it be.
+        if (timer.c.has_result) return;
+        self.state.disarmTimer(timer);
+        timer.c.disarm();
+        self.state.decrActive();
     }
 
     /// Cancel a completion directly without requiring a Cancel completion struct.
@@ -683,30 +663,16 @@ pub const Loop = struct {
     /// invoked when the operation completes (either with error.Canceled or its natural result).
     /// Thread-safe: can be called from any thread.
     pub fn cancel(self: *Loop, completion: *Completion) void {
-        // Check if completion has been added to a loop
-        // (loop is set once by addInternal and never changes)
-        const target = completion.loop orelse {
-            // Not yet submitted - just set requested, addInternal will handle it
-            var old = completion.cancel_state.load(.acquire);
-            while (true) {
-                if (old.requested) return;
-                var new = old;
-                new.requested = true;
-                old = completion.cancel_state.cmpxchgWeak(old, new, .acq_rel, .acquire) orelse return;
-            }
-            return;
-        };
+        self.assertOwnThread();
 
-        // Atomically set requested and in_queue flags
-        var old = completion.cancel_state.load(.acquire);
-        while (true) {
-            if (old.requested) return; // Already requested
-            if (old.completed) return; // Already completed
-            var new = old;
-            new.requested = true;
-            new.in_queue = true;
-            old = completion.cancel_state.cmpxchgWeak(old, new, .acq_rel, .acquire) orelse break;
-        }
+        const old = completion.requestCancel();
+        // Nothing to route: already requested, too late, or not yet submitted
+        // (enterRunning picks the latched request up).
+        if (old.cancel_requested or old.phase != .running) return;
+
+        // The CAS observed `.running`, so the loop published by enterRunning
+        // is visible.
+        const target = completion.getLoop().?;
 
         if (self == target) {
             // Same loop - cancel directly
@@ -728,20 +694,14 @@ pub const Loop = struct {
     /// Cancel a completion on the local loop (must be called from the loop's thread)
     fn cancelLocal(self: *Loop, completion: *Completion) void {
         defer {
-            // Clear in_queue and call finishCompletion if completed
-            var old = completion.cancel_state.load(.acquire);
-            while (true) {
-                var new = old;
-                new.in_queue = false;
-                old = completion.cancel_state.cmpxchgWeak(old, new, .acq_rel, .acquire) orelse break;
-            }
-            if (old.completed) {
+            const old = completion.finishCancelPass();
+            if (old.phase == .completed) {
                 self.state.dispatchCompletion(completion);
             }
         }
 
-        // If already completed, skip cancel work (defer will still run)
-        if (completion.cancel_state.load(.acquire).completed) {
+        // Completed while queued, or disarmed in the meantime (timers)
+        if (completion.loadState().phase != .running) {
             return;
         }
 
@@ -759,12 +719,17 @@ pub const Loop = struct {
             .timer => {
                 const timer = completion.cast(Timer);
                 self.state.lockTimers();
-                // Set the result under the timer lock: a cross-thread
-                // Loop.clearTimer keys "already fired/canceled, hands off" on
-                // (.running and has_result) under this lock, so the result must
-                // never appear outside it while the timer is running.
+                // Re-check under the lock: a cross-thread clearTimer may have
+                // disarmed it, or the fire may have won (mid-fire limbo:
+                // running with a result set, out of the heap already).
+                if (timer.c.loadState().phase != .running or timer.c.has_result) {
+                    self.state.unlockTimers();
+                    return;
+                }
+                // Set the result under the timer lock: clearTimer keys
+                // "already fired/canceled, hands off" on it.
                 timer.c.setError(error.Canceled);
-                self.state.clearTimer(timer);
+                self.state.disarmTimer(timer);
                 self.state.unlockTimers();
                 self.state.markCompleted(&timer.c);
             },
@@ -856,6 +821,7 @@ pub const Loop = struct {
     }
 
     pub fn add(self: *Loop, completion: *Completion) void {
+        self.assertOwnThread();
         if (in_safe_mode) {
             if (self.in_add) {
                 @panic("recursive call to Loop.add() is not allowed");
@@ -869,21 +835,19 @@ pub const Loop = struct {
     }
 
     fn addInternal(self: *Loop, completion: *Completion) void {
-        // If completion is dead (callback was called), reset it to new state for rearming
-        if (completion.state == .dead) {
+        completion.setLoop(self);
+        const old = completion.enterRunning();
+        if (old.phase == .dead) {
             completion.reset();
         }
+        self.state.incrActive();
 
-        std.debug.assert(completion.state == .new);
-
-        // Set the loop reference for cross-thread cancellation
-        @atomicStore(?*Loop, &completion.loop, self, .release);
-
-        if (completion.cancel_state.load(.acquire).requested) {
-            // Directly mark it as canceled
+        if (old.cancel_requested) {
+            // Groups cannot be canceled before submission
+            if (completion.op == .group) {
+                @panic("cannot cancel a group before adding it to the loop");
+            }
             completion.setError(error.Canceled);
-            self.state.incrActive();
-            completion.state = .running;
             self.state.markCompleted(completion);
             return;
         }
@@ -891,14 +855,6 @@ pub const Loop = struct {
         switch (completion.op) {
             .group => {
                 const group = completion.cast(Group);
-
-                // Groups cannot be canceled before submission
-                if (group.c.cancel_state.load(.acquire).requested) {
-                    @panic("cannot cancel a group before adding it to the loop");
-                }
-
-                group.c.state = .running;
-                self.state.incrActive();
 
                 if (group.remaining.load(.acquire) == 0) {
                     // Empty group - complete immediately
@@ -919,14 +875,12 @@ pub const Loop = struct {
             .timer => {
                 const timer = completion.cast(Timer);
                 self.state.lockTimers();
-                self.state.setTimer(timer);
+                self.state.armTimer(timer);
                 self.state.unlockTimers();
                 return;
             },
             .async => {
                 const async = completion.cast(Async);
-                async.c.state = .running;
-                self.state.incrActive();
 
                 // Check if already notified before submission
                 if (checkAndSetAsyncResult(async)) {
@@ -942,8 +896,6 @@ pub const Loop = struct {
                 const work = completion.cast(Work);
                 work.completion_fn = loopWorkComplete;
                 work.completion_context = @ptrCast(self);
-                work.c.state = .running;
-                self.state.incrActive();
                 if (self.thread_pool) |thread_pool| {
                     thread_pool.submit(work);
                 } else {
@@ -955,8 +907,6 @@ pub const Loop = struct {
             },
             .net_send_file => {
                 const op = completion.cast(NetSendFile);
-                completion.state = .running;
-                self.state.incrActive();
                 if (comptime Backend.capabilities.net_send_file) {
                     self.backend.submit(&self.state, completion);
                 } else {
@@ -991,7 +941,6 @@ pub const Loop = struct {
                             // Route pollable fds to the backend readiness/overlapped path;
                             // seekable fds (regular files, block devices) to the thread pool.
                             if (pollable) {
-                                self.state.incrActive();
                                 self.backend.submit(&self.state, completion);
                             } else {
                                 self.submitFileOpToThreadPool(completion);
@@ -1010,7 +959,6 @@ pub const Loop = struct {
                     .file_set_size => {
                         if (comptime @hasDecl(Backend, "fileSetSizeSupported")) {
                             if (self.backend.fileSetSizeSupported()) {
-                                self.state.incrActive();
                                 self.backend.submit(&self.state, completion);
                                 return;
                             }
@@ -1032,7 +980,6 @@ pub const Loop = struct {
                     },
                 }
 
-                self.state.incrActive();
                 self.backend.submit(&self.state, completion);
                 return;
             },
@@ -1112,7 +1059,7 @@ pub const Loop = struct {
                         break;
                     }
                     timer.c.setResult(.timer, {});
-                    self.state.clearTimer(timer);
+                    self.state.disarmTimer(timer);
                     batch[batch_count] = timer;
                     batch_count += 1;
                     if (batch_count >= batch.len) break;
@@ -1156,7 +1103,10 @@ pub const Loop = struct {
     /// Returns true if the async was pending and had its result set.
     /// Caller is responsible for managing queues and calling markCompleted.
     fn checkAndSetAsyncResult(async_handle: *Async) bool {
-        const was_pending = async_handle.pending.swap(0, .acquire);
+        // acq_rel: pairs with the swap in Async.notify (see the comment there).
+        // The release half publishes addInternal's setLoop to a notifier that
+        // misses this pending flag.
+        const was_pending = async_handle.pending.swap(0, .acq_rel);
         if (was_pending != 0) {
             async_handle.c.setResult(.async, {});
             return true;
@@ -1234,7 +1184,7 @@ pub const Loop = struct {
             const next = completion.cancel_next;
             completion.cancel_next = null;
 
-            // cancelLocal handles completed check and clears in_queue
+            // cancelLocal re-checks the phase and clears cancel_inflight
             self.cancelLocal(completion);
 
             c = next;
@@ -1245,15 +1195,10 @@ pub const Loop = struct {
         const tp = self.thread_pool orelse {
             // No thread pool - complete with error
             log.err("No thread pool available for file operation", .{});
-            completion.state = .running;
-            self.state.incrActive();
             completion.setError(error.Unexpected);
             self.state.markCompleted(completion);
             return;
         };
-
-        completion.state = .running;
-        self.state.incrActive();
 
         switch (completion.op) {
             inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_read_streaming, .file_write_streaming, .file_sync, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .dir_create_dir, .dir_rename, .dir_rename_preserve, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat, .dir_open, .dir_close, .dir_read, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps, .dir_sym_link, .dir_read_link, .dir_hard_link, .dir_access, .dir_real_path, .dir_real_path_file, .file_real_path, .file_hard_link, .device_io_control, .process_wait => |op| {
@@ -1382,7 +1327,7 @@ pub const Loop = struct {
         const f = &op.internal;
 
         // A cancel that arrived between callbacks turns into a parked error.
-        if (op.c.cancel_state.load(.acquire).requested and f.pending_err == null) {
+        if (op.c.loadState().cancel_requested and f.pending_err == null) {
             f.pending_err = error.Canceled;
         }
 

@@ -202,10 +202,11 @@ pub const CompletionQueue = struct {
 
         // Cancel each pending operation. We don't hold the lock while calling
         // loop.cancel() because the callback needs to acquire it.
+        const loop = &getCurrentExecutor().loop;
         while (node) |n| {
             const next_node = n.next;
             const c = completionFromGroup(n);
-            if (c.loop) |loop| loop.cancel(c);
+            loop.cancel(c);
             node = next_node;
         }
     }
