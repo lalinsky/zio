@@ -664,6 +664,7 @@ pub const Loop = struct {
         // `now` in its own clock (via `nowFor` in `setTimer`).
         self.state.updateNow();
         timer.c.setLoop(self);
+        _ = timer.c.publishLoop();
         timer.timeout = timeout;
         self.state.setTimer(timer);
     }
@@ -700,29 +701,23 @@ pub const Loop = struct {
     pub fn cancel(self: *Loop, completion: *Completion) void {
         self.assertOwnThread();
 
-        // Check if completion has been added to a loop
-        const target = completion.getLoop() orelse {
-            // Not yet submitted - just set requested, addInternal will handle it
-            var old = completion.cancel_state.load(.acquire);
-            while (true) {
-                if (old.requested) return;
-                var new = old;
-                new.requested = true;
-                old = completion.cancel_state.cmpxchgWeak(old, new, .acq_rel, .acquire) orelse return;
-            }
-            return;
-        };
-
-        // Atomically set requested and in_queue flags
-        var old = completion.cancel_state.load(.acquire);
+        var old = completion.cancel_state.load(.monotonic);
         while (true) {
             if (old.requested) return; // Already requested
             if (old.completed) return; // Already completed
             var new = old;
             new.requested = true;
-            new.in_queue = true;
-            old = completion.cancel_state.cmpxchgWeak(old, new, .acq_rel, .acquire) orelse break;
+            // Only a submitted completion can be routed; an unsubmitted one
+            // gets `requested` alone and the submitting add() picks it up.
+            new.in_queue = old.loop_set;
+            old = completion.cancel_state.cmpxchgWeak(old, new, .acq_rel, .monotonic) orelse break;
         }
+
+        if (!old.loop_set) return;
+
+        // The successful CAS observed `loop_set`, so the loop reference
+        // published by add() is visible.
+        const target = completion.getLoop().?;
 
         if (self == target) {
             // Same loop - cancel directly
@@ -893,10 +888,13 @@ pub const Loop = struct {
 
         std.debug.assert(completion.state == .new);
 
-        // Set the loop reference for cross-thread cancellation
+        // Set the loop reference and publish it; the RMW also returns whether
+        // a cancel arrived before submission (see Completion.publishLoop).
         completion.setLoop(self);
+        const old = completion.publishLoop();
 
-        if (completion.cancel_state.load(.acquire).requested) {
+        if (old.requested) {
+            std.debug.assert(!old.in_queue);
             // Directly mark it as canceled
             completion.setError(error.Canceled);
             self.state.incrActive();

@@ -287,7 +287,10 @@ pub const Completion = struct {
 
     /// Loop this completion was submitted to. Set by `Loop.add`/`Loop.setTimer`,
     /// cleared by `reset`. Read cross-thread (`Async.notify`, cancel routing,
-    /// finish routing), so always access through `setLoop`/`getLoop`.
+    /// finish routing), so always access through `setLoop`/`getLoop`. Both are
+    /// monotonic (plain machine loads/stores); visibility is guaranteed by the
+    /// RMW handshakes instead: `publishLoop` vs the cancel CAS, and the
+    /// `pending` swaps for async notify.
     loop: ?*Loop = null,
 
     /// Cross-thread cancellation state (atomic for thread-safe cancel)
@@ -332,7 +335,8 @@ pub const Completion = struct {
         requested: bool = false, // Cancel was requested
         in_queue: bool = false, // Completion is in cancel queue, queue will call finish
         completed: bool = false, // markCompleted ran, result is set
-        _pad: u5 = 0,
+        loop_set: bool = false, // `loop` is published; set by the publishLoop RMW
+        _pad: u4 = 0,
     };
 
     pub const CallbackFn = fn (
@@ -345,11 +349,20 @@ pub const Completion = struct {
     }
 
     pub fn setLoop(c: *Completion, loop: ?*Loop) void {
-        @atomicStore(?*Loop, &c.loop, loop, .release);
+        @atomicStore(?*Loop, &c.loop, loop, .monotonic);
     }
 
     pub fn getLoop(c: *const Completion) ?*Loop {
-        return @atomicLoad(?*Loop, &c.loop, .acquire);
+        return @atomicLoad(?*Loop, &c.loop, .monotonic);
+    }
+
+    /// Set `loop_set` in cancel_state and return the previous flags. The
+    /// acq_rel RMW publishes the preceding `setLoop` and orders against the
+    /// CAS in `Loop.cancel`: whichever lands second in the modification order
+    /// sees the other's flag, so a cancel is never lost between the two.
+    pub fn publishLoop(c: *Completion) CancelState {
+        const bits: u8 = @bitCast(CancelState{ .loop_set = true });
+        return @bitCast(@atomicRmw(u8, @as(*u8, @ptrCast(&c.cancel_state.raw)), .Or, bits, .acq_rel));
     }
 
     pub fn reset(c: *Completion) void {
