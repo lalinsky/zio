@@ -1809,7 +1809,12 @@ fn clockResolutionImpl(_: ?*anyopaque, clock: Io.Clock) Io.Clock.ResolutionError
 fn sleepImpl(_: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
     if (timeout == .none) return;
     var waiter: Waiter = .init();
-    try waiter.timedWaitClock(1, .fromStd(timeout), .fromStdTimeout(timeout), .allow_cancel);
+    // Nothing ever signals this waiter, so the timeout firing is the sleep
+    // finishing.
+    waiter.timedWaitClock(1, .fromStd(timeout), .fromStdTimeout(timeout), .allow_cancel) catch |err| switch (err) {
+        error.Timeout => {},
+        error.Canceled => return error.Canceled,
+    };
 }
 
 fn randomImpl(_: ?*anyopaque, buffer: []u8) void {

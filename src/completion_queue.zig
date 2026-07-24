@@ -134,15 +134,16 @@ pub const CompletionQueue = struct {
                 return null;
             }
 
-            self.waiter.timedWait(1, timeout, .allow_cancel) catch |err| switch (err) {
+            const timed_out = if (self.waiter.timedWait(1, timeout, .allow_cancel)) |_| false else |err| switch (err) {
                 error.Canceled => {
                     self.cancelAll();
                     self.drainPending();
                     return error.Canceled;
                 },
+                error.Timeout => true,
             };
 
-            // Check if we got a completion or timed out
+            // A completion can still have landed together with the timeout.
             self.mutex.lock();
             const node = self.completed.pop();
             self.mutex.unlock();
@@ -151,7 +152,13 @@ pub const CompletionQueue = struct {
                 return completionFromGroup(n);
             }
 
-            return error.Timeout;
+            if (timed_out) {
+                return error.Timeout;
+            }
+
+            // Signaled without a completion to hand out (a pending op finished
+            // into the queue and was taken, or the signal raced the pop): go
+            // around rather than reporting a timeout that did not happen.
         }
     }
 

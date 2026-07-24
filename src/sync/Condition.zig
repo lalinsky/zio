@@ -166,27 +166,39 @@ pub fn timedWait(self: *Condition, mutex: *Mutex, timeout: Timeout) (Timeoutable
     mutex.unlock();
 
     // Wait for signal or timeout, handling spurious wakeups internally
-    waiter.timedWait(1, timeout, .allow_cancel) catch |err| {
-        // On cancellation, try to remove from queue
-        const was_in_queue = self.wait_queue.remove(&waiter.node);
-        if (!was_in_queue) {
-            // Removed by signal() - wait for signal to complete before destroying waiter
-            waiter.wait(1, .no_cancel);
-            // Since we're being cancelled and won't process the signal,
-            // wake another waiter to receive the signal instead.
-            if (self.wait_queue.pop()) |next_waiter| {
-                Waiter.fromNode(next_waiter).signal();
+    var timed_out = false;
+    waiter.timedWait(1, timeout, .allow_cancel) catch |err| switch (err) {
+        // The timer fired, but signal() may have claimed this waiter just
+        // behind it: whoever can still remove the node decides.
+        error.Timeout => {
+            if (self.wait_queue.remove(&waiter.node)) {
+                timed_out = true;
+            } else {
+                // Claimed by signal() - take the signal instead of the
+                // timeout, and wait for it to land before destroying the
+                // waiter.
+                waiter.wait(1, .no_cancel);
             }
-        }
+        },
+        error.Canceled => {
+            // On cancellation, try to remove from queue
+            const was_in_queue = self.wait_queue.remove(&waiter.node);
+            if (!was_in_queue) {
+                // Removed by signal() - wait for signal to complete before destroying waiter
+                waiter.wait(1, .no_cancel);
+                // Since we're being cancelled and won't process the signal,
+                // wake another waiter to receive the signal instead.
+                if (self.wait_queue.pop()) |next_waiter| {
+                    Waiter.fromNode(next_waiter).signal();
+                }
+            }
 
-        // Must reacquire mutex before returning
-        mutex.lockUncancelable();
+            // Must reacquire mutex before returning
+            mutex.lockUncancelable();
 
-        return err;
+            return err;
+        },
     };
-
-    // Determine winner: can we remove ourselves from queue?
-    const timed_out = self.wait_queue.remove(&waiter.node);
 
     // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
     mutex.lockUncancelable();

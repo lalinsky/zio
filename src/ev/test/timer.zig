@@ -36,7 +36,7 @@ test "clearTimer before expiration" {
     try std.testing.expectEqual(.running, timer.c.loadState().phase);
 
     // Clear it immediately
-    loop.clearTimer(&timer);
+    try std.testing.expect(loop.clearTimer(&timer));
     try std.testing.expectEqual(.new, timer.c.loadState().phase);
 
     // Run the loop - should complete immediately with no active timers
@@ -48,6 +48,42 @@ test "clearTimer before expiration" {
     try std.testing.expect(elapsed.toMilliseconds() < 200);
     try std.testing.expect(loop.done());
     std.log.info("clearTimer: elapsed={f}", .{elapsed});
+}
+
+test "clearTimer reports a callback it could not stop" {
+    // A timer whose callback has not run yet is not the caller's to reclaim:
+    // the clear must report that, so the caller keeps the timer (and whatever
+    // its userdata points at) alive until the callback is done with them.
+    // `do_not_call_callbacks` holds a finished completion in the dispatch queue
+    // and reproduces that window without a second thread.
+    var loop: Loop = undefined;
+    try loop.init(.{ .do_not_call_callbacks = true });
+    defer loop.deinit();
+
+    var fired = false;
+    var timer: Timer = .init(.{ .duration = .zero });
+    timer.c.userdata = &fired;
+    timer.c.callback = struct {
+        fn cb(_: *Loop, c: *@import("../completion.zig").Completion) void {
+            const flag: *bool = @ptrCast(@alignCast(c.userdata.?));
+            flag.* = true;
+        }
+    }.cb;
+
+    loop.setTimer(&timer, .{ .duration = .zero });
+    try loop.run(.once);
+    try std.testing.expect(!fired);
+
+    try std.testing.expect(!loop.clearTimer(&timer));
+
+    const dispatched = loop.nextDispatched().?;
+    try std.testing.expectEqual(&timer.c, dispatched);
+    dispatched.call(&loop);
+    try std.testing.expect(fired);
+
+    // Still not reclaimable afterwards: the callback ran, so the clear has
+    // nothing to hand back and must not claim it does.
+    try std.testing.expect(!loop.clearTimer(&timer));
 }
 
 test "setTimer multiple times" {
@@ -85,7 +121,7 @@ test "clearTimer and reuse timer" {
 
     // Set and clear
     loop.setTimer(&timer, .{ .duration = .fromMilliseconds(200) });
-    loop.clearTimer(&timer);
+    try std.testing.expect(loop.clearTimer(&timer));
     try std.testing.expectEqual(.new, timer.c.loadState().phase);
 
     // Reuse the same timer
@@ -238,13 +274,14 @@ test "clearTimer racing a firing timer (cross-thread)" {
         // limbo window.
         loop.setTimer(&timer, .{ .duration = .fromNanoseconds((i % 64) * 1000) });
         if (i % 2 == 0) std.Thread.yield() catch {};
-        loop.clearTimer(&timer);
 
-        // If the clear won, the timer is ours again (.new, written by this
-        // thread under the lock). Anything else means the fire got there
-        // first (or is mid-flight): wait for its callback before the stack
-        // timer goes out of scope.
-        if (timer.c.loadState().phase != .new) {
+        // A clear that won hands the timer back and rules out the callback.
+        // Anything else means the fire got there first (or is mid-flight):
+        // wait for its callback before the stack timer goes out of scope.
+        if (loop.clearTimer(&timer)) {
+            try std.testing.expectEqual(.new, timer.c.loadState().phase);
+            try std.testing.expect(!fired.load(.acquire));
+        } else {
             while (!fired.load(.acquire)) std.Thread.yield() catch {};
         }
     }

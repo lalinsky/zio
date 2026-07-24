@@ -396,12 +396,20 @@ pub const Completion = struct {
         c.state.store(.{ .phase = .dead, .cancel_requested = old.cancel_requested }, .monotonic);
     }
 
-    /// running -> new (disarm a timer without completing it).
-    pub fn disarm(c: *Completion) void {
+    /// running -> new (disarm a timer without completing it). A latched cancel
+    /// request is kept for the next incarnation, exactly as if it had arrived
+    /// while the completion sat in `.new`.
+    ///
+    /// Fails when a cancel pass has claimed the completion: that pass owns the
+    /// finish dispatch, and clearing `cancel_inflight` under it would let both
+    /// it and the next incarnation dispatch the same completion.
+    pub fn tryDisarm(c: *Completion) bool {
         var old = c.loadState();
         while (true) {
             std.debug.assert(old.phase == .running);
-            old = c.state.cmpxchgWeak(old, .{}, .acq_rel, .monotonic) orelse return;
+            if (old.cancel_inflight) return false;
+            const new_state: State = .{ .phase = .new, .cancel_requested = old.cancel_requested };
+            old = c.state.cmpxchgWeak(old, new_state, .acq_rel, .monotonic) orelse return true;
         }
     }
 

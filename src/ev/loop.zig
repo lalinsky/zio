@@ -644,18 +644,30 @@ pub const Loop = struct {
     /// Clear a timer without completing it (works immediately, no cancellation
     /// completion required). Thread-safe: may be called from a thread that does
     /// not own the loop (a migrated task clearing its sleep timer).
-    pub fn clearTimer(self: *Loop, timer: *Timer) void {
+    ///
+    /// Returns true when the timer is the caller's again: it was disarmed here
+    /// (or was never armed), and its callback will not run. Returns false when
+    /// the timer is already on its way to completion, which means its callback
+    /// has run or is still to run, and both the timer and whatever its
+    /// `userdata` points at must stay alive until it does.
+    pub fn clearTimer(self: *Loop, timer: *Timer) bool {
         self.state.lockTimers();
         defer self.state.unlockTimers();
-        if (timer.c.loadState().phase != .running) return;
+        const st = timer.c.loadState();
+        // Not armed: `.new` is ours to hand back, anything else is a fired
+        // incarnation whose callback ran or is queued to run.
+        if (st.phase != .running) return st.phase == .new;
         // A running timer that already has its result is in the fired/canceled
         // limbo window: checkTimers (or cancelLocal) removed it from the heap
         // and set its result under this lock, but its markCompleted runs after
         // unlocking. It is already on its way to completion; leave it be.
-        if (timer.c.has_result) return;
+        if (timer.c.has_result) return false;
+        // A cancel pass claimed it (possibly on another loop's thread, still
+        // sitting in this loop's cancel queue); it owns the finish dispatch.
+        if (!timer.c.tryDisarm()) return false;
         self.state.disarmTimer(timer);
-        timer.c.disarm();
         self.state.decrActive();
+        return true;
     }
 
     /// Cancel a completion directly without requiring a Cancel completion struct.

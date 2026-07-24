@@ -568,18 +568,21 @@ pub const Timeout = union(enum) {
 
     fn timerCallback(_: *ev.Loop, c: *ev.Completion) void {
         const ctx: *WaitContext = @ptrCast(@alignCast(c.userdata.?));
-        if (ctx.waiter) |waiter| {
-            waiter.signal();
-        }
+        // Every dispatch signals: the wait protocol keeps `ctx` alive until the
+        // signal arrives whenever `asyncCancelWait` reported the timer as still
+        // completing, so a missed signal would park the waiter forever.
+        ctx.waiter.?.signal();
     }
 
     pub fn asyncCancelWait(self: *const Timeout, waiter: *Waiter, ctx: *WaitContext) bool {
         _ = self;
         _ = waiter;
+        // `.none` never arms a timer, so there is nothing to remove.
         const loop = ctx.timer.c.getLoop() orelse return true;
-        ctx.waiter = null; // Prevent callback from waking a stale/reused waiter
-        loop.clearTimer(&ctx.timer);
-        return true; // Timer operations don't have values to re-add if we lost the race
+        // Disarmed: no callback, no signal. Otherwise the timer is completing
+        // and its callback still signals `ctx.waiter`, so report the wake as
+        // in flight and let the caller wait for it.
+        return loop.clearTimer(&ctx.timer);
     }
 
     pub fn getResult(self: *const Timeout, ctx: *WaitContext) void {

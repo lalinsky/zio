@@ -143,26 +143,30 @@ pub fn timedWait(self: *Notify, timeout: Timeout) (Timeoutable || Cancelable)!vo
     self.wait_queue.push(&waiter.node);
 
     // Wait for signal or timeout, handling spurious wakeups internally
-    waiter.timedWait(1, timeout, .allow_cancel) catch |err| {
-        // On cancellation, try to remove from queue
-        const was_in_queue = self.wait_queue.remove(&waiter.node);
-        if (!was_in_queue) {
-            // Removed by signal() - wait for signal to complete before destroying waiter
+    waiter.timedWait(1, timeout, .allow_cancel) catch |err| switch (err) {
+        // The timer fired, but signal() may have claimed this waiter just
+        // behind it: whoever can still remove the node decides.
+        error.Timeout => {
+            if (self.wait_queue.remove(&waiter.node)) return error.Timeout;
+            // Claimed by signal() - take the signal instead of the timeout,
+            // and wait for it to land before destroying the waiter.
             waiter.wait(1, .no_cancel);
-            // Since we're being cancelled and won't process the signal,
-            // wake another waiter to receive the signal instead.
-            if (self.wait_queue.pop()) |node| {
-                Waiter.fromNode(node).signal();
+        },
+        error.Canceled => {
+            // On cancellation, try to remove from queue
+            const was_in_queue = self.wait_queue.remove(&waiter.node);
+            if (!was_in_queue) {
+                // Removed by signal() - wait for signal to complete before destroying waiter
+                waiter.wait(1, .no_cancel);
+                // Since we're being cancelled and won't process the signal,
+                // wake another waiter to receive the signal instead.
+                if (self.wait_queue.pop()) |node| {
+                    Waiter.fromNode(node).signal();
+                }
             }
-        }
-        return err;
+            return err;
+        },
     };
-
-    // Determine winner: can we remove ourselves from queue?
-    if (self.wait_queue.remove(&waiter.node)) {
-        // We were still in queue - timer won
-        return error.Timeout;
-    }
 
     // Acquire fence: synchronize-with signal()/broadcast()'s wake
     // Ensures visibility of all writes made before signal() was called

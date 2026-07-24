@@ -139,6 +139,21 @@ pub const Waiter = struct {
         };
     }
 
+    /// Top bit of a direct waiter's notify state, set when its timeout timer
+    /// fired. It is deliberately not a signal: the timer never touches the
+    /// count, so the count keeps meaning "signals from real sources", and the
+    /// bit alone says the timeout won.
+    const timeout_flag: u32 = 1 << 31;
+
+    fn signalCount(state: u32) u32 {
+        return state & ~timeout_flag;
+    }
+
+    /// Whether this waiter's timeout timer fired.
+    fn timedOut(self: *const Waiter) bool {
+        return self.mode.direct.notify.state.load(.acquire) & timeout_flag != 0;
+    }
+
     /// Wait for at least `expected` signals, handling spurious wakeups internally.
     /// Only valid for direct waiters.
     pub fn wait(self: *Waiter, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
@@ -150,39 +165,92 @@ pub const Waiter = struct {
         }
     }
 
+    /// Error set of a timed wait: `error.Timeout` says the timer fired with no
+    /// signal in hand, which the count alone cannot tell you (the timer does
+    /// not signal).
+    ///
+    /// It reports which source ended the wait, not who won a contested
+    /// handoff: a caller racing a wait queue still settles that with its own
+    /// bookkeeping, since a signal can land right behind the timeout.
+    pub fn TimedWaitError(comptime cancel_mode: Executor.YieldCancelMode) type {
+        return if (cancel_mode == .allow_cancel) (Timeoutable || Cancelable) else Timeoutable;
+    }
+
     /// Wait for at least `expected` signals with a timeout.
-    /// The caller must check their condition to determine if timeout actually won
-    /// (e.g., by trying to remove from a wait queue).
     /// Only valid for direct waiters.
-    pub fn timedWait(self: *Waiter, expected: u32, timeout: Timeout, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+    pub fn timedWait(self: *Waiter, expected: u32, timeout: Timeout, comptime cancel_mode: Executor.YieldCancelMode) TimedWaitError(cancel_mode)!void {
         return self.timedWaitClock(expected, timeout, .awake, cancel_mode);
     }
 
     /// Like `timedWait`, but the timeout is measured against `clock`. The
     /// no-task futex fallback only supports the monotonic (`awake`) clock, so
     /// boot/real timeouts there degrade to awake semantics.
-    pub fn timedWaitClock(self: *Waiter, expected: u32, timeout: Timeout, clock: Clock, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+    pub fn timedWaitClock(self: *Waiter, expected: u32, timeout: Timeout, clock: Clock, comptime cancel_mode: Executor.YieldCancelMode) TimedWaitError(cancel_mode)!void {
         if (timeout == .none) {
-            return self.wait(expected, cancel_mode);
+            if (cancel_mode == .allow_cancel) {
+                try self.wait(expected, cancel_mode);
+            } else {
+                self.wait(expected, cancel_mode);
+            }
+            return;
         }
 
         const d = &self.mode.direct;
         const task = d.task orelse return timedWaitFutex(d, expected, futexTimeout(timeout, clock));
 
+        // Drop a flag left behind by an earlier timed wait on this waiter.
+        _ = d.notify.state.fetchAnd(~timeout_flag, .monotonic);
+
         var timer: ev.Timer = .initClock(timeout, clock);
         timer.c.userdata = self;
-        timer.c.callback = callback;
+        timer.c.callback = timeoutCallback;
 
         task.getExecutor().loop.setTimer(&timer, timeout);
-        defer timer.c.getLoop().?.clearTimer(&timer);
+        defer {
+            // A clear that loses its race leaves the timer completing, and its
+            // callback still runs against `timer`, which lives in this frame.
+            // The callback sets the flag before waking us, so parking on it
+            // keeps the frame alive for exactly as long as the callback needs.
+            if (!timer.c.getLoop().?.clearTimer(&timer)) {
+                while (!self.timedOut()) {
+                    task.yield(.park, .no_cancel);
+                }
+            }
+        }
 
-        return waitTask(d, task, expected, cancel_mode);
+        // Park until the count is reached or the timer fires. The count is
+        // checked first, so a signal landing together with the timeout still
+        // counts as a signal.
+        while (true) {
+            const state = d.notify.state.load(.acquire);
+            if (signalCount(state) >= expected) return;
+            if (state & timeout_flag != 0) return error.Timeout;
+            if (cancel_mode == .allow_cancel) {
+                try task.yield(.park, .allow_cancel);
+            } else {
+                task.yield(.park, .no_cancel);
+            }
+        }
+    }
+
+    /// Callback for the `timedWaitClock` timer.
+    fn timeoutCallback(_: *ev.Loop, c: *ev.Completion) void {
+        const self: *Waiter = @ptrCast(@alignCast(c.userdata.?));
+        const d = &self.mode.direct;
+        // Read the task before publishing: once the flag is visible the waiter
+        // may return and drop the frame holding the timer, so nothing below may
+        // touch `self` or the completion again.
+        const task = d.task.?;
+        _ = d.notify.state.fetchOr(timeout_flag, .release);
+        task.wake();
     }
 
     fn waitFutex(d: *Direct, expected: u32) void {
         while (true) {
+            // The raw word is what the futex compares against; only the count
+            // half of it is the wait condition.
             const current = d.notify.state.load(.acquire);
-            if (current >= expected) return;
+            if (signalCount(current) >= expected) return;
             d.notify.wait(current);
         }
     }
@@ -204,23 +272,28 @@ pub const Waiter = struct {
         };
     }
 
-    fn timedWaitFutex(d: *Direct, expected: u32, timeout: Timeout) void {
+    fn timedWaitFutex(d: *Direct, expected: u32, timeout: Timeout) Timeoutable!void {
         const deadline = timeout.toDeadline();
         while (true) {
             const current = d.notify.state.load(.acquire);
-            if (current >= expected) {
+            if (signalCount(current) >= expected) {
                 return;
             }
             const remaining = deadline.durationFromNow();
             if (remaining.value <= 0) {
-                return;
+                return error.Timeout;
             }
-            d.notify.timedWait(current, remaining) catch return;
+            d.notify.timedWait(current, remaining) catch {
+                // Deadline reached; one last look before calling it a timeout.
+                const final = d.notify.state.load(.acquire);
+                if (signalCount(final) >= expected) return;
+                return error.Timeout;
+            };
         }
     }
 
     fn waitTask(d: *Direct, task: *AnyTask, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        var current = d.notify.state.load(.acquire);
+        var current = signalCount(d.notify.state.load(.acquire));
         if (current >= expected) return;
 
         // Park loop: yield until the condition is met.
@@ -237,7 +310,7 @@ pub const Waiter = struct {
                 task.yield(.park, .no_cancel);
             }
 
-            current = d.notify.state.load(.acquire);
+            current = signalCount(d.notify.state.load(.acquire));
             if (current >= expected) return;
         }
     }
@@ -401,12 +474,12 @@ test "Waiter: futex-based timed wait with timeout" {
     };
 
     var timer = Stopwatch.start();
-    waiter.timedWait(1, .fromMilliseconds(50), .no_cancel);
+    try std.testing.expectError(error.Timeout, waiter.timedWait(1, .fromMilliseconds(50), .no_cancel));
     const elapsed = timer.read();
 
     errdefer std.debug.print("timedWait(50ms) returned after {d}ms\n", .{elapsed.toMilliseconds()});
 
-    // Should return normally after timeout expires (allow slight undershoot for timer resolution)
+    // Should return after the timeout expires (allow slight undershoot for timer resolution)
     try std.testing.expect(elapsed.toMilliseconds() >= 40);
     // Generous upper bound: only meant to catch gross timeout miscalculation
     // (wrong units, waiting forever). Loaded CI runners can delay the wakeup

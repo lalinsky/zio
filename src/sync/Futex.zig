@@ -179,21 +179,25 @@ pub fn timedWaitClock(ptr: *const u32, expect: u32, timeout: Timeout, clock: Clo
     bucket.mutex.unlock();
 
     // Wait for signal or timeout, handling spurious wakeups internally
-    futex_waiter.waiter.timedWaitClock(1, timeout, clock, .allow_cancel) catch |err| {
-        // On cancellation, try to remove from queue
-        const was_in_queue = removeFromBucket(bucket, &futex_waiter);
-        if (!was_in_queue) {
-            // Removed by wake() - wait for signal to complete before destroying waiter
+    futex_waiter.waiter.timedWaitClock(1, timeout, clock, .allow_cancel) catch |err| switch (err) {
+        // The timer fired, but wake() may have claimed this waiter just behind
+        // it: whoever can still remove the node decides.
+        error.Timeout => {
+            if (removeFromBucket(bucket, &futex_waiter)) return error.Timeout;
+            // Claimed by wake() - take the signal instead of the timeout, and
+            // wait for it to land before destroying the waiter.
             futex_waiter.waiter.wait(1, .no_cancel);
-        }
-        return err;
+        },
+        error.Canceled => {
+            // On cancellation, try to remove from queue
+            const was_in_queue = removeFromBucket(bucket, &futex_waiter);
+            if (!was_in_queue) {
+                // Removed by wake() - wait for signal to complete before destroying waiter
+                futex_waiter.waiter.wait(1, .no_cancel);
+            }
+            return err;
+        },
     };
-
-    // Determine winner: can we remove ourselves from queue?
-    if (removeFromBucket(bucket, &futex_waiter)) {
-        // We were still in queue - timer won
-        return error.Timeout;
-    }
 }
 
 /// Remove a waiter from its bucket (for cancellation/timeout).
