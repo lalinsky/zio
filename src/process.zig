@@ -113,3 +113,11 @@ test "childKill: terminates process" {
     childKill(&child);
     try std.testing.expect(child.id == null);
 }
+
+test "childWait: spawn nonexistent binary returns FileNotFound" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const result = std.process.spawn(rt.io(), .{ .argv = &.{"definitely-not-a-real-binary-xyz123"} });
+    try std.testing.expectError(error.FileNotFound, result);
+}
