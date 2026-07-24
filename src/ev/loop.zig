@@ -653,6 +653,10 @@ pub const Loop = struct {
     pub fn setTimer(self: *Loop, timer: *Timer, timeout: Timeout) void {
         self.state.lockTimers();
         defer self.state.unlockTimers();
+        // A running timer sits in its owning loop's heap; re-arming it here
+        // would remove it from this loop's heap instead and leak the owner's
+        // active count. Clear it on the owning loop first.
+        std.debug.assert(timer.c.state != .running or timer.c.getLoop() == self);
         // Rearming a fired (completed/dead) timer: drop the stale result so
         // that a running timer with a result set unambiguously means "mid-fire"
         // (the limbo state clearTimer must leave alone).
