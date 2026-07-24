@@ -24,7 +24,7 @@ pub const AutoCancel = struct {
 
     pub fn clear(self: *AutoCancel) void {
         const loop = self.timer.c.getLoop() orelse return;
-        if (self.timer.c.state != .running) return;
+        if (self.timer.c.loadState().phase != .running) return;
 
         loop.clearTimer(&self.timer);
         self.task = null;

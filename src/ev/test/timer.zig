@@ -12,13 +12,13 @@ test "setTimer and clearTimer basic" {
 
     // Test setTimer
     loop.setTimer(&timer, .{ .duration = .fromMilliseconds(100) });
-    try std.testing.expectEqual(.running, timer.c.state);
+    try std.testing.expectEqual(.running, timer.c.loadState().phase);
 
     var wall_timer = time.Stopwatch.start();
     try loop.run(.until_done);
     const elapsed = wall_timer.read();
 
-    try std.testing.expectEqual(.dead, timer.c.state);
+    try std.testing.expectEqual(.dead, timer.c.loadState().phase);
     try std.testing.expect(elapsed.toMilliseconds() >= 90);
     try std.testing.expect(elapsed.toMilliseconds() <= 250);
     std.log.info("setTimer: expected=100ms, actual={f}", .{elapsed});
@@ -33,11 +33,11 @@ test "clearTimer before expiration" {
 
     // Set a timer with a long delay
     loop.setTimer(&timer, .{ .duration = .fromMilliseconds(1000) });
-    try std.testing.expectEqual(.running, timer.c.state);
+    try std.testing.expectEqual(.running, timer.c.loadState().phase);
 
     // Clear it immediately
     loop.clearTimer(&timer);
-    try std.testing.expectEqual(.new, timer.c.state);
+    try std.testing.expectEqual(.new, timer.c.loadState().phase);
 
     // Run the loop - should complete immediately with no active timers
     var wall_timer = time.Stopwatch.start();
@@ -59,18 +59,18 @@ test "setTimer multiple times" {
 
     // Set timer with a long delay
     loop.setTimer(&timer, .{ .duration = .fromMilliseconds(2000) });
-    try std.testing.expectEqual(.running, timer.c.state);
+    try std.testing.expectEqual(.running, timer.c.loadState().phase);
 
     // Reset it with a short delay
     loop.setTimer(&timer, .{ .duration = .fromMilliseconds(10) });
-    try std.testing.expectEqual(.running, timer.c.state);
+    try std.testing.expectEqual(.running, timer.c.loadState().phase);
 
     // Should complete after ~10ms, not 2000ms
     var wall_timer = time.Stopwatch.start();
     try loop.run(.until_done);
     const elapsed = wall_timer.read();
 
-    try std.testing.expectEqual(.dead, timer.c.state);
+    try std.testing.expectEqual(.dead, timer.c.loadState().phase);
     try std.testing.expect(elapsed.toMilliseconds() >= 5);
     try std.testing.expect(elapsed.toMilliseconds() <= 100);
     std.log.info("setTimer multiple: expected=10ms, actual={f}", .{elapsed});
@@ -86,17 +86,17 @@ test "clearTimer and reuse timer" {
     // Set and clear
     loop.setTimer(&timer, .{ .duration = .fromMilliseconds(200) });
     loop.clearTimer(&timer);
-    try std.testing.expectEqual(.new, timer.c.state);
+    try std.testing.expectEqual(.new, timer.c.loadState().phase);
 
     // Reuse the same timer
     loop.setTimer(&timer, .{ .duration = .fromMilliseconds(10) });
-    try std.testing.expectEqual(.running, timer.c.state);
+    try std.testing.expectEqual(.running, timer.c.loadState().phase);
 
     var wall_timer = time.Stopwatch.start();
     try loop.run(.until_done);
     const elapsed = wall_timer.read();
 
-    try std.testing.expectEqual(.dead, timer.c.state);
+    try std.testing.expectEqual(.dead, timer.c.loadState().phase);
     try std.testing.expect(elapsed.toMilliseconds() >= 5);
     try std.testing.expect(elapsed.toMilliseconds() <= 100);
     std.log.info("clearTimer reuse: expected=10ms, actual={f}", .{elapsed});
@@ -114,7 +114,7 @@ test "timer with zero duration completes immediately" {
     try loop.run(.until_done);
     const elapsed = wall_timer.read();
 
-    try std.testing.expectEqual(.dead, timer.c.state);
+    try std.testing.expectEqual(.dead, timer.c.loadState().phase);
     try std.testing.expect(elapsed.toMilliseconds() < 50);
     std.log.info("zero duration timer: elapsed={f}", .{elapsed});
 }
@@ -133,7 +133,7 @@ test "timer with explicit deadline" {
     try loop.run(.until_done);
     const elapsed = wall_timer.read();
 
-    try std.testing.expectEqual(.dead, timer.c.state);
+    try std.testing.expectEqual(.dead, timer.c.loadState().phase);
     try std.testing.expect(elapsed.toMilliseconds() >= 90);
     try std.testing.expect(elapsed.toMilliseconds() <= 250);
     std.log.info("deadline timer: expected=100ms, actual={f}", .{elapsed});
@@ -146,13 +146,13 @@ test "timer on boot clock fires (duration)" {
 
     var timer: Timer = .initClock(.{ .duration = .zero }, .boot);
     loop.setTimer(&timer, .{ .duration = .fromMilliseconds(100) });
-    try std.testing.expectEqual(.running, timer.c.state);
+    try std.testing.expectEqual(.running, timer.c.loadState().phase);
 
     var wall_timer = time.Stopwatch.start();
     try loop.run(.until_done);
     const elapsed = wall_timer.read();
 
-    try std.testing.expectEqual(.dead, timer.c.state);
+    try std.testing.expectEqual(.dead, timer.c.loadState().phase);
     try std.testing.expect(elapsed.toMilliseconds() >= 90);
     try std.testing.expect(elapsed.toMilliseconds() <= 250);
     std.log.info("boot timer: expected=100ms, actual={f}", .{elapsed});
@@ -174,7 +174,7 @@ test "timer on real clock fires (absolute deadline)" {
     try loop.run(.until_done);
     const elapsed = wall_timer.read();
 
-    try std.testing.expectEqual(.dead, timer.c.state);
+    try std.testing.expectEqual(.dead, timer.c.loadState().phase);
     try std.testing.expect(elapsed.toMilliseconds() >= 90);
     try std.testing.expect(elapsed.toMilliseconds() <= 250);
     std.log.info("real timer: expected=100ms, actual={f}", .{elapsed});
@@ -244,7 +244,7 @@ test "clearTimer racing a firing timer (cross-thread)" {
         // thread under the lock). Anything else means the fire got there
         // first (or is mid-flight): wait for its callback before the stack
         // timer goes out of scope.
-        if (@atomicLoad(@TypeOf(timer.c.state), &timer.c.state, .acquire) != .new) {
+        if (timer.c.loadState().phase != .new) {
             while (!fired.load(.acquire)) std.Thread.yield() catch {};
         }
     }

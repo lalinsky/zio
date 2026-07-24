@@ -44,10 +44,9 @@ const time = @import("../time.zig");
 /// Supports file, pipe, and socket operations (read/write use poll+I/O on POSIX).
 /// Timer and async/work/group operations are not supported (require event loop).
 pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
-    // Mark completion as having no loop (including a stale `loop_set` from a
-    // previous submitted incarnation)
+    // Reset the completion: no loop, fresh state
     c.setLoop(null);
-    c.cancel_state.store(.{}, .monotonic);
+    c.state.store(.{}, .monotonic);
 
     switch (c.op) {
         .file_open => common.handleFileOpen(c, allocator),

@@ -278,23 +278,21 @@ pub const Completion = struct {
     };
 
     op: Op,
-    state: State = .new,
+
+    /// One atomic word holding the lifecycle phase and the cancel flags; all
+    /// cross-thread races on a completion resolve through the modification
+    /// order of this word. Access only through the transition methods below.
+    state: std.atomic.Value(State) = .init(.{}),
 
     flags: Flags = .{},
 
     userdata: ?*anyopaque = null,
     callback: ?*const CallbackFn = null,
 
-    /// Loop this completion was submitted to. Set by `Loop.add`/`Loop.setTimer`,
-    /// cleared by `reset`. Read cross-thread (`Async.notify`, cancel routing,
-    /// finish routing), so always access through `setLoop`/`getLoop`. Both are
-    /// monotonic (plain machine loads/stores); visibility is guaranteed by the
-    /// RMW handshakes instead: `publishLoop` vs the cancel CAS, and the
-    /// `pending` swaps for async notify.
+    /// Loop this completion was submitted to. Monotonic accesses; visibility
+    /// comes from `state`: a thread that observed phase `.running` sees the
+    /// loop published by `enterRunning` (async notify pairs via `pending`).
     loop: ?*Loop = null,
-
-    /// Cross-thread cancellation state (atomic for thread-safe cancel)
-    cancel_state: std.atomic.Value(CancelState) = .init(.{}),
 
     /// Cancel queue intrusive linked list
     cancel_next: ?*Completion = null,
@@ -316,7 +314,9 @@ pub const Completion = struct {
     /// Stored here instead of in each operation type to simplify error handling.
     err: ?anyerror = null,
 
-    /// Whether a result has been set (for debugging/assertions).
+    /// Whether a result has been set. Written only by the servicing thread
+    /// (under the timer mutex for timers, where `.running` plus a result means
+    /// mid-fire).
     has_result: bool = false,
 
     /// Backend-specific internal data for async operations.
@@ -328,15 +328,15 @@ pub const Completion = struct {
     prev: ?*Completion = null,
     next: ?*Completion = null,
 
-    pub const State = enum { new, running, completed, dead };
+    pub const State = packed struct(u8) {
+        phase: Phase = .new,
+        /// Cancel was requested; backends poll it to stop retrying.
+        cancel_requested: bool = false,
+        /// A cancel pass (cancelLocal) owns the finish dispatch.
+        cancel_inflight: bool = false,
+        _reserved: u4 = 0,
 
-    /// Atomic state for cross-thread cancellation coordination
-    pub const CancelState = packed struct(u8) {
-        requested: bool = false, // Cancel was requested
-        in_queue: bool = false, // Completion is in cancel queue, queue will call finish
-        completed: bool = false, // markCompleted ran, result is set
-        loop_set: bool = false, // `loop` is published; set by the publishLoop RMW
-        _pad: u4 = 0,
+        pub const Phase = enum(u2) { new, running, completed, dead };
     };
 
     pub const CallbackFn = fn (
@@ -356,23 +356,83 @@ pub const Completion = struct {
         return @atomicLoad(?*Loop, &c.loop, .monotonic);
     }
 
-    /// Set `loop_set` in cancel_state and return the previous flags. The
-    /// acq_rel RMW publishes the preceding `setLoop` and orders against the
-    /// CAS in `Loop.cancel`: whichever lands second in the modification order
-    /// sees the other's flag, so a cancel is never lost between the two.
-    pub fn publishLoop(c: *Completion) CancelState {
-        const bits: u8 = @bitCast(CancelState{ .loop_set = true });
-        return @bitCast(@atomicRmw(u8, @as(*u8, @ptrCast(&c.cancel_state.raw)), .Or, bits, .acq_rel));
+    pub fn loadState(c: *const Completion) State {
+        return c.state.load(.monotonic);
     }
 
+    /// {new,dead} -> running. Publishes the preceding `setLoop`. A cancel
+    /// latched before the first submission is kept; one aimed at a dead
+    /// incarnation is dropped on rearm. Returns the previous state.
+    pub fn enterRunning(c: *Completion) State {
+        var old = c.loadState();
+        while (true) {
+            std.debug.assert(old.phase == .new or old.phase == .dead);
+            std.debug.assert(!old.cancel_inflight);
+            const new_state: State = .{
+                .phase = .running,
+                .cancel_requested = old.cancel_requested and old.phase == .new,
+            };
+            old = c.state.cmpxchgWeak(old, new_state, .acq_rel, .monotonic) orelse return old;
+        }
+    }
+
+    /// running -> completed. Returns the previous state; `cancel_inflight` in
+    /// it means a cancel pass owns the dispatch.
+    pub fn enterCompleted(c: *Completion) State {
+        var old = c.loadState();
+        while (true) {
+            std.debug.assert(old.phase == .running);
+            var new_state = old;
+            new_state.phase = .completed;
+            old = c.state.cmpxchgWeak(old, new_state, .acq_rel, .monotonic) orelse return old;
+        }
+    }
+
+    /// completed -> dead, keeping `cancel_requested` so callbacks can see it.
+    /// No concurrent writers remain at this point.
+    pub fn enterDead(c: *Completion) void {
+        const old = c.loadState();
+        std.debug.assert(old.phase == .completed);
+        c.state.store(.{ .phase = .dead, .cancel_requested = old.cancel_requested }, .monotonic);
+    }
+
+    /// running -> new (disarm a timer without completing it).
+    pub fn disarm(c: *Completion) void {
+        var old = c.loadState();
+        while (true) {
+            std.debug.assert(old.phase == .running);
+            old = c.state.cmpxchgWeak(old, .{}, .acq_rel, .monotonic) orelse return;
+        }
+    }
+
+    /// Latch a cancel request. Returns the previous state: phase `.running`
+    /// without `cancel_requested` means the caller latched `cancel_inflight`
+    /// and must run (or route) the cancel pass. On `.new` only the request is
+    /// latched; `enterRunning` picks it up. Completed/dead: too late, no-op.
+    pub fn requestCancel(c: *Completion) State {
+        var old = c.loadState();
+        while (true) {
+            if (old.cancel_requested) return old;
+            if (old.phase == .completed or old.phase == .dead) return old;
+            var new_state = old;
+            new_state.cancel_requested = true;
+            new_state.cancel_inflight = old.phase == .running;
+            old = c.state.cmpxchgWeak(old, new_state, .acq_rel, .monotonic) orelse return old;
+        }
+    }
+
+    /// Clear `cancel_inflight` at the end of a cancel pass. Returns the
+    /// previous state: phase `.completed` means the completion finished during
+    /// the pass and the caller owns its dispatch.
+    pub fn finishCancelPass(c: *Completion) State {
+        const mask: u8 = @bitCast(State{ .cancel_inflight = true });
+        return @bitCast(@atomicRmw(u8, @as(*u8, @ptrCast(&c.state.raw)), .And, ~mask, .acq_rel));
+    }
+
+    /// Clear per-incarnation fields when re-adding a dead completion.
     pub fn reset(c: *Completion) void {
-        c.state = .new;
         c.has_result = false;
         c.err = null;
-        // An Async.notify() landing in the null window between this and the
-        // re-add's setLoop is picked up by add() via the `pending` flag.
-        c.setLoop(null);
-        c.cancel_state.store(.{}, .release);
         c.cancel_next = null;
         c.group.next = null;
         c.group.prev = null;
@@ -443,8 +503,8 @@ pub const Group = struct {
 
     /// Add a completion to this group. Must be called before submitting the group.
     pub fn add(self: *Group, c: *Completion) void {
-        std.debug.assert(c.state == .new);
-        std.debug.assert(self.c.state == .new); // Group must not be submitted yet
+        std.debug.assert(c.loadState().phase == .new);
+        std.debug.assert(self.c.loadState().phase == .new); // Group must not be submitted yet
         std.debug.assert(c.group.owner == null);
         std.debug.assert(!c.flags.rearm); // groups are single-shot
         c.group.next = self.head;
@@ -485,7 +545,7 @@ pub const Group = struct {
 
         const prev = self.remaining.fetchSub(1, .acq_rel);
         if (prev == 1) {
-            if (self.c.cancel_state.load(.acquire).requested) {
+            if (self.c.loadState().cancel_requested) {
                 self.c.setError(error.Canceled);
             } else {
                 self.c.setResult(.group, {});

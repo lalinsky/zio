@@ -22,7 +22,7 @@ test "File: open/close" {
 
     try loop.run(.until_done);
 
-    try std.testing.expectEqual(.dead, file_create.c.state);
+    try std.testing.expectEqual(.dead, file_create.c.loadState().phase);
     try std.testing.expectEqual(true, file_create.c.has_result);
 
     const fd = (try file_create.getResult()).fd;
@@ -38,7 +38,7 @@ test "File: open/close" {
     var file_write = ev.FileWrite.init(fd, .fromSlice(write_data, &write_iov), 0);
     loop.add(&file_write.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, file_write.c.state);
+    try std.testing.expectEqual(.dead, file_write.c.loadState().phase);
     try std.testing.expectEqual(true, file_write.c.has_result);
     const bytes_written = try file_write.getResult();
     try std.testing.expectEqual(write_data.len, bytes_written);
@@ -47,7 +47,7 @@ test "File: open/close" {
     var file_sync1 = ev.FileSync.init(fd, .{ .only_data = false });
     loop.add(&file_sync1.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, file_sync1.c.state);
+    try std.testing.expectEqual(.dead, file_sync1.c.loadState().phase);
     try std.testing.expectEqual(true, file_sync1.c.has_result);
     try file_sync1.getResult();
 
@@ -57,7 +57,7 @@ test "File: open/close" {
     var file_read = ev.FileRead.init(fd, .fromSlice(&read_buffer, &read_iov), 0);
     loop.add(&file_read.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, file_read.c.state);
+    try std.testing.expectEqual(.dead, file_read.c.loadState().phase);
     try std.testing.expectEqual(true, file_read.c.has_result);
     const bytes_read = try file_read.getResult();
     try std.testing.expectEqual(write_data.len, bytes_read);
@@ -67,7 +67,7 @@ test "File: open/close" {
     var file_sync2 = ev.FileSync.init(fd, .{ .only_data = true });
     loop.add(&file_sync2.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, file_sync2.c.state);
+    try std.testing.expectEqual(.dead, file_sync2.c.loadState().phase);
     try std.testing.expectEqual(true, file_sync2.c.has_result);
     try file_sync2.getResult();
 
@@ -76,7 +76,7 @@ test "File: open/close" {
 
     try loop.run(.until_done);
 
-    try std.testing.expectEqual(.dead, file_close.c.state);
+    try std.testing.expectEqual(.dead, file_close.c.loadState().phase);
     try std.testing.expectEqual(true, file_close.c.has_result);
 
     try file_close.getResult();
@@ -100,7 +100,7 @@ test "File: rename/delete" {
     var file_create = ev.FileCreate.init(cwd, "test-rename-src", .{ .read = true, .truncate = true, .mode = 0o664 });
     loop.add(&file_create.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, file_create.c.state);
+    try std.testing.expectEqual(.dead, file_create.c.loadState().phase);
     const fd = (try file_create.getResult()).fd;
 
     // Write some data
@@ -109,19 +109,19 @@ test "File: rename/delete" {
     var file_write = ev.FileWrite.init(fd, .fromSlice(write_data, &write_iov), 0);
     loop.add(&file_write.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, file_write.c.state);
+    try std.testing.expectEqual(.dead, file_write.c.loadState().phase);
 
     // Close the file
     var file_close = ev.FileClose.init(fd);
     loop.add(&file_close.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, file_close.c.state);
+    try std.testing.expectEqual(.dead, file_close.c.loadState().phase);
 
     // Rename the file
     var file_rename = ev.DirRename.init(cwd, "test-rename-src", cwd, "test-rename-dst");
     loop.add(&file_rename.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, file_rename.c.state);
+    try std.testing.expectEqual(.dead, file_rename.c.loadState().phase);
     try std.testing.expectEqual(true, file_rename.c.has_result);
     try file_rename.getResult();
 
@@ -129,7 +129,7 @@ test "File: rename/delete" {
     var file_open = ev.FileOpen.init(cwd, "test-rename-dst", .{ .mode = .read_only });
     loop.add(&file_open.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, file_open.c.state);
+    try std.testing.expectEqual(.dead, file_open.c.loadState().phase);
     const fd2 = (try file_open.getResult()).fd;
 
     // Read and verify the data
@@ -138,7 +138,7 @@ test "File: rename/delete" {
     var file_read = ev.FileRead.init(fd2, .fromSlice(&read_buffer, &read_iov2), 0);
     loop.add(&file_read.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, file_read.c.state);
+    try std.testing.expectEqual(.dead, file_read.c.loadState().phase);
     const bytes_read = try file_read.getResult();
     try std.testing.expectEqual(write_data.len, bytes_read);
     try std.testing.expectEqualStrings(write_data, read_buffer[0..bytes_read]);
@@ -147,13 +147,13 @@ test "File: rename/delete" {
     var file_close2 = ev.FileClose.init(fd2);
     loop.add(&file_close2.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, file_close2.c.state);
+    try std.testing.expectEqual(.dead, file_close2.c.loadState().phase);
 
     // Delete the file
     var file_delete = ev.DirDeleteFile.init(cwd, "test-rename-dst");
     loop.add(&file_delete.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, file_delete.c.state);
+    try std.testing.expectEqual(.dead, file_delete.c.loadState().phase);
     try std.testing.expectEqual(true, file_delete.c.has_result);
     try file_delete.getResult();
 
@@ -161,7 +161,7 @@ test "File: rename/delete" {
     var file_open_fail = ev.FileOpen.init(cwd, "test-rename-dst", .{ .mode = .read_only });
     loop.add(&file_open_fail.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, file_open_fail.c.state);
+    try std.testing.expectEqual(.dead, file_open_fail.c.loadState().phase);
     try std.testing.expectError(error.FileNotFound, file_open_fail.getResult());
 }
 
@@ -208,7 +208,7 @@ test "File: read EOF" {
     var file_read2 = ev.FileRead.init(fd, .fromSlice(&read_buffer2, &read_iov2), write_data.len);
     loop.add(&file_read2.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, file_read2.c.state);
+    try std.testing.expectEqual(.dead, file_read2.c.loadState().phase);
     try std.testing.expectEqual(true, file_read2.c.has_result);
     const bytes_read2 = try file_read2.getResult();
     try std.testing.expectEqual(0, bytes_read2);
@@ -249,7 +249,7 @@ test "File: size" {
     var file_size1 = ev.FileSize.init(fd);
     loop.add(&file_size1.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, file_size1.c.state);
+    try std.testing.expectEqual(.dead, file_size1.c.loadState().phase);
     try std.testing.expectEqual(true, file_size1.c.has_result);
     const size1 = try file_size1.getResult();
     try std.testing.expectEqual(0, size1);
@@ -266,7 +266,7 @@ test "File: size" {
     var file_size2 = ev.FileSize.init(fd);
     loop.add(&file_size2.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, file_size2.c.state);
+    try std.testing.expectEqual(.dead, file_size2.c.loadState().phase);
     try std.testing.expectEqual(true, file_size2.c.has_result);
     const size2 = try file_size2.getResult();
     try std.testing.expectEqual(write_data.len, size2);
@@ -322,7 +322,7 @@ test "File: stat" {
     var file_stat1 = ev.FileStat.init(fd, null, .{});
     loop.add(&file_stat1.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, file_stat1.c.state);
+    try std.testing.expectEqual(.dead, file_stat1.c.loadState().phase);
     try std.testing.expectEqual(true, file_stat1.c.has_result);
     const stat1 = try file_stat1.getResult();
     try std.testing.expectEqual(0, stat1.size);
@@ -397,7 +397,7 @@ test "File: stat_path" {
     var file_stat = ev.FileStat.init(cwd, "test-stat-path", .{});
     loop.add(&file_stat.c);
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, file_stat.c.state);
+    try std.testing.expectEqual(.dead, file_stat.c.loadState().phase);
     try std.testing.expectEqual(true, file_stat.c.has_result);
     const stat = try file_stat.getResult();
     try std.testing.expectEqual(write_data.len, stat.size);

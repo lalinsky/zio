@@ -363,19 +363,22 @@ pub fn hasInflight(self: *const Self) bool {
 
 /// Submit a completion to the backend - infallible.
 /// On error, completes the operation immediately with error.Unexpected.
-/// Can be called for initial submission (state == .new) or resubmission after EINTR (state == .running).
 pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
-    const is_new = c.state == .new;
-    if (is_new) {
-        c.state = .running;
-        // Counted once per accepted op (sync completers decrement right back
-        // via markCompletedFromBackend); EINTR resubmissions are not new and
-        // stay counted from their first submit.
-        self.inflight += 1;
-    } else {
-        std.debug.assert(c.state == .running);
-    }
+    // Counted once per accepted op (sync completers decrement right back via
+    // markCompletedFromBackend); EINTR resubmissions go through resubmit and
+    // stay counted from their first submit.
+    self.inflight += 1;
+    self.submitInner(state, c, true);
+}
 
+fn resubmit(self: *Self, state: *LoopState, c: *Completion) void {
+    std.debug.assert(c.loadState().phase == .running);
+    self.submitInner(state, c, false);
+}
+
+/// `is_new` distinguishes the first submission (allocate op-owned resources)
+/// from an EINTR/SQ-full resubmission (reuse them).
+fn submitInner(self: *Self, state: *LoopState, c: *Completion, is_new: bool) void {
     switch (c.op) {
         .group, .timer, .async, .work => unreachable, // Managed by the loop
 
@@ -846,10 +849,9 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 /// Cancel a completion - infallible.
 /// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
 pub fn cancel(self: *Self, _: *LoopState, target: *Completion) void {
-    switch (target.state) {
+    switch (target.loadState().phase) {
         .new => {
-            // UNREACHABLE: When cancel is added via loop.add() and target.state == .new,
-            // loop.add() handles it directly and doesn't call backend.cancel().
+            // UNREACHABLE: cancelLocal only forwards running completions.
             unreachable;
         },
         .running => {
@@ -1008,7 +1010,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         // When a target is canceled, it recursively completes the cancel operation
         // So when we get the cancel's CQE, it's already completed
         // Similarly, when we get the target's CQE after the cancel already completed it
-        if (completion.state == .completed or completion.state == .dead) {
+        if (completion.loadState().phase != .running) {
             continue;
         }
 
@@ -1040,15 +1042,15 @@ fn drainPending(self: *Self, state: *LoopState) void {
     self.pending = .{};
 
     while (to_drain.pop()) |c| {
-        if (c.cancel_state.load(.acquire).requested) {
+        if (c.loadState().cancel_requested) {
             // Complete canceled pending ops immediately rather than writing a SQE.
             // storeResult handles resource cleanup (e.g. allocated paths).
             self.storeResult(c, -@as(i32, @intFromEnum(linux.E.CANCELED)));
             state.markCompletedFromBackend(c);
         } else {
-            // submit() will call getSqeOrDefer(); if the SQ fills up again the
+            // resubmit() will call getSqeOrDefer(); if the SQ fills up again the
             // completion lands in self.pending and will be retried next poll.
-            self.submit(state, c);
+            self.resubmit(state, c);
         }
     }
 }

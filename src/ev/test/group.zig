@@ -19,7 +19,7 @@ test "group: empty group completes immediately" {
 
     try loop.run(.until_done);
 
-    try std.testing.expectEqual(.dead, group.c.state);
+    try std.testing.expectEqual(.dead, group.c.loadState().phase);
     try group.getResult();
 }
 
@@ -36,8 +36,8 @@ test "group: single completion" {
 
     try loop.run(.until_done);
 
-    try std.testing.expectEqual(.dead, timer.c.state);
-    try std.testing.expectEqual(.dead, group.c.state);
+    try std.testing.expectEqual(.dead, timer.c.loadState().phase);
+    try std.testing.expectEqual(.dead, group.c.loadState().phase);
     try timer.getResult();
     try group.getResult();
 }
@@ -59,10 +59,10 @@ test "group: multiple completions" {
 
     try loop.run(.until_done);
 
-    try std.testing.expectEqual(.dead, timer1.c.state);
-    try std.testing.expectEqual(.dead, timer2.c.state);
-    try std.testing.expectEqual(.dead, timer3.c.state);
-    try std.testing.expectEqual(.dead, group.c.state);
+    try std.testing.expectEqual(.dead, timer1.c.loadState().phase);
+    try std.testing.expectEqual(.dead, timer2.c.loadState().phase);
+    try std.testing.expectEqual(.dead, timer3.c.loadState().phase);
+    try std.testing.expectEqual(.dead, group.c.loadState().phase);
 
     try timer1.getResult();
     try timer2.getResult();
@@ -242,9 +242,9 @@ test "group: mixed completion types" {
 
     try loop.run(.until_done);
 
-    try std.testing.expectEqual(.dead, timer.c.state);
-    try std.testing.expectEqual(.dead, async_handle.c.state);
-    try std.testing.expectEqual(.dead, group.c.state);
+    try std.testing.expectEqual(.dead, timer.c.loadState().phase);
+    try std.testing.expectEqual(.dead, async_handle.c.loadState().phase);
+    try std.testing.expectEqual(.dead, group.c.loadState().phase);
 
     try timer.getResult();
     try async_handle.getResult();

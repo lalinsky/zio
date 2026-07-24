@@ -69,7 +69,7 @@ test "Loop: timer basic" {
     try loop.run(.until_done);
     const elapsed = wall_timer.read();
 
-    try std.testing.expectEqual(.dead, timer.c.state);
+    try std.testing.expectEqual(.dead, timer.c.loadState().phase);
     try std.testing.expect(elapsed.toMilliseconds() >= timeout_ms - 5);
     try std.testing.expect(elapsed.toMilliseconds() <= timeout_ms + 100);
     std.log.info("timer: expected={}ms, actual={f}", .{ timeout_ms, elapsed });
@@ -137,7 +137,7 @@ test "Loop: async notification - same thread" {
 
     // Run loop - async should complete
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, async_handle.c.state);
+    try std.testing.expectEqual(.dead, async_handle.c.loadState().phase);
     try async_handle.c.getResult(.async);
 }
 
@@ -164,7 +164,7 @@ test "Loop: async notification - cross-thread" {
 
     // Run loop - should block until notified
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, async_handle.c.state);
+    try std.testing.expectEqual(.dead, async_handle.c.loadState().phase);
     try async_handle.c.getResult(.async);
 
     thread.join();
@@ -190,9 +190,9 @@ test "Loop: async notification - multiple handles" {
 
     // Run loop - all should complete
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, async1.c.state);
-    try std.testing.expectEqual(.dead, async2.c.state);
-    try std.testing.expectEqual(.dead, async3.c.state);
+    try std.testing.expectEqual(.dead, async1.c.loadState().phase);
+    try std.testing.expectEqual(.dead, async2.c.loadState().phase);
+    try std.testing.expectEqual(.dead, async3.c.loadState().phase);
 }
 
 test "Loop: async notification - re-arm" {
@@ -206,14 +206,14 @@ test "Loop: async notification - re-arm" {
     loop.add(&async_handle.c);
     async_handle.notify();
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, async_handle.c.state);
+    try std.testing.expectEqual(.dead, async_handle.c.loadState().phase);
 
     // Re-arm for second notification
     async_handle = .init();
     loop.add(&async_handle.c);
     async_handle.notify();
     try loop.run(.until_done);
-    try std.testing.expectEqual(.dead, async_handle.c.state);
+    try std.testing.expectEqual(.dead, async_handle.c.loadState().phase);
 }
 
 test "Pipe: write and read" {
