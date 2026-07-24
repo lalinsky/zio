@@ -1743,10 +1743,21 @@ fn processReplacePathImpl(_: ?*anyopaque, dir: Io.Dir, options: std.process.Repl
     return io.vtable.processReplacePath(io.userdata, dir, options);
 }
 
+fn processEnviron() std.process.Environ {
+    if (builtin.os.tag == .windows) {
+        return .{ .block = .global };
+    }
+    if (builtin.link_libc) {
+        const slice = std.mem.sliceTo(std.c.environ, null);
+        return .{ .block = .{ .slice = @ptrCast(slice) } };
+    }
+    return .empty;
+}
+
 // TODO: implement using our own posix_spawn/fork+exec wrapper
 fn processSpawnImpl(userdata: ?*anyopaque, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    var threaded: Io.Threaded = .init(rt.allocator, .{});
+    var threaded: Io.Threaded = .init(rt.allocator, .{ .environ = processEnviron() });
     defer threaded.deinit();
     const io = threaded.io();
     var child = try io.vtable.processSpawn(io.userdata, options);
@@ -1757,7 +1768,7 @@ fn processSpawnImpl(userdata: ?*anyopaque, options: std.process.SpawnOptions) st
 // TODO: implement using our own posix_spawn/fork+exec wrapper
 fn processSpawnPathImpl(userdata: ?*anyopaque, dir: Io.Dir, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    var threaded: Io.Threaded = .init(rt.allocator, .{});
+    var threaded: Io.Threaded = .init(rt.allocator, .{ .environ = processEnviron() });
     defer threaded.deinit();
     const io = threaded.io();
     var child = try io.vtable.processSpawnPath(io.userdata, dir, options);
