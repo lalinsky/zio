@@ -5,6 +5,8 @@ const std = @import("std");
 const ev = @import("ev/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTask = @import("runtime.zig").getCurrentTask;
+const yield = @import("runtime.zig").yield;
+const JoinHandle = @import("runtime.zig").JoinHandle;
 const Duration = @import("time.zig").Duration;
 const Timeout = @import("time.zig").Timeout;
 const AnyTask = @import("task.zig").AnyTask;
@@ -17,7 +19,11 @@ const AnyTask = @import("task.zig").AnyTask;
 /// allowing the caller to distinguish timeout-induced cancellation from explicit cancellation.
 pub const AutoCancel = struct {
     timer: ev.Timer = .init(.{ .duration = .zero }),
-    triggered: bool = false,
+    /// Whether this instance is the one that canceled the task. Written by the
+    /// callback before it hands the cancellation to the task, and read by
+    /// `check` on the task itself, so the two are ordered by the release/acquire
+    /// pair on the task's cancel state rather than by touching this field.
+    triggered: std.atomic.Value(bool) = .init(false),
     task: ?*AnyTask = null,
     /// Set by the callback, before it wakes the owner task, as its last touch
     /// of this struct. A `clear` that lost the disarm race parks on it, which
@@ -57,7 +63,7 @@ pub const AutoCancel = struct {
 
         // Set task reference and reset the per-arm flags
         self.task = task;
-        self.triggered = false;
+        self.triggered.store(false, .monotonic);
         self.fired.store(0, .monotonic);
 
         // Initialize ev.Timer
@@ -73,7 +79,10 @@ pub const AutoCancel = struct {
     /// User cancellation has priority - if the task was user-canceled, returns false.
     pub fn check(self: *AutoCancel, err: Cancelable) bool {
         std.debug.assert(err == error.Canceled);
-        if (!self.triggered) return false;
+        // A user cancel that shadowed this one leaves the flag set (see the
+        // callback), so `checkAutoCancel` is what decides; the flag only says
+        // which instance to attribute an auto-cancel to.
+        if (!self.triggered.load(.acquire)) return false;
         return getCurrentTask().checkAutoCancel();
     }
 };
@@ -89,11 +98,21 @@ fn autoCancelCallback(
     // Clear the associated task
     autocancel.task = null;
 
-    // An error means the timer was cancelled, so don't cancel the task; only
-    // cancel if we triggered (not shadowed by user cancel).
+    // An error means the timer was cancelled, so don't cancel the task.
     if (completion.err == null) {
         if (task) |t| {
-            if (t.setCanceled(.auto)) autocancel.triggered = true;
+            // Claim the cancellation before handing it over: `setCanceled`
+            // publishes this write, and the task can reach `check` as soon as
+            // it can see the cancellation. Setting it afterwards let a task
+            // that was running (rather than parked on this timer) observe the
+            // cancel first and report it as a plain cancel.
+            //
+            // A shadowing user cancel makes the claim wrong, so take it back.
+            // The window is harmless: `check` only trusts the flag to pick an
+            // instance, and `checkAutoCancel` refuses once the task is
+            // user-canceled.
+            autocancel.triggered.store(true, .release);
+            if (!t.setCanceled(.auto)) autocancel.triggered.store(false, .monotonic);
         }
     }
 
@@ -230,9 +249,9 @@ test "AutoCancel: multiple timeouts with different deadlines" {
     // Sleep - should be interrupted by timeout2 (earliest at 10ms)
     rt.sleep(.fromMilliseconds(1000)) catch |err| {
         // timeout2 should have triggered
-        try std.testing.expect(timeout2.triggered);
-        try std.testing.expect(!timeout1.triggered);
-        try std.testing.expect(!timeout3.triggered);
+        try std.testing.expect(timeout2.triggered.load(.acquire));
+        try std.testing.expect(!timeout1.triggered.load(.acquire));
+        try std.testing.expect(!timeout3.triggered.load(.acquire));
 
         // Should return true for timeout2
         try std.testing.expect(timeout2.check(err));
@@ -284,6 +303,49 @@ test "AutoCancel: set with Duration.max clears prior timer" {
     try rt.sleep(.fromMilliseconds(50));
 
     // If we reach here, the timer was properly cleared
+}
+
+test "AutoCancel: attributed when it fires on a task running elsewhere" {
+    // Attribution under churn: the callback hands the cancellation over from
+    // the loop that armed the timer, which after a migration is not the
+    // executor the task runs on. This does not reproduce the ordering window
+    // between claiming and handing over (that needs the loop thread to stall
+    // between two adjacent stores), it covers the surrounding path.
+    const worker = struct {
+        fn call(rounds: usize, unattributed: *std.atomic.Value(u32)) void {
+            var timeout: AutoCancel = .init;
+            defer timeout.clear();
+
+            var round: usize = 0;
+            while (round < rounds) : (round += 1) {
+                timeout.set(.fromMicroseconds(200));
+
+                // Spin over cancellation points until the timer lands. Nothing
+                // else cancels this task, so every cancellation seen here is
+                // this timeout's.
+                while (true) {
+                    yield() catch |err| {
+                        if (!timeout.check(err)) _ = unattributed.fetchAdd(1, .monotonic);
+                        break;
+                    };
+                }
+            }
+        }
+    }.call;
+
+    // More workers than executors, so they keep getting stolen and end up
+    // running on an executor other than the one that armed their timer.
+    const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
+    defer rt.deinit();
+
+    var unattributed: std.atomic.Value(u32) = .init(0);
+    var handles: [8]JoinHandle(void) = undefined;
+    for (&handles) |*handle| {
+        handle.* = try rt.spawn(worker, .{ @as(usize, 200), &unattributed });
+    }
+    for (&handles) |*handle| handle.join();
+
+    try std.testing.expectEqual(0, unattributed.load(.monotonic));
 }
 
 test "AutoCancel: cancels spawned task via join" {
