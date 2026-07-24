@@ -17,7 +17,7 @@ else
 const argv_kill_self: []const []const u8 = if (builtin.os.tag == .windows)
     &.{}
 else
-    &.{ "sh", "-c", "kill -TERM $$" };
+    &.{ "sh", "-c", "kill -KILL $$" };
 
 test "ProcessWait: wait for child process exit code 0" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
@@ -40,8 +40,8 @@ test "ProcessWait: wait for child process exit code 0" {
 
     const result = try wait.getResult();
     child.id = null;
-    try std.testing.expectEqual(@as(u8, 0), result.code);
-    try std.testing.expectEqual(@as(?u8, null), result.signal);
+    try std.testing.expectEqual(0, result.code);
+    try std.testing.expectEqual(null, result.signal);
 }
 
 test "ProcessWait: wait for child process exit code 1" {
@@ -65,8 +65,8 @@ test "ProcessWait: wait for child process exit code 1" {
 
     const result = try wait.getResult();
     child.id = null;
-    try std.testing.expectEqual(@as(u8, 1), result.code);
-    try std.testing.expectEqual(@as(?u8, null), result.signal);
+    try std.testing.expectEqual(1, result.code);
+    try std.testing.expectEqual(null, result.signal);
 }
 
 test "ProcessWait: wait for child process killed by signal" {
@@ -90,5 +90,5 @@ test "ProcessWait: wait for child process killed by signal" {
 
     const result = try wait.getResult();
     child.id = null;
-    try std.testing.expectEqual(@as(?u8, @intFromEnum(std.posix.SIG.TERM)), result.signal);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(std.posix.SIG.KILL)), result.signal);
 }
