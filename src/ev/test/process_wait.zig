@@ -7,17 +7,17 @@ const ThreadPool = @import("../thread_pool.zig").ThreadPool;
 const argv_exit0: []const []const u8 = if (builtin.os.tag == .windows)
     &.{ "cmd.exe", "/c", "exit 0" }
 else
-    &.{ "/bin/sh", "-c", "exit 0" };
+    &.{ "sh", "-c", "exit 0" };
 
 const argv_exit1: []const []const u8 = if (builtin.os.tag == .windows)
     &.{ "cmd.exe", "/c", "exit 1" }
 else
-    &.{ "/bin/sh", "-c", "exit 1" };
+    &.{ "sh", "-c", "exit 1" };
 
 const argv_kill_self: []const []const u8 = if (builtin.os.tag == .windows)
     &.{}
 else
-    &.{ "/bin/sh", "-c", "kill -TERM $$" };
+    &.{ "sh", "-c", "kill -TERM $$" };
 
 test "ProcessWait: wait for child process exit code 0" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
