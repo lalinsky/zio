@@ -505,6 +505,12 @@ pub const LoopState = struct {
                 slot.* = node.resend_next;
                 node.resend_next = null;
                 node.resend_key = null;
+                // Fire the release hook (drops the blocking task's keep-alive
+                // ref) now that the entry is unlinked. Cleared so it runs once.
+                if (node.resend_release) |release| {
+                    node.resend_release = null;
+                    release(node);
+                }
             }
         }
     }
@@ -840,6 +846,39 @@ pub const Loop = struct {
                     self.backend.cancel(&self.state, completion);
                 }
             },
+        }
+    }
+
+    /// Cancel a thread-pool `work` that was submitted directly to the pool (not
+    /// through this loop), e.g. a blocking task. Loop-thread only.
+    ///
+    /// Requests cancellation via the pool (which sends the first `SIGURG`); if
+    /// the worker is blocked in the canceled syscall, arms this loop's resend so
+    /// `tick` re-sends until it acknowledges. The work must carry a
+    /// `cancel_token`. If no resend is armed (worker not blocked, or no pool),
+    /// the `resend_release` hook fires immediately; otherwise `sweepResend` fires
+    /// it on acknowledgement. Either way the hook runs exactly once, on this
+    /// thread.
+    pub fn cancelWork(self: *Loop, work: *Work) void {
+        const thread_pool = self.thread_pool orelse {
+            if (work.resend_release) |release| {
+                work.resend_release = null;
+                release(work);
+            }
+            return;
+        };
+        thread_pool.cancel(work);
+        if (work.cancel_token) |token| {
+            if (token.isCanceling()) {
+                // Keyed by &work.c; blocking-task work never finalizes through a
+                // loop, so only sweepResend drops the entry (and fires the hook).
+                self.state.addResend(work, &work.c);
+                return;
+            }
+        }
+        if (work.resend_release) |release| {
+            work.resend_release = null;
+            release(work);
         }
     }
 
