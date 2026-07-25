@@ -1812,7 +1812,7 @@ test "Stream.Writer.sendFile cancellation unblocks a stalled transfer" {
         defer f.close(io);
         var fw_buf: [4096]u8 = undefined;
         var fw = f.writer(io, &fw_buf);
-        const zeros = [_]u8{0} ** 4096;
+        const zeros: [4096]u8 = @splat(0);
         var written: usize = 0;
         while (written < total) : (written += zeros.len) {
             try fw.interface.writeAll(&zeros);

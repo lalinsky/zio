@@ -129,7 +129,7 @@ fn FutureResult(comptime future_type: type) type {
 
 /// Check for self-wait deadlock if the future has a toAwaitable() method
 fn checkSelfWait(task: *AnyTask, future: anytype) void {
-    if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+    if (builtin.mode == .debug or builtin.mode == .safe) {
         if (std.meta.hasMethod(@TypeOf(future), "toAwaitable")) {
             const awaitable_ptr = future.toAwaitable();
             if (awaitable_ptr == &task.awaitable) {

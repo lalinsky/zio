@@ -2369,7 +2369,6 @@ fn recvErrToReadErr(err: ev.NetRecv.Error) Io.Operation.NetRead.Error {
         error.SocketNotConnected, error.SocketShutdown => error.SocketUnconnected,
         error.NetworkDown => error.NetworkDown,
         error.SystemResources => error.SystemResources,
-        error.Timeout,
         error.Canceled,
         error.WouldBlock,
         error.ConnectionRefused,
