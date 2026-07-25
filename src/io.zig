@@ -1941,9 +1941,10 @@ fn bindErrToListenErr(err: BindOrCancel) Io.net.IpAddress.ListenError {
         error.NetworkDown => error.NetworkDown,
         error.SystemResources => error.SystemResources,
         error.Canceled => error.Canceled,
-        // TODO(zig-0.17): map `error.AccessDenied` through once `ListenError` has it
-        // (https://codeberg.org/ziglang/zig/pulls/36307). Binding a privileged port
-        // without the permission to do so is a normal error, not something unexpected.
+        // TODO: map `error.AccessDenied` through once `ListenError` has it. Binding a
+        // privileged port without the permission to do so is a normal error, not
+        // something unexpected. Still missing from the set as of 0.17.0-dev.1464,
+        // waiting on https://codeberg.org/ziglang/zig/pulls/36307.
         error.AccessDenied,
         error.FileDescriptorNotASocket,
         error.SymLinkLoop,
@@ -2053,9 +2054,8 @@ fn bindErrToBindErr(err: BindOrCancel) Io.net.IpAddress.BindError {
         error.NetworkDown => error.NetworkDown,
         error.SystemResources => error.SystemResources,
         error.Canceled => error.Canceled,
-        // TODO(zig-0.17): same as in `bindErrToListenErr`, map `error.AccessDenied`
-        // through once `BindError` has it
-        // (https://codeberg.org/ziglang/zig/pulls/36307).
+        // TODO: same as in `bindErrToListenErr`, map `error.AccessDenied` through
+        // once `BindError` has it.
         error.AccessDenied,
         error.FileDescriptorNotASocket,
         error.SymLinkLoop,
