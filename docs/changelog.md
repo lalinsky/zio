@@ -13,6 +13,10 @@ All notable changes to this project will be documented in this file.
   whether the timeout or a real wakeup ended the wait. `CompletionQueue.timedWait` no
   longer reports a timeout when a completion woke it.
 
+- `AutoCancel` now claims the cancellation before handing it to the task, so `check()`
+  cannot miss a timeout it caused. Its `triggered` field became atomic, so code reading
+  it directly needs `.load(.acquire)`.
+
 - Reworked completion state tracking in the low-level `ev` API: the lifecycle phase and
   the cancellation flags now live in a single atomic `Completion.state` word, read
   through `Completion.loadState()`. The separate `cancel_state` field is gone; code that
