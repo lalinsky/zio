@@ -5,16 +5,16 @@
 [![Zig](https://img.shields.io/badge/zig-0.16.0-orange.svg)](https://ziglang.org/download/)
 [![Documentation](https://img.shields.io/badge/docs-online-green.svg)](https://lalinsky.github.io/zio/)
 
-The project consists of a few high-level components:
-- Runtime for executing stackful coroutines (fibers, green threads) on one or more CPU threads.
-- Asynchronous I/O layer that makes it look like operations are blocking for easy state management, but using event-driven OS APIs under the hood.
-- Synchronization primitives that cooperate with this runtime.
-- Seamless integration with standard library interfaces:
-    * Full implementation of the [`std.Io`] interface, so that you can use any Zig 0.16+ networking library.
-    * All streams implement the [`std.Io.Reader`] and [`std.Io.Writer`] interfaces.
-    * Integration with `std.log` and `std.debug.print` via custom `debug_io`.
+The project consists of a few components, together forming a coroutine runtime, that uses asynchronous I/O event loop under the hood.
+It's similar to [goroutines] in Go, but with the pros and cons of being implemented in a language with manual memory management
+and without compiler support.
 
-It's similar to [goroutines] in Go, but with the pros and cons of being implemented in a language with manual memory management and without compiler support.
+The key components are:
+- Callback-based I/O event loop, using the best strategy for asynchronous operations on many supported operating systems. Accessible also as a standalone library, `zio.ev`.
+- Coroutine library, custom assembly context switching for many architectures, growable stacks implemented using extending virtual memory reservations. Also usable also as a standalone library, `zio.coro`.
+- Configurable scheduler that uses these two internal libraries, and allows for coroutines to run on a single or multiple threads, interweaving CPU tasks with I/O operations, aiming for a good balance between fairness and throughput. The multi-threaded version has two modes of operation, tasks pinned to their thread, or tasks freely migrating across threads.
+- Public API for all common concurrency and I/O operations, that looks blocking from user code, but always use the event loop and suspend the current coroutine while waiting, allowing other coroutines to run in the meantime. This covers all kinds of synchronization primitives, networking, DNS, file reading/writing, directory operations.
+- Implementation of the `std.Io` interface, which is basically a different version of the public API, still using the same runtime components.
 
 > The main branch is for Zig 0.16 . For Zig master (0.17+), use the [`zig-0.17`](https://github.com/lalinsky/zio/tree/zig-0.17) branch.
 
@@ -36,6 +36,7 @@ It's similar to [goroutines] in Go, but with the pros and cons of being implemen
 - Structured concurrency using task groups.
 - Synchronization primitives, including more advanced ones, like channels.
 - Low-level event loop access for integrating with existing C libraries.
+- Integration with `std.log` and `std.debug.print` via custom `debug_io`.
 
 ## Installation
 
