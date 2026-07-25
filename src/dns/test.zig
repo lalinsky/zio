@@ -38,6 +38,7 @@ test "HostName: validate" {
     try std.testing.expectError(error.InvalidHostName, HostName.validate("."));
     try std.testing.expectError(error.InvalidHostName, HostName.validate(".."));
     try std.testing.expectError(error.InvalidHostName, HostName.validate(@as([64]u8, @splat('a')) ++ ".com")); // Label length 64 (too long)
+    try std.testing.expectError(error.NameTooLong, HostName.validate(@as([127 * 2]u8, @bitCast(@as([127][2]u8, @splat(.{ 'a', '.' })))) ++ "a.")); // Total length 255 + trailing dot (too long)
     try std.testing.expectError(error.NameTooLong, HostName.validate(@as([127 * 2]u8, @bitCast(@as([127][2]u8, @splat(.{ 'a', '.' })))) ++ "ab")); // Total length 256 (too long)
 }
 

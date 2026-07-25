@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `net.HostName.validate` now counts the trailing dot of a fully qualified domain name
+  toward the 255 byte limit, matching how the name is encoded in a DNS packet. A 255 byte
+  name written with a trailing dot used to validate at 256 bytes, so a validated
+  `HostName` could be longer than `HostName.max_len`.
+
 - File writes now report `EBUSY` as `error.DeviceBusy` and `ETXTBSY` as `error.FileBusy`
   instead of `error.Unexpected`, which in debug builds also asked the user to file a bug
   report and dumped a stack trace to stderr. Writing to a
