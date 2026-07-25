@@ -64,6 +64,11 @@ All notable changes to this project will be documented in this file.
   progress, as long as the spawn happens before the group drains. This matches
   `std.Io.Threaded` and the `select`-based wait.
 
+- Fixed a crash in `Runtime.deinit()` on multi-threaded runtimes. A worker could act on
+  its shutdown notification and close its waker descriptors before the notifying thread
+  had made the syscall that wakes a sleeping loop, so that write hit a closed descriptor,
+  or a recycled one belonging to an unrelated file or socket.
+
 ## [0.16.0] - 2026-07-12
 
 - Blocking operations running on thread-pool workers are now cancelable. Previously,

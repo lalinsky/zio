@@ -1105,6 +1105,11 @@ pub const Runtime = struct {
     workers: std.ArrayList(Worker) = .empty,
     task_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), // Active task counter
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    // Permission for worker threads to tear down their executors. Set by
+    // shutdownWorkers() once every shutdown notification has been delivered,
+    // so a worker cannot close its waker fds while a notifier is still using
+    // them. See the wait in runWorker().
+    teardown: os.ResetEvent = .init(),
     own_self: bool = false,
 
     resolver: ?dns.Resolver = null,
@@ -1198,6 +1203,10 @@ pub const Runtime = struct {
                 worker.executor.shutdown.notify();
             }
         }
+
+        // Every notify() above has returned, so no waker syscall is in flight
+        // against a worker loop any more; workers may now tear theirs down.
+        self.teardown.set();
 
         // Join worker threads
         for (self.workers.items) |*worker| {
@@ -1316,7 +1325,17 @@ pub const Runtime = struct {
             worker.ready.set();
             return;
         };
-        defer worker.executor.deinit();
+        defer {
+            // A cross-thread notifier publishes its wake (Async.pending plus the
+            // loop's wake_requested bit) before it performs the waker syscall,
+            // and the loop is free to act on that publication in between: it can
+            // run the shutdown callback, stop, and get here while the notifier
+            // is still short of its write(). Deiniting now would close the waker
+            // fds underneath it, so wait until shutdownWorkers() reports that
+            // every notification has been delivered.
+            self.teardown.wait();
+            worker.executor.deinit();
+        }
 
         worker.ready.set();
 
