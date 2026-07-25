@@ -235,6 +235,11 @@ pub const FileWriteError = error{
     FileTooBig,
     LockViolation,
     Unseekable,
+    /// The device backing the file is busy.
+    DeviceBusy,
+    /// The file is an executable image that is currently being executed, or is
+    /// otherwise in use by the kernel.
+    FileBusy,
     Canceled,
     Unexpected,
 };
@@ -1866,6 +1871,8 @@ pub fn errnoToFileWriteError(err: E) FileWriteError {
                 .BADF => error.NotOpenForWriting,
                 .DQUOT => error.DiskQuota,
                 .FBIG => error.FileTooBig,
+                .BUSY => error.DeviceBusy,
+                .TXTBSY => error.FileBusy,
                 // ESPIPE is the usual "not seekable" answer for a positional
                 // write, but macOS returns ENXIO for a tty, and EOVERFLOW when
                 // the offset is past what the device can represent.
