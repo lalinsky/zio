@@ -105,7 +105,7 @@ pub const Table = struct {
     mutex: os.Mutex = .init(),
     refcount: usize = 0,
     allocator: std.mem.Allocator = undefined,
-    shards: [shard_count]Shard = [_]Shard{.{}} ** shard_count,
+    shards: [shard_count]Shard = @splat(.{}),
 
     pub fn acquire(self: *Table, allocator: std.mem.Allocator) void {
         self.mutex.lock();

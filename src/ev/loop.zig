@@ -27,8 +27,8 @@ const common = @import("backends/common.zig");
 
 const log = @import("../common.zig").log;
 
-const in_safe_mode = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
-const in_debug_mode = builtin.mode == .Debug;
+const in_safe_mode = builtin.mode == .debug or builtin.mode == .safe;
+const in_debug_mode = builtin.mode == .debug;
 
 /// The loop bound to the current thread (debug builds only), used by
 /// `assertOwnThread`. Set by `Loop.init`, cleared by `Loop.deinit`.

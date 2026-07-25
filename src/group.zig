@@ -618,7 +618,7 @@ test "Group: failed spawnBlocking frees the task exactly once" {
         fn call(_: [3000]u8) void {}
     }.call;
 
-    try std.testing.expectError(error.RuntimeShutdown, group.spawnBlocking(bigWork, .{[_]u8{0} ** 3000}));
+    try std.testing.expectError(error.RuntimeShutdown, group.spawnBlocking(bigWork, .{@as([3000]u8, @splat(0))}));
 }
 
 test "Group: reusable after wait" {

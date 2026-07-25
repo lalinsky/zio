@@ -1502,7 +1502,7 @@ test "runtime: spawnBlocking does not leak with a large result" {
     // smoke test did not catch it.
     const blockingWork = struct {
         fn call(x: u8) [4000]u8 {
-            return [_]u8{x} ** 4000;
+            return @splat(x);
         }
     }.call;
 
