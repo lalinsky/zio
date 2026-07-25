@@ -12,7 +12,7 @@ pub const iovec_const = switch (builtin.os.tag) {
     else => std.c.iovec_const,
 };
 
-pub const unexpected_error_tracing = builtin.mode == .Debug and switch (builtin.zig_backend) {
+pub const unexpected_error_tracing = builtin.mode == .debug and switch (builtin.zig_backend) {
     .stage2_llvm, .stage2_x86_64 => true,
     else => false,
 };
