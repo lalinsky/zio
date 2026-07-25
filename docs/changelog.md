@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed a use-after-free in timed waits, where a task could return and drop the stack
+  frame holding its timeout timer before the event loop was done with it. A timer that
+  has already fired cannot be disarmed, so `Loop.clearTimer` now returns false to say the
+  callback is still coming; low-level `ev` users need to handle the result.
+
+- `Waiter.timedWait` now returns `error.Timeout` instead of leaving callers to work out
+  whether the timeout or a real wakeup ended the wait. `CompletionQueue.timedWait` no
+  longer reports a timeout when a completion woke it.
+
 - Reworked completion state tracking in the low-level `ev` API: the lifecycle phase and
   the cancellation flags now live in a single atomic `Completion.state` word, read
   through `Completion.loadState()`. The separate `cancel_state` field is gone; code that

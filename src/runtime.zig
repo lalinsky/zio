@@ -1075,7 +1075,12 @@ pub fn now() Timestamp {
 /// Sleep for a specified duration.
 pub fn sleep(duration: Duration) Cancelable!void {
     var waiter: Waiter = .init();
-    try waiter.timedWait(1, .{ .duration = duration }, .allow_cancel);
+    // Nothing ever signals this waiter, so the timeout firing is the sleep
+    // finishing.
+    waiter.timedWait(1, .{ .duration = duration }, .allow_cancel) catch |err| switch (err) {
+        error.Timeout => {},
+        error.Canceled => return error.Canceled,
+    };
 }
 
 // Runtime - orchestrator for one or more Executors

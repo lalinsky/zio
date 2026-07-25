@@ -162,21 +162,25 @@ pub fn timedWait(self: *ResetEvent, timeout: Timeout) (Timeoutable || Cancelable
     }
 
     // Wait for signal or timeout, handling spurious wakeups internally
-    waiter.timedWait(1, timeout, .allow_cancel) catch |err| {
-        // On cancellation, try to remove from queue
-        const was_in_queue = self.wait_queue.remove(&waiter.node);
-        if (!was_in_queue) {
-            // Removed by set() - wait for signal to complete before destroying waiter
+    waiter.timedWait(1, timeout, .allow_cancel) catch |err| switch (err) {
+        // The timer fired, but set() may have claimed this waiter just behind
+        // it: whoever can still remove the node decides.
+        error.Timeout => {
+            if (self.wait_queue.remove(&waiter.node)) return error.Timeout;
+            // Claimed by set() - take the signal instead of the timeout, and
+            // wait for it to land before destroying the waiter.
             waiter.wait(1, .no_cancel);
-        }
-        return err;
+        },
+        error.Canceled => {
+            // On cancellation, try to remove from queue
+            const was_in_queue = self.wait_queue.remove(&waiter.node);
+            if (!was_in_queue) {
+                // Removed by set() - wait for signal to complete before destroying waiter
+                waiter.wait(1, .no_cancel);
+            }
+            return err;
+        },
     };
-
-    // Determine winner: can we remove ourselves from queue?
-    if (self.wait_queue.remove(&waiter.node)) {
-        // We were still in queue - timer won
-        return error.Timeout;
-    }
 
     // Acquire fence: synchronize-with set()'s .release in setFlag
     // Ensures visibility of all writes made before set() was called
