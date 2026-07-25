@@ -1889,6 +1889,9 @@ fn bindErrToListenErr(err: BindOrCancel) Io.net.IpAddress.ListenError {
         error.NetworkDown => error.NetworkDown,
         error.SystemResources => error.SystemResources,
         error.Canceled => error.Canceled,
+        // TODO(zig-0.17): map `error.AccessDenied` through once `ListenError` has it
+        // (https://codeberg.org/ziglang/zig/pulls/36307). Binding a privileged port
+        // without the permission to do so is a normal error, not something unexpected.
         error.AccessDenied,
         error.FileDescriptorNotASocket,
         error.SymLinkLoop,
@@ -1993,6 +1996,9 @@ fn bindErrToBindErr(err: BindOrCancel) Io.net.IpAddress.BindError {
         error.NetworkDown => error.NetworkDown,
         error.SystemResources => error.SystemResources,
         error.Canceled => error.Canceled,
+        // TODO(zig-0.17): same as in `bindErrToListenErr`, map `error.AccessDenied`
+        // through once `BindError` has it
+        // (https://codeberg.org/ziglang/zig/pulls/36307).
         error.AccessDenied,
         error.FileDescriptorNotASocket,
         error.SymLinkLoop,
@@ -2017,6 +2023,9 @@ fn netBindIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: Io.n
         waitForIoUncancelable(&close_op.c);
     }
 
+    // TODO(zig-0.17): `ip6_only` became `?bool`, where null means "leave it to the system
+    // configuration" (ziglang/zig a0aba69c11). Set the option only when it is non-null,
+    // with `@intFromBool` as the value, instead of only ever turning it on.
     if (options.ip6_only) {
         if (zio_addr.any.family != os_net.AF.INET6) return error.OptionUnsupported;
         const value: c_int = 1;
@@ -2176,11 +2185,14 @@ fn netConnectUnixImpl(
         error.WouldBlock => error.WouldBlock,
         error.NetworkDown => error.NetworkDown,
         error.Canceled => error.Canceled,
+        // TODO(zig-0.17): map `error.ConnectionRefused` through once it is part of
+        // `Io.net.UnixAddress.ConnectError` (ziglang/zig 9726270846). Connecting to a
+        // socket path with no listener is a normal error, not something unexpected.
+        error.ConnectionRefused,
         error.AddressInUse,
         error.AddressUnavailable,
         error.AlreadyConnected,
         error.ConnectionPending,
-        error.ConnectionRefused,
         error.ConnectionResetByPeer,
         error.Timeout,
         error.NetworkUnreachable,

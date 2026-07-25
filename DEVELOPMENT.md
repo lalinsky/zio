@@ -18,6 +18,7 @@ Testing:
 Random notes on Zig usage:
 - We are using Zig 0.16+, so modules like `std.posix`, `std.Thread`, `std.fs`, `std.net` no longer exist or are mostly empty, look at `src/os/` for replacements.
 - Use `zig env` to get the path to the Zig standard library and read the source code, if you need to check something.
+- Code that is written a certain way only because it has to work with the Zig 0.16 standard library is marked with a `TODO(zig-0.17):` comment saying what to do instead. Grep for it when porting the `zig-0.17` branch.
 
 LLM usage:
 - We explicitly allow using LLMs for code changes, but:
