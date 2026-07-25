@@ -219,11 +219,40 @@ pub fn madvise(addr: [*]const u8, len: usize, advice: u32) usize {
     return linux.syscall3(.madvise, @intFromPtr(addr), len, advice);
 }
 
+/// ThreadSanitizer learns that a range of address space was recycled only
+/// through its libc `mmap`/`munmap` interceptors, which reset the shadow memory
+/// for the range. Raw syscalls are invisible to it, so an address the kernel
+/// hands back to a later `mmap` keeps the shadow of its previous mapping, and
+/// TSan reports races between two coroutine stacks that merely landed on the
+/// same address. Route those two calls through libc when instrumented.
+///
+/// Nothing else needs it: the `mprotect` interceptor does not touch shadow
+/// memory on Linux, and `madvise` has no interceptor at all, which is harmless
+/// because memory kept in the stack pool never leaves the process and its reuse
+/// is ordered by the pool mutex.
+const route_mmap_through_libc = builtin.sanitize_thread and builtin.link_libc;
+
+/// Convert a failed libc call into the negative-errno encoding that the raw
+/// syscall wrappers in this file return.
+fn libcErrnoReturn() usize {
+    return @bitCast(-@as(isize, std.c._errno().*));
+}
+
 pub fn munmap(addr: [*]const u8, len: usize) usize {
+    if (route_mmap_through_libc) {
+        const rc = std.c.munmap(@ptrCast(@alignCast(addr)), len);
+        return if (rc == 0) 0 else libcErrnoReturn();
+    }
     return linux.syscall2(.munmap, @intFromPtr(addr), len);
 }
 
 pub fn mmap(addr: ?[*]u8, len: usize, prot: u32, flags: u32, fd: i32, offset: i64) usize {
+    if (route_mmap_through_libc) {
+        const res = std.c.mmap(@ptrCast(@alignCast(addr)), len, @bitCast(prot), @bitCast(flags), fd, @intCast(offset));
+        // libc reports failure as MAP_FAILED, which is (void *)-1
+        if (@intFromPtr(res) == @as(usize, @bitCast(@as(isize, -1)))) return libcErrnoReturn();
+        return @intFromPtr(res);
+    }
     if (@hasField(linux.SYS, "mmap2")) {
         return linux.syscall6(
             .mmap2,
