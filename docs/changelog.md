@@ -9,6 +9,13 @@ All notable changes to this project will be documented in this file.
   name written with a trailing dot used to validate at 256 bytes, so a validated
   `HostName` could be longer than `HostName.max_len`.
 
+- File writes now report `EBUSY` as `error.DeviceBusy` and `ETXTBSY` as `error.FileBusy`
+  instead of `error.Unexpected`, which in debug builds also asked the user to file a bug
+  report and dumped a stack trace to stderr. Writing to a
+  device that is in use, or to a file the kernel is currently executing, is a normal
+  failure. Both are new members of `os.fs.FileWriteError`, so exhaustive switches over
+  file write errors need to handle them.
+
 - Fixed a use-after-free in timed waits, where a task could return and drop the stack
   frame holding its timeout timer before the event loop was done with it. A timer that
   has already fired cannot be disarmed, so `Loop.clearTimer` now returns false to say the
