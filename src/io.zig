@@ -2258,10 +2258,7 @@ fn netConnectUnixImpl(
         error.WouldBlock => error.WouldBlock,
         error.NetworkDown => error.NetworkDown,
         error.Canceled => error.Canceled,
-        // TODO(zig-0.17): map `error.ConnectionRefused` through once it is part of
-        // `Io.net.UnixAddress.ConnectError` (ziglang/zig 9726270846). Connecting to a
-        // socket path with no listener is a normal error, not something unexpected.
-        error.ConnectionRefused,
+        error.ConnectionRefused => error.ConnectionRefused,
         error.AddressInUse,
         error.AddressUnavailable,
         error.AlreadyConnected,
@@ -3168,6 +3165,33 @@ test "io: net Unix listen/connect/accept round-trip" {
             var out: [8]u8 = undefined;
             const got = try reader.interface.readSliceShort(&out);
             try std.testing.expectEqualStrings("ping", out[0..got]);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: net Unix connect to a path with no listener is refused" {
+    if (!zio_net.has_unix_sockets) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn run(io: Io) !void {
+            const path = "test_io_net_unix_refused.sock";
+            (Io.Dir.cwd()).deleteFile(io, path) catch {};
+            defer (Io.Dir.cwd()).deleteFile(io, path) catch {};
+
+            const address = try Io.net.UnixAddress.init(path);
+
+            // Leave a stale socket file behind: the path exists, but nothing is
+            // listening on it any more, so connecting has to be refused.
+            var server = try address.listen(io, .{});
+            server.deinit(io);
+
+            try std.testing.expectError(error.ConnectionRefused, Io.net.UnixAddress.connect(&address, io));
         }
     };
 
