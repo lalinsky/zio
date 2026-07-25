@@ -86,13 +86,16 @@ pub const HostName = struct {
         if (IpAddress.parseIp(bytes, 0)) |_| return else |_| {}
         if (bytes[0] == '.') return error.InvalidHostName;
 
-        // Ignore trailing dot (FQDN). It doesn't count toward our length.
+        // The trailing dot of an FQDN counts toward the length. In a DNS packet it is
+        // the zero-length root label, which still takes up a byte. Checking the full
+        // length here also keeps `max_len` big enough to hold any validated hostname.
+        if (bytes.len > max_len) return error.NameTooLong;
+
+        // Ignore trailing dot (FQDN) when validating labels.
         const end = if (bytes[bytes.len - 1] == '.') end: {
             if (bytes.len == 1) return error.InvalidHostName;
             break :end bytes.len - 1;
         } else bytes.len;
-
-        if (end > max_len) return error.NameTooLong;
 
         // Hostnames are divided into dot-separated "labels", which:
         // - Start with a letter or digit

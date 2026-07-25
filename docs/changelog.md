@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `net.HostName.validate` now counts the trailing dot of a fully qualified domain name
+  toward the 255 byte limit, matching how the name is encoded in a DNS packet. A 255 byte
+  name written with a trailing dot used to validate at 256 bytes, so a validated
+  `HostName` could be longer than `HostName.max_len`.
+
 - Fixed a use-after-free in timed waits, where a task could return and drop the stack
   frame holding its timeout timer before the event loop was done with it. A timer that
   has already fired cannot be disarmed, so `Loop.clearTimer` now returns false to say the
