@@ -43,6 +43,7 @@ const os_net = @import("os/net.zig");
 const os_fs = @import("os/fs.zig");
 const zio_fs = @import("fs.zig");
 const os_posix = @import("os/posix.zig");
+const os_process = @import("os/process.zig");
 const process_impl = @import("process.zig");
 const zio_net = @import("net.zig");
 const zio_dns = @import("dns/root.zig");
@@ -1537,18 +1538,19 @@ fn fileSyncImpl(_: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
 }
 
 fn fileIsTtyImpl(_: ?*anyopaque, file: Io.File) Io.Cancelable!bool {
-    const io = globalIo();
-    return io.vtable.fileIsTty(io.userdata, file);
+    return os_fs.isTty(stdIoHandleToZio(file.handle));
 }
 
 fn fileEnableAnsiEscapeCodesImpl(_: ?*anyopaque, file: Io.File) Io.File.EnableAnsiEscapeCodesError!void {
+    // Turning the mode on for a Windows console is the one thing this does that
+    // is not a query, and it goes through the console driver protocol that std
+    // implements.
     const io = globalIo();
     return io.vtable.fileEnableAnsiEscapeCodes(io.userdata, file);
 }
 
 fn fileSupportsAnsiEscapeCodesImpl(_: ?*anyopaque, file: Io.File) Io.Cancelable!bool {
-    const io = globalIo();
-    return io.vtable.fileSupportsAnsiEscapeCodes(io.userdata, file);
+    return os_fs.supportsAnsiEscapeCodes(stdIoHandleToZio(file.handle));
 }
 
 fn fileSetLengthImpl(_: ?*anyopaque, file: Io.File, new_length: u64) Io.File.SetLengthError!void {
@@ -1715,19 +1717,47 @@ fn unlockStderrImpl(_: ?*anyopaque) void {
     stderr_mutex.unlock();
 }
 
-fn processCurrentPathImpl(_: ?*anyopaque, buffer: []u8) std.process.CurrentPathError!usize {
-    const io = globalIo();
-    return io.vtable.processCurrentPath(io.userdata, buffer);
+fn processCurrentPathImpl(userdata: ?*anyopaque, buffer: []u8) std.process.CurrentPathError!usize {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    return os_process.getCurrentPath(rt.allocator, buffer) catch |err| switch (err) {
+        error.NameTooLong => error.NameTooLong,
+        error.CurrentDirUnlinked => error.CurrentDirUnlinked,
+        error.Canceled => error.Canceled,
+        // CurrentPathError has neither member, so a directory we are not
+        // allowed to read the path of, and a failed allocation, both have to
+        // come out as Unexpected.
+        error.AccessDenied, error.SystemResources => error.Unexpected,
+        error.Unexpected => error.Unexpected,
+    };
 }
 
-fn processSetCurrentDirImpl(_: ?*anyopaque, dir: Io.Dir) std.process.SetCurrentDirError!void {
-    const io = globalIo();
-    return io.vtable.processSetCurrentDir(io.userdata, dir);
+fn processSetCurrentDirImpl(userdata: ?*anyopaque, dir: Io.Dir) std.process.SetCurrentDirError!void {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    return os_process.setCurrentDir(rt.allocator, stdIoHandleToZio(dir.handle)) catch |err| switch (err) {
+        error.AccessDenied => error.AccessDenied,
+        error.NotDir => error.NotDir,
+        error.InputOutput => error.FileSystem,
+        error.BadPathName => error.BadPathName,
+        error.Canceled => error.Canceled,
+        // SetCurrentDirError has no SystemResources.
+        error.SystemResources, error.Unexpected => error.Unexpected,
+    };
 }
 
-fn processSetCurrentPathImpl(_: ?*anyopaque, path: []const u8) std.process.SetCurrentPathError!void {
-    const io = globalIo();
-    return io.vtable.processSetCurrentPath(io.userdata, path);
+fn processSetCurrentPathImpl(userdata: ?*anyopaque, path: []const u8) std.process.SetCurrentPathError!void {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    return os_process.setCurrentPath(rt.allocator, path) catch |err| switch (err) {
+        error.AccessDenied => error.AccessDenied,
+        error.SymLinkLoop => error.SymLinkLoop,
+        error.NameTooLong => error.NameTooLong,
+        error.FileNotFound => error.FileNotFound,
+        error.NotDir => error.NotDir,
+        error.BadPathName => error.BadPathName,
+        error.InputOutput => error.FileSystem,
+        error.SystemResources => error.SystemResources,
+        error.Canceled => error.Canceled,
+        error.Unexpected => error.Unexpected,
+    };
 }
 
 // TODO: implement using our own execve wrapper
@@ -2697,6 +2727,102 @@ test "io: processExecutablePath returns a non-empty path" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const len = try std.process.executablePath(io, &buf);
     try std.testing.expect(len > 0);
+}
+
+test "io: processCurrentPath agrees with the working directory" {
+    if (builtin.os.tag == .netbsd) return error.SkipZigTest; // no realPath to compare against
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try std.process.currentPath(io, &buf);
+    try std.testing.expect(len > 0);
+
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const real_len = Io.Dir.cwd().realPath(io, &real_buf) catch |err| switch (err) {
+        error.OperationUnsupported => return error.SkipZigTest,
+        else => return err,
+    };
+    try std.testing.expectEqualStrings(real_buf[0..real_len], buf[0..len]);
+}
+
+test "io: processSetCurrentPath and processSetCurrentDir move the working directory" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const sub_path = "test_io_set_current_dir";
+
+    // Remember where we started, so the move can be undone by path even after
+    // the working directory is somewhere else.
+    var original_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const original = original_buf[0..try std.process.currentPath(io, &original_buf)];
+
+    try dir.createDir(io, sub_path, .default_dir);
+    defer dir.deleteDir(io, sub_path) catch {};
+
+    {
+        var sub = try dir.openDir(io, sub_path, .{});
+        defer sub.close(io);
+        errdefer std.process.setCurrentPath(io, original) catch {};
+
+        // Once by handle, and back, then once by path, so both entry points
+        // move the working directory.
+        try std.process.setCurrentDir(io, sub);
+
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const len = try std.process.currentPath(io, &buf);
+        try std.testing.expect(std.mem.endsWith(u8, buf[0..len], sub_path));
+    }
+
+    try std.process.setCurrentPath(io, original);
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try std.process.currentPath(io, &buf);
+    try std.testing.expectEqualStrings(original, buf[0..len]);
+
+    // The cwd handle names the directory we are in, so moving to it is a no-op
+    // rather than an error, even where it is a sentinel and not a descriptor.
+    try std.process.setCurrentDir(io, .cwd());
+}
+
+test "io: file isTty is false for a pipe" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    // On Windows this is a named pipe, which is also what an MSYS2/Cygwin pty
+    // is, so it goes through the name check that tells the two apart.
+    const fds = try os_fs.pipe();
+    var read_file: Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = true } };
+    var write_file: Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = true } };
+    defer read_file.close(io);
+    defer write_file.close(io);
+
+    try std.testing.expect(!try io.vtable.fileIsTty(io.userdata, read_file));
+    try std.testing.expect(!try io.vtable.fileSupportsAnsiEscapeCodes(io.userdata, read_file));
+}
+
+test "io: file isTty is true for a terminal" {
+    // A pty master is a terminal on Linux, but not on the BSDs, where the
+    // terminal is the slave side and opening it takes the whole grantpt dance.
+    // CI has no terminal attached to the test process to use instead.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const tty_handle = os_fs.openat(std.testing.allocator, os_fs.cwd(), "/dev/ptmx", .{ .mode = .read_write }) catch
+        return error.SkipZigTest;
+    var tty_file: Io.File = .{ .handle = tty_handle, .flags = .{ .nonblocking = false } };
+    defer tty_file.close(io);
+
+    try std.testing.expect(try io.vtable.fileIsTty(io.userdata, tty_file));
+    try std.testing.expect(try io.vtable.fileSupportsAnsiEscapeCodes(io.userdata, tty_file));
 }
 
 test "io: now returns monotonically increasing awake timestamps" {

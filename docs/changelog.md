@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Added `os.process.getCurrentPath`, `os.process.setCurrentPath` and
+  `os.process.setCurrentDir` for the working directory, and `os.fs.isTty` and
+  `os.fs.supportsAnsiEscapeCodes` for terminal detection. These also back the matching
+  `std.Io` operations.
+
 - Added `os.fs.fileSeekBy` and `os.fs.fileSeekTo`, which now also back the `std.Io` file
   seek operations.
 

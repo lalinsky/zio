@@ -3384,6 +3384,89 @@ fn dirRealPathFileWindows(allocator: std.mem.Allocator, dir: fd_t, path: []const
     return dirRealPathWindows(handle, buffer);
 }
 
+/// Returns true if `fd` refers to a terminal.
+pub fn isTty(fd: fd_t) bool {
+    if (builtin.os.tag == .windows) {
+        // A console handle is one the console driver will report a mode for.
+        var mode: w.DWORD = undefined;
+        if (w.GetConsoleMode(fd, &mode) != w.FALSE) return true;
+        return isCygwinPty(fd);
+    }
+
+    if (builtin.os.tag == .linux) {
+        // Asking a descriptor for its window size is a question only a terminal
+        // answers, and unlike `isatty` it does not need libc. The answer itself
+        // is four u16 we do not read.
+        var wsz: [4]u16 = undefined;
+        return ioctlPosix(fd, @intCast(posix.system.T.IOCGWINSZ), &wsz) >= 0;
+    }
+
+    // Everywhere else libc is linked and `isatty` is the canonical answer. The
+    // window size ioctl is not a stand-in for it there: a pty master on macOS
+    // rejects the ioctl, and which devices answer it is a per-system detail we
+    // would rather not carry.
+    return posix.system.isatty(fd) != 0;
+}
+
+/// Returns true if ANSI escape codes written to `fd` will be interpreted.
+pub fn supportsAnsiEscapeCodes(fd: fd_t) bool {
+    if (builtin.os.tag == .windows) {
+        var mode: w.DWORD = undefined;
+        if (w.GetConsoleMode(fd, &mode) != w.FALSE) {
+            // A console that already has the mode set needs nothing further.
+            // One that does not can still have it turned on, which is what
+            // `enableAnsiEscapeCodes` is for, so it counts as supporting them.
+            return true;
+        }
+        return isCygwinPty(fd);
+    }
+
+    return isTty(fd);
+}
+
+/// An MSYS2/Cygwin pty is a named pipe rather than a console, named
+/// `msys-[...]-ptyN-[...]` or `cygwin-[...]-ptyN-[...]`.
+fn isCygwinPty(handle: fd_t) bool {
+    if (builtin.os.tag != .windows) return false;
+
+    // Checking the device type first keeps the more expensive name query off
+    // every handle that is not a pipe at all.
+    var iosb: w.IO_STATUS_BLOCK = undefined;
+    var device_info: w.FILE_FS_DEVICE_INFORMATION = undefined;
+    if (w.NtQueryVolumeInformationFile(
+        handle,
+        &iosb,
+        &device_info,
+        @sizeOf(w.FILE_FS_DEVICE_INFORMATION),
+        .FileFsDeviceInformation,
+    ) != .SUCCESS) return false;
+    if (device_info.DeviceType != w.FILE_DEVICE_NAMED_PIPE) return false;
+
+    // The names we are looking for are far shorter than a full path, so a
+    // buffer that cannot hold every possible name is enough; anything that does
+    // not fit is not one of ours.
+    const name_offset = @offsetOf(w.FILE_NAME_INFORMATION, "FileName");
+    var name_bytes align(@alignOf(w.FILE_NAME_INFORMATION)) = [_]u8{0} ** (name_offset + 256 * 2);
+    if (w.NtQueryInformationFile(
+        handle,
+        &iosb,
+        &name_bytes,
+        @intCast(name_bytes.len),
+        .FileNameInformation,
+    ) != .SUCCESS) return false;
+
+    const name_info: *const w.FILE_NAME_INFORMATION = @ptrCast(&name_bytes);
+    const len = @min(name_info.FileNameLength, name_bytes.len - name_offset);
+    const name = std.mem.bytesAsSlice(u16, name_bytes[name_offset..][0..len]);
+
+    // The queried name is prefixed with a '\', e.g. \msys-1888ae32e00d56aa-pty0-to-master
+    const msys = std.unicode.utf8ToUtf16LeStringLiteral("\\msys-");
+    const cygwin = std.unicode.utf8ToUtf16LeStringLiteral("\\cygwin-");
+    const pty = std.unicode.utf8ToUtf16LeStringLiteral("-pty");
+    return (std.mem.startsWith(u16, name, msys) or std.mem.startsWith(u16, name, cygwin)) and
+        std.mem.indexOf(u16, name, pty) != null;
+}
+
 /// Call ioctl(2) on `fd`, retrying on EINTR. Returns the raw ioctl return
 /// value on success, or a negative errno value on failure, matching the
 /// `std.Io.Operation.DeviceIoControl.Result` contract.

@@ -652,6 +652,50 @@ pub fn pipe() !([2]HANDLE) {
     return .{ read_handle, write_handle };
 }
 
+// Current directory
+pub extern "kernel32" fn GetCurrentDirectoryW(nBufferLength: DWORD, lpBuffer: ?[*]WCHAR) callconv(.winapi) DWORD;
+pub extern "kernel32" fn SetCurrentDirectoryW(lpPathName: [*:0]const WCHAR) callconv(.winapi) BOOL;
+
+// Console
+pub extern "kernel32" fn GetConsoleMode(hConsoleHandle: HANDLE, lpMode: *DWORD) callconv(.winapi) BOOL;
+
+/// Console mode bit for interpreting ANSI escape sequences in written output.
+pub const ENABLE_VIRTUAL_TERMINAL_PROCESSING: DWORD = 0x0004;
+
+// Handle queries used to recognize an MSYS2/Cygwin pty (ntdll)
+pub extern "ntdll" fn NtQueryInformationFile(
+    FileHandle: HANDLE,
+    IoStatusBlock: *IO_STATUS_BLOCK,
+    FileInformation: [*]u8,
+    Length: ULONG,
+    FileInformationClass: FILE_INFORMATION_CLASS,
+) callconv(.winapi) NTSTATUS;
+
+pub extern "ntdll" fn NtQueryVolumeInformationFile(
+    FileHandle: HANDLE,
+    IoStatusBlock: *IO_STATUS_BLOCK,
+    FsInformation: *anyopaque,
+    Length: ULONG,
+    FsInformationClass: FS_INFORMATION_CLASS,
+) callconv(.winapi) NTSTATUS;
+
+/// Only the one class we query; values match the Windows DDK.
+pub const FS_INFORMATION_CLASS = enum(c_int) {
+    FileFsDeviceInformation = 4,
+};
+
+pub const FILE_FS_DEVICE_INFORMATION = extern struct {
+    DeviceType: ULONG,
+    Characteristics: ULONG,
+};
+
+pub const FILE_DEVICE_NAMED_PIPE: ULONG = 0x00000011;
+
+pub const FILE_NAME_INFORMATION = extern struct {
+    FileNameLength: ULONG,
+    FileName: [1]WCHAR,
+};
+
 // Path utilities (shlwapi)
 pub extern "shlwapi" fn PathIsRelativeW(pszPath: LPCWSTR) callconv(.winapi) BOOL;
 
