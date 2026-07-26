@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 pub const time = @import("time.zig");
 pub const net = @import("net.zig");
 pub const fs = @import("fs.zig");
+pub const process = @import("process.zig");
 pub const path = std.fs.path;
 
 pub const posix = @import("posix.zig");
