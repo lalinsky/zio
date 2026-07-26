@@ -55,7 +55,7 @@ pub fn buildQuery(buf: []u8, id: u16, name: []const u8, qtype: QType) ![]u8 {
     std.mem.writeInt(u16, buf[10..12], 1, .big); // ARCOUNT = 1 (OPT record)
     const p = try encodeName(buf, 12, name);
     if (p + 4 + 11 > buf.len) return error.BufferTooSmall;
-    std.mem.writeInt(u16, buf[p..][0..2], @intFromEnum(qtype), .big);
+    std.mem.writeInt(u16, buf[p..][0..2], @backingInt(qtype), .big);
     std.mem.writeInt(u16, buf[p + 2 ..][0..2], 1, .big); // CLASS IN
     // OPT pseudo-record (EDNS0, RFC 6891)
     const opt = buf[p + 4 ..][0..11];
@@ -155,7 +155,7 @@ pub fn parseResponse(
     if (flags & 0x8000 == 0) return error.NotAResponse;
 
     const truncated = flags & 0x0200 != 0;
-    const rcode: RCode = @enumFromInt(@as(u4, @truncate(flags)));
+    const rcode: RCode = @fromBackingInt(@intCast(@as(u4, @truncate(flags))));
     const qdcount = std.mem.readInt(u16, buf[4..6], .big);
     const ancount = std.mem.readInt(u16, buf[6..8], .big);
 

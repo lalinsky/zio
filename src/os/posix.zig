@@ -291,7 +291,7 @@ pub fn sigemptyset() sigset_t {
 /// Install a signal handler. sig must be convertible to an integer (e.g. SIG enum or integer).
 pub fn sigaction(sig: anytype, act: ?*const Sigaction, oact: ?*Sigaction) void {
     const sig_enum: SIG = switch (@typeInfo(@TypeOf(sig))) {
-        .int, .comptime_int => @enumFromInt(sig),
+        .int, .comptime_int => @fromBackingInt(@intCast(sig)),
         .@"enum" => sig,
         else => @compileError("sig must be an integer or enum"),
     };
@@ -305,7 +305,7 @@ pub fn sigaction(sig: anytype, act: ?*const Sigaction, oact: ?*Sigaction) void {
 /// Send a signal to the calling process. sig must be convertible to c_int.
 pub fn raise(sig: anytype) !void {
     const sig_enum: SIG = switch (@typeInfo(@TypeOf(sig))) {
-        .int, .comptime_int => @enumFromInt(sig),
+        .int, .comptime_int => @fromBackingInt(@intCast(sig)),
         .@"enum" => sig,
         else => @compileError("sig must be an integer or enum"),
     };

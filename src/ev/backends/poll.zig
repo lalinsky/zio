@@ -613,7 +613,7 @@ fn handlePollError(item: *const net.pollfd, comptime errnoToError: fn (net.E) an
 
     const sock_err = net.getSockError(item.fd) catch return error.Unexpected;
     if (sock_err == 0) return null; // No actual error, caller should retry operation
-    return errnoToError(@enumFromInt(sock_err));
+    return errnoToError(@fromBackingInt(@intCast(sock_err)));
 }
 
 fn checkSpuriousWakeup(result: anytype) CheckResult {

@@ -37,7 +37,7 @@ pub fn main(init: std.process.Init) !void {
     var response = try request.receiveHead(&redirect_buffer);
     // --8<-- [end:request]
 
-    std.log.info("{d} {s}", .{ @intFromEnum(response.head.status), response.head.reason });
+    std.log.info("{d} {s}", .{ @backingInt(response.head.status), response.head.reason });
 
     // --8<-- [start:body]
     // Read the (possibly decompressed) response body

@@ -409,7 +409,7 @@ fn stackAllocWindows(info: *StackInfo, maximum_size: usize, committed_size: usiz
     );
 
     if (status != .SUCCESS) {
-        log.err("RtlCreateUserStack failed with status: 0x{x}", .{@intFromEnum(status)});
+        log.err("RtlCreateUserStack failed with status: 0x{x}", .{@backingInt(status)});
         return error.OutOfMemory;
     }
 

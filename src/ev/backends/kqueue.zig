@@ -805,13 +805,13 @@ fn handleKqueueError(event: *const std.c.Kevent, comptime errnoToError: fn (net.
     if (has_error) {
         // event.data contains the errno when EV_ERROR is set
         if (event.data != 0) {
-            return errnoToError(@enumFromInt(@as(i32, @intCast(event.data))));
+            return errnoToError(@fromBackingInt(@intCast(@as(i32, @intCast(event.data)))));
         }
     }
 
     const sock_err = net.getSockError(@intCast(event.ident)) catch return error.Unexpected;
     if (sock_err == 0) return null; // No actual error, caller should retry operation
-    return errnoToError(@enumFromInt(sock_err));
+    return errnoToError(@fromBackingInt(@intCast(sock_err)));
 }
 
 pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResult {
@@ -999,7 +999,7 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
             // Check for actual errors first
             const has_error = (event.flags & EV_ERROR) != 0;
             if (has_error and event.data != 0) {
-                comp.setError(fs.errnoToFileReadError(@enumFromInt(@as(i32, @intCast(event.data)))));
+                comp.setError(fs.errnoToFileReadError(@fromBackingInt(@intCast(@as(i32, @intCast(event.data))))));
                 return .completed;
             }
             // Try to read - there might still be data in the pipe buffer
@@ -1031,7 +1031,7 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
             if (has_error and event.data != 0) {
                 // BSD systems return EBADF (NotOpenForWriting) when writing to closed pipe
                 // Normalize to BrokenPipe for consistency with Linux
-                const err = fs.errnoToFileWriteError(@enumFromInt(@as(i32, @intCast(event.data))));
+                const err = fs.errnoToFileWriteError(@fromBackingInt(@intCast(@as(i32, @intCast(event.data)))));
                 comp.setError(switch (err) {
                     error.NotOpenForWriting => error.BrokenPipe,
                     else => err,

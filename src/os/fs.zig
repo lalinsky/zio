@@ -770,7 +770,7 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
             else => |err| {
                 if (flags.resolve_beneath) {
                     if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.AccessDenied;
-                    if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 107) return error.AccessDenied;
+                    if (builtin.os.tag.isDarwin() and @backingInt(err) == 107) return error.AccessDenied;
                 }
                 return errnoToFileOpenError(err, flags);
             },
@@ -883,7 +883,7 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
             else => |err| {
                 if (flags.resolve_beneath) {
                     if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.AccessDenied;
-                    if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 107) return error.AccessDenied;
+                    if (builtin.os.tag.isDarwin() and @backingInt(err) == 107) return error.AccessDenied;
                 }
                 return errnoToDirOpenError(err, flags);
             },
@@ -1029,7 +1029,7 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
             else => |err| {
                 if (flags.resolve_beneath) {
                     if (@hasField(@TypeOf(err), "NOTCAPABLE") and err == .NOTCAPABLE) return error.AccessDenied;
-                    if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 107) return error.AccessDenied;
+                    if (builtin.os.tag.isDarwin() and @backingInt(err) == 107) return error.AccessDenied;
                 }
                 return errnoToFileOpenError(err, flags);
             },
@@ -3248,7 +3248,7 @@ pub fn dirRealPathFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8
             if (std.c.realpath(path_z, buffer.ptr)) |_| {
                 return std.mem.indexOfScalar(u8, buffer, 0) orelse buffer.len;
             }
-            const err: posix.system.E = @enumFromInt(std.c._errno().*);
+            const err: posix.system.E = @fromBackingInt(@intCast(std.c._errno().*));
             if (err == .INTR) continue;
             return errnoToDirRealPathFileError(err);
         }
@@ -3495,7 +3495,7 @@ fn ioctlPosix(fd: fd_t, code: u32, arg: ?*anyopaque) i32 {
             else
                 rc,
             .INTR => continue,
-            else => |err| return -@as(i32, @intFromEnum(err)),
+            else => |err| return -@as(i32, @backingInt(err)),
         }
     }
 }

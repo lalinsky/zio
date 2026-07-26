@@ -115,7 +115,7 @@ pub fn lookup(
 }
 
 fn eaiToLookupError(status: i32) dns.LookupError {
-    const err: std.c.EAI = @enumFromInt(status);
+    const err: std.c.EAI = @fromBackingInt(@intCast(status));
     return switch (err) {
         .ADDRFAMILY => error.AddressFamilyUnsupported,
         .AGAIN => error.TemporaryNameServerFailure,

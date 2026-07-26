@@ -31,7 +31,7 @@ const PipeClose = @import("../completion.zig").PipeClose;
 const ProcessWait = @import("../completion.zig").ProcessWait;
 
 // WAIT_IO_COMPLETION is returned when an alertable wait is interrupted by an APC
-const WAIT_IO_COMPLETION: windows.Win32Error = @enumFromInt(0xC0);
+const WAIT_IO_COMPLETION: windows.Win32Error = @fromBackingInt(@intCast(0xC0));
 
 // Winsock extension function GUIDs
 const WSAID_ACCEPTEX = windows.GUID{
@@ -805,7 +805,7 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
     const exts = self.shared_state.exts;
 
     // Create new socket for the accepted connection (same family as listening socket)
-    const accept_socket = try net.socket(@enumFromInt(family), .stream, .ip, data.flags);
+    const accept_socket = try net.socket(@fromBackingInt(@intCast(family)), .stream, .ip, data.flags);
     errdefer net.close(accept_socket);
 
     // Publish the accepted socket into the op BEFORE issuing AcceptEx (#530). The
@@ -1333,7 +1333,7 @@ fn submitFileRead(self: *Self, state: *LoopState, data: *FileRead) !void {
         } else if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             log.err("ReadFile failed: {}", .{err});
-            data.c.setError(fs.errnoToFileReadError(@enumFromInt(@intFromEnum(err))));
+            data.c.setError(fs.errnoToFileReadError(@fromBackingInt(@intCast(@backingInt(err)))));
             state.markCompletedFromBackend(&data.c);
             return;
         }
@@ -1368,7 +1368,7 @@ fn submitFileWrite(self: *Self, state: *LoopState, data: *FileWrite) !void {
         if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             log.err("WriteFile failed: {}", .{err});
-            data.c.setError(fs.errnoToFileWriteError(@enumFromInt(@intFromEnum(err))));
+            data.c.setError(fs.errnoToFileWriteError(@fromBackingInt(@intCast(@backingInt(err)))));
             state.markCompletedFromBackend(&data.c);
             return;
         }
@@ -1456,7 +1456,7 @@ fn submitFileReadStreaming(self: *Self, state: *LoopState, data: *FileReadStream
         } else if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             log.err("ReadFile (pipe) failed: {}", .{err});
-            data.c.setError(fs.errnoToFileReadError(@enumFromInt(@intFromEnum(err))));
+            data.c.setError(fs.errnoToFileReadError(@fromBackingInt(@intCast(@backingInt(err)))));
             state.markCompletedFromBackend(&data.c);
             return;
         }
@@ -1495,7 +1495,7 @@ fn submitFileWriteStreaming(self: *Self, state: *LoopState, data: *FileWriteStre
         if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             log.err("WriteFile (pipe) failed: {}", .{err});
-            data.c.setError(fs.errnoToFileWriteError(@enumFromInt(@intFromEnum(err))));
+            data.c.setError(fs.errnoToFileWriteError(@fromBackingInt(@intCast(@backingInt(err)))));
             state.markCompletedFromBackend(&data.c);
             return;
         }
@@ -1510,7 +1510,7 @@ fn submitPipeClose(self: *Self, state: *LoopState, data: *PipeClose) !void {
     if (result == windows.FALSE) {
         const err = windows.GetLastError();
         log.err("CloseHandle (pipe) failed: {}", .{err});
-        data.c.setError(fs.errnoToFileCloseError(@enumFromInt(@intFromEnum(err))));
+        data.c.setError(fs.errnoToFileCloseError(@fromBackingInt(@intCast(@backingInt(err)))));
     } else {
         data.c.setResult(.pipe_close, {});
     }
@@ -2059,7 +2059,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
 
             if (result == .FALSE) {
                 const err = windows.GetLastError();
-                c.setError(fs.errnoToFileWriteError(@enumFromInt(@intFromEnum(err))));
+                c.setError(fs.errnoToFileWriteError(@fromBackingInt(@intCast(@backingInt(err)))));
             } else {
                 c.setResult(.file_write, @intCast(bytes_transferred));
             }
@@ -2106,7 +2106,7 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
 
             if (result == .FALSE) {
                 const err = windows.GetLastError();
-                c.setError(fs.errnoToFileWriteError(@enumFromInt(@intFromEnum(err))));
+                c.setError(fs.errnoToFileWriteError(@fromBackingInt(@intCast(@backingInt(err)))));
             } else {
                 c.setResult(.file_write_streaming, @intCast(bytes_transferred));
             }
