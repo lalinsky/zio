@@ -40,7 +40,7 @@ pub const capabilities: BackendCapabilities = .{
     // The BSDs' EVFILT_TIMER absolute clock is monotonic-only and underspecified
     // with no CLOCK_REALTIME timer, so they keep the capped poll-timeout fallback.
     .native_wall_timers = builtin.os.tag.isDarwin(),
-    .net_send_file = builtin.os.tag == .freebsd or builtin.os.tag == .dragonfly,
+    .net_send_file = builtin.os.tag == .freebsd,
 };
 
 pub const SharedState = struct {
@@ -561,12 +561,14 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         // File operations are handled by Loop via thread pool
         .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_size, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .file_stat, .dir_open, .dir_close, .dir_read, .dir_create_dir, .dir_rename, .dir_rename_preserve, .dir_delete_file, .dir_delete_dir, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps, .dir_sym_link, .dir_read_link, .dir_hard_link, .dir_access, .dir_real_path, .dir_real_path_file, .file_real_path, .file_hard_link, .device_io_control => unreachable,
         // Driven by Loop's generic read/write fallback, never reaches the backend.
-        .net_send_file => {      
+        .net_send_file => {
+            if (builtin.os.tag != .freebsd) unreachable;
+
             const data = c.cast(NetSendFile);
 
-            if(data.internal.sbytes == 0 and data.internal.offset == 0 and data.internal.remaining == 0) {
+            if (data.internal.sbytes == 0 and data.internal.offset == 0 and data.internal.remaining == 0) {
                 const file_size = fs.fileSize(data.file) catch |err| {
-                    switch(err) { 
+                    switch (err) {
                         error.PermissionDenied => c.setError(error.AccessDenied),
                         else => |e| c.setError(e),
                     }
@@ -578,7 +580,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 data.internal.remaining = @min(@as(u64, data.remaining), avail);
                 data.internal.offset = data.offset;
 
-                if(data.internal.remaining == 0)  {
+                if (data.internal.remaining == 0) {
                     data.c.setResult(.net_send_file, 0);
                     state.markCompletedFromBackend(&data.c);
                     return;
@@ -592,20 +594,20 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             data.internal.offset += sent;
             data.internal.remaining -= sent;
             data.internal.sbytes += sent;
-            
-            if(rc == -1) {
+
+            if (rc == -1) {
                 const err = std.posix.errno(rc);
-                if(err == .AGAIN) {
+                if (err == .AGAIN) {
                     _ = registerSocket(self, data.handle, .write, false);
                     return;
                 }
 
                 c.setError(unexpectedError(err));
-                state.markCompletedFromBackend(c);                
+                state.markCompletedFromBackend(c);
                 return;
             }
-            
-            if(data.internal.remaining > 0) {
+
+            if (data.internal.remaining > 0) {
                 _ = registerSocket(self, data.handle, .write, false);
                 return;
             }
