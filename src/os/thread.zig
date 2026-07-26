@@ -309,7 +309,7 @@ const FutexDarwin = struct {
         );
 
         if (rc < 0) {
-            const err: posix.sys.E = @enumFromInt(-rc);
+            const err: posix.sys.E = @fromBackingInt(@intCast(-rc));
             if (err == .TIMEDOUT) return error.Timeout;
         }
     }

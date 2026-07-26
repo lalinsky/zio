@@ -105,13 +105,13 @@ pub const ExecutorCount = enum(u8) {
     /// Create an exact executor count (1 = single-threaded, no worker threads)
     pub fn exact(n: u8) ExecutorCount {
         assert(n >= 1 and n <= Executor.max_executors);
-        return @enumFromInt(n);
+        return @fromBackingInt(@intCast(n));
     }
 
     pub fn resolve(self: ExecutorCount) u8 {
         return switch (self) {
             .auto => autoDetect(),
-            _ => @intFromEnum(self),
+            _ => @backingInt(self),
         };
     }
 

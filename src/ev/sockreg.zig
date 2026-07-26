@@ -401,7 +401,7 @@ pub fn submitConnect(self: anytype, state: anytype, c: *Completion) void {
         .retry => {
             // The socket became writable while we raced: the connect finished.
             if (net.getSockError(data.handle)) |se| {
-                if (se == 0) c.setResult(.net_connect, {}) else c.setError(net.errnoToConnectError(@enumFromInt(se)));
+                if (se == 0) c.setResult(.net_connect, {}) else c.setError(net.errnoToConnectError(@fromBackingInt(@intCast(se))));
             } else |_| c.setError(error.Unexpected);
             state.markCompletedFromBackend(c);
         },

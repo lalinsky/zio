@@ -21,15 +21,15 @@ pub const SignalKind = switch (builtin.os.tag) {
         terminate = w.CTRL_CLOSE_EVENT,
     },
     else => enum(u8) {
-        interrupt = @intFromEnum(posix.SIG.INT),
-        terminate = @intFromEnum(posix.SIG.TERM),
-        hangup = @intFromEnum(posix.SIG.HUP),
-        alarm = @intFromEnum(posix.SIG.ALRM),
-        child = @intFromEnum(posix.SIG.CHLD),
-        pipe = @intFromEnum(posix.SIG.PIPE),
-        quit = @intFromEnum(posix.SIG.QUIT),
-        user1 = @intFromEnum(posix.SIG.USR1),
-        user2 = @intFromEnum(posix.SIG.USR2),
+        interrupt = @backingInt(posix.SIG.INT),
+        terminate = @backingInt(posix.SIG.TERM),
+        hangup = @backingInt(posix.SIG.HUP),
+        alarm = @backingInt(posix.SIG.ALRM),
+        child = @backingInt(posix.SIG.CHLD),
+        pipe = @backingInt(posix.SIG.PIPE),
+        quit = @backingInt(posix.SIG.QUIT),
+        user1 = @backingInt(posix.SIG.USR1),
+        user2 = @backingInt(posix.SIG.USR2),
         _,
     },
 };
@@ -53,7 +53,7 @@ const HandlerRegistryUnix = struct {
     prev_handlers: [256]posix.Sigaction = undefined,
 
     fn install(self: *HandlerRegistryUnix, kind: SignalKind) !*HandlerEntry {
-        const signum: u8 = @intFromEnum(kind);
+        const signum: u8 = @backingInt(kind);
 
         // Atomically increment refcount for this signal type
         const prev_count = self.installed_handlers[signum].fetchAdd(1, .acq_rel);
@@ -68,13 +68,13 @@ const HandlerRegistryUnix = struct {
             };
 
             // Save the previous handler so we can restore it later
-            posix.sigaction(@intFromEnum(kind), &sa, &self.prev_handlers[signum]);
+            posix.sigaction(@backingInt(kind), &sa, &self.prev_handlers[signum]);
         }
 
         errdefer {
             // Restore previous handler if this was the last handler
             if (prev_count == 0) {
-                posix.sigaction(@intFromEnum(kind), &self.prev_handlers[signum], null);
+                posix.sigaction(@backingInt(kind), &self.prev_handlers[signum], null);
             }
         }
 
@@ -97,7 +97,7 @@ const HandlerRegistryUnix = struct {
     }
 
     fn uninstall(self: *HandlerRegistryUnix, kind: SignalKind, entry: *HandlerEntry) void {
-        const signum: u8 = @intFromEnum(kind);
+        const signum: u8 = @backingInt(kind);
 
         // First swap to INSTALLING to prevent signal handler from accessing this entry
         const prev_value = entry.kind.swap(INSTALLING, .acq_rel);
@@ -106,7 +106,7 @@ const HandlerRegistryUnix = struct {
         // Restore previous handler if this was the last handler for this signal type
         const new_count = self.installed_handlers[signum].fetchSub(1, .acq_rel) - 1;
         if (new_count == 0) {
-            posix.sigaction(@intFromEnum(kind), &self.prev_handlers[signum], null);
+            posix.sigaction(@backingInt(kind), &self.prev_handlers[signum], null);
         }
 
         // Mark as available
@@ -121,7 +121,7 @@ const HandlerRegistryWindows = struct {
     total_handlers: std.atomic.Value(usize) = .init(0),
 
     fn install(self: *HandlerRegistryWindows, kind: SignalKind) !*HandlerEntry {
-        const signum: u8 = @intFromEnum(kind);
+        const signum: u8 = @backingInt(kind);
 
         const prev_total = self.total_handlers.fetchAdd(1, .acq_rel);
         errdefer _ = self.total_handlers.fetchSub(1, .acq_rel);
@@ -160,7 +160,7 @@ const HandlerRegistryWindows = struct {
     }
 
     fn uninstall(self: *HandlerRegistryWindows, kind: SignalKind, entry: *HandlerEntry) void {
-        const signum: u8 = @intFromEnum(kind);
+        const signum: u8 = @backingInt(kind);
 
         // First swap to INSTALLING to prevent signal handler from accessing this entry
         const prev_value = entry.kind.swap(INSTALLING, .acq_rel);
@@ -182,7 +182,7 @@ const HandlerRegistry = if (builtin.os.tag == .windows) HandlerRegistryWindows e
 var registry: HandlerRegistry = .{};
 
 fn signalHandlerUnix(sig: posix.SIG) callconv(.c) void {
-    const signum: u8 = @intCast(@intFromEnum(sig));
+    const signum: u8 = @intCast(@backingInt(sig));
     for (&registry.handlers) |*entry| {
         const kind = entry.kind.load(.acquire);
         if (kind == signum) {
@@ -199,8 +199,8 @@ fn signalHandlerUnix(sig: posix.SIG) callconv(.c) void {
 fn consoleCtrlHandlerWindows(ctrl_type: w.DWORD) callconv(.winapi) w.BOOL {
     // Map Windows control events to SignalKind values
     const signal_value: u8 = switch (ctrl_type) {
-        w.CTRL_C_EVENT => @intFromEnum(SignalKind.interrupt),
-        w.CTRL_CLOSE_EVENT => @intFromEnum(SignalKind.terminate),
+        w.CTRL_C_EVENT => @backingInt(SignalKind.interrupt),
+        w.CTRL_CLOSE_EVENT => @backingInt(SignalKind.terminate),
         else => return w.FALSE, // Not handled
     };
 
@@ -400,7 +400,7 @@ test "Signal: basic signal handling" {
     const sendSignal = struct {
         fn call(r: *Runtime) !void {
             try r.sleep(.fromMilliseconds(10));
-            try posix.raise(@intFromEnum(SignalKind.interrupt));
+            try posix.raise(@backingInt(SignalKind.interrupt));
         }
     }.call;
 
@@ -435,7 +435,7 @@ test "Signal: multiple handlers for same signal" {
     const sendSignal = struct {
         fn call(r: *Runtime) !void {
             try r.sleep(.fromMilliseconds(10));
-            try posix.raise(@intFromEnum(SignalKind.interrupt));
+            try posix.raise(@backingInt(SignalKind.interrupt));
         }
     }.call;
 
@@ -485,7 +485,7 @@ test "Signal: timedWait receives signal before timeout" {
     const sendSignal = struct {
         fn call(r: *Runtime) !void {
             try r.sleep(.fromMilliseconds(10));
-            try posix.raise(@intFromEnum(SignalKind.interrupt));
+            try posix.raise(@backingInt(SignalKind.interrupt));
         }
     }.call;
 
@@ -519,8 +519,8 @@ test "Signal: select on multiple signals" {
 
             const result = try select(.{ .sig1 = &sig1, .sig2 = &sig2 });
             switch (result) {
-                .sig1 => flag.store(@intFromEnum(SignalKind.user1), .monotonic),
-                .sig2 => flag.store(@intFromEnum(SignalKind.user2), .monotonic),
+                .sig1 => flag.store(@backingInt(SignalKind.user1), .monotonic),
+                .sig2 => flag.store(@backingInt(SignalKind.user2), .monotonic),
             }
         }
     }.call;
@@ -528,7 +528,7 @@ test "Signal: select on multiple signals" {
     const sendSignal = struct {
         fn call(r: *Runtime) !void {
             try r.sleep(.fromMilliseconds(10));
-            try posix.raise(@intFromEnum(SignalKind.user2));
+            try posix.raise(@backingInt(SignalKind.user2));
         }
     }.call;
 
@@ -540,7 +540,7 @@ test "Signal: select on multiple signals" {
 
     try group.wait();
 
-    try std.testing.expectEqual(@intFromEnum(SignalKind.user2), signal_received.load(.monotonic));
+    try std.testing.expectEqual(@backingInt(SignalKind.user2), signal_received.load(.monotonic));
 }
 
 test "Signal: select with signal already received (fast path)" {
@@ -555,7 +555,7 @@ test "Signal: select with signal already received (fast path)" {
     defer sig.deinit();
 
     // Send signal first
-    try posix.raise(@intFromEnum(SignalKind.user1));
+    try posix.raise(@backingInt(SignalKind.user1));
 
     // Small delay to ensure signal is processed
     try rt.sleep(.fromMilliseconds(10));
@@ -588,7 +588,7 @@ test "Signal: select with signal and task" {
     const sendSignal = struct {
         fn call(r: *Runtime) !void {
             try r.sleep(.fromMilliseconds(10));
-            try posix.raise(@intFromEnum(SignalKind.user1));
+            try posix.raise(@backingInt(SignalKind.user1));
         }
     }.call;
 
