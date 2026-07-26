@@ -350,6 +350,12 @@ pub const mmap = libc.mmap;
 pub const sigaltstack = libc.sigaltstack;
 pub const utimensat = libc.utimensat;
 
-pub fn lseek(fd: i32, offset: off_t, whence: u32) off_t {
-    return libc.lseek(fd, offset, @intCast(whence));
+/// Returns 0 on success, or -1 on failure. The resulting file position is
+/// reported through `new_offset`, to match the Linux syscall wrapper, which
+/// cannot return it on 32-bit platforms.
+pub fn lseek(fd: i32, offset: off_t, whence: u32, new_offset: ?*u64) off_t {
+    const rc = libc.lseek(fd, offset, @intCast(whence));
+    if (rc == -1) return -1;
+    if (new_offset) |out| out.* = @intCast(rc);
+    return 0;
 }

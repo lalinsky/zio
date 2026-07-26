@@ -276,9 +276,13 @@ pub fn mmap(addr: ?[*]u8, len: usize, prot: u32, flags: u32, fd: i32, offset: i6
     }
 }
 
-pub fn lseek(fd: i32, offset: off_t, whence: u32) usize {
+/// Returns 0 on success, or the negative errno on failure. The resulting file
+/// position is reported through `new_offset`, because it does not fit in the
+/// return value on 32-bit platforms.
+pub fn lseek(fd: i32, offset: off_t, whence: u32, new_offset: ?*u64) usize {
     if (@sizeOf(usize) == 4) {
-        // 32-bit platforms use llseek which returns result via pointer
+        // 32-bit platforms use llseek, which returns 0 on success and reports
+        // the resulting position through a pointer.
         var result: u64 = undefined;
         const rc = linux.syscall5(
             .llseek,
@@ -288,11 +292,9 @@ pub fn lseek(fd: i32, offset: off_t, whence: u32) usize {
             @intFromPtr(&result),
             whence,
         );
-        if (rc == 0) {
-            return @truncate(result); // TODO: do not truncate
-        } else {
-            return @bitCast(@as(isize, -1));
-        }
+        if (rc != 0) return rc;
+        if (new_offset) |out| out.* = result;
+        return 0;
     } else {
         const rc = linux.syscall3(
             .lseek,
@@ -300,7 +302,9 @@ pub fn lseek(fd: i32, offset: off_t, whence: u32) usize {
             @as(usize, @bitCast(offset)),
             whence,
         );
-        return rc;
+        if (errno(rc) != .SUCCESS) return rc;
+        if (new_offset) |out| out.* = rc;
+        return 0;
     }
 }
 

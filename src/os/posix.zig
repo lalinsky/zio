@@ -188,7 +188,7 @@ pub fn setNonblocking(fd: fd_t) error{Unexpected}!void {
 /// non-seekable descriptors without disturbing the file offset.
 pub fn isPollable(fd: fd_t) bool {
     while (true) {
-        const rc = sys.lseek(fd, 0, system.SEEK.CUR);
+        const rc = sys.lseek(fd, 0, system.SEEK.CUR, null);
         switch (errno(rc)) {
             .SUCCESS => return false,
             .INTR => continue,
@@ -358,4 +358,30 @@ pub fn getrandom(buffer: []u8) (GetRandomError || syscall_cancel.Cancelable)!voi
             }
         },
     }
+}
+
+test "isPollable: a pipe is pollable" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const fds = try pipe(.{});
+    defer close(fds[0]);
+    defer close(fds[1]);
+    try std.testing.expect(isPollable(fds[0]));
+}
+
+test "isPollable: a terminal is pollable" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    // NetBSD is the one system where the no-op seek succeeds on a terminal, so
+    // the probe cannot tell one from a regular file there and its streaming I/O
+    // goes to the thread pool. Linux and macOS both answer ESPIPE.
+    if (builtin.os.tag == .netbsd) return error.SkipZigTest;
+
+    // A pty is a terminal we can open without one being attached to the test
+    // process. Systems without the multiplexer at this path skip.
+    const fs = @import("fs.zig");
+    const fd = fs.openat(std.testing.allocator, fs.cwd(), "/dev/ptmx", .{ .mode = .read_write }) catch
+        return error.SkipZigTest;
+    defer close(fd);
+
+    try std.testing.expect(isPollable(fd));
 }

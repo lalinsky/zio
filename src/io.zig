@@ -1523,13 +1523,11 @@ fn fileReadPositionalImpl(_: ?*anyopaque, file: Io.File, data: []const []u8, off
 }
 
 fn fileSeekByImpl(_: ?*anyopaque, file: Io.File, offset: i64) Io.File.SeekError!void {
-    const io = globalIo();
-    return io.vtable.fileSeekBy(io.userdata, file, offset);
+    return os_fs.fileSeekBy(stdIoHandleToZio(file.handle), offset);
 }
 
 fn fileSeekToImpl(_: ?*anyopaque, file: Io.File, offset: u64) Io.File.SeekError!void {
-    const io = globalIo();
-    return io.vtable.fileSeekTo(io.userdata, file, offset);
+    return os_fs.fileSeekTo(stdIoHandleToZio(file.handle), offset);
 }
 
 fn fileSyncImpl(_: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
@@ -3333,6 +3331,60 @@ test "io: file streaming write advances position and appends" {
     var buf: [14]u8 = undefined;
     try std.testing.expectEqual(14, try file.readPositional(io, &.{&buf}, 0));
     try std.testing.expectEqualStrings("HELLO WORLD!!!", &buf);
+}
+
+test "io: file seek moves the streaming position" {
+    // See note on Windows in the streaming-read test above: without an implicit
+    // file position there is nothing for a seek to move.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const file_path = "test_io_file_seek.txt";
+    defer dir.deleteFile(io, file_path) catch {};
+
+    var file = try dir.createFile(io, file_path, .{ .read = true });
+    defer file.close(io);
+
+    try std.testing.expectEqual(10, try file.writePositional(io, &.{"HELLOWORLD"}, 0));
+
+    var buf: [5]u8 = undefined;
+    try io.vtable.fileSeekTo(io.userdata, file, 5);
+    try std.testing.expectEqual(5, try file.readStreaming(io, &.{&buf}));
+    try std.testing.expectEqualStrings("WORLD", &buf);
+
+    // The read above left the position at the end of the file.
+    try io.vtable.fileSeekBy(io.userdata, file, -10);
+    try std.testing.expectEqual(5, try file.readStreaming(io, &.{&buf}));
+    try std.testing.expectEqualStrings("HELLO", &buf);
+
+    // No signed file offset can represent this, so it is not a position the
+    // file can be moved to.
+    try std.testing.expectError(error.Unseekable, io.vtable.fileSeekTo(io.userdata, file, std.math.maxInt(u64)));
+
+    // Seeking before the start of the file leaves the position untouched.
+    try io.vtable.fileSeekTo(io.userdata, file, 0);
+    try std.testing.expectError(error.Unseekable, io.vtable.fileSeekBy(io.userdata, file, -1));
+    try std.testing.expectEqual(5, try file.readStreaming(io, &.{&buf}));
+    try std.testing.expectEqualStrings("HELLO", &buf);
+}
+
+test "io: file seek on a pipe reports Unseekable" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const fds = try os_fs.pipe();
+    var read_file: Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = true } };
+    var write_file: Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = true } };
+    defer read_file.close(io);
+    defer write_file.close(io);
+
+    try std.testing.expectError(error.Unseekable, io.vtable.fileSeekTo(io.userdata, read_file, 0));
+    try std.testing.expectError(error.Unseekable, io.vtable.fileSeekBy(io.userdata, read_file, 1));
 }
 
 test "io: streaming read/write over a pollable (pipe) fd" {
