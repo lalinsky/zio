@@ -313,7 +313,7 @@ const FutexDarwin = struct {
         );
 
         if (rc < 0) {
-            const err: posix.sys.E = @enumFromInt(-rc);
+            const err: posix.sys.E = @fromBackingInt(@intCast(-rc));
             if (err == .TIMEDOUT) return error.Timeout;
         }
     }
@@ -620,7 +620,7 @@ const NotifyNetBSD = struct {
         // Safe to call even if signal() was already called - the kernel remembers
         // the unpark and will return EALREADY immediately without blocking.
         _ = sys.___lwp_park60(
-            @intFromEnum(sys.CLOCK.MONOTONIC),
+            @backingInt(sys.CLOCK.MONOTONIC),
             0,
             null,
             0, // unpark: don't unpark anyone
@@ -638,7 +638,7 @@ const NotifyNetBSD = struct {
         // Safe to call even if signal() was already called - the kernel remembers
         // the unpark and will return EALREADY immediately without blocking.
         const result = sys.___lwp_park60(
-            @intFromEnum(sys.CLOCK.MONOTONIC),
+            @backingInt(sys.CLOCK.MONOTONIC),
             0,
             &timeout_ts,
             0, // unpark: don't unpark anyone

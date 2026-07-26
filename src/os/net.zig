@@ -228,12 +228,12 @@ pub const Domain = enum(c_int) {
 
     /// Convert from POSIX address family constant
     pub fn fromPosix(af: anytype) Domain {
-        return @enumFromInt(af);
+        return @fromBackingInt(@intCast(af));
     }
 
     /// Convert to POSIX address family constant
     pub fn toPosix(self: Domain) c_int {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 };
 
@@ -247,12 +247,12 @@ pub const Type = enum(c_int) {
 
     /// Convert from POSIX socket type constant
     pub fn fromPosix(sock_type: anytype) Type {
-        return @enumFromInt(sock_type);
+        return @fromBackingInt(@intCast(sock_type));
     }
 
     /// Convert to POSIX socket type constant
     pub fn toPosix(self: Type) c_int {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 
     /// Convert from std.Io socket mode
@@ -279,17 +279,17 @@ pub const Protocol = enum(c_int) {
 
     /// Convert from POSIX protocol constant
     pub fn fromPosix(protocol: anytype) Protocol {
-        return @enumFromInt(protocol);
+        return @fromBackingInt(@intCast(protocol));
     }
 
     /// Convert to POSIX protocol constant
     pub fn toPosix(self: Protocol) c_int {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 
     /// Convert from std.Io protocol
     pub fn fromStd(protocol: std.Io.net.Protocol) Protocol {
-        return @enumFromInt(@intFromEnum(protocol));
+        return @fromBackingInt(@intCast(@backingInt(protocol)));
     }
 };
 
@@ -409,7 +409,7 @@ pub fn socketpair(domain: Domain, socket_type: Type, protocol: Protocol, flags: 
                 const err = posix.errno(rc);
                 // Darwin with __DARWIN_UNIX03 returns EOPNOTSUPP = 102, but Zig's
                 // darwin E enum defines OPNOTSUPP = 45 (the legacy ENOTSUP alias).
-                if (builtin.os.tag.isDarwin() and @intFromEnum(err) == 102) {
+                if (builtin.os.tag.isDarwin() and @backingInt(err) == 102) {
                     return error.OperationUnsupported;
                 }
                 switch (err) {
@@ -1587,7 +1587,7 @@ pub fn getaddrinfo(
         },
         else => {
             const rc = std.c.getaddrinfo(node, service, hints, res);
-            const rc_int: c_int = @intFromEnum(rc);
+            const rc_int: c_int = @backingInt(rc);
             if (rc_int != 0) {
                 return errnoToGetAddrInfoError(rc);
             }
@@ -1609,7 +1609,7 @@ pub fn freeaddrinfo(res: *addrinfo) void {
 fn errnoToGetAddrInfoError(err: anytype) GetAddrInfoError {
     switch (builtin.os.tag) {
         .windows => {
-            const wsa_err: windows.WinsockError = @enumFromInt(@as(u16, @intCast(err)));
+            const wsa_err: windows.WinsockError = @fromBackingInt(@intCast(@as(u16, @intCast(err))));
             return switch (wsa_err) {
                 .EAFNOSUPPORT => error.AddressFamilyUnsupported,
                 .EINVAL => error.InvalidFlags,
@@ -1638,7 +1638,7 @@ fn errnoToGetAddrInfoError(err: anytype) GetAddrInfoError {
                 .SOCKTYPE => error.SocketTypeNotSupported,
                 .SYSTEM => {
                     // EAI.SYSTEM means we need to check errno
-                    const errno_val: posix.system.E = @enumFromInt(std.c._errno().*);
+                    const errno_val: posix.system.E = @fromBackingInt(@intCast(std.c._errno().*));
                     return switch (errno_val) {
                         .SUCCESS => unreachable,
                         .NOMEM => error.SystemResources,

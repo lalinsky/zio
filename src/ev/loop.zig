@@ -166,13 +166,13 @@ fn clockIndex(clock: Clock) usize {
     // and are driven by the uncapped awake poll timeout instead of a separate
     // capped/native path.
     const c: Clock = if (clock == .boot and !time.boot_distinct_from_awake) .awake else clock;
-    const idx = @intFromEnum(c);
+    const idx = @backingInt(c);
     if (idx >= wall_clock_count) @panic("timers cannot use CPU-time clocks");
     return idx;
 }
 
 fn indexClock(index: usize) Clock {
-    return @enumFromInt(index);
+    return @fromBackingInt(@intCast(index));
 }
 
 pub fn SimpleStack(comptime T: type) type {

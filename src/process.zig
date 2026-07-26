@@ -37,14 +37,14 @@ pub fn childKill(child: *std.process.Child) void {
 
 fn exitStatusToTerm(status: ev.ProcessWait.ExitStatus) std.process.Child.Term {
     if (status.signal) |sig| {
-        return .{ .signal = @enumFromInt(sig) };
+        return .{ .signal = @fromBackingInt(@intCast(sig)) };
     }
     return .{ .exited = status.code };
 }
 
 fn sendTermSignal(handle: ProcessHandle) void {
     if (builtin.os.tag == .windows) {
-        _ = std.os.windows.ntdll.NtTerminateProcess(handle, @enumFromInt(1));
+        _ = std.os.windows.ntdll.NtTerminateProcess(handle, @fromBackingInt(@intCast(1)));
     } else {
         _ = std.posix.system.kill(handle, .TERM);
     }

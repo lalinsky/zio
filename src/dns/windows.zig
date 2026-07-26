@@ -139,7 +139,7 @@ fn fillBuffers(
 }
 
 fn winsockToLookupError(err: i32) dns.LookupError {
-    const wsa_err: windows.WinsockError = @enumFromInt(@as(u16, @intCast(err)));
+    const wsa_err: windows.WinsockError = @fromBackingInt(@intCast(@as(u16, @intCast(err))));
     return switch (wsa_err) {
         .EAFNOSUPPORT => error.AddressFamilyUnsupported,
         .EINVAL => error.Unexpected,

@@ -746,7 +746,7 @@ fn handleEpollError(event: *const std.os.linux.epoll_event, comptime errnoToErro
 
     const sock_err = net.getSockError(eventFd(event)) catch return error.Unexpected;
     if (sock_err == 0) return null; // No actual error, caller should retry operation
-    return errnoToError(@enumFromInt(sock_err));
+    return errnoToError(@fromBackingInt(@intCast(sock_err)));
 }
 
 pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) CheckResult {

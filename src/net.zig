@@ -1337,7 +1337,7 @@ pub const Stream = struct {
             if (bufs[0].len == 0 and bufs[1].len == 0) return error.Unimplemented;
 
             // Stream the file body directly from the current read position.
-            const want = @intFromEnum(limit);
+            const want = @backingInt(limit);
             if (want == 0) return 0;
 
             var op = ev.NetSendFile.init(

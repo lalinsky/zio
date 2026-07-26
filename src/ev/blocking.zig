@@ -502,7 +502,7 @@ fn handleNetConnect(c: *Completion) void {
             if (sock_err == 0) {
                 c.setResult(.net_connect, {});
             } else {
-                c.setError(os.net.errnoToConnectError(@enumFromInt(sock_err)));
+                c.setError(os.net.errnoToConnectError(@fromBackingInt(@intCast(sock_err))));
             }
         },
         else => c.setError(err),

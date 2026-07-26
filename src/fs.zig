@@ -1088,7 +1088,7 @@ pub const FileReader = struct {
 
     fn discard(io_reader: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
         const r: *FileReader = @alignCast(@fieldParentPtr("interface", io_reader));
-        const to_discard = @intFromEnum(limit);
+        const to_discard = @backingInt(limit);
         if (to_discard == 0) return 0;
 
         switch (r.mode) {
