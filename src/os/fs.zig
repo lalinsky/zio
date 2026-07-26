@@ -1972,11 +1972,20 @@ pub fn errnoToFileSeekError(err: E) FileSeekError {
         .windows => {
             return switch (err) {
                 .SUCCESS => unreachable,
-                // The answers for "this handle has no file position": a pipe or
-                // socket (INVALID_FUNCTION, or BAD_DEV_TYPE for the named pipes
-                // we create in `w.pipe`), a character device (SEEK_ON_DEVICE),
-                // or a position before the start of the file (NEGATIVE_SEEK).
-                .INVALID_FUNCTION, .BAD_DEV_TYPE, .SEEK_ON_DEVICE, .NEGATIVE_SEEK => error.Unseekable,
+                // The answers for "this handle has no file position". Windows
+                // reports a pipe as INVALID_PARAMETER and Wine reports one as
+                // BAD_DEV_TYPE; INVALID_FUNCTION is the documented answer for a
+                // handle type that cannot seek, and SEEK_ON_DEVICE for a
+                // character device. The move method is a constant and the
+                // distance is range checked before the call, so the handle is
+                // the only parameter left for INVALID_PARAMETER to be about.
+                // NEGATIVE_SEEK is a position before the start of the file.
+                .INVALID_FUNCTION,
+                .INVALID_PARAMETER,
+                .BAD_DEV_TYPE,
+                .SEEK_ON_DEVICE,
+                .NEGATIVE_SEEK,
+                => error.Unseekable,
                 .ACCESS_DENIED => error.AccessDenied,
                 .OPERATION_ABORTED => error.Canceled,
                 else => |e| unexpectedError(e),
