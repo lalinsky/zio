@@ -188,7 +188,7 @@ pub fn setNonblocking(fd: fd_t) error{Unexpected}!void {
 /// non-seekable descriptors without disturbing the file offset.
 pub fn isPollable(fd: fd_t) bool {
     while (true) {
-        const rc = sys.lseek(fd, 0, system.SEEK.CUR);
+        const rc = sys.lseek(fd, 0, system.SEEK.CUR, null);
         switch (errno(rc)) {
             .SUCCESS => return false,
             .INTR => continue,
@@ -358,4 +358,13 @@ pub fn getrandom(buffer: []u8) (GetRandomError || syscall_cancel.Cancelable)!voi
             }
         },
     }
+}
+
+test "isPollable: a pipe is pollable" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const fds = try pipe(.{});
+    defer close(fds[0]);
+    defer close(fds[1]);
+    try std.testing.expect(isPollable(fds[0]));
 }

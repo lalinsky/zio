@@ -262,6 +262,15 @@ pub const FileSyncError = error{
     Unexpected,
 };
 
+pub const FileSeekError = error{
+    /// The file does not have a position that can be set: a pipe, FIFO, socket
+    /// or tty, or an offset the device cannot represent.
+    Unseekable,
+    AccessDenied,
+    Canceled,
+    Unexpected,
+};
+
 pub const DirRenameError = error{
     AccessDenied,
     PermissionDenied,
@@ -1399,6 +1408,51 @@ pub fn fileSync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
     }
 }
 
+/// Move the file position by `offset` bytes, relative to the current position.
+pub fn fileSeekBy(fd: fd_t, offset: i64) FileSeekError!void {
+    if (builtin.os.tag == .windows) {
+        return seekWindows(fd, offset, w.FILE_CURRENT);
+    }
+    return seekPosix(fd, offset, posix.system.SEEK.CUR);
+}
+
+/// Set the file position to `offset` bytes from the start of the file.
+pub fn fileSeekTo(fd: fd_t, offset: u64) FileSeekError!void {
+    // Both `LARGE_INTEGER` and `off_t` are signed, so an offset past 2^63 has
+    // no representation to seek to.
+    const signed = std.math.cast(i64, offset) orelse return error.Unseekable;
+    if (builtin.os.tag == .windows) {
+        return seekWindows(fd, signed, w.FILE_BEGIN);
+    }
+    return seekPosix(fd, signed, posix.system.SEEK.SET);
+}
+
+fn seekWindows(handle: fd_t, offset: i64, move_method: w.DWORD) FileSeekError!void {
+    if (w.SetFilePointerEx(handle, offset, null, move_method) == w.FALSE) {
+        return errnoToFileSeekError(w.GetLastError());
+    }
+}
+
+fn seekPosix(fd: fd_t, offset: i64, whence: u32) FileSeekError!void {
+    // `off_t` is narrower than 64 bits on some platforms; an offset that does
+    // not fit is one the file cannot be positioned at.
+    const off = std.math.cast(posix.off_t, offset) orelse return error.Unseekable;
+
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
+    while (true) {
+        const rc = posix.sys.lseek(fd, off, whence, null);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
+            else => |err| return errnoToFileSeekError(err),
+        }
+    }
+}
+
 /// Rename a file using renameat() syscall
 pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) DirRenameError!void {
     if (builtin.os.tag == .windows) {
@@ -1911,6 +1965,39 @@ pub fn errnoToFileSyncError(errno: posix.system.E) FileSyncError {
         .CANCELED => error.Canceled,
         else => |e| unexpectedError(e),
     };
+}
+
+pub fn errnoToFileSeekError(err: E) FileSeekError {
+    switch (builtin.os.tag) {
+        .windows => {
+            return switch (err) {
+                .SUCCESS => unreachable,
+                // The answers for "this handle has no file position": a pipe or
+                // socket (INVALID_FUNCTION, or BAD_DEV_TYPE for the named pipes
+                // we create in `w.pipe`), a character device (SEEK_ON_DEVICE),
+                // or a position before the start of the file (NEGATIVE_SEEK).
+                .INVALID_FUNCTION, .BAD_DEV_TYPE, .SEEK_ON_DEVICE, .NEGATIVE_SEEK => error.Unseekable,
+                .ACCESS_DENIED => error.AccessDenied,
+                .OPERATION_ABORTED => error.Canceled,
+                else => |e| unexpectedError(e),
+            };
+        },
+        else => {
+            return switch (err) {
+                .SUCCESS => unreachable,
+                .CANCELED => error.Canceled,
+                // ESPIPE is the usual "not seekable" answer, but macOS returns
+                // ENXIO for a tty, and EOVERFLOW when the resulting offset is
+                // past what the device can represent. EINVAL is a resulting
+                // offset before the start of the file.
+                .SPIPE, .NXIO, .OVERFLOW, .INVAL => error.Unseekable,
+                // Not specified by POSIX for lseek, but sandboxes that filter
+                // the syscall report a denied seek this way.
+                .ACCES, .PERM => error.AccessDenied,
+                else => |e| unexpectedError(e),
+            };
+        },
+    }
 }
 
 pub fn errnoToDirRenameError(errno: posix.system.E) DirRenameError {
@@ -2936,7 +3023,7 @@ pub fn dirRead(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
 fn dirReadPosix(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
     // Seek to beginning if restart requested
     if (restart) {
-        const rc = posix.sys.lseek(handle, 0, posix.system.SEEK.SET);
+        const rc = posix.sys.lseek(handle, 0, posix.system.SEEK.SET, null);
         switch (posix.errno(rc)) {
             .SUCCESS => {},
             .BADF => return error.Unexpected,

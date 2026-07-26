@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Added `os.fs.fileSeekBy` and `os.fs.fileSeekTo`, which now also back the `std.Io` file
+  seek operations.
+
+- Fixed pipes, FIFOs and terminals being treated as seekable on 32-bit Linux. Streaming
+  reads and writes on them were routed to a thread pool worker, where they occupy the
+  worker until they complete, instead of to the event loop.
+
 - `net.HostName.validate` now counts the trailing dot of a fully qualified domain name
   toward the 255 byte limit, matching how the name is encoded in a DNS packet. A 255 byte
   name written with a trailing dot used to validate at 256 bytes, so a validated
