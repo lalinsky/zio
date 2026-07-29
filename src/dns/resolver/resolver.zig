@@ -31,9 +31,7 @@ const max_search_domain_len = 254;
 
 const Cache = @import("cache.zig").Cache;
 const CacheKey = @import("cache.zig").CacheKey;
-const CacheEntry = @import("cache.zig").CacheEntry;
 const Shape = @import("cache.zig").Shape;
-const max_cached_addrs = @import("cache.zig").max_cached_addrs;
 
 // Maximum addresses parsed/returned per family within one batched query.
 const max_addrs_per_family = dns.max_addrs_per_family;
@@ -108,7 +106,7 @@ pub const Resolver = struct {
             .conf_mtime = conf_mtime,
             .conf_next_check = .init(next_check_s),
             .conf_reloading = .init(false),
-            .cache = std.mem.zeroes(Cache),
+            .cache = .init(),
             .hash_seed = hash_seed,
             .prng_mutex = .init,
             .prng = prng,
@@ -260,16 +258,15 @@ pub const Resolver = struct {
         {
             try self.lock.lockShared();
             defer self.lock.unlockShared();
-            if (self.cache.get(&key, now)) |entry| {
-                var i: usize = 0;
-                for (entry.addrs[0..entry.count]) |addr_in| {
-                    if (i >= storage.len) break;
+            var cached: [2 * max_addrs_per_family]net.IpAddress = undefined;
+            if (self.cache.get(&key, now, cached[0..])) |n| {
+                const c = @min(n, storage.len);
+                for (cached[0..c], storage[0..c]) |addr_in, *out| {
                     var addr = addr_in;
                     addr.setPort(options.port);
-                    storage[i] = .{ .address = addr };
-                    i += 1;
+                    out.* = .{ .address = addr };
                 }
-                if (i > 0) return .{ .count = i, .canonical_name_len = 0 };
+                return .{ .count = c, .canonical_name_len = 0 };
             }
         }
 
@@ -476,7 +473,7 @@ pub const Resolver = struct {
         var key: CacheKey = undefined;
         CacheKey.init(&key, name, self.hash_seed, shape);
 
-        if (results.len == 0 or truncated or results.len > max_cached_addrs) {
+        if (results.len == 0 or truncated) {
             self.lock.lockUncancelable();
             defer self.lock.unlock();
             self.cache.expire(&key);
@@ -484,19 +481,15 @@ pub const Resolver = struct {
         }
 
         const ttl_secs = std.math.clamp(ttl, cache_ttl_min, cache_ttl_max);
-        var entry: CacheEntry = .{
-            .addrs = undefined,
-            .count = @intCast(results.len),
-            .expiry = now.addDuration(.fromSeconds(ttl_secs)),
-        };
-        for (results, 0..) |r, i| {
-            entry.addrs[i] = r.address;
-            entry.addrs[i].setPort(0);
+        var addrs: [2 * max_addrs_per_family]net.IpAddress = undefined;
+        for (results, addrs[0..results.len]) |r, *out| {
+            out.* = r.address;
+            out.setPort(0);
         }
 
         self.lock.lockUncancelable();
         defer self.lock.unlock();
-        self.cache.put(&key, entry, now);
+        self.cache.put(&key, addrs[0..results.len], now.addDuration(.fromSeconds(ttl_secs)), now);
     }
 
     fn maybeReloadHosts(self: *Resolver, now: Timestamp) void {
