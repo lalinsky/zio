@@ -2527,7 +2527,9 @@ fn netLookupImpl(
     const io = fromRuntime(rt);
     defer resolved.close(io);
 
-    var storage: [32]zio_dns.LookupResult = undefined;
+    // Sized for the largest answer the resolver can return: both families
+    // plus one canonical-name entry.
+    var storage: [2 * zio_dns.max_addrs_per_family + 1]zio_dns.LookupResult = undefined;
     const count = zio_dns.lookup(&storage, .{
         .name = host_name.bytes,
         .port = options.port,
@@ -2536,10 +2538,7 @@ fn netLookupImpl(
             .ip6 => .ipv6,
         } else null,
         .canonical_name_buffer = options.canonical_name_buffer,
-    }) catch |err| switch (err) {
-        error.TooManyAddresses => storage.len,
-        else => return dnsLookupErrToStdErr(err),
-    };
+    }) catch |err| return dnsLookupErrToStdErr(err);
 
     for (storage[0..count]) |entry| switch (entry) {
         .address => |addr| {
@@ -2567,7 +2566,6 @@ fn dnsLookupErrToStdErr(err: zio_dns.LookupError) Io.net.HostName.LookupError {
         error.ProcessFdQuotaExceeded => error.ProcessFdQuotaExceeded,
         error.SystemResources, error.OutOfMemory => error.SystemResources,
         error.Canceled => error.Canceled,
-        error.TooManyAddresses => unreachable, // handled before calling this function
         error.Unexpected, error.ServiceUnavailable, error.NoThreadPool, error.RuntimeShutdown => error.Unexpected,
     };
 }

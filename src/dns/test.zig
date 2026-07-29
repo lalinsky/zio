@@ -177,7 +177,7 @@ test "HostName: lookup with no storage" {
 
     const host = try HostName.init("localhost");
     var storage: [0]HostName.LookupResult = undefined;
-    try std.testing.expectError(error.TooManyAddresses, host.lookup(&storage, .{ .port = 80 }));
+    try std.testing.expectEqual(0, try host.lookup(&storage, .{ .port = 80 }));
 }
 
 test "HostName: lookup localhost" {
@@ -225,7 +225,7 @@ test "HostName: lookup numeric IPv4 with no storage" {
 
     const host = try HostName.init("127.0.0.1");
     var storage: [0]HostName.LookupResult = undefined;
-    try std.testing.expectError(error.TooManyAddresses, host.lookup(&storage, .{ .port = 8080 }));
+    try std.testing.expectEqual(0, try host.lookup(&storage, .{ .port = 8080 }));
 }
 
 test "HostName: lookup numeric IPv6 with no storage" {
@@ -234,7 +234,7 @@ test "HostName: lookup numeric IPv6 with no storage" {
 
     const host = try HostName.init("::1");
     var storage: [0]HostName.LookupResult = undefined;
-    try std.testing.expectError(error.TooManyAddresses, host.lookup(&storage, .{ .port = 8080 }));
+    try std.testing.expectEqual(0, try host.lookup(&storage, .{ .port = 8080 }));
 }
 
 test "HostName: lookup numeric IPv4 wrong family" {

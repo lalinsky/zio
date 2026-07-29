@@ -9,6 +9,13 @@ const runtime = @import("../runtime.zig");
 pub const IpAddress = net.IpAddress;
 pub const HostName = net.HostName;
 
+/// Maximum addresses the built-in resolver keeps per address family in one
+/// lookup. Records beyond this are silently dropped; results are never
+/// truncated below this limit by the resolver itself, only by the caller's
+/// buffer. A dual-stack lookup can thus return up to `2 * max_addrs_per_family`
+/// addresses (plus one canonical-name entry when requested).
+pub const max_addrs_per_family = 64;
+
 pub const LookupOptions = struct {
     name: []const u8,
     port: u16,
@@ -35,7 +42,6 @@ pub const LookupError = error{
     Canceled,
     RuntimeShutdown,
     NoThreadPool,
-    TooManyAddresses,
 };
 
 /// Extended error set used internally by Resolver/NoResolver. Includes
@@ -53,6 +59,10 @@ else if (builtin.os.tag.isDarwin() and backend.backend == .kqueue)
 else
     @import("posix.zig");
 
+/// Resolves a hostname, filling `storage` with up to `storage.len` results and
+/// returning the number of entries written. Addresses that do not fit are
+/// dropped without error — a full buffer may therefore mean the answer was
+/// truncated.
 pub fn lookup(
     storage: []LookupResult,
     options: LookupOptions,
