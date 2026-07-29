@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Added `withTimeout(timeout, func, args)`, the scoped form of `AutoCancel`: it arms the
+  timer, runs `func`, and turns the `error.Canceled` the timeout produced back into
+  `error.Timeout`. The result type is `func`'s own, with `error.Timeout` added to its
+  error set. An explicit cancel still wins over the deadline and is reported as
+  `error.Canceled`.
+
 - Added `os.process.getCurrentPath`, `os.process.setCurrentPath` and
   `os.process.setCurrentDir` for the working directory, and `os.fs.isTty` and
   `os.fs.supportsAnsiEscapeCodes` for terminal detection. These also back the matching

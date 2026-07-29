@@ -10,6 +10,8 @@ const JoinHandle = @import("runtime.zig").JoinHandle;
 const Duration = @import("time.zig").Duration;
 const Timeout = @import("time.zig").Timeout;
 const AnyTask = @import("task.zig").AnyTask;
+const meta = @import("meta.zig");
+const Timeoutable = @import("common.zig").Timeoutable;
 
 /// Automatically cancels I/O operations on the current task after a timeout.
 /// Multiple AutoCancel instances can be nested - each has its own independent timer.
@@ -86,6 +88,62 @@ pub const AutoCancel = struct {
         return getCurrentTask().checkAutoCancel();
     }
 };
+
+/// The return type of `withTimeout(timeout, func, args)`: whatever `func`
+/// returns, with `error.Timeout` added to its error set.
+pub fn WithTimeoutResult(func: anytype) type {
+    const Ret = meta.ReturnType(func);
+    return switch (@typeInfo(Ret)) {
+        .error_union => |eu| (eu.error_set || Timeoutable)!eu.payload,
+        else => Timeoutable!Ret,
+    };
+}
+
+/// Run `func(args...)` on the current task, canceling it after `timeout`.
+///
+/// The scoped form of `AutoCancel`: arms a timer, runs `func`, and turns the
+/// `error.Canceled` the timeout produced back into `error.Timeout`. The result
+/// type is `func`'s own with `error.Timeout` added to its error set. A `.none`
+/// timeout just calls `func`.
+///
+/// ```zig
+/// const body = try zio.withTimeout(.fromSeconds(5), fetch, .{url});
+/// ```
+///
+/// An explicit cancel of the task wins over the timeout and is reported as
+/// `error.Canceled`, exactly as `AutoCancel.check` decides.
+pub fn withTimeout(
+    timeout: Timeout,
+    func: anytype,
+    args: std.meta.ArgsTuple(@TypeOf(func)),
+) WithTimeoutResult(func) {
+    var auto: AutoCancel = .init;
+    auto.set(timeout);
+
+    const ret = @call(.auto, func, args);
+
+    auto.clear();
+
+    const Ret = meta.ReturnType(func);
+    if (@typeInfo(Ret) != .error_union) return ret;
+
+    return ret catch |err| {
+        if (comptime canBeCanceled(meta.ErrorSet(Ret))) {
+            if (err == error.Canceled and auto.check(error.Canceled)) return error.Timeout;
+        }
+        return err;
+    };
+}
+
+/// Whether `error.Canceled` can travel out of an error set, and so whether a
+/// timeout on a `func` returning it could ever be observed.
+fn canBeCanceled(comptime ErrorSet: type) bool {
+    const errors = @typeInfo(ErrorSet).error_set orelse return true; // anyerror
+    for (errors) |e| {
+        if (std.mem.eql(u8, e.name, "Canceled")) return true;
+    }
+    return false;
+}
 
 /// Callback when auto-cancel timer fires
 fn autoCancelCallback(
@@ -373,4 +431,152 @@ test "AutoCancel: cancels spawned task via join" {
     };
 
     return error.TestUnexpectedResult;
+}
+
+test "withTimeout: returns the value when func finishes in time" {
+    const work = struct {
+        fn call(rt: *Runtime) !u32 {
+            try rt.sleep(.fromMilliseconds(5));
+            return 42;
+        }
+    }.call;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    try std.testing.expectEqual(42, try withTimeout(.fromMilliseconds(500), work, .{rt}));
+}
+
+test "withTimeout: reports error.Timeout when func overruns" {
+    const work = struct {
+        fn call(rt: *Runtime) !void {
+            try rt.sleep(.fromMilliseconds(500));
+        }
+    }.call;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    try std.testing.expectError(error.Timeout, withTimeout(.fromMilliseconds(10), work, .{rt}));
+}
+
+test "withTimeout: func's own error passes through unchanged" {
+    const work = struct {
+        fn call(_: *Runtime) error{ Boom, Canceled }!void {
+            return error.Boom;
+        }
+    }.call;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    try std.testing.expectError(error.Boom, withTimeout(.fromMilliseconds(500), work, .{rt}));
+}
+
+test "withTimeout: result type is func's error set plus Timeout" {
+    const fallible = struct {
+        fn call() error{Boom}!u32 {
+            return 1;
+        }
+    }.call;
+    const infallible = struct {
+        fn call() u32 {
+            return 1;
+        }
+    }.call;
+
+    try std.testing.expect(WithTimeoutResult(fallible) == (error{ Boom, Timeout }!u32));
+    try std.testing.expect(WithTimeoutResult(infallible) == (error{Timeout}!u32));
+}
+
+test "withTimeout: a func that cannot fail still returns its value" {
+    const work = struct {
+        fn call(x: u32) u32 {
+            return x * 2;
+        }
+    }.call;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    try std.testing.expectEqual(42, try withTimeout(.fromMilliseconds(500), work, .{@as(u32, 21)}));
+}
+
+test "withTimeout: .none runs func without a deadline" {
+    const work = struct {
+        fn call(rt: *Runtime) !u32 {
+            try rt.sleep(.fromMilliseconds(5));
+            return 7;
+        }
+    }.call;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    try std.testing.expectEqual(7, try withTimeout(.none, work, .{rt}));
+}
+
+test "withTimeout: user cancel wins over the timeout" {
+    const worker = struct {
+        fn call(rt: *Runtime) !void {
+            const inner = struct {
+                fn call(r: *Runtime) !void {
+                    try r.sleep(.fromMilliseconds(500));
+                }
+            }.call;
+
+            // The task is canceled from outside well before the deadline, so
+            // this must surface as Canceled rather than Timeout.
+            try std.testing.expectError(error.Canceled, withTimeout(.fromMilliseconds(200), inner, .{rt}));
+        }
+    }.call;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var handle = try rt.spawn(worker, .{rt});
+    try rt.sleep(.fromMilliseconds(5));
+    handle.cancel();
+    try handle.join();
+}
+
+test "withTimeout: nested, inner deadline fires first" {
+    const work = struct {
+        fn outer(rt: *Runtime) !void {
+            const inner = struct {
+                fn call(r: *Runtime) !void {
+                    try r.sleep(.fromMilliseconds(500));
+                }
+            }.call;
+            try withTimeout(.fromMilliseconds(10), inner, .{rt});
+        }
+    }.outer;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    try std.testing.expectError(error.Timeout, withTimeout(.fromMilliseconds(1000), work, .{rt}));
+}
+
+test "withTimeout: nested, outer deadline fires while inner is running" {
+    const work = struct {
+        fn outer(rt: *Runtime) !void {
+            const inner = struct {
+                fn call(r: *Runtime) !void {
+                    try r.sleep(.fromMilliseconds(500));
+                }
+            }.call;
+            // The inner deadline never fires; the outer one interrupts it. The
+            // inner wrapper must report that as Canceled and not claim it as
+            // its own Timeout — asserted here, because the outer result is
+            // error.Timeout either way and cannot tell the difference.
+            try std.testing.expectError(error.Canceled, withTimeout(.fromMilliseconds(1000), inner, .{rt}));
+            return error.Canceled;
+        }
+    }.outer;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    try std.testing.expectError(error.Timeout, withTimeout(.fromMilliseconds(10), work, .{rt}));
 }
