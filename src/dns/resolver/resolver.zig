@@ -32,6 +32,7 @@ const max_search_domain_len = 254;
 const Cache = @import("cache.zig").Cache;
 const CacheKey = @import("cache.zig").CacheKey;
 const Shape = @import("cache.zig").Shape;
+const max_entry_addrs = @import("cache.zig").max_entry_addrs;
 
 // Maximum addresses parsed/returned per family within one batched query.
 const max_addrs_per_family = dns.max_addrs_per_family;
@@ -258,7 +259,7 @@ pub const Resolver = struct {
         {
             try self.lock.lockShared();
             defer self.lock.unlockShared();
-            var cached: [2 * max_addrs_per_family]net.IpAddress = undefined;
+            var cached: [max_entry_addrs]net.IpAddress = undefined;
             if (self.cache.get(&key, now, cached[0..])) |n| {
                 const c = @min(n, storage.len);
                 for (cached[0..c], storage[0..c]) |addr_in, *out| {
@@ -318,7 +319,7 @@ pub const Resolver = struct {
         // Always resolve into an internal buffer sized for the full answer, so
         // what gets cached never depends on the caller's buffer; the caller
         // receives whatever prefix fits.
-        var tmp: [2 * max_addrs_per_family]dns.LookupResult = undefined;
+        var tmp: [max_entry_addrs]dns.LookupResult = undefined;
         const result = self.lookupDnsBatched(tmp[0..], opts, shape);
 
         if (result) |r| {
@@ -481,7 +482,7 @@ pub const Resolver = struct {
         }
 
         const ttl_secs = std.math.clamp(ttl, cache_ttl_min, cache_ttl_max);
-        var addrs: [2 * max_addrs_per_family]net.IpAddress = undefined;
+        var addrs: [max_entry_addrs]net.IpAddress = undefined;
         for (results, addrs[0..results.len]) |r, *out| {
             out.* = r.address;
             out.setPort(0);

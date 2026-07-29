@@ -29,6 +29,7 @@ comptime {
     // enough.
     if (node_count < max_entry_nodes) @compileError("node pool smaller than one maximal entry");
     if (node_count >= none) @compileError("node indices must fit u16 with a sentinel");
+    if (max_entry_addrs > std.math.maxInt(u8)) @compileError("CacheSlot.count cannot hold a maximal entry");
 }
 
 /// The shape of a lookup request. Cache and dedup are keyed by shape so that a
