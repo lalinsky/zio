@@ -811,24 +811,45 @@ fn queryBatch(
         if (!resolved) q.done = false;
     }
 
-    // Assemble the union of all families that found records.
-    var total: usize = 0;
+    // Assemble the union of all families that found records, interleaved
+    // IPv6-first (RFC 6724 preference), so a caller whose buffer is smaller
+    // than the answer still sees both families. This runs before caching, so
+    // a cache hit and a fresh lookup return the same order.
     var min_ttl: u32 = 0;
     var any_found = false;
     var any_overflow = false;
     var all_done = true;
+    var v6: ?*FamilyQuery = null;
+    var v4: ?*FamilyQuery = null;
     for (qs) |*q| {
         if (q.found) {
-            for (q.addrs[0..q.count]) |a| {
-                if (total >= storage.len) break;
-                storage[total] = .{ .address = a };
-                total += 1;
-            }
+            if (q.qtype == .aaaa) v6 = q else v4 = q;
             min_ttl = if (!any_found) q.ttl else @min(min_ttl, q.ttl);
             any_found = true;
             if (q.overflow) any_overflow = true;
         }
         if (!q.done) all_done = false;
+    }
+
+    var total: usize = 0;
+    var next6: usize = 0;
+    var next4: usize = 0;
+    var take6 = true;
+    while (total < storage.len) {
+        const rem6 = if (v6) |q| q.count - next6 else 0;
+        const rem4 = if (v4) |q| q.count - next4 else 0;
+        if (rem6 == 0 and rem4 == 0) break;
+        // Alternate; once one family is exhausted, continue with the other.
+        const use6 = if (rem6 == 0) false else if (rem4 == 0) true else take6;
+        if (use6) {
+            storage[total] = .{ .address = v6.?.addrs[next6] };
+            next6 += 1;
+        } else {
+            storage[total] = .{ .address = v4.?.addrs[next4] };
+            next4 += 1;
+        }
+        total += 1;
+        take6 = !take6;
     }
 
     if (any_found) {
@@ -1044,5 +1065,31 @@ test "queryBatch: answer within the family buffer is complete and unflagged" {
 
     try std.testing.expectEqual(12, r.count);
     try std.testing.expect(!r.truncated);
+    try server_task.join();
+}
+
+test "queryBatch: dual-stack answers interleave IPv6-first" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const bind_addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    const sock = try bind_addr.bind(.{});
+    defer sock.close();
+
+    var server_task = try rt.spawn(TestDnsServer.run, .{ sock, 3, 2, 2 });
+    defer server_task.cancel();
+
+    var resolver = Resolver.init(std.testing.allocator);
+    defer resolver.deinit();
+
+    var storage: [2 * max_addrs_per_family]dns.LookupResult = undefined;
+    const servers = [_]net.IpAddress{sock.address.ip};
+    const r = try queryBatch(&resolver, storage[0..], .{ .name = "dual.test", .port = 80 }, "dual.test.", .both, &servers, 1, .fromSeconds(5));
+
+    try std.testing.expectEqual(5, r.count);
+    const expected_families = [_]net.IpAddress.Family{ .ipv6, .ipv4, .ipv6, .ipv4, .ipv4 };
+    for (storage[0..r.count], expected_families) |entry, family| {
+        try std.testing.expectEqual(family, entry.address.getFamily());
+    }
     try server_task.join();
 }
