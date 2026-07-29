@@ -25,6 +25,8 @@ pub const endShield = runtime.endShield;
 pub const checkCancel = runtime.checkCancel;
 
 pub const AutoCancel = @import("autocancel.zig").AutoCancel;
+pub const withTimeout = @import("autocancel.zig").withTimeout;
+pub const WithTimeoutResult = @import("autocancel.zig").WithTimeoutResult;
 
 pub const Group = @import("group.zig").Group;
 pub const CompletionQueue = @import("completion_queue.zig").CompletionQueue;
