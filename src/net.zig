@@ -154,7 +154,8 @@ pub const HostName = struct {
 
     /// Resolves the hostname to IP addresses.
     /// Fills `storage` with up to `storage.len` results.
-    /// Returns the number of entries written.
+    /// Returns the number of entries written. Addresses that do not fit are
+    /// dropped without error — a full buffer may mean the answer was truncated.
     pub fn lookup(
         self: HostName,
         storage: []LookupResult,
@@ -171,10 +172,7 @@ pub const HostName = struct {
     /// Resolves the hostname and connects to the first successful address.
     pub fn connect(self: HostName, port: u16, options: IpAddress.ConnectOptions) !Stream {
         var storage: [32]LookupResult = undefined;
-        const count = self.lookup(&storage, .{ .port = port }) catch |err| switch (err) {
-            error.TooManyAddresses => storage.len,
-            else => return err,
-        };
+        const count = try self.lookup(&storage, .{ .port = port });
 
         var last_err: ?anyerror = null;
         for (storage[0..count]) |entry| {

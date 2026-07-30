@@ -130,7 +130,7 @@ fn fillBuffers(
     while (current) |info| : (current = info.ai_next) {
         const addr = info.ai_addr orelse continue;
         if (addr.family != os_net.AF.INET and addr.family != os_net.AF.INET6) continue;
-        if (i >= storage.len) return error.TooManyAddresses;
+        if (i >= storage.len) break;
         storage[i] = .{ .address = dns.IpAddress.initPosix(@ptrCast(addr), @intCast(info.ai_addrlen)) };
         i += 1;
     }

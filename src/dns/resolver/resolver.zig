@@ -31,12 +31,11 @@ const max_search_domain_len = 254;
 
 const Cache = @import("cache.zig").Cache;
 const CacheKey = @import("cache.zig").CacheKey;
-const CacheEntry = @import("cache.zig").CacheEntry;
 const Shape = @import("cache.zig").Shape;
-const max_cached_addrs = @import("cache.zig").max_cached_addrs;
+const max_entry_addrs = @import("cache.zig").max_entry_addrs;
 
 // Maximum addresses parsed/returned per family within one batched query.
-const max_addrs_per_family = 8;
+const max_addrs_per_family = dns.max_addrs_per_family;
 
 const num_dedup_buckets = 64;
 
@@ -108,7 +107,7 @@ pub const Resolver = struct {
             .conf_mtime = conf_mtime,
             .conf_next_check = .init(next_check_s),
             .conf_reloading = .init(false),
-            .cache = std.mem.zeroes(Cache),
+            .cache = .init(),
             .hash_seed = hash_seed,
             .prng_mutex = .init,
             .prng = prng,
@@ -159,25 +158,31 @@ pub const Resolver = struct {
         // 0. Numeric IP literal — parse directly without touching hosts or DNS.
         if (net.IpAddress.parseIp4(options.name, options.port) catch null) |addr| {
             if (options.family == null or options.family == .ipv4) {
-                if (addr_storage.len == 0) return error.TooManyAddresses;
-                addr_storage[0] = .{ .address = addr };
+                var i: usize = 0;
+                if (addr_storage.len > 0) {
+                    addr_storage[0] = .{ .address = addr };
+                    i = 1;
+                }
                 if (cname_buf) |buf| {
                     storage[0] = .{ .canonical_name = .{ .bytes = buf[0..options.name.len] } };
-                    return 2;
+                    return i + 1;
                 }
-                return 1;
+                return i;
             }
             return error.AddressFamilyUnsupported;
         }
         if (net.IpAddress.parseIp6(options.name, options.port) catch null) |addr| {
             if (options.family == null or options.family == .ipv6) {
-                if (addr_storage.len == 0) return error.TooManyAddresses;
-                addr_storage[0] = .{ .address = addr };
+                var i: usize = 0;
+                if (addr_storage.len > 0) {
+                    addr_storage[0] = .{ .address = addr };
+                    i = 1;
+                }
                 if (cname_buf) |buf| {
                     storage[0] = .{ .canonical_name = .{ .bytes = buf[0..options.name.len] } };
-                    return 2;
+                    return i + 1;
                 }
-                return 1;
+                return i;
             }
             return error.AddressFamilyUnsupported;
         }
@@ -189,17 +194,22 @@ pub const Resolver = struct {
 
             if (self.hosts.lookupByName(options.name)) |addrs| {
                 var i: usize = 0;
+                // Track matches separately from what fits: a hosts entry that
+                // matched the family filter must answer the lookup even when
+                // nothing fits the buffer, rather than fall through to DNS.
+                var matched = false;
                 for (addrs) |addr_in| {
                     if (options.family) |f| {
                         if (addr_in.getFamily() != f) continue;
                     }
-                    if (i >= addr_storage.len) return error.TooManyAddresses;
+                    matched = true;
+                    if (i >= addr_storage.len) break;
                     var addr = addr_in;
                     addr.setPort(options.port);
                     addr_storage[i] = .{ .address = addr };
                     i += 1;
                 }
-                if (i > 0) {
+                if (matched) {
                     if (cname_buf) |buf| {
                         storage[0] = .{ .canonical_name = .{ .bytes = buf[0..options.name.len] } };
                         return i + 1;
@@ -249,16 +259,15 @@ pub const Resolver = struct {
         {
             try self.lock.lockShared();
             defer self.lock.unlockShared();
-            if (self.cache.get(&key, now)) |entry| {
-                var i: usize = 0;
-                for (entry.addrs[0..entry.count]) |addr_in| {
-                    if (i >= storage.len) return error.TooManyAddresses;
+            var cached: [max_entry_addrs]net.IpAddress = undefined;
+            if (self.cache.get(&key, now, cached[0..])) |n| {
+                const c = @min(n, storage.len);
+                for (cached[0..c], storage[0..c]) |addr_in, *out| {
                     var addr = addr_in;
                     addr.setPort(options.port);
-                    storage[i] = .{ .address = addr };
-                    i += 1;
+                    out.* = .{ .address = addr };
                 }
-                if (i > 0) return .{ .count = i, .canonical_name_len = 0 };
+                return .{ .count = c, .canonical_name_len = 0 };
             }
         }
 
@@ -307,13 +316,15 @@ pub const Resolver = struct {
         bucket.waiters.push(&active_node);
         bucket.mutex.unlock();
 
-        var tmp: [2 * max_addrs_per_family]dns.LookupResult = undefined;
-        const buf: []dns.LookupResult = if (storage.len >= tmp.len) storage else tmp[0..];
-        const result = self.lookupDnsBatched(buf, opts, shape);
+        // Always resolve into an internal buffer sized for the full answer, so
+        // what gets cached never depends on the caller's buffer; the caller
+        // receives whatever prefix fits.
+        var tmp: [max_entry_addrs]dns.LookupResult = undefined;
+        const result = self.lookupDnsBatched(tmp[0..], opts, shape);
 
         if (result) |r| {
             const now_updated = getCurrentTime();
-            self.cacheInsert(options.name, shape, buf[0..r.count], r.ttl, now_updated);
+            self.cacheInsert(options.name, shape, tmp[0..r.count], r.truncated, r.ttl, now_updated);
         } else |_| {}
 
         // Notify all joiners, then remove the active node.
@@ -322,17 +333,14 @@ pub const Resolver = struct {
         while (wit) |n| : (wit = n.next) {
             if (!n.is_active and !n.done and n.key.eql(&key)) {
                 if (result) |r| {
-                    if (r.count > n.storage.len) {
-                        n.err = error.TooManyAddresses;
-                    } else {
-                        @memcpy(n.storage[0..r.count], buf[0..r.count]);
-                        n.count = r.count;
-                        n.canonical_name_len = r.canonical_name_len;
-                        if (r.canonical_name_len > 0) if (n.canonical_name_buffer) |cbuf| {
-                            @memcpy(cbuf[0..r.canonical_name_len], cname_buf[0..r.canonical_name_len]);
-                        };
-                        n.err = null;
-                    }
+                    const c = @min(r.count, n.storage.len);
+                    @memcpy(n.storage[0..c], tmp[0..c]);
+                    n.count = c;
+                    n.canonical_name_len = r.canonical_name_len;
+                    if (r.canonical_name_len > 0) if (n.canonical_name_buffer) |cbuf| {
+                        @memcpy(cbuf[0..r.canonical_name_len], cname_buf[0..r.canonical_name_len]);
+                    };
+                    n.err = null;
                 } else |err| {
                     n.count = 0;
                     n.err = err;
@@ -348,12 +356,9 @@ pub const Resolver = struct {
         if (r.canonical_name_len > 0) if (options.canonical_name_buffer) |cbuf| {
             @memcpy(cbuf[0..r.canonical_name_len], cname_buf[0..r.canonical_name_len]);
         };
-        if (buf.ptr != storage.ptr) {
-            if (r.count > storage.len) return error.TooManyAddresses;
-            @memcpy(storage[0..r.count], buf[0..r.count]);
-            return .{ .count = r.count, .canonical_name_len = r.canonical_name_len };
-        }
-        return .{ .count = r.count, .canonical_name_len = r.canonical_name_len };
+        const c = @min(r.count, storage.len);
+        @memcpy(storage[0..c], tmp[0..c]);
+        return .{ .count = c, .canonical_name_len = r.canonical_name_len };
     }
 
     fn lookupDnsBatched(
@@ -465,11 +470,11 @@ pub const Resolver = struct {
         return last_err;
     }
 
-    fn cacheInsert(self: *Resolver, name: []const u8, shape: Shape, results: []const dns.LookupResult, ttl: u32, now: Timestamp) void {
+    fn cacheInsert(self: *Resolver, name: []const u8, shape: Shape, results: []const dns.LookupResult, truncated: bool, ttl: u32, now: Timestamp) void {
         var key: CacheKey = undefined;
         CacheKey.init(&key, name, self.hash_seed, shape);
 
-        if (results.len == 0 or results.len > max_cached_addrs) {
+        if (results.len == 0 or truncated) {
             self.lock.lockUncancelable();
             defer self.lock.unlock();
             self.cache.expire(&key);
@@ -477,19 +482,15 @@ pub const Resolver = struct {
         }
 
         const ttl_secs = std.math.clamp(ttl, cache_ttl_min, cache_ttl_max);
-        var entry: CacheEntry = .{
-            .addrs = undefined,
-            .count = @intCast(results.len),
-            .expiry = now.addDuration(.fromSeconds(ttl_secs)),
-        };
-        for (results, 0..) |r, i| {
-            entry.addrs[i] = r.address;
-            entry.addrs[i].setPort(0);
+        var addrs: [max_entry_addrs]net.IpAddress = undefined;
+        for (results, addrs[0..results.len]) |r, *out| {
+            out.* = r.address;
+            out.setPort(0);
         }
 
         self.lock.lockUncancelable();
         defer self.lock.unlock();
-        self.cache.put(&key, entry, now);
+        self.cache.put(&key, addrs[0..results.len], now.addDuration(.fromSeconds(ttl_secs)), now);
     }
 
     fn maybeReloadHosts(self: *Resolver, now: Timestamp) void {
@@ -564,7 +565,14 @@ fn makeFqdn(buf: *[256]u8, name: []const u8, suffix: ?[]const u8) ?[]u8 {
     return buf[0..total];
 }
 
-const QueryResult = struct { count: usize, ttl: u32, canonical_name_len: usize = 0 };
+const QueryResult = struct {
+    count: usize,
+    ttl: u32,
+    canonical_name_len: usize = 0,
+    // True when a family had more records than max_addrs_per_family; the
+    // result is incomplete and must not be cached.
+    truncated: bool = false,
+};
 
 /// Per-family state tracked across the attempts × servers loop of one batched
 /// query. A query is `done` once it reaches a terminal state (records found or
@@ -578,6 +586,7 @@ const FamilyQuery = struct {
     answered: bool = false, // got a response this send-round (for recv accounting)
     addrs: [max_addrs_per_family]net.IpAddress = undefined,
     count: usize = 0,
+    overflow: bool = false, // the answer had more records than `addrs` holds
     ttl: u32 = 0,
 };
 
@@ -718,6 +727,7 @@ fn queryBatch(
                             const c = @min(result.count, parse_addrs.len);
                             @memcpy(q.addrs[0..c], parse_addrs[0..c]);
                             q.count = c;
+                            q.overflow = result.count > parse_addrs.len;
                             q.ttl = result.ttl;
                             q.found = c > 0;
                             q.done = true;
@@ -766,6 +776,7 @@ fn queryBatch(
                     const c = @min(result.count, parse_addrs.len);
                     @memcpy(q.addrs[0..c], parse_addrs[0..c]);
                     q.count = c;
+                    q.overflow = result.count > parse_addrs.len;
                     q.ttl = result.ttl;
                     q.found = c > 0;
                     if (q.found and canonical_name_len == 0 and result.canonical_name_len > 0) {
@@ -794,26 +805,49 @@ fn queryBatch(
         if (!resolved) q.done = false;
     }
 
-    // Assemble the union of all families that found records.
-    var total: usize = 0;
+    // Assemble the union of all families that found records, interleaved
+    // IPv6-first (RFC 6724 preference), so a caller whose buffer is smaller
+    // than the answer still sees both families. This runs before caching, so
+    // a cache hit and a fresh lookup return the same order.
     var min_ttl: u32 = 0;
     var any_found = false;
+    var any_overflow = false;
     var all_done = true;
+    var v6: ?*FamilyQuery = null;
+    var v4: ?*FamilyQuery = null;
     for (qs) |*q| {
         if (q.found) {
-            for (q.addrs[0..q.count]) |a| {
-                if (total >= storage.len) break;
-                storage[total] = .{ .address = a };
-                total += 1;
-            }
+            if (q.qtype == .aaaa) v6 = q else v4 = q;
             min_ttl = if (!any_found) q.ttl else @min(min_ttl, q.ttl);
             any_found = true;
+            if (q.overflow) any_overflow = true;
         }
         if (!q.done) all_done = false;
     }
 
+    var total: usize = 0;
+    var next6: usize = 0;
+    var next4: usize = 0;
+    var take6 = true;
+    while (total < storage.len) {
+        const rem6 = if (v6) |q| q.count - next6 else 0;
+        const rem4 = if (v4) |q| q.count - next4 else 0;
+        if (rem6 == 0 and rem4 == 0) break;
+        // Alternate; once one family is exhausted, continue with the other.
+        const use6 = if (rem6 == 0) false else if (rem4 == 0) true else take6;
+        if (use6) {
+            storage[total] = .{ .address = v6.?.addrs[next6] };
+            next6 += 1;
+        } else {
+            storage[total] = .{ .address = v4.?.addrs[next4] };
+            next4 += 1;
+        }
+        total += 1;
+        take6 = !take6;
+    }
+
     if (any_found) {
-        return .{ .count = total, .ttl = min_ttl, .canonical_name_len = canonical_name_len };
+        return .{ .count = total, .ttl = min_ttl, .canonical_name_len = canonical_name_len, .truncated = any_overflow };
     }
     if (all_done) {
         // Every family answered definitively with no records → advance candidate.
@@ -908,4 +942,148 @@ fn loadResolvConf(allocator: std.mem.Allocator, mtime_out: *i64) ResolvConf {
         log.warn("dns: failed to parse /etc/resolv.conf: {}", .{err});
         return .{ .arena = .init(allocator), .servers = &.{}, .search = &.{}, .parse_error = true };
     };
+}
+
+// -- Tests --------------------------------------------------------------------
+
+const Runtime = @import("../../runtime.zig").Runtime;
+
+/// Builds a DNS response for `query` with `num_answers` records of `qtype`,
+/// each answer's name a compression pointer to the question. Addresses are
+/// distinct: 10.0.x.x for A, 2001::x for AAAA.
+fn buildTestResponse(out: []u8, query: []const u8, num_answers: u16, qtype: message.QType) usize {
+    // Find the end of the question section (QNAME + QTYPE + QCLASS).
+    var p: usize = 12;
+    while (query[p] != 0) p += query[p] + 1;
+    p += 1 + 4;
+    const qend = p;
+
+    @memcpy(out[0..2], query[0..2]); // id
+    std.mem.writeInt(u16, out[2..4], 0x8180, .big); // QR + RD + RA, NOERROR
+    std.mem.writeInt(u16, out[4..6], 1, .big); // QDCOUNT
+    std.mem.writeInt(u16, out[6..8], num_answers, .big); // ANCOUNT
+    std.mem.writeInt(u16, out[8..10], 0, .big); // NSCOUNT
+    std.mem.writeInt(u16, out[10..12], 0, .big); // ARCOUNT
+    @memcpy(out[12..qend], query[12..qend]);
+
+    var w: usize = qend;
+    for (0..num_answers) |i| {
+        std.mem.writeInt(u16, out[w..][0..2], 0xC00C, .big); // name: ptr to question
+        std.mem.writeInt(u16, out[w + 2 ..][0..2], @intFromEnum(qtype), .big);
+        std.mem.writeInt(u16, out[w + 4 ..][0..2], 1, .big); // class IN
+        std.mem.writeInt(u32, out[w + 6 ..][0..4], 60, .big); // ttl
+        w += 10;
+        switch (qtype) {
+            .a => {
+                std.mem.writeInt(u16, out[w..][0..2], 4, .big);
+                out[w + 2] = 10;
+                out[w + 3] = 0;
+                out[w + 4] = @intCast((i >> 8) & 0xff);
+                out[w + 5] = @intCast(i & 0xff);
+                w += 6;
+            },
+            .aaaa => {
+                std.mem.writeInt(u16, out[w..][0..2], 16, .big);
+                @memset(out[w + 2 ..][0..16], 0);
+                out[w + 2] = 0x20;
+                out[w + 3] = 0x01;
+                out[w + 16] = @intCast((i >> 8) & 0xff);
+                out[w + 17] = @intCast(i & 0xff);
+                w += 18;
+            },
+            _ => unreachable,
+        }
+    }
+    return w;
+}
+
+/// Serves `num_queries` DNS queries on `sock`, answering A queries with
+/// `num_a` records and AAAA queries with `num_aaaa`.
+const TestDnsServer = struct {
+    fn run(sock: net.Socket, num_a: u16, num_aaaa: u16, num_queries: usize) !void {
+        var qbuf: [512]u8 = undefined;
+        var rbuf: [4096]u8 = undefined;
+        var served: usize = 0;
+        while (served < num_queries) : (served += 1) {
+            const r = try sock.receiveFrom(&qbuf, .none);
+            var p: usize = 12;
+            while (qbuf[p] != 0) p += qbuf[p] + 1;
+            const qtype: message.QType = @enumFromInt(std.mem.readInt(u16, qbuf[p + 1 ..][0..2], .big));
+            const n = if (qtype == .a) num_a else num_aaaa;
+            const len = buildTestResponse(&rbuf, qbuf[0..r.len], n, qtype);
+            _ = try sock.sendTo(r.from, rbuf[0..len], .none);
+        }
+    }
+};
+
+test "queryBatch: answer beyond the family buffer is capped and flagged, not an error" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const bind_addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    const sock = try bind_addr.bind(.{});
+    defer sock.close();
+
+    var server_task = try rt.spawn(TestDnsServer.run, .{ sock, 80, 0, 1 });
+    defer server_task.cancel();
+
+    var resolver = Resolver.init(std.testing.allocator);
+    defer resolver.deinit();
+
+    var storage: [2 * max_addrs_per_family]dns.LookupResult = undefined;
+    const servers = [_]net.IpAddress{sock.address.ip};
+    const r = try queryBatch(&resolver, storage[0..], .{ .name = "big.test", .port = 80 }, "big.test.", .ipv4, &servers, 1, .fromSeconds(5));
+
+    try std.testing.expectEqual(max_addrs_per_family, r.count);
+    try std.testing.expect(r.truncated);
+    try server_task.join();
+}
+
+test "queryBatch: answer within the family buffer is complete and unflagged" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const bind_addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    const sock = try bind_addr.bind(.{});
+    defer sock.close();
+
+    var server_task = try rt.spawn(TestDnsServer.run, .{ sock, 12, 0, 1 });
+    defer server_task.cancel();
+
+    var resolver = Resolver.init(std.testing.allocator);
+    defer resolver.deinit();
+
+    var storage: [2 * max_addrs_per_family]dns.LookupResult = undefined;
+    const servers = [_]net.IpAddress{sock.address.ip};
+    const r = try queryBatch(&resolver, storage[0..], .{ .name = "big.test", .port = 80 }, "big.test.", .ipv4, &servers, 1, .fromSeconds(5));
+
+    try std.testing.expectEqual(12, r.count);
+    try std.testing.expect(!r.truncated);
+    try server_task.join();
+}
+
+test "queryBatch: dual-stack answers interleave IPv6-first" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const bind_addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    const sock = try bind_addr.bind(.{});
+    defer sock.close();
+
+    var server_task = try rt.spawn(TestDnsServer.run, .{ sock, 3, 2, 2 });
+    defer server_task.cancel();
+
+    var resolver = Resolver.init(std.testing.allocator);
+    defer resolver.deinit();
+
+    var storage: [2 * max_addrs_per_family]dns.LookupResult = undefined;
+    const servers = [_]net.IpAddress{sock.address.ip};
+    const r = try queryBatch(&resolver, storage[0..], .{ .name = "dual.test", .port = 80 }, "dual.test.", .both, &servers, 1, .fromSeconds(5));
+
+    try std.testing.expectEqual(5, r.count);
+    const expected_families = [_]net.IpAddress.Family{ .ipv6, .ipv4, .ipv6, .ipv4, .ipv4 };
+    for (storage[0..r.count], expected_families) |entry, family| {
+        try std.testing.expectEqual(family, entry.address.getFamily());
+    }
+    try server_task.join();
 }
