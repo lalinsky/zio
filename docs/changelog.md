@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed a deadlock in the io_uring backend when many operations were cancelled at once,
+  for example when a burst of operation timeouts expired together. A full submission
+  queue made the backend drop cancel requests with a "Failed to get io_uring SQE for
+  cancel" log line, leaving the cancelled operations running and the tasks awaiting them
+  blocked forever. The submission queue is now flushed to the kernel and the submission
+  retried whenever it fills up, for cancels and regular operations alike.
+
 - Added `withTimeout(timeout, func, args)`, the scoped form of `AutoCancel`: it arms the
   timer, runs `func`, and turns the `error.Canceled` the timeout produced back into
   `error.Timeout`. The result type is `func`'s own, with `error.Timeout` added to its

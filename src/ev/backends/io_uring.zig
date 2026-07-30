@@ -329,11 +329,12 @@ pub fn wake(self: *Self, state: *LoopState) void {
 }
 
 /// Arm the multishot poll on the waker eventfd if needed. Returns false only
-/// when a rearm was needed but the SQ was full (caller must not block).
-/// Normally a no-op: the poll is armed once and the kernel keeps it armed.
+/// when a rearm was needed but the ring refused the SQE (caller must not
+/// block). Normally a no-op: the poll is armed once and the kernel keeps it
+/// armed.
 fn armWaker(self: *Self) bool {
     if (!self.waker_needs_rearm) return true;
-    const sqe = self.ring.get_sqe() catch return false;
+    const sqe = self.getSqe() orelse return false;
     sqe.prep_poll_add(self.waker_eventfd, linux.POLL.IN);
     sqe.len = linux.IORING_POLL_ADD_MULTI;
     sqe.user_data = specialUd(.waker, 0);
@@ -863,9 +864,14 @@ pub fn cancel(self: *Self, _: *LoopState, target: *Completion) void {
             // In poll(), we:
             // - Skip cancel CQEs with user_data=USER_DATA_CANCEL
             // - Process target CQE and mark target complete with error.Canceled (or natural result)
-            const sqe = self.ring.get_sqe() catch {
-                log.err("Failed to get io_uring SQE for cancel", .{});
-                // Cancel SQE failed - do nothing, let target complete naturally
+            // A dropped cancel is not benign: a cancel is submitted precisely
+            // because the target is not expected to complete on its own (e.g.
+            // a recv on a silent peer whose timeout just fired), so dropping
+            // it leaves the completion running and the awaiting task blocked
+            // forever. getSqe() flushes a full SQ and retries, so this only
+            // fails if the kernel refuses submissions outright.
+            const sqe = self.getSqe() orelse {
+                log.err("dropping cancel SQE, kernel refused submission; target may never complete", .{});
                 return;
             };
             sqe.prep_cancel(@intFromPtr(target), 0);
@@ -879,10 +885,29 @@ pub fn cancel(self: *Self, _: *LoopState, target: *Completion) void {
     }
 }
 
-/// Get an SQE or defer the completion to the pending list if the SQ is full.
-/// Returns null if deferred (caller should return immediately).
+/// Get an SQE, flushing the submission queue to the kernel if it is full.
+/// A full SQ consists entirely of entries the kernel has not been told about
+/// yet, so one non-blocking submit frees the whole ring and the retry
+/// succeeds. The flush is retried on signal interruption. Returns null only
+/// if the kernel refuses submissions outright (e.g. CQ overcommit); every
+/// caller needs a fallback for that case.
+fn getSqe(self: *Self) ?*linux.io_uring_sqe {
+    if (self.ring.get_sqe()) |sqe| return sqe else |_| {}
+    while (true) {
+        _ = self.ring.submit() catch |err| switch (err) {
+            error.SignalInterrupt => continue,
+            else => return null,
+        };
+        break;
+    }
+    return self.ring.get_sqe() catch null;
+}
+
+/// Get an SQE or defer the completion to the pending list if the ring will
+/// not accept one even after a flush. Returns null if deferred (caller should
+/// return immediately).
 fn getSqeOrDefer(self: *Self, c: *Completion) ?*linux.io_uring_sqe {
-    return self.ring.get_sqe() catch {
+    return self.getSqe() orelse {
         self.pending.push(c);
         return null;
     };
@@ -903,16 +928,17 @@ pub fn syncWallTimer(self: *Self, clock: Clock, deadline: ?u64) bool {
 
     // Remove the existing timeout (if any) before re-arming. The removed
     // timeout's CQE and the remove op's CQE are both ignored in poll(). If the
-    // SQ is full, leave wall_armed unchanged (old timeout stays valid) and
-    // report failure so the loop folds this clock into the capped poll timeout.
+    // ring refuses the SQE, leave wall_armed unchanged (old timeout stays
+    // valid) and report failure so the loop folds this clock into the capped
+    // poll timeout.
     if (self.wall_armed[idx] != null) {
-        const sqe = self.ring.get_sqe() catch return false;
+        const sqe = self.getSqe() orelse return false;
         sqe.prep_timeout_remove(specialUd(wallKind(idx), self.wall_generation[idx]), 0);
         sqe.user_data = specialUd(.cancel, 0);
     }
 
     if (deadline) |d| {
-        const sqe = self.ring.get_sqe() catch {
+        const sqe = self.getSqe() orelse {
             // Remove was queued but we can't arm the new timeout now. Forget it
             // (the next scan re-arms) and report failure so the loop folds.
             self.wall_armed[idx] = null;
