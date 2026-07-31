@@ -7,15 +7,22 @@ All notable changes to this project will be documented in this file.
 - Coroutine stacks are now carved out of larger slab reservations instead of each
   getting its own mmap (on 64-bit POSIX targets; Windows and OpenBSD keep the previous
   allocator). A cold stack costs one page-protection syscall instead of three mapping
-  syscalls, and a released stack is kept and reused with no syscalls at all, with no
-  cap and no age eviction. This mainly helps workloads holding many coroutines alive
-  at once: 10k concurrently sleeping tasks got about 25% faster, large fan-out about
-  10%. Note the memory trade-off: slab-backed stacks are only returned to the OS at
-  runtime shutdown, so resident memory tracks the high-water mark of concurrently
-  live coroutine stacks. The slots-per-slab count is a build option
-  (`-Dstack-slab-slots=N`, default 64; 0 restores the per-stack allocator), and the
-  new `stack_pool.prewarm` runtime option commits that many slots at startup so an
-  early spawn burst skips stack allocation entirely.
+  syscalls, and releasing and reusing stacks never makes a syscall at all. This mainly
+  helps workloads holding many coroutines alive at once: 10k concurrently sleeping
+  tasks got about 25% faster, large fan-out about 10%. The slots-per-slab count is a
+  build option (`-Dstack-slab-slots=N`, default 64; 0 restores the per-stack
+  allocator), and the new `stack_pool.prewarm` runtime option commits that many slots
+  at startup so an early spawn burst skips stack allocation entirely.
+
+- **BREAKING**: The stack pool's `max_unused_stacks` and `max_age` settings are gone,
+  replaced by a demand watermark. The pool tracks the peak number of stacks
+  simultaneously in use over each `stack_pool.shrink_interval` (default 60 seconds,
+  `.zero` disables shrinking), and a periodic pass returns free capacity beyond that
+  watermark to the OS, unmapping whole empty slabs first and then individually mapped
+  stacks. Prewarmed slots act as a floor and are never shrunk away. Compared to the
+  old count cap and age limit, memory now follows what the workload actually needed
+  recently: a burst decays one interval after it stops repeating, and a steady load
+  keeps its stacks indefinitely without periodic reallocation.
 
 - Multi-threaded runtimes no longer steal work the moment an executor runs out of local
   tasks. A freshly idle executor now gives its own event loop a short grace window first

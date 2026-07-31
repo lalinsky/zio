@@ -470,16 +470,16 @@ pub const AnyTask = struct {
     /// once control has left the coroutine's stack. `destroy` calls it again
     /// for tasks that were created but never ran. Idempotent, with a zeroed
     /// `allocation_len` marking the resources as already released.
-    pub fn releaseCoro(self: *AnyTask, rt: *Runtime, now: Timestamp) void {
+    pub fn releaseCoro(self: *AnyTask, rt: *Runtime) void {
         if (self.coro.context.stack_info.allocation_len == 0) return;
-        rt.stack_pool.release(self.coro.context.stack_info, now);
+        rt.stack_pool.release(self.coro.context.stack_info);
         self.coro.context.stack_info.allocation_len = 0;
         self.coro.deinit();
     }
 
     pub fn destroy(self: *AnyTask) void {
         const rt = self.getRuntime();
-        self.releaseCoro(rt, rt.now());
+        self.releaseCoro(rt);
 
         self.closure.free(AnyTask, rt, self);
     }

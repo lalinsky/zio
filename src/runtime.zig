@@ -131,8 +131,6 @@ pub const RuntimeOptions = struct {
     stack_pool: StackPoolConfig = .{
         .maximum_size = 8 * 1024 * 1024,
         .committed_size = 256 * 1024,
-        .max_unused_stacks = 1000,
-        .max_age = .fromSeconds(60),
     },
     /// Total number of executors to run.
     /// When enable_main_executor is true (default), this includes the main executor on the calling thread.
@@ -417,8 +415,9 @@ pub const Executor = struct {
     // When notified, it calls loop.stop() to exit the event loop.
     shutdown: ev.Async = ev.Async.init(),
 
-    // Periodic timer for evicting idle stacks from the shared stack pool.
-    stack_pool_eviction_timer: ev.Timer = ev.Timer.init(.{ .duration = .fromSeconds(60) }),
+    // Periodic timer driving the stack pool's watermark shrink pass. The
+    // pool rate-limits itself, so every executor may carry this timer.
+    stack_pool_shrink_timer: ev.Timer = ev.Timer.init(.{ .duration = .fromSeconds(60) }),
 
     // The task currently executing on this executor, or null when we are running
     // scheduler code (the run loop, a context switch, a completion callback) rather
@@ -500,11 +499,14 @@ pub const Executor = struct {
         self.shutdown.c.callback = shutdownCallback;
         self.loop.add(&self.shutdown.c);
 
-        // Register periodic stack pool eviction timer (skipped when max_age is zero)
-        if (self.runtime.options.stack_pool.max_age.value > 0) {
-            self.stack_pool_eviction_timer.c.callback = stackPoolEvictionCallback;
-            self.stack_pool_eviction_timer.c.flags.rearm = true;
-            self.loop.add(&self.stack_pool_eviction_timer.c);
+        // Register the periodic stack pool shrink timer (skipped when
+        // shrinking is disabled).
+        const shrink_interval = self.runtime.options.stack_pool.shrink_interval;
+        if (shrink_interval.value > 0) {
+            self.stack_pool_shrink_timer = ev.Timer.init(.{ .duration = shrink_interval });
+            self.stack_pool_shrink_timer.c.callback = stackPoolShrinkCallback;
+            self.stack_pool_shrink_timer.c.flags.rearm = true;
+            self.loop.add(&self.stack_pool_shrink_timer.c);
         }
 
         self.main_task.coro.setCurrent();
@@ -525,10 +527,10 @@ pub const Executor = struct {
         loop.stop();
     }
 
-    fn stackPoolEvictionCallback(loop: *ev.Loop, c: *ev.Completion) void {
+    fn stackPoolShrinkCallback(loop: *ev.Loop, c: *ev.Completion) void {
         const timer = c.cast(ev.Timer);
-        const self: *Executor = @alignCast(@fieldParentPtr("stack_pool_eviction_timer", timer));
-        self.runtime.stack_pool.cleanup(loop.now(), 16);
+        const self: *Executor = @alignCast(@fieldParentPtr("stack_pool_shrink_timer", timer));
+        self.runtime.stack_pool.shrink(loop.now());
     }
 
     pub const YieldCancelMode = enum { allow_cancel, no_cancel };
@@ -1066,7 +1068,7 @@ pub const Executor = struct {
             .finish => |task| {
                 self.pending_cleanup = .none;
                 task.state.store(.{ .tag = .finished }, .release);
-                task.releaseCoro(self.runtime, self.loop.now());
+                task.releaseCoro(self.runtime);
                 finishTask(self.runtime, &task.awaitable);
             },
         }
