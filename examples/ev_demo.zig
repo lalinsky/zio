@@ -10,7 +10,7 @@
 //! The low-level API is useful when you need:
 //! - Callback-based async instead of coroutines
 //! - Building a custom scheduler/runtime on top of zio.ev
-//! - Embedding in a game loop (call loop.run(.no_wait) each frame)
+//! - Embedding in a game loop (call loop.poll(.zero) each frame)
 
 const std = @import("std");
 const zio = @import("zio");
@@ -72,7 +72,7 @@ pub fn main() !void {
     slow_timer.start(&loop);
 
     // Run until all completions are done
-    try loop.run(.until_done);
+    try loop.run();
 
     std.log.info("", .{});
     std.log.info("[main] event loop finished", .{});

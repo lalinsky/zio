@@ -33,7 +33,7 @@ pub fn main() !void {
     timer.c.callback = timerCallback;
     loop.add(&timer.c);
 
-    try loop.run(.until_done);
+    try loop.run();
 }
 
 fn timerCallback(loop: *ev.Loop, c: *ev.Completion) void {

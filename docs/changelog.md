@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Multi-threaded runtimes no longer steal work the moment an executor runs out of local
+  tasks. A freshly idle executor now gives its own event loop a short grace window first
+  (a non-blocking probe, then a park capped at 100us), since completions usually re-ready
+  the very tasks that just ran there. Stealing, which also migrates a task's pending I/O
+  to another loop, only starts once that window produces nothing, and an executor with
+  excess work still wakes an idle one immediately through the searcher protocol. This
+  removes speculative cross-executor task migration from the steady-state I/O path.
+
+- **BREAKING**: `Loop.run(mode)` and `ev.RunMode` are gone from the low-level event loop
+  API. Use `loop.poll(max_wait)` for a single pass, where `.zero` never blocks (the old
+  `.no_wait`), `.max` waits for the next event (the old `.once`), and anything in between
+  caps the wait. The parameterless `loop.run()` keeps the old `.until_done` behavior.
+
 - Fixed a deadlock in the io_uring backend when many operations were cancelled at once,
   for example when a burst of operation timeouts expired together. A full submission
   queue made the backend drop cancel requests with a "Failed to get io_uring SQE for

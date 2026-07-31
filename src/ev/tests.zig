@@ -32,28 +32,28 @@ test {
     _ = @import("test/async_stress.zig");
 }
 
-test "Loop: empty run(.no_wait)" {
+test "Loop: empty poll(.zero)" {
     var loop: Loop = undefined;
     try loop.init(.{});
     defer loop.deinit();
 
-    try loop.run(.no_wait);
+    try loop.poll(.zero);
 }
 
-test "Loop: empty run(.once)" {
+test "Loop: empty poll(.max)" {
     var loop: Loop = undefined;
     try loop.init(.{});
     defer loop.deinit();
 
-    try loop.run(.once);
+    try loop.poll(.max);
 }
 
-test "Loop: empty run(.until_done)" {
+test "Loop: empty run()" {
     var loop: Loop = undefined;
     try loop.init(.{});
     defer loop.deinit();
 
-    try loop.run(.until_done);
+    try loop.run();
 }
 
 test "Loop: timer basic" {
@@ -66,7 +66,7 @@ test "Loop: timer basic" {
     loop.add(&timer.c);
 
     var wall_timer = time.Stopwatch.start();
-    try loop.run(.until_done);
+    try loop.run();
     const elapsed = wall_timer.read();
 
     try std.testing.expectEqual(.dead, timer.c.loadState().phase);
@@ -83,13 +83,13 @@ test "Loop: close" {
     // Create a socket first
     var open: NetOpen = .init(.ipv4, .stream, .ip, .{ .nonblocking = true });
     loop.add(&open.c);
-    try loop.run(.until_done);
+    try loop.run();
     const sock = try open.c.getResult(.net_open);
 
     // Now close it
     var close: NetClose = .init(sock);
     loop.add(&close.c);
-    try loop.run(.until_done);
+    try loop.run();
 }
 
 test "Loop: socket create and bind" {
@@ -100,7 +100,7 @@ test "Loop: socket create and bind" {
     // Create socket
     var open: NetOpen = .init(.ipv4, .stream, .ip, .{ .nonblocking = true });
     loop.add(&open.c);
-    try loop.run(.until_done);
+    try loop.run();
 
     const sock = try open.c.getResult(.net_open);
 
@@ -114,14 +114,14 @@ test "Loop: socket create and bind" {
     var addr_len: net.socklen_t = @sizeOf(@TypeOf(addr));
     var bind: NetBind = .init(sock, @ptrCast(&addr), &addr_len);
     loop.add(&bind.c);
-    try loop.run(.until_done);
+    try loop.run();
 
     try bind.c.getResult(.net_bind);
 
     // Close socket
     var close: NetClose = .init(sock);
     loop.add(&close.c);
-    try loop.run(.until_done);
+    try loop.run();
 }
 
 test "Loop: async notification - same thread" {
@@ -136,7 +136,7 @@ test "Loop: async notification - same thread" {
     async_handle.notify();
 
     // Run loop - async should complete
-    try loop.run(.until_done);
+    try loop.run();
     try std.testing.expectEqual(.dead, async_handle.c.loadState().phase);
     try async_handle.c.getResult(.async);
 }
@@ -163,7 +163,7 @@ test "Loop: async notification - cross-thread" {
     }.notifyThread, .{&ctx});
 
     // Run loop - should block until notified
-    try loop.run(.until_done);
+    try loop.run();
     try std.testing.expectEqual(.dead, async_handle.c.loadState().phase);
     try async_handle.c.getResult(.async);
 
@@ -189,7 +189,7 @@ test "Loop: async notification - multiple handles" {
     async3.notify();
 
     // Run loop - all should complete
-    try loop.run(.until_done);
+    try loop.run();
     try std.testing.expectEqual(.dead, async1.c.loadState().phase);
     try std.testing.expectEqual(.dead, async2.c.loadState().phase);
     try std.testing.expectEqual(.dead, async3.c.loadState().phase);
@@ -205,14 +205,14 @@ test "Loop: async notification - re-arm" {
     // First notification cycle
     loop.add(&async_handle.c);
     async_handle.notify();
-    try loop.run(.until_done);
+    try loop.run();
     try std.testing.expectEqual(.dead, async_handle.c.loadState().phase);
 
     // Re-arm for second notification
     async_handle = .init();
     loop.add(&async_handle.c);
     async_handle.notify();
-    try loop.run(.until_done);
+    try loop.run();
     try std.testing.expectEqual(.dead, async_handle.c.loadState().phase);
 }
 
@@ -235,7 +235,7 @@ test "Pipe: write and read" {
     var stream_write: FileWriteStreaming = .init(pipefd[1], write_buf);
     stream_write.pollable = true;
     loop.add(&stream_write.c);
-    try loop.run(.until_done);
+    try loop.run();
     const written = try stream_write.getResult();
     try std.testing.expectEqual(write_data.len, written);
 
@@ -246,7 +246,7 @@ test "Pipe: write and read" {
     var stream_read: FileReadStreaming = .init(pipefd[0], read_buf);
     stream_read.pollable = true;
     loop.add(&stream_read.c);
-    try loop.run(.until_done);
+    try loop.run();
     const read_len = try stream_read.getResult();
     try std.testing.expectEqual(write_data.len, read_len);
     try std.testing.expectEqualStrings(write_data, read_data[0..read_len]);
@@ -271,7 +271,7 @@ test "Pipe: poll for readability" {
     // Poll for readability
     var stream_poll: PipePoll = .init(pipefd[0], .read);
     loop.add(&stream_poll.c);
-    try loop.run(.until_done);
+    try loop.run();
     try stream_poll.getResult();
 
     // Verify we can read the data
