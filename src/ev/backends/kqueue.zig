@@ -40,6 +40,12 @@ pub const capabilities: BackendCapabilities = .{
     // The BSDs' EVFILT_TIMER absolute clock is monotonic-only and underspecified
     // with no CLOCK_REALTIME timer, so they keep the capped poll-timeout fallback.
     .native_wall_timers = builtin.os.tag.isDarwin(),
+    // FreeBSD only: its sendfile never blocks the caller on disk I/O (the
+    // syscall returns before the reads complete and the kernel fills the
+    // socket asynchronously, in order; documented for ffs), so it is safe to
+    // drive from the loop thread. Darwin's sendfile blocks on disk I/O, so it
+    // deliberately stays on the generic fallback, which reads the file on the
+    // thread pool; the other BSDs have no std.c.sendfile declaration.
     .net_send_file = builtin.os.tag == .freebsd,
 };
 
@@ -66,11 +72,16 @@ pub const NetShutdownError = error{
 
 const Self = @This();
 
+/// Progress of a native sendfile op. Initialized in submit() (which caps the
+/// request to the file size) and advanced by the checkCompletion arm each time
+/// the socket's write edge fires.
 pub const NetSendFileData = struct {
+    /// File offset for the next sendfile call.
     offset: u64 = 0,
+    /// Bytes still to send; 0 means the op is done.
     remaining: usize = 0,
-    // Total bytes sent so far
-    sbytes: usize = 0,
+    /// Total bytes sent so far (the operation result).
+    sent: usize = 0,
 };
 
 const log = @import("../../common.zig").log;
@@ -279,7 +290,6 @@ fn getFilter(completion: *Completion) i16 {
         .net_sendto => std.c.EVFILT.WRITE,
         .net_recvmsg => std.c.EVFILT.READ,
         .net_sendmsg => std.c.EVFILT.WRITE,
-        .net_send_file => std.c.EVFILT.WRITE,
         .net_poll => blk: {
             const poll_data = completion.cast(NetPoll);
             break :blk switch (poll_data.event) {
@@ -317,7 +327,6 @@ fn getIdent(completion: *Completion) usize {
         inline .file_read_streaming, .file_write_streaming => |op| @intCast(completion.cast(op.toType()).handle),
         .pipe_close => @intCast(completion.cast(PipeClose).handle),
         .process_wait => @intCast(completion.cast(ProcessWait).handle),
-        .net_send_file => @intCast(completion.cast(NetSendFile).handle),
         .mach_port => completion.cast(MachPort).port,
         else => unreachable,
     };
@@ -560,60 +569,28 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
 
         // File operations are handled by Loop via thread pool
         .file_open, .file_create, .file_close, .file_read, .file_write, .file_sync, .file_size, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .file_stat, .dir_open, .dir_close, .dir_read, .dir_create_dir, .dir_rename, .dir_rename_preserve, .dir_delete_file, .dir_delete_dir, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps, .dir_sym_link, .dir_read_link, .dir_hard_link, .dir_access, .dir_real_path, .dir_real_path_file, .file_real_path, .file_hard_link, .device_io_control => unreachable,
-        // Driven by Loop's generic read/write fallback, never reaches the backend.
         .net_send_file => {
-            if (builtin.os.tag != .freebsd) unreachable;
-
+            // Driven by Loop's generic read/write fallback on backends
+            // without native sendfile, never reaches the backend there.
+            if (comptime !capabilities.net_send_file) unreachable;
+            // Cap the request to the current file size once, so the
+            // continuation can treat "remaining == 0" as done and never
+            // spins on a writable socket at EOF. Then drive the sendfile
+            // syscall through the generic single-owner socket path like
+            // any other write op: drain to EAGAIN, park on the owner
+            // loop, resume on the write edge (see checkCompletion).
             const data = c.cast(NetSendFile);
-
-            if (data.internal.sbytes == 0 and data.internal.offset == 0 and data.internal.remaining == 0) {
-                const file_size = fs.fileSize(data.file) catch |err| {
-                    switch (err) {
-                        error.PermissionDenied => c.setError(error.AccessDenied),
-                        else => |e| c.setError(e),
-                    }
-                    state.markCompletedFromBackend(c);
-                    return;
-                };
-
-                const avail: u64 = if (data.offset >= file_size) 0 else file_size - data.offset;
-                data.internal.remaining = @min(@as(u64, data.remaining), avail);
-                data.internal.offset = data.offset;
-
-                if (data.internal.remaining == 0) {
-                    data.c.setResult(.net_send_file, 0);
-                    state.markCompletedFromBackend(&data.c);
-                    return;
-                }
-            }
-
-            var sbytes: std.posix.off_t = 0;
-            const rc = std.c.sendfile(data.file, data.handle, @intCast(data.internal.offset), @intCast(data.internal.remaining), null, &sbytes, 0);
-
-            const sent: usize = @intCast(sbytes);
-            data.internal.offset += sent;
-            data.internal.remaining -= sent;
-            data.internal.sbytes += sent;
-
-            if (rc == -1) {
-                const err = std.posix.errno(rc);
-                if (err == .AGAIN) {
-                    _ = registerSocket(self, data.handle, .write, false);
-                    return;
-                }
-
-                c.setError(unexpectedError(err));
+            const file_size = fs.fileSize(data.file) catch |err| {
+                c.setError(switch (err) {
+                    error.PermissionDenied => error.AccessDenied,
+                    else => |e| e,
+                });
                 state.markCompletedFromBackend(c);
                 return;
-            }
-
-            if (data.internal.remaining > 0) {
-                _ = registerSocket(self, data.handle, .write, false);
-                return;
-            }
-
-            data.c.setResult(.net_send_file, data.internal.sbytes);
-            state.markCompletedFromBackend(&data.c);
+            };
+            data.internal.offset = data.offset;
+            data.internal.remaining = @intCast(@min(@as(u64, data.remaining), file_size -| data.offset));
+            sockreg.submitIo(self, state, c);
         },
     }
 }
@@ -887,6 +864,46 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
                     return .completed;
                 },
             }
+        },
+        .net_send_file => {
+            if (comptime !capabilities.net_send_file) unreachable;
+            const data = comp.cast(NetSendFile);
+            if (handleKqueueError(event, net.errnoToSendError)) |err| {
+                comp.setError(err);
+                return .completed;
+            }
+            while (data.internal.remaining > 0) {
+                var sbytes: posix.off_t = 0;
+                const rc = std.c.sendfile(
+                    data.file,
+                    data.handle,
+                    @intCast(data.internal.offset),
+                    data.internal.remaining,
+                    null,
+                    &sbytes,
+                    0,
+                );
+                // Progress is reported through sbytes even when the call
+                // "fails" (EAGAIN/EINTR after a partial transfer).
+                const sent: usize = @intCast(sbytes);
+                data.internal.offset += sent;
+                data.internal.remaining -= sent;
+                data.internal.sent += sent;
+                switch (posix.errno(rc)) {
+                    // Success means the whole remaining request was sent,
+                    // or the file was truncated under us (sendfile stops
+                    // at EOF); either way there is nothing left to drive.
+                    .SUCCESS => break,
+                    .INTR => continue,
+                    .AGAIN => return .requeue,
+                    else => |err| {
+                        comp.setError(net.errnoToSendError(err));
+                        return .completed;
+                    },
+                }
+            }
+            comp.setResult(.net_send_file, data.internal.sent);
+            return .completed;
         },
         .net_poll => {
             // For poll operations, EOF means the socket is "ready" (will return EOF on next read).

@@ -1683,6 +1683,107 @@ test "Stream.Writer.sendFile honors a byte limit" {
     try group.wait();
 }
 
+test "Stream.Writer.sendFile completes a transfer that stalls on a full socket buffer" {
+    const Io = std.Io;
+    const path = "test-native-sendfile-stall";
+    // With both socket buffers shrunk below, this comfortably overruns the
+    // in-flight window, so the sender must hit WouldBlock and wait for the
+    // receiver at least once instead of completing inline.
+    const total = 1024 * 1024;
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer runtime.deinit();
+    const io = runtime.io();
+
+    const ServerTask = struct {
+        fn run(server_port: *Channel(u16)) !void {
+            const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+            const server = try addr.listen(.{});
+            defer server.close();
+
+            // Keep the receive window small (the accepted socket inherits it,
+            // and it is set before the client connects) so the file doesn't
+            // have to be huge to fill it.
+            try server.socket.setReceiveBufferSize(16 * 1024);
+
+            try server_port.send(server.socket.address.ip.getPort());
+
+            var stream = try server.accept(.{});
+            defer stream.close();
+
+            var received: usize = 0;
+            var next_stall: usize = 0;
+            var buf: [4096]u8 = undefined;
+            while (received < total) {
+                // Stall periodically (including before the first read) so the
+                // sender repeatedly fills the socket buffers, parks on the
+                // write edge, and resumes, rather than going through a single
+                // park/resume cycle.
+                if (received >= next_stall) {
+                    try runtime_mod.sleep(.fromMilliseconds(50));
+                    next_stall += 128 * 1024;
+                }
+                const n = stream.read(&buf, .none) catch break;
+                if (n == 0) break;
+                for (buf[0..n], received..) |b, i| {
+                    try std.testing.expectEqual(@as(u8, @intCast(i % 251)), b);
+                }
+                received += n;
+            }
+            try std.testing.expectEqual(total, received);
+        }
+    };
+
+    const ClientTask = struct {
+        fn run(client_io: Io, server_port: *Channel(u16)) !void {
+            // Create the source file with a known pattern.
+            {
+                var f = try Io.Dir.cwd().createFile(client_io, path, .{ .truncate = true });
+                defer f.close(client_io);
+                var fw_buf: [4096]u8 = undefined;
+                var fw = f.writer(client_io, &fw_buf);
+                var i: usize = 0;
+                while (i < total) : (i += 1) {
+                    try fw.interface.writeByte(@intCast(i % 251));
+                }
+                try fw.interface.flush();
+            }
+            defer Io.Dir.cwd().deleteFile(client_io, path) catch {};
+
+            var f = try Io.Dir.cwd().openFile(client_io, path, .{});
+            defer f.close(client_io);
+            var fr_buf: [4096]u8 = undefined;
+            var fr = f.reader(client_io, &fr_buf);
+
+            const port = try server_port.receive();
+            const addr = try IpAddress.parseIp4("127.0.0.1", port);
+            var stream = try tcpConnectToAddress(addr, .{});
+            defer stream.close();
+            try stream.socket.setSendBufferSize(16 * 1024);
+
+            var write_buffer: [4096]u8 = undefined;
+            var writer = stream.writer(&write_buffer);
+
+            const sent = try writer.interface.sendFileAll(&fr, .unlimited);
+            try std.testing.expectEqual(total, sent);
+            try writer.interface.flush();
+
+            stream.shutdown(.both) catch {};
+        }
+    };
+
+    var server_port_buf: [1]u16 = undefined;
+    var server_port_ch = Channel(u16).init(&server_port_buf);
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(ServerTask.run, .{&server_port_ch});
+    try group.spawn(ClientTask.run, .{ io, &server_port_ch });
+
+    try group.wait();
+}
+
 test "Stream.Writer.sendFile cancellation unblocks a stalled transfer" {
     const Io = std.Io;
     const path = "test-native-sendfile-cancel";
