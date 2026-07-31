@@ -237,7 +237,7 @@ test "clearTimer racing a firing timer (cross-thread)" {
             defer {
                 // Deinit belongs to this thread, but must not race the main
                 // thread's final wake(): a stale wake from the last clearTimer
-                // can pop run(.once) before that wake() is issued.
+                // can pop poll(.max) before that wake() is issued.
                 while (!w.load(.acquire)) std.Thread.yield() catch {};
                 l.deinit();
             }

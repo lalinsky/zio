@@ -32,7 +32,7 @@ test {
     _ = @import("test/async_stress.zig");
 }
 
-test "Loop: empty run(.no_wait)" {
+test "Loop: empty poll(.zero)" {
     var loop: Loop = undefined;
     try loop.init(.{});
     defer loop.deinit();
@@ -40,7 +40,7 @@ test "Loop: empty run(.no_wait)" {
     try loop.poll(.zero);
 }
 
-test "Loop: empty run(.once)" {
+test "Loop: empty poll(.max)" {
     var loop: Loop = undefined;
     try loop.init(.{});
     defer loop.deinit();
@@ -48,7 +48,7 @@ test "Loop: empty run(.once)" {
     try loop.poll(.max);
 }
 
-test "Loop: empty run(.until_done)" {
+test "Loop: empty run()" {
     var loop: Loop = undefined;
     try loop.init(.{});
     defer loop.deinit();
