@@ -53,9 +53,47 @@ const ExecutorId = switch (@sizeOf(usize)) {
 // execve into child processes, mirroring std.Io.Threaded.
 const have_sig_pipe = builtin.os.tag != .windows and @hasField(os.posix.SIG, "PIPE");
 
-// Only referenced when have_sig_pipe, so the posix types are never analyzed
-// on Windows.
-fn doNothingSignalHandler(_: os.posix.SIG) callconv(.c) void {}
+// The disposition is process-global while Runtime instances may overlap, so
+// ownership is refcounted at module scope: the first acquire installs (only
+// when the disposition is still SIG_DFL — embedders that manage SIGPIPE
+// themselves, e.g. a host language runtime, are left alone), and only the
+// last release restores what the install replaced. Only referenced when
+// have_sig_pipe, so the posix types are never analyzed on Windows.
+const sig_pipe_guard = struct {
+    var mutex: os.Mutex = .init();
+    var refcount: usize = 0;
+    var installed: bool = false;
+    var old: os.posix.Sigaction = undefined;
+
+    fn doNothingSignalHandler(_: os.posix.SIG) callconv(.c) void {}
+
+    fn acquire() void {
+        mutex.lock();
+        defer mutex.unlock();
+        refcount += 1;
+        if (refcount > 1) return;
+        os.posix.sigaction(os.posix.SIG.PIPE, null, &old);
+        if (old.handler.handler == os.posix.SIG.DFL) {
+            const act: os.posix.Sigaction = .{
+                .handler = .{ .handler = doNothingSignalHandler },
+                .mask = os.posix.sigemptyset(),
+                .flags = 0,
+            };
+            os.posix.sigaction(os.posix.SIG.PIPE, &act, null);
+            installed = true;
+        }
+    }
+
+    fn release() void {
+        mutex.lock();
+        defer mutex.unlock();
+        refcount -= 1;
+        if (refcount == 0 and installed) {
+            os.posix.sigaction(os.posix.SIG.PIPE, &old, null);
+            installed = false;
+        }
+    }
+};
 const mod = @This();
 
 /// Number of executor threads to run (including main).
@@ -1125,13 +1163,6 @@ pub const Runtime = struct {
     teardown: os.ResetEvent = .init(),
     own_self: bool = false,
 
-    /// Previous SIGPIPE disposition, restored in deinit. Only valid while
-    /// `sig_pipe_installed`; never installed when an embedder already changed
-    /// the disposition away from SIG_DFL (e.g. a host language runtime that
-    /// manages SIGPIPE itself).
-    old_sig_pipe: if (have_sig_pipe) os.posix.Sigaction else void = undefined,
-    sig_pipe_installed: bool = false,
-
     resolver: ?dns.Resolver = null,
 
     const Worker = struct {
@@ -1170,23 +1201,8 @@ pub const Runtime = struct {
         };
         errdefer if (self.resolver) |*r| r.deinit();
 
-        if (comptime have_sig_pipe) {
-            var old: os.posix.Sigaction = undefined;
-            os.posix.sigaction(os.posix.SIG.PIPE, null, &old);
-            if (old.handler.handler == os.posix.SIG.DFL) {
-                const act: os.posix.Sigaction = .{
-                    .handler = .{ .handler = doNothingSignalHandler },
-                    .mask = os.posix.sigemptyset(),
-                    .flags = 0,
-                };
-                os.posix.sigaction(os.posix.SIG.PIPE, &act, null);
-                self.old_sig_pipe = old;
-                self.sig_pipe_installed = true;
-            }
-        }
-        errdefer if (comptime have_sig_pipe) {
-            if (self.sig_pipe_installed) os.posix.sigaction(os.posix.SIG.PIPE, &self.old_sig_pipe, null);
-        };
+        if (comptime have_sig_pipe) sig_pipe_guard.acquire();
+        errdefer if (comptime have_sig_pipe) sig_pipe_guard.release();
 
         try self.thread_pool.init(allocator, options.thread_pool);
         errdefer self.thread_pool.deinit();
@@ -1292,9 +1308,7 @@ pub const Runtime = struct {
 
         if (self.resolver) |*r| r.deinit();
 
-        if (comptime have_sig_pipe) {
-            if (self.sig_pipe_installed) os.posix.sigaction(os.posix.SIG.PIPE, &self.old_sig_pipe, null);
-        }
+        if (comptime have_sig_pipe) sig_pipe_guard.release();
 
         // Free the Runtime allocation
         if (self.own_self) {
@@ -2038,12 +2052,28 @@ test "runtime: installs a SIGPIPE handler while the disposition is default" {
     os.posix.sigaction(os.posix.SIG.PIPE, null, &current);
     try std.testing.expect(current.handler.handler == os.posix.SIG.DFL);
 
-    // A second runtime must leave a non-default (embedder-owned) disposition
-    // alone.
+    // Overlapping lifetimes: the disposition is owned by the group of live
+    // runtimes, so the first deinit must not strip protection from the second.
+    // Worker-thread executors only — two main executors cannot share the test
+    // thread (loop thread-affinity).
+    if (!builtin.single_threaded) {
+        const opts: RuntimeOptions = .{ .executors = .exact(1), .enable_main_executor = false };
+        const a = try Runtime.init(std.testing.allocator, opts);
+        const b = try Runtime.init(std.testing.allocator, opts);
+        a.deinit();
+        os.posix.sigaction(os.posix.SIG.PIPE, null, &current);
+        try std.testing.expect(current.handler.handler != os.posix.SIG.DFL);
+        b.deinit();
+        os.posix.sigaction(os.posix.SIG.PIPE, null, &current);
+        try std.testing.expect(current.handler.handler == os.posix.SIG.DFL);
+    }
+
+    // A non-default (embedder-owned) disposition must be left alone.
     os.posix.sigaction(os.posix.SIG.PIPE, &saved, null);
     {
         const runtime = try Runtime.init(std.testing.allocator, .{});
         defer runtime.deinit();
-        try std.testing.expect(!runtime.sig_pipe_installed);
+        os.posix.sigaction(os.posix.SIG.PIPE, null, &current);
+        try std.testing.expect(current.handler.handler == saved.handler.handler);
     }
 }
