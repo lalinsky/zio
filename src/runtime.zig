@@ -43,6 +43,57 @@ const ExecutorId = switch (@sizeOf(usize)) {
     8 => u6,
     else => @compileError("Unsupported architecture"),
 };
+
+// SIGPIPE protection. Zig 0.15's start code ignored SIGPIPE process-wide, but
+// Zig 0.16 moved that into std.Io.Threaded.init, which zio replaces — so
+// without this, a write to a peer-closed socket or pipe kills the process
+// instead of failing with EPIPE. (Zig's test runner creates its own
+// std.Io.Threaded, which is why tests never see the crash.) A do-nothing
+// handler rather than SIG_IGN so the disposition is not inherited across
+// execve into child processes, mirroring std.Io.Threaded.
+const have_sig_pipe = builtin.os.tag != .windows and @hasField(os.posix.SIG, "PIPE");
+
+// The disposition is process-global while Runtime instances may overlap, so
+// ownership is refcounted at module scope: the first acquire installs (only
+// when the disposition is still SIG_DFL — embedders that manage SIGPIPE
+// themselves, e.g. a host language runtime, are left alone), and only the
+// last release restores what the install replaced. Only referenced when
+// have_sig_pipe, so the posix types are never analyzed on Windows.
+const sig_pipe_guard = struct {
+    var mutex: os.Mutex = .init();
+    var refcount: usize = 0;
+    var installed: bool = false;
+    var old: os.posix.Sigaction = undefined;
+
+    fn doNothingSignalHandler(_: os.posix.SIG) callconv(.c) void {}
+
+    fn acquire() void {
+        mutex.lock();
+        defer mutex.unlock();
+        refcount += 1;
+        if (refcount > 1) return;
+        os.posix.sigaction(os.posix.SIG.PIPE, null, &old);
+        if (old.handler.handler == os.posix.SIG.DFL) {
+            const act: os.posix.Sigaction = .{
+                .handler = .{ .handler = doNothingSignalHandler },
+                .mask = os.posix.sigemptyset(),
+                .flags = 0,
+            };
+            os.posix.sigaction(os.posix.SIG.PIPE, &act, null);
+            installed = true;
+        }
+    }
+
+    fn release() void {
+        mutex.lock();
+        defer mutex.unlock();
+        refcount -= 1;
+        if (refcount == 0 and installed) {
+            os.posix.sigaction(os.posix.SIG.PIPE, &old, null);
+            installed = false;
+        }
+    }
+};
 const mod = @This();
 
 /// Number of executor threads to run (including main).
@@ -1150,6 +1201,9 @@ pub const Runtime = struct {
         };
         errdefer if (self.resolver) |*r| r.deinit();
 
+        if (comptime have_sig_pipe) sig_pipe_guard.acquire();
+        errdefer if (comptime have_sig_pipe) sig_pipe_guard.release();
+
         try self.thread_pool.init(allocator, options.thread_pool);
         errdefer self.thread_pool.deinit();
 
@@ -1253,6 +1307,8 @@ pub const Runtime = struct {
         self.task_pool.deinit();
 
         if (self.resolver) |*r| r.deinit();
+
+        if (comptime have_sig_pipe) sig_pipe_guard.release();
 
         // Free the Runtime allocation
         if (self.own_self) {
@@ -1958,4 +2014,66 @@ test "runtime: disable main executor" {
     var handle = try runtime.spawn(compute, .{21});
     const result = handle.join();
     try std.testing.expectEqual(42, result);
+}
+
+test "runtime: installs a SIGPIPE handler while the disposition is default" {
+    if (comptime !have_sig_pipe) return error.SkipZigTest;
+
+    // The test runner's std.Io.Threaded already owns SIGPIPE, so stash its
+    // disposition, run the whole test from SIG_DFL, and restore at the end.
+    var saved: os.posix.Sigaction = undefined;
+    os.posix.sigaction(os.posix.SIG.PIPE, null, &saved);
+    defer os.posix.sigaction(os.posix.SIG.PIPE, &saved, null);
+
+    const dfl: os.posix.Sigaction = .{
+        .handler = .{ .handler = os.posix.SIG.DFL },
+        .mask = os.posix.sigemptyset(),
+        .flags = 0,
+    };
+    os.posix.sigaction(os.posix.SIG.PIPE, &dfl, null);
+
+    var current: os.posix.Sigaction = undefined;
+    {
+        const runtime = try Runtime.init(std.testing.allocator, .{});
+        defer runtime.deinit();
+
+        // The runtime replaced SIG_DFL with its do-nothing handler.
+        os.posix.sigaction(os.posix.SIG.PIPE, null, &current);
+        try std.testing.expect(current.handler.handler != os.posix.SIG.DFL);
+
+        // The proof: without the handler this write kills the test process.
+        const fds = try os.fs.pipe();
+        os.fs.close(fds[0]) catch {};
+        defer os.fs.close(fds[1]) catch {};
+        try std.testing.expectError(error.BrokenPipe, os.fs.write(fds[1], "x"));
+    }
+
+    // deinit restored SIG_DFL.
+    os.posix.sigaction(os.posix.SIG.PIPE, null, &current);
+    try std.testing.expect(current.handler.handler == os.posix.SIG.DFL);
+
+    // Overlapping lifetimes: the disposition is owned by the group of live
+    // runtimes, so the first deinit must not strip protection from the second.
+    // Worker-thread executors only — two main executors cannot share the test
+    // thread (loop thread-affinity).
+    if (!builtin.single_threaded) {
+        const opts: RuntimeOptions = .{ .executors = .exact(1), .enable_main_executor = false };
+        const a = try Runtime.init(std.testing.allocator, opts);
+        const b = try Runtime.init(std.testing.allocator, opts);
+        a.deinit();
+        os.posix.sigaction(os.posix.SIG.PIPE, null, &current);
+        try std.testing.expect(current.handler.handler != os.posix.SIG.DFL);
+        b.deinit();
+        os.posix.sigaction(os.posix.SIG.PIPE, null, &current);
+        try std.testing.expect(current.handler.handler == os.posix.SIG.DFL);
+    }
+
+    // A non-default (embedder-owned) disposition must be left alone.
+    os.posix.sigaction(os.posix.SIG.PIPE, &saved, null);
+    {
+        const runtime = try Runtime.init(std.testing.allocator, .{});
+        defer runtime.deinit();
+        os.posix.sigaction(os.posix.SIG.PIPE, null, &current);
+        try std.testing.expect(current.handler.handler == saved.handler.handler);
+    }
 }
