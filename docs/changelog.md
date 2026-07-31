@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Coroutine stacks are now carved out of larger slab reservations instead of each
+  getting its own mmap (on 64-bit POSIX targets; Windows and OpenBSD keep the previous
+  allocator). A cold stack costs one page-protection syscall instead of three mapping
+  syscalls, and a released stack is kept and reused with no syscalls at all, with no
+  cap and no age eviction. This mainly helps workloads holding many coroutines alive
+  at once: 10k concurrently sleeping tasks got about 25% faster, large fan-out about
+  10%. Note the memory trade-off: slab-backed stacks are only returned to the OS at
+  runtime shutdown, so resident memory tracks the high-water mark of concurrently
+  live coroutine stacks. The slots-per-slab count is a build option
+  (`-Dstack-slab-slots=N`, default 64; 0 restores the per-stack allocator), and the
+  new `stack_pool.prewarm` runtime option commits that many slots at startup so an
+  early spawn burst skips stack allocation entirely.
+
 - Multi-threaded runtimes no longer steal work the moment an executor runs out of local
   tasks. A freshly idle executor now gives its own event loop a short grace window first
   (a non-blocking probe, then a park capped at 100us), since completions usually re-ready

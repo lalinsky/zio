@@ -169,6 +169,77 @@ fn stackAllocOpenBSD(info: *StackInfo, size: usize) error{OutOfMemory}!void {
     };
 }
 
+/// Reserve one slab arena: a PROT_NONE address-space reservation that stack
+/// slots are carved out of, with its first page committed for the slab
+/// header. Pages between and below slots stay PROT_NONE, so guard pages cost
+/// nothing extra. POSIX-only (the slab pool is comptime-disabled elsewhere);
+/// OpenBSD is excluded because MAP_STACK cannot start as PROT_NONE.
+pub fn slabReserve(len: usize) error{OutOfMemory}![]align(page_size) u8 {
+    const prot_flags = posix.PROT.NONE | posix.PROT.MAX(posix.PROT.READ | posix.PROT.WRITE);
+    var map_flags = posix.MAP.PRIVATE | posix.MAP.ANONYMOUS;
+    if (builtin.os.tag == .linux or builtin.os.tag == .netbsd) {
+        map_flags |= posix.MAP.STACK;
+    }
+
+    const allocation = posix.mmap(null, len, prot_flags, map_flags, -1, 0) catch |err| {
+        log.err("Failed to mmap stack slab (size={d}): {}", .{ len, err });
+        return error.OutOfMemory;
+    };
+    errdefer posix.munmap(allocation) catch {};
+
+    // One madvise for the whole slab instead of one per stack.
+    if (@hasDecl(posix.MADV, "NOHUGEPAGE")) {
+        posix.madvise(allocation, posix.MADV.NOHUGEPAGE) catch {};
+    }
+
+    // Commit the header page for the slab bookkeeping.
+    posix.mprotect(allocation.ptr[0..page_size], posix.PROT.READ | posix.PROT.WRITE) catch |err| {
+        log.err("Failed to commit stack slab header page: {}", .{err});
+        return error.OutOfMemory;
+    };
+
+    return allocation;
+}
+
+pub fn slabFree(mem: []align(page_size) u8) void {
+    posix.munmap(mem) catch {};
+}
+
+/// Initialize a stack inside a slab slot: commit the initial region at the
+/// top and leave everything below it (including the slot's first page, the
+/// guard) as the slab's PROT_NONE reservation. The resulting StackInfo has
+/// exactly the layout stackAllocPosix produces, so growth, overflow
+/// detection, and pooling treat both kinds identically. One mprotect per
+/// cold slot; a recycled slot pays no syscalls at all.
+pub fn stackInitSlot(info: *StackInfo, slot: []align(page_size) u8, committed_size: usize) error{OutOfMemory}!void {
+    // Commit at least one page so the pool's FreeNode always fits.
+    const commit_size = @max(std.mem.alignForward(usize, committed_size, page_size), page_size);
+    if (commit_size > slot.len - page_size) {
+        log.err("Committed size ({d}) exceeds slab slot size ({d})", .{ commit_size, slot.len });
+        return error.OutOfMemory;
+    }
+
+    const stack_top = @intFromPtr(slot.ptr) + slot.len;
+    const initial_commit_start = stack_top - commit_size;
+    const initial_region: [*]align(page_size) u8 = @ptrFromInt(initial_commit_start);
+    posix.mprotect(initial_region[0..commit_size], posix.PROT.READ | posix.PROT.WRITE) catch |err| {
+        log.err("Failed to commit slab stack slot (commit_size={d}): {}", .{ commit_size, err });
+        return error.OutOfMemory;
+    };
+
+    info.* = .{
+        .allocation_ptr = slot.ptr,
+        .base = stack_top,
+        .limit = initial_commit_start,
+        .allocation_len = slot.len,
+    };
+
+    if (builtin.mode == .Debug and builtin.valgrind_support) {
+        const stack_slice: [*]u8 = @ptrFromInt(info.limit);
+        info.valgrind_stack_id = std.valgrind.stackRegister(stack_slice[0 .. info.base - info.limit]);
+    }
+}
+
 pub fn stackFree(info: StackInfo) void {
     if (builtin.mode == .Debug and builtin.valgrind_support) {
         if (info.valgrind_stack_id != 0) {

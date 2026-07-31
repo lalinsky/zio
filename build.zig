@@ -24,12 +24,15 @@ pub fn build(b: *std.Build) void {
 
     const task_migration = b.option(bool, "task-migration", "Compile in task migration / work-stealing support. When false, tasks are pinned to their home executor and the scheduler can drop the machinery it needs (default true)") orelse true;
 
+    const stack_slab_slots = b.option(usize, "stack-slab-slots", "Coroutine stack slots carved from one slab address-space reservation; 0 disables slab allocation and maps every stack separately (default 64, only used on 64-bit POSIX targets)") orelse 64;
+
     // Create options for backend selection
     var options = b.addOptions();
     options.addOption(?[]const u8, "backend", backend);
     options.addOption(ResolveBeneathMode, "resolve_beneath_mode", resolve_beneath_mode);
     options.addOption(bool, "no_hacks", no_hacks);
     options.addOption(bool, "task_migration", task_migration);
+    options.addOption(usize, "stack_slab_slots", stack_slab_slots);
 
     const zio = b.addModule("zio", .{
         .root_source_file = b.path("src/zio.zig"),

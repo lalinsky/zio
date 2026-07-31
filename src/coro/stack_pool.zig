@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
+const builtin = @import("builtin");
+const zio_options = @import("zio_options");
 const stack = @import("stack.zig");
 const StackInfo = stack.StackInfo;
 const Timestamp = @import("../time.zig").Timestamp;
@@ -14,6 +16,30 @@ const FreeNode = struct {
     next: ?*FreeNode,
     stack_info: StackInfo,
     timestamp: Timestamp,
+};
+
+/// Number of stack slots carved from one slab reservation (build option
+/// `stack-slab-slots`; 0 disables slab allocation and every stack gets its
+/// own mapping as before).
+pub const slab_slots: usize = zio_options.stack_slab_slots;
+
+/// Slab allocation reserves slab_slots * (maximum_size + guard) of address
+/// space per slab, which is only affordable on 64-bit targets. Windows keeps
+/// RtlCreateUserStack (TEB integration), and OpenBSD requires MAP_STACK
+/// mappings that cannot start as PROT_NONE reservations.
+pub const slab_enabled = slab_slots > 0 and @sizeOf(usize) == 8 and switch (builtin.os.tag) {
+    .windows, .openbsd, .freestanding, .wasi => false,
+    else => true,
+};
+
+/// Slab header, stored in the committed first page of the arena itself.
+/// Slots follow the header page back to back; each slot's first page is
+/// never committed and acts as its guard page, exactly mirroring the layout
+/// of a standalone stack mapping.
+const Slab = struct {
+    next: ?*Slab,
+    memory: []align(stack.page_size) u8,
+    carved: usize,
 };
 
 pub const Config = struct {
@@ -32,7 +58,14 @@ pub const Config = struct {
     /// Maximum age of an unused stack.
     /// Stacks older than this will be freed on the next release() call.
     /// .zero means no age limit.
+    /// Only applies to individually mapped stacks; slab slots are never
+    /// evicted or decommitted (recycling was measured too expensive).
     max_age: Duration = .zero,
+
+    /// Number of slab slots to carve and commit up front (at runtime init),
+    /// so that a burst of early spawns skips the cold-allocation cost.
+    /// Ignored when slab allocation is compiled out.
+    prewarm: usize = 0,
 };
 
 pub const StackPool = struct {
@@ -41,14 +74,28 @@ pub const StackPool = struct {
     head: ?*FreeNode,
     tail: ?*FreeNode,
     pool_size: usize,
+    // Slab state: chain of arenas (newest first; only the newest still has
+    // uncarved slots) and a LIFO of released slab slots. Slab slots bypass
+    // the max_unused_stacks/max_age policy entirely: releasing one is a
+    // pointer push, reusing one costs no syscalls, and the memory is only
+    // returned at deinit.
+    slabs: ?*Slab,
+    arena_free: ?*FreeNode,
+    slot_size: usize,
 
     pub fn init(config: Config) StackPool {
+        // Same slot layout as stackAllocPosix: usable size rounded to pages,
+        // plus the (never committed) guard page, at least two pages total.
+        const aligned_max = std.mem.alignForward(usize, config.maximum_size, stack.page_size);
         return .{
             .config = config,
             .mutex = .init(),
             .head = null,
             .tail = null,
             .pool_size = 0,
+            .slabs = null,
+            .arena_free = null,
+            .slot_size = @max(aligned_max + stack.page_size, stack.page_size * 2),
         };
     }
 
@@ -67,6 +114,16 @@ pub const StackPool = struct {
         self.head = null;
         self.tail = null;
         self.pool_size = 0;
+
+        // Free whole slab arenas; their FreeNodes and headers live inside.
+        var slab = self.slabs;
+        while (slab) |s| {
+            const next = s.next;
+            stack.slabFree(s.memory);
+            slab = next;
+        }
+        self.slabs = null;
+        self.arena_free = null;
     }
 
     /// Acquires a stack from the pool, or allocates a new one if the pool is empty.
@@ -77,10 +134,30 @@ pub const StackPool = struct {
             self.mutex.lock();
             defer self.mutex.unlock();
 
+            if (slab_enabled) {
+                // Released slab slots first: LIFO, still committed, still
+                // cache-warm, zero syscalls.
+                if (self.arena_free) |node| {
+                    self.arena_free = node.next;
+                    return node.stack_info;
+                }
+            }
+
             if (self.head) |node| {
                 const stack_info = node.stack_info;
                 self.removeNode(node);
                 return stack_info;
+            }
+
+            if (slab_enabled) {
+                // Cold path: carve a fresh slot (one mprotect), creating a
+                // new slab if the current one is exhausted. Done under the
+                // lock — carving is rare and the bookkeeping needs it anyway.
+                if (self.carveSlotLocked()) |stack_info| {
+                    return stack_info;
+                }
+                // Slab reservation failed (address space exhausted?); fall
+                // through to an individual mapping.
             }
         }
 
@@ -88,6 +165,60 @@ pub const StackPool = struct {
         var stack_info: StackInfo = undefined;
         try stack.stackAlloc(&stack_info, self.config.maximum_size, self.config.committed_size);
         return stack_info;
+    }
+
+    /// Carve and commit the next slot out of the newest slab, growing the
+    /// slab chain when needed. Returns null if reservation or commit fails
+    /// (the caller falls back to individual mappings). Must run under mutex.
+    fn carveSlotLocked(self: *StackPool) ?StackInfo {
+        const slab = blk: {
+            if (self.slabs) |s| {
+                if (s.carved < slab_slots) break :blk s;
+            }
+            const len = stack.page_size + slab_slots * self.slot_size;
+            const mem = stack.slabReserve(len) catch return null;
+            const s: *Slab = @ptrCast(@alignCast(mem.ptr));
+            s.* = .{ .next = self.slabs, .memory = mem, .carved = 0 };
+            self.slabs = s;
+            break :blk s;
+        };
+
+        const offset = stack.page_size + slab.carved * self.slot_size;
+        const slot: []align(stack.page_size) u8 = @alignCast(slab.memory[offset .. offset + self.slot_size]);
+        var stack_info: StackInfo = undefined;
+        stack.stackInitSlot(&stack_info, slot, self.config.committed_size) catch return null;
+        slab.carved += 1;
+        return stack_info;
+    }
+
+    /// Whether this allocation is a slab slot. Must run under mutex (the
+    /// slab chain is mutated by carveSlotLocked).
+    fn inArenaLocked(self: *StackPool, ptr: [*]align(stack.page_size) u8) bool {
+        const addr = @intFromPtr(ptr);
+        var slab = self.slabs;
+        while (slab) |s| : (slab = s.next) {
+            const base = @intFromPtr(s.memory.ptr);
+            if (addr >= base and addr < base + s.memory.len) return true;
+        }
+        return false;
+    }
+
+    /// Carve and commit `config.prewarm` slots up front. Called once from
+    /// runtime init so that an early spawn burst finds warm slots instead of
+    /// paying the cold-allocation cost inside the workload.
+    pub fn prewarm(self: *StackPool) error{OutOfMemory}!void {
+        if (!slab_enabled) return;
+
+        var i: usize = 0;
+        while (i < self.config.prewarm) : (i += 1) {
+            self.mutex.lock();
+            const stack_info = self.carveSlotLocked() orelse {
+                self.mutex.unlock();
+                return error.OutOfMemory;
+            };
+            self.mutex.unlock();
+            self.release(stack_info, .zero);
+        }
     }
 
     /// Releases a stack back to the pool.
@@ -98,6 +229,25 @@ pub const StackPool = struct {
         // Check if the stack has enough committed space to store the FreeNode
         // The FreeNode is stored at the base of the stack (aligned backward)
         const node_addr = std.mem.alignBackward(usize, stack_info.base - @sizeOf(FreeNode), @alignOf(FreeNode));
+
+        if (slab_enabled) {
+            self.mutex.lock();
+            if (self.inArenaLocked(stack_info.allocation_ptr)) {
+                // Slab slots always commit at least one page, so the node fits.
+                std.debug.assert(node_addr >= stack_info.limit);
+                const node: *FreeNode = @ptrFromInt(node_addr);
+                node.* = .{
+                    .prev = null,
+                    .next = self.arena_free,
+                    .stack_info = stack_info,
+                    .timestamp = timestamp,
+                };
+                self.arena_free = node;
+                self.mutex.unlock();
+                return;
+            }
+            self.mutex.unlock();
+        }
 
         // Verify the FreeNode fits within the committed region (between limit and base)
         if (node_addr < stack_info.limit) {
@@ -252,20 +402,86 @@ test "StackPool basic acquire and release" {
     try std.testing.expect(stack1.base != 0);
     try std.testing.expect(stack1.base > stack1.limit); // Stack grows downward
 
-    // Release it back
+    // Release it back, acquire again - should reuse the same stack
     pool.release(stack1, .zero);
-    try std.testing.expectEqual(1, pool.pool_size);
-
-    // Acquire again - should reuse the same stack
     const stack2 = try pool.acquire();
     try std.testing.expectEqual(stack1.base, stack2.base);
-    try std.testing.expectEqual(0, pool.pool_size);
 
-    // Clean up
-    stack.stackFree(stack2);
+    // Return it so pool.deinit() reclaims it (slab slots must not be
+    // stackFree'd individually).
+    pool.release(stack2, .zero);
+}
+
+test "StackPool slab: carving spans slabs and slots are distinct" {
+    if (!slab_enabled) return error.SkipZigTest;
+
+    var pool = StackPool.init(.{
+        .maximum_size = 256 * 1024,
+        .committed_size = 16 * 1024,
+    });
+    defer pool.deinit();
+
+    // Acquire more slots than one slab holds to force a second slab.
+    const total = slab_slots + 2;
+    const infos = try std.testing.allocator.alloc(StackInfo, total);
+    defer std.testing.allocator.free(infos);
+
+    for (infos) |*info| {
+        info.* = try pool.acquire();
+        // Every slot must be arena-backed while slabs have room.
+        pool.mutex.lock();
+        defer pool.mutex.unlock();
+        try std.testing.expect(pool.inArenaLocked(info.allocation_ptr));
+    }
+
+    // All distinct, all writable at base, guard layout intact.
+    for (infos, 0..) |a, i| {
+        for (infos[i + 1 ..]) |b| {
+            try std.testing.expect(a.allocation_ptr != b.allocation_ptr);
+        }
+        const mem: [*]u8 = @ptrFromInt(a.limit);
+        mem[0] = 0xAA;
+        mem[a.base - a.limit - 1] = 0xBB;
+    }
+
+    // Two slabs exist now.
+    try std.testing.expect(pool.slabs != null);
+    try std.testing.expect(pool.slabs.?.next != null);
+
+    // Release everything; re-acquire returns the same slots (LIFO) with no
+    // new carving.
+    for (infos) |info| pool.release(info, .zero);
+    const carved_before = pool.slabs.?.carved;
+    for (0..total) |_| {
+        const info = try pool.acquire();
+        pool.release(info, .zero);
+    }
+    try std.testing.expectEqual(carved_before, pool.slabs.?.carved);
+}
+
+test "StackPool slab: prewarm fills the arena freelist" {
+    if (!slab_enabled) return error.SkipZigTest;
+
+    var pool = StackPool.init(.{
+        .maximum_size = 256 * 1024,
+        .committed_size = 16 * 1024,
+        .prewarm = 8,
+    });
+    defer pool.deinit();
+
+    try pool.prewarm();
+    try std.testing.expect(pool.arena_free != null);
+    try std.testing.expectEqual(8, pool.slabs.?.carved);
+
+    // Acquires are served from the prewarmed slots without carving more.
+    const s1 = try pool.acquire();
+    try std.testing.expectEqual(8, pool.slabs.?.carved);
+    pool.release(s1, .zero);
 }
 
 test "StackPool respects max_unused_stacks" {
+    // Policy applies to individually mapped stacks only.
+    if (slab_enabled) return error.SkipZigTest;
     var pool = StackPool.init(.{
         .maximum_size = 1024 * 1024,
         .committed_size = 64 * 1024,
@@ -302,6 +518,9 @@ test "StackPool respects max_unused_stacks" {
 }
 
 test "StackPool age-based expiration" {
+    // Policy applies to individually mapped stacks only.
+    if (slab_enabled) return error.SkipZigTest;
+
     const max_age: Duration = .fromMilliseconds(100);
 
     var pool = StackPool.init(.{
