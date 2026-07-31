@@ -50,6 +50,7 @@ const NetRecvFrom = @import("../completion.zig").NetRecvFrom;
 const NetSendTo = @import("../completion.zig").NetSendTo;
 const NetRecvMsg = @import("../completion.zig").NetRecvMsg;
 const NetSendMsg = @import("../completion.zig").NetSendMsg;
+const NetSendFile = @import("../completion.zig").NetSendFile;
 const NetPoll = @import("../completion.zig").NetPoll;
 const NetClose = @import("../completion.zig").NetClose;
 const NetShutdown = @import("../completion.zig").NetShutdown;
@@ -104,6 +105,10 @@ pub const capabilities: BackendCapabilities = .{
     .dir_close = true,
     .process_wait = true,
     .native_wall_timers = true,
+    // Native zero-copy sendfile via a two-hop splice chain (file -> pipe ->
+    // socket). IORING_OP_SPLICE needs Linux >= 5.7, comfortably below the
+    // >= 6.1 the ring setup flags already require, so no runtime probe.
+    .net_send_file = true,
 };
 
 // Tri-state for the once-probed IORING_OP_FTRUNCATE support. `unknown` is treated
@@ -194,6 +199,44 @@ pub const DirOpenData = struct {
 pub const ProcessWaitData = struct {
     siginfo: linux.siginfo_t = undefined,
 };
+
+/// State of the native sendfile splice chain. The transfer alternates two
+/// hops through an op-owned pipe — splice file -> pipe, then splice pipe ->
+/// socket until the pipe drains — so each CQE advances the machine
+/// (netSendFileAdvance) rather than completing the op. Serial by design: at
+/// most one SQE is in flight per op, and the pipe is fully drained before the
+/// next file read, so a pipe-side EAGAIN is impossible by construction.
+pub const NetSendFileData = struct {
+    /// Intermediary pipe; closed when the op finishes on any path.
+    pipe_fds: [2]fs.fd_t = .{ -1, -1 },
+    /// Which hop the in-flight SQE belongs to.
+    stage: Stage = .to_pipe,
+    /// True while a readiness poll is in flight instead of the stage's splice:
+    /// splice punts to io-wq with no internal poll-retry, so an -EAGAIN CQE
+    /// (non-blocking socket, or a non-regular source file) is bridged by an
+    /// explicit poll SQE and the splice is re-issued when it fires.
+    polling: bool = false,
+    /// File offset of the next file -> pipe splice.
+    offset: u64 = 0,
+    /// Bytes still allowed to be read from the file (the caller's limit).
+    read_remaining: usize = 0,
+    /// Bytes sitting in the pipe, not yet spliced to the socket.
+    in_pipe: usize = 0,
+    /// Set when the file -> pipe splice returned 0 (end of file).
+    eof: bool = false,
+    /// Total bytes delivered to the socket (the operation result).
+    sent: usize = 0,
+
+    pub const Stage = enum { to_pipe, to_socket };
+};
+
+/// "No offset" sentinel for the pipe side of a splice SQE (the kernel treats
+/// ~0 as a null offset pointer).
+const splice_no_offset: u64 = std.math.maxInt(u64);
+
+// splice(2) flags; not defined in std.os.linux.
+const SPLICE_F_MOVE: u32 = 1;
+const SPLICE_F_MORE: u32 = 4;
 
 const Self = @This();
 
@@ -841,9 +884,153 @@ fn submitInner(self: *Self, state: *LoopState, c: *Completion, is_new: bool) voi
             sqe.user_data = @intFromPtr(c);
         },
         .device_io_control => unreachable, // Handled via thread pool
-        // Driven by Loop's generic read/write fallback, never reaches the backend.
-        .net_send_file => unreachable,
+        .net_send_file => {
+            const data = c.cast(NetSendFile);
+            if (is_new) {
+                data.internal = .{
+                    .pipe_fds = fs.pipe() catch |err| {
+                        c.setError(switch (err) {
+                            error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded => error.SystemResources,
+                            else => error.Unexpected,
+                        });
+                        state.markCompletedFromBackend(c);
+                        return;
+                    },
+                    .offset = data.offset,
+                    .read_remaining = data.remaining,
+                };
+            }
+            // A resubmission (EINTR / full SQ) re-preps the same step.
+            self.netSendFileIssue(c);
+        },
         .mach_port => unreachable,
+    }
+}
+
+/// Prep the SQE for the sendfile chain's current step: one splice hop, or the
+/// readiness poll bridging an -EAGAIN. See NetSendFileData.
+fn netSendFileIssue(self: *Self, c: *Completion) void {
+    const data = c.cast(NetSendFile);
+    const sqe = self.getSqeOrDefer(c) orelse return;
+    if (data.internal.polling) {
+        switch (data.internal.stage) {
+            .to_pipe => sqe.prep_poll_add(data.file, linux.POLL.IN),
+            .to_socket => sqe.prep_poll_add(data.handle, linux.POLL.OUT),
+        }
+    } else switch (data.internal.stage) {
+        .to_pipe => {
+            // The kernel caps each hop at the pipe's free space, so the length
+            // only needs to respect the caller's limit (and the u32 SQE field).
+            const chunk: usize = @min(data.internal.read_remaining, std.math.maxInt(u32));
+            sqe.prep_splice(data.file, data.internal.offset, data.internal.pipe_fds[1], splice_no_offset, chunk);
+            sqe.rw_flags = SPLICE_F_MOVE;
+        },
+        .to_socket => {
+            // splice has no MSG_NOSIGNAL equivalent, but a broken peer is
+            // safe here: the op runs in an io-wq worker, which does not
+            // deliver SIGPIPE to the process — the CQE carries -EPIPE
+            // instead (verified empirically; a *synchronous* splice to the
+            // same socket does raise SIGPIPE).
+            sqe.prep_splice(data.internal.pipe_fds[0], splice_no_offset, data.handle, splice_no_offset, data.internal.in_pipe);
+            // MORE (the MSG_MORE analog) batches segments while further chunks
+            // are known to follow; it must be off for the final drain so the
+            // tail is not held back.
+            sqe.rw_flags = SPLICE_F_MOVE;
+            if (!data.internal.eof and data.internal.read_remaining > 0) sqe.rw_flags |= SPLICE_F_MORE;
+        },
+    }
+    sqe.user_data = @intFromPtr(c);
+}
+
+/// Advance the sendfile chain on a CQE for its in-flight SQE. Issues the next
+/// step, or tears down and completes the op (via the storeResult arm) when the
+/// transfer is done, failed, or canceled.
+fn netSendFileAdvance(self: *Self, state: *LoopState, c: *Completion, res: i32) void {
+    const data = c.cast(NetSendFile);
+
+    // A cancel request can land between steps, and the kernel cancel only
+    // catches the SQE that was in flight when it was submitted — checked
+    // before issuing ANY further SQE (including the -EAGAIN poll bridge below:
+    // a cancel whose target CQE was already generated spends itself on
+    // -ENOENT, and a poll armed after that would never be canceled, hanging
+    // the op on a stalled socket forever).
+    if (c.loadState().cancel_requested) {
+        self.storeResult(c, -@as(i32, @intFromEnum(linux.E.CANCELED)));
+        state.markCompletedFromBackend(c);
+        return;
+    }
+
+    if (res < 0) {
+        const errno: linux.E = @enumFromInt(-res);
+        if (errno == .AGAIN and !data.internal.polling) {
+            data.internal.polling = true;
+            self.netSendFileIssue(c);
+            return;
+        }
+        self.storeResult(c, res);
+        state.markCompletedFromBackend(c);
+        return;
+    }
+
+    if (data.internal.polling) {
+        // Readiness poll fired; retry the stage's splice.
+        data.internal.polling = false;
+        self.netSendFileIssue(c);
+        return;
+    }
+
+    const n: usize = @intCast(res);
+    switch (data.internal.stage) {
+        .to_pipe => {
+            if (n == 0) {
+                data.internal.eof = true;
+            } else {
+                data.internal.offset += n;
+                data.internal.read_remaining -= n;
+                data.internal.in_pipe += n;
+            }
+            if (data.internal.in_pipe > 0) {
+                data.internal.stage = .to_socket;
+                self.netSendFileIssue(c);
+            } else {
+                // EOF (or a zero-byte request) with nothing buffered: done.
+                self.storeResult(c, 0);
+                state.markCompletedFromBackend(c);
+            }
+        },
+        .to_socket => {
+            if (n == 0) {
+                // Cannot happen (the pipe holds in_pipe > 0 bytes); bail out
+                // rather than re-splice forever.
+                self.netSendFileCleanup(c);
+                c.setError(error.Unexpected);
+                state.markCompletedFromBackend(c);
+                return;
+            }
+            data.internal.in_pipe -= n;
+            data.internal.sent += n;
+            if (data.internal.in_pipe > 0) {
+                self.netSendFileIssue(c);
+            } else if (!data.internal.eof and data.internal.read_remaining > 0) {
+                data.internal.stage = .to_pipe;
+                self.netSendFileIssue(c);
+            } else {
+                self.storeResult(c, 0);
+                state.markCompletedFromBackend(c);
+            }
+        },
+    }
+}
+
+/// Close the op-owned pipe (idempotent).
+fn netSendFileCleanup(self: *Self, c: *Completion) void {
+    _ = self;
+    const data = c.cast(NetSendFile);
+    for (&data.internal.pipe_fds) |*fd| {
+        if (fd.* != -1) {
+            fs.close(fd.*) catch {};
+            fd.* = -1;
+        }
     }
 }
 
@@ -1044,6 +1231,13 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         // waker always gets priority over EINTR resubmissions.
         if (cqe.res == -@as(i32, @intFromEnum(linux.E.INTR))) {
             self.pending.push(completion);
+            continue;
+        }
+
+        // Multi-step sendfile: a CQE advances the splice chain rather than
+        // completing the op.
+        if (completion.op == .net_send_file) {
+            self.netSendFileAdvance(state, completion, cqe.res);
             continue;
         }
 
@@ -1408,8 +1602,24 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
             }
         },
         .device_io_control => unreachable, // Handled via thread pool
-        // Driven by Loop's generic read/write fallback, never reaches the backend.
-        .net_send_file => unreachable,
+        .net_send_file => {
+            // Terminal result for the splice chain: reached from
+            // netSendFileAdvance (done / failed / canceled between steps) and
+            // from drainPending's cancel path while parked on `pending`.
+            // Mid-chain CQEs never get here — poll() routes them to
+            // netSendFileAdvance.
+            const data = c.cast(NetSendFile);
+            self.netSendFileCleanup(c);
+            if (res < 0) {
+                const errno: linux.E = @enumFromInt(-res);
+                c.setError(switch (data.internal.stage) {
+                    .to_pipe => fs.errnoToFileReadError(errno),
+                    .to_socket => net.errnoToSendError(errno),
+                });
+            } else {
+                c.setResult(.net_send_file, data.internal.sent);
+            }
+        },
         .mach_port => unreachable,
     }
 }
