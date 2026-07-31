@@ -17,7 +17,7 @@ test "group: empty group completes immediately" {
     var group: Group = .init(.gather);
     loop.add(&group.c);
 
-    try loop.run(.until_done);
+    try loop.run();
 
     try std.testing.expectEqual(.dead, group.c.loadState().phase);
     try group.getResult();
@@ -34,7 +34,7 @@ test "group: single completion" {
     group.add(&timer.c);
     loop.add(&group.c);
 
-    try loop.run(.until_done);
+    try loop.run();
 
     try std.testing.expectEqual(.dead, timer.c.loadState().phase);
     try std.testing.expectEqual(.dead, group.c.loadState().phase);
@@ -57,7 +57,7 @@ test "group: multiple completions" {
     group.add(&timer3.c);
     loop.add(&group.c);
 
-    try loop.run(.until_done);
+    try loop.run();
 
     try std.testing.expectEqual(.dead, timer1.c.loadState().phase);
     try std.testing.expectEqual(.dead, timer2.c.loadState().phase);
@@ -118,7 +118,7 @@ test "group: callback invoked when all complete" {
     group.add(&timer2.c);
     loop.add(&group.c);
 
-    try loop.run(.until_done);
+    try loop.run();
 
     // Group callback should be called after both timer callbacks
     try std.testing.expect(ctx.group_callback_order > ctx.timer1_callback_order);
@@ -162,7 +162,7 @@ test "group: gather member freed by the group callback is not used-after-free (#
     group.add(&member.c);
     loop.add(&group.c);
 
-    try loop.run(.until_done);
+    try loop.run();
 
     try std.testing.expect(ctx.completed);
 }
@@ -185,7 +185,7 @@ test "group: cancel cancels all children" {
     // Cancel the group
     loop.cancel(&group.c);
 
-    try loop.run(.until_done);
+    try loop.run();
 
     // All children should be canceled
     try std.testing.expectError(error.Canceled, timer1.getResult());
@@ -212,7 +212,7 @@ test "group: child error does not affect group result" {
     // Cancel just timer2, not the group
     loop.cancel(&timer2.c);
 
-    try loop.run(.until_done);
+    try loop.run();
 
     // timer1 should succeed
     try timer1.getResult();
@@ -240,7 +240,7 @@ test "group: mixed completion types" {
     // Notify async immediately
     async_handle.notify();
 
-    try loop.run(.until_done);
+    try loop.run();
 
     try std.testing.expectEqual(.dead, timer.c.loadState().phase);
     try std.testing.expectEqual(.dead, async_handle.c.loadState().phase);
@@ -264,7 +264,7 @@ test "group: race mode first completer wins" {
     group.add(&slow_timer.c);
     loop.add(&group.c);
 
-    try loop.run(.until_done);
+    try loop.run();
 
     // Fast timer should complete successfully
     try fast_timer.getResult();
@@ -291,7 +291,7 @@ test "group: race mode cancels siblings" {
     group.add(&timer3.c);
     loop.add(&group.c);
 
-    try loop.run(.until_done);
+    try loop.run();
 
     // timer1 should complete successfully (it fires first)
     try timer1.getResult();
@@ -315,7 +315,7 @@ test "group: race mode with single child" {
     group.add(&timer.c);
     loop.add(&group.c);
 
-    try loop.run(.until_done);
+    try loop.run();
 
     // Timer should complete successfully
     try timer.getResult();
@@ -347,7 +347,7 @@ test "group: nested gather inside race (timeout pattern) - ops complete first" {
     race.add(&ops.c);
 
     loop.add(&race.c);
-    try loop.run(.until_done);
+    try loop.run();
 
     // Operations should complete successfully
     try op1.getResult();
@@ -384,7 +384,7 @@ test "group: nested gather inside race (timeout pattern) - timeout fires first" 
     race.add(&ops.c);
 
     loop.add(&race.c);
-    try loop.run(.until_done);
+    try loop.run();
 
     // Timeout should complete successfully (it won the race)
     try timeout.getResult();
@@ -418,7 +418,7 @@ test "group: nested gather inside gather" {
     outer.add(&op3.c);
 
     loop.add(&outer.c);
-    try loop.run(.until_done);
+    try loop.run();
 
     // All should complete successfully
     try op1.getResult();
@@ -449,7 +449,7 @@ test "group: nested race inside gather" {
     outer.add(&op.c);
 
     loop.add(&outer.c);
-    try loop.run(.until_done);
+    try loop.run();
 
     // Fast wins inner race, slow is canceled
     try fast.getResult();
@@ -485,7 +485,7 @@ test "group: large batch exceeding queue size exercises deferred pending list" {
     var create_group: Group = .init(.gather);
     for (creates) |*pc| create_group.add(&pc.c);
     loop.add(&create_group.c);
-    try loop.run(.until_done);
+    try loop.run();
     try create_group.getResult();
 
     // Collect all fds from the created pipe pairs
@@ -507,7 +507,7 @@ test "group: large batch exceeding queue size exercises deferred pending list" {
     var close_group: Group = .init(.gather);
     for (closes) |*pc| close_group.add(&pc.c);
     loop.add(&close_group.c);
-    try loop.run(.until_done);
+    try loop.run();
 
     for (closes) |*pc| try pc.getResult();
     try close_group.getResult();

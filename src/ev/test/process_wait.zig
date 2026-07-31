@@ -36,7 +36,7 @@ test "ProcessWait: wait for child process exit code 0" {
 
     var wait = ProcessWait.init(child.id.?);
     loop.add(&wait.c);
-    try loop.run(.until_done);
+    try loop.run();
 
     const result = try wait.getResult();
     child.id = null;
@@ -61,7 +61,7 @@ test "ProcessWait: wait for child process exit code 1" {
 
     var wait = ProcessWait.init(child.id.?);
     loop.add(&wait.c);
-    try loop.run(.until_done);
+    try loop.run();
 
     const result = try wait.getResult();
     child.id = null;
@@ -86,7 +86,7 @@ test "ProcessWait: wait for child process killed by signal" {
 
     var wait = ProcessWait.init(child.id.?);
     loop.add(&wait.c);
-    try loop.run(.until_done);
+    try loop.run();
 
     const result = try wait.getResult();
     child.id = null;

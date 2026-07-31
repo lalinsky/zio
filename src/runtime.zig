@@ -395,6 +395,11 @@ pub const Executor = struct {
     // average (see scheduleTaskLocal).
     shed_quota: u32 = 0,
 
+    // Whether this executor has already spent its doze (the steal-free grace
+    // park, see parkAndSearch) since it last had local work. Reset by any
+    // local work; while set, empty passes go straight to the full park.
+    dozed: bool = false,
+
     // Deferred cleanup for the task that just yielded away from this executor.
     // Processed by the next coroutine to run (at landing sites: startFn, yield resume, run loop).
     pending_cleanup: TaskCleanup = .none,
@@ -542,6 +547,15 @@ pub const Executor = struct {
     /// workloads; also tokio's max tasks per global-queue interval.
     const checkpoint_interval = 127;
 
+    /// How long the first idle park (the "doze") waits before this executor
+    /// concludes it is genuinely idle and stealing is worth the churn. An I/O
+    /// completion typically re-readies the very tasks that just ran here (their
+    /// ops are homed on this loop), so the loop gets this long to produce local
+    /// work before any task is dragged to another executor. The idle bit is set
+    /// while dozing, so a searcher wake still cuts the doze short — excess work
+    /// elsewhere reaches this executor within a wake, not within doze_wait.
+    const doze_wait: Duration = .fromMicroseconds(100);
+
     /// True while the current tick may keep spending quanta without polling.
     inline fn tickBudgetLeft(self: *const Executor) bool {
         return self.tick_task_count < self.tick_task_budget and !self.tick_expired;
@@ -604,6 +618,10 @@ pub const Executor = struct {
         // Process deferred cleanup (e.g. main task's park/reschedule)
         self.processCleanup();
 
+        // Entering the run loop means the main task just ran (or this executor
+        // just started): that was productive work, a fresh doze is due.
+        self.dozed = false;
+
         // When entered with the tick budget already spent (e.g. the main task
         // yielded because its slice ran out), ready tasks must get one
         // fresh-budget batch after the next poll before control can return to
@@ -632,8 +650,13 @@ pub const Executor = struct {
                 @panic("event loop stopped while the main task was yielding");
             }
 
-            const has_work = self.checkAboutForWork(check_ready, true);
-            if (has_work) try self.loop.run(.no_wait) else try self.parkAndSearch(check_ready);
+            const has_work = self.checkLocalWork(check_ready);
+            if (has_work) {
+                self.dozed = false;
+                try self.loop.poll(.zero);
+            } else {
+                try self.parkAndSearch(check_ready);
+            }
 
             // Retune the tick budget from this batch. Skipped when we may have
             // slept in parkAndSearch — sleep time would poison the estimate.
@@ -696,7 +719,53 @@ pub const Executor = struct {
         }
     }
 
+    /// One idle step per call; the run loop re-checks stopped/main-ready/local
+    /// work between calls and resets `dozed` whenever any of those produce
+    /// work.
+    ///
+    /// The first empty pass after productive work probes the loop with a
+    /// non-blocking poll and, if that yields nothing, dozes: a park capped at
+    /// doze_wait whose work check is local-only. Together they give this
+    /// executor's own event loop a grace window to hand back the tasks that
+    /// just ran here before any stealing churn is paid. Every later pass
+    /// parks indefinitely with stealing folded into the pre-park check — by
+    /// then idleness is proven and the steal is also what makes the park's
+    /// wake protocol sound (see park).
     fn parkAndSearch(self: *Executor, check_ready: bool) !void {
+        if (!self.dozed) {
+            self.dozed = true;
+            // With nobody to steal from (or to) the probe and doze would only
+            // delay the real park; skip both.
+            if (self.runtime.stealingActive()) {
+                // Probe: one non-blocking poll before publishing any idleness.
+                // Completions that already arrived (the common case right
+                // after a drain) put this executor straight back on the busy
+                // path without touching idle_mask or inviting a spurious
+                // searcher election.
+                try self.loop.poll(.zero);
+                if (self.checkLocalWork(check_ready)) return;
+                return self.park(check_ready, doze_wait, .local_only);
+            }
+        }
+        return self.park(check_ready, .max, .steal);
+    }
+
+    const ParkSearch = enum { local_only, steal };
+
+    /// One park episode: publish the idle bit, give the event loop one poll
+    /// bounded by `wait_cap`, withdraw the bit. If armSearcher elected this
+    /// executor as the searcher meanwhile, run the searcher-token protocol:
+    /// consume the token by finding work, or release it and steal on the
+    /// pusher's behalf.
+    ///
+    /// With `search == .steal` the pre-park work check extends to the other
+    /// executors' rings. That is what makes an indefinite park sound: the bit
+    /// is published before the check while a pusher publishes its task before
+    /// reading idle_mask (both seq_cst), so either the pusher sees the bit and
+    /// wakes us, or this check sees the pushed task — including one sitting in
+    /// the pusher's own ring. A `.local_only` check (the doze) reopens that
+    /// window, but only for doze_wait: the cap itself is the rescue.
+    fn park(self: *Executor, check_ready: bool, wait_cap: Duration, search: ParkSearch) !void {
         const my_bit = @as(usize, 1) << self.id;
         // seq_cst: pairs with armSearcher's idle_mask load (see there). The bit
         // must be globally visible before the work check below, or a concurrent
@@ -709,8 +778,9 @@ pub const Executor = struct {
             }
         }
 
-        const found_work = self.checkAboutForWork(check_ready, true);
-        try self.loop.run(if (found_work) .no_wait else .once);
+        var found_work = self.checkLocalWork(check_ready);
+        if (!found_work and search == .steal) found_work = self.stealWork();
+        try self.loop.poll(if (found_work) .zero else wait_cap);
 
         const previous_bit = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel);
 
@@ -743,12 +813,17 @@ pub const Executor = struct {
             // push missed by this recheck - a dropped wake with no retry.
             _ = self.runtime.searchers.cmpxchgStrong(1, 0, .seq_cst, .monotonic);
             if (self.stealWork()) return;
-            if (self.checkAboutForWork(check_ready, false)) self.runtime.armSearcher();
+            // No main-ready here: only queued (stealable) work justifies
+            // arming a fresh searcher.
+            if (self.checkLocalWork(false)) self.runtime.armSearcher();
         }
     }
 
-    fn checkAboutForWork(self: *Executor, check_ready: bool, include_main_ready: bool) bool {
-        const main_ready = include_main_ready and check_ready and self.main_task.state.load(.acquire).tag == .ready;
+    /// Local work check: the main task (when `check_main_ready`), the ring,
+    /// and a refill from the overflow queue. Deliberately never steals — see
+    /// parkAndSearch for when remote work is taken.
+    fn checkLocalWork(self: *Executor, check_main_ready: bool) bool {
+        const main_ready = check_main_ready and self.main_task.state.load(.acquire).tag == .ready;
         // Overflow work counts too: if the ring is empty but the overflow queue
         // still holds tasks (e.g. a local ring spill, which doesn't wake the
         // loop), don't block — return promptly and refill from it below.
@@ -768,10 +843,14 @@ pub const Executor = struct {
             self.run_queue.refill(batch);
             has_work = !self.run_queue.isEmpty();
         }
-        if (!has_work) has_work = self.stealWork();
         return has_work;
     }
 
+    /// Steal half of a random victim's ring into ours. Reached only from
+    /// park() — the indefinite park's pre-check and the searcher-token path —
+    /// never while this executor still has plausible local work and never
+    /// before the doze has elapsed, since migrating a task also re-homes its
+    /// I/O and the home loop usually hands work back within doze_wait.
     fn stealWork(self: *Executor) bool {
         if (!self.runtime.stealingActive()) return false;
         const executors = self.runtime.executors.items;

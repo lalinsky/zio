@@ -137,12 +137,6 @@ pub const LoopGroup = struct {
     shared: Backend.SharedState = .{},
 };
 
-pub const RunMode = enum {
-    no_wait,
-    once,
-    until_done,
-};
-
 fn timerDeadlineLess(_: void, a: *Timer, b: *Timer) bool {
     return a.deadline.value < b.deadline.value;
 }
@@ -821,15 +815,12 @@ pub const Loop = struct {
         }
     }
 
-    pub fn run(self: *Loop, mode: RunMode) !void {
+    /// Run the loop until every completion it owns has finished (or the loop
+    /// is stopped).
+    pub fn run(self: *Loop) !void {
         std.debug.assert(self.state.initialized);
-        if (self.state.stopped) return;
-        switch (mode) {
-            .no_wait => try self.tick(false),
-            .once => try self.tick(true),
-            .until_done => while (!self.done()) {
-                try self.tick(true);
-            },
+        while (!self.done()) {
+            try self.poll(.max);
         }
     }
 
@@ -1024,7 +1015,7 @@ pub const Loop = struct {
 
         // Each wall-clock domain has its own heap, compared against `now` in
         // that clock. The earliest remaining across all domains becomes the
-        // poll timeout; `tick`'s caller caps it at `max_wait`, which bounds how
+        // poll timeout; `poll` caps it at `max_wait`, which bounds how
         // far a boot/real timer can oversleep after a suspend or clock step
         // (the re-read of `now(clock)` on the next scan corrects it).
         for (0..wall_clock_count) |idx| {
@@ -1422,9 +1413,18 @@ pub const Loop = struct {
         self.state.markCompleted(&op.c);
     }
 
-    pub fn tick(self: *Loop, wait: bool) !void {
+    /// Process one batch of events: expire timers, poll the backend for
+    /// completions, run callbacks. `wait_cap` bounds how long the backend poll
+    /// may block: `.zero` never blocks (and skips the poll syscall entirely
+    /// when nothing is in flight), `.max` waits for the next event, anything
+    /// in between caps the wait at that duration (the executor's idle doze).
+    /// Timer deadlines, pending completions, and the loop's `max_wait` option
+    /// can all shorten the wait; they never lengthen it.
+    pub fn poll(self: *Loop, wait_cap: Duration) !void {
+        std.debug.assert(self.state.initialized);
         if (self.done()) return;
 
+        const wait = wait_cap.value != 0;
         const timer_result = self.checkTimers();
 
         // Re-send SIGURG to any worker still blocked in a canceled syscall.
@@ -1447,9 +1447,12 @@ pub const Loop = struct {
             if (self.state.cancel_resend != null and timeout.value > resend_interval.value) {
                 timeout = resend_interval;
             }
+            if (wait_cap.value < timeout.value) {
+                timeout = wait_cap;
+            }
         }
 
-        // Skip backend poll in no_wait mode if there's nothing to retrieve.
+        // Skip the backend poll when not waiting and there's nothing to retrieve.
         // This avoids syscall overhead for pure CPU-bound workloads.
         const should_poll = wait or self.backend.hasInflight();
         const wake_flags = self.state.wake_requested.swap(0, .acq_rel);

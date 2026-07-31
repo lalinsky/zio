@@ -94,7 +94,7 @@ test "Async: cross-thread notify storm with rearm never strands work" {
 
     // Join before propagating a loop error: the producers publish into
     // stack-local state that must not be unwound under them.
-    const run_result = loop.run(.until_done);
+    const run_result = loop.run();
     for (threads) |t| t.join();
     try run_result;
 
@@ -170,7 +170,7 @@ test "Async: notify racing the rearm re-add is never lost" {
 
     // On a loop error the producer would spin forever waiting for progress;
     // signal it before joining, and only then propagate.
-    const run_result = loop.run(.until_done);
+    const run_result = loop.run();
     ctx.abort.store(true, .release);
     t.join();
     try run_result;

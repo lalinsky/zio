@@ -540,7 +540,7 @@ fn testEcho(comptime domain: net.Domain, comptime sockaddr: type) !void {
     // Run loop until server reaches accepting state
     var iterations: usize = 0;
     while (server.state != .accepting and server.state != .failed) {
-        try loop.run(.once);
+        try loop.poll(.max);
         iterations += 1;
         if (iterations > 100) {
             return error.Timeout;
@@ -557,7 +557,7 @@ fn testEcho(comptime domain: net.Domain, comptime sockaddr: type) !void {
     client.start();
 
     // Run until both are done
-    try loop.run(.until_done);
+    try loop.run();
 
     // Verify results
     try std.testing.expectEqual(.done, server.state);

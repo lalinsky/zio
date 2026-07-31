@@ -15,7 +15,7 @@ test "setTimer and clearTimer basic" {
     try std.testing.expectEqual(.running, timer.c.loadState().phase);
 
     var wall_timer = time.Stopwatch.start();
-    try loop.run(.until_done);
+    try loop.run();
     const elapsed = wall_timer.read();
 
     try std.testing.expectEqual(.dead, timer.c.loadState().phase);
@@ -41,7 +41,7 @@ test "clearTimer before expiration" {
 
     // Run the loop - should complete immediately with no active timers
     var wall_timer = time.Stopwatch.start();
-    try loop.run(.once);
+    try loop.poll(.max);
     const elapsed = wall_timer.read();
 
     // Should be very fast since there's nothing to wait for
@@ -71,7 +71,7 @@ test "clearTimer reports a callback it could not stop" {
     }.cb;
 
     loop.setTimer(&timer, .{ .duration = .zero });
-    try loop.run(.once);
+    try loop.poll(.max);
     try std.testing.expect(!fired);
 
     try std.testing.expect(!loop.clearTimer(&timer));
@@ -103,7 +103,7 @@ test "setTimer multiple times" {
 
     // Should complete after ~10ms, not 2000ms
     var wall_timer = time.Stopwatch.start();
-    try loop.run(.until_done);
+    try loop.run();
     const elapsed = wall_timer.read();
 
     try std.testing.expectEqual(.dead, timer.c.loadState().phase);
@@ -129,7 +129,7 @@ test "clearTimer and reuse timer" {
     try std.testing.expectEqual(.running, timer.c.loadState().phase);
 
     var wall_timer = time.Stopwatch.start();
-    try loop.run(.until_done);
+    try loop.run();
     const elapsed = wall_timer.read();
 
     try std.testing.expectEqual(.dead, timer.c.loadState().phase);
@@ -147,7 +147,7 @@ test "timer with zero duration completes immediately" {
 
     var wall_timer = time.Stopwatch.start();
     loop.add(&timer.c);
-    try loop.run(.until_done);
+    try loop.run();
     const elapsed = wall_timer.read();
 
     try std.testing.expectEqual(.dead, timer.c.loadState().phase);
@@ -166,7 +166,7 @@ test "timer with explicit deadline" {
 
     var wall_timer = time.Stopwatch.start();
     loop.add(&timer.c);
-    try loop.run(.until_done);
+    try loop.run();
     const elapsed = wall_timer.read();
 
     try std.testing.expectEqual(.dead, timer.c.loadState().phase);
@@ -185,7 +185,7 @@ test "timer on boot clock fires (duration)" {
     try std.testing.expectEqual(.running, timer.c.loadState().phase);
 
     var wall_timer = time.Stopwatch.start();
-    try loop.run(.until_done);
+    try loop.run();
     const elapsed = wall_timer.read();
 
     try std.testing.expectEqual(.dead, timer.c.loadState().phase);
@@ -207,7 +207,7 @@ test "timer on real clock fires (absolute deadline)" {
 
     var wall_timer = time.Stopwatch.start();
     loop.add(&timer.c);
-    try loop.run(.until_done);
+    try loop.run();
     const elapsed = wall_timer.read();
 
     try std.testing.expectEqual(.dead, timer.c.loadState().phase);
@@ -243,7 +243,7 @@ test "clearTimer racing a firing timer (cross-thread)" {
             }
             r.store(true, .release);
             while (!s.load(.acquire)) {
-                l.run(.once) catch return;
+                l.poll(.max) catch return;
             }
         }
     }.run, .{ &loop, &ready, &stop, &wake_done });

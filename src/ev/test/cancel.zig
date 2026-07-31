@@ -28,7 +28,7 @@ test "cancel: timer with loop.cancel()" {
     loop.cancel(&timer.c);
 
     var wall_timer = time.Stopwatch.start();
-    try loop.run(.until_done);
+    try loop.run();
     const elapsed_ms = wall_timer.read().toMilliseconds();
 
     try std.testing.expectEqual(.dead, timer.c.loadState().phase);
@@ -48,7 +48,7 @@ test "cancel: double cancel is idempotent" {
     loop.cancel(&timer.c);
     loop.cancel(&timer.c);
 
-    try loop.run(.until_done);
+    try loop.run();
     try std.testing.expectError(error.Canceled, timer.getResult());
 }
 
@@ -61,7 +61,7 @@ test "cancel: cancel completed operation is no-op" {
     loop.add(&timer.c);
 
     // Wait for timer to complete
-    try loop.run(.until_done);
+    try loop.run();
     try std.testing.expectEqual(.dead, timer.c.loadState().phase);
     try timer.getResult();
 
@@ -82,7 +82,7 @@ test "cancel: cancel not-started operation marks for cancel on add" {
 
     // Now add - should immediately fail with Canceled
     loop.add(&timer.c);
-    try loop.run(.until_done);
+    try loop.run();
     try std.testing.expectError(error.Canceled, timer.getResult());
 }
 
@@ -96,7 +96,7 @@ test "cancel: async handle with loop.cancel()" {
 
     loop.cancel(&async_handle.c);
 
-    try loop.run(.until_done);
+    try loop.run();
 
     try std.testing.expectEqual(.dead, async_handle.c.loadState().phase);
     try std.testing.expectError(error.Canceled, async_handle.getResult());
@@ -110,7 +110,7 @@ test "cancel: net_accept with loop.cancel()" {
     // Create and bind server socket
     var server_open: NetOpen = .init(.ipv4, .stream, .ip, .{ .nonblocking = true });
     loop.add(&server_open.c);
-    try loop.run(.until_done);
+    try loop.run();
     const server_sock = try server_open.getResult();
 
     var addr = net.sockaddr.in{
@@ -122,26 +122,26 @@ test "cancel: net_accept with loop.cancel()" {
     var addr_len: net.socklen_t = @sizeOf(@TypeOf(addr));
     var server_bind: NetBind = .init(server_sock, @ptrCast(&addr), &addr_len);
     loop.add(&server_bind.c);
-    try loop.run(.until_done);
+    try loop.run();
     try server_bind.getResult();
 
     // Listen
     var server_listen: NetListen = .init(server_sock, 1);
     loop.add(&server_listen.c);
-    try loop.run(.until_done);
+    try loop.run();
     try server_listen.getResult();
 
     // Start accept
     var accept_comp: NetAccept = .init(server_sock, null, null);
     loop.add(&accept_comp.c);
 
-    try loop.run(.no_wait);
+    try loop.poll(.zero);
     try std.testing.expectEqual(.running, accept_comp.c.loadState().phase);
 
     // Cancel with loop.cancel()
     loop.cancel(&accept_comp.c);
 
-    try loop.run(.until_done);
+    try loop.run();
 
     try std.testing.expectEqual(.dead, accept_comp.c.loadState().phase);
     try std.testing.expectError(error.Canceled, accept_comp.getResult());
@@ -149,7 +149,7 @@ test "cancel: net_accept with loop.cancel()" {
     // Close server socket
     var close_server: NetClose = .init(server_sock);
     loop.add(&close_server.c);
-    try loop.run(.until_done);
+    try loop.run();
 }
 
 test "cancel: net_recv with loop.cancel()" {
@@ -160,7 +160,7 @@ test "cancel: net_recv with loop.cancel()" {
     // Create socket pair
     var server_open: NetOpen = .init(.ipv4, .stream, .ip, .{ .nonblocking = true });
     loop.add(&server_open.c);
-    try loop.run(.until_done);
+    try loop.run();
     const server_sock = try server_open.getResult();
 
     var addr = net.sockaddr.in{
@@ -172,12 +172,12 @@ test "cancel: net_recv with loop.cancel()" {
     var addr_len: net.socklen_t = @sizeOf(@TypeOf(addr));
     var server_bind: NetBind = .init(server_sock, @ptrCast(&addr), &addr_len);
     loop.add(&server_bind.c);
-    try loop.run(.until_done);
+    try loop.run();
     try server_bind.getResult();
 
     var server_listen: NetListen = .init(server_sock, 1);
     loop.add(&server_listen.c);
-    try loop.run(.until_done);
+    try loop.run();
     try server_listen.getResult();
 
     // Get bound address
@@ -186,7 +186,7 @@ test "cancel: net_recv with loop.cancel()" {
     // Connect client
     var client_open: NetOpen = .init(.ipv4, .stream, .ip, .{ .nonblocking = true });
     loop.add(&client_open.c);
-    try loop.run(.until_done);
+    try loop.run();
     const client_sock = try client_open.getResult();
 
     var client_conn = ev.NetConnect.init(client_sock, @ptrCast(&addr), addr_len);
@@ -196,7 +196,7 @@ test "cancel: net_recv with loop.cancel()" {
     var accept: NetAccept = .init(server_sock, null, null);
     loop.add(&accept.c);
 
-    try loop.run(.until_done);
+    try loop.run();
     try client_conn.getResult();
     const accepted_sock = try accept.getResult();
 
@@ -206,13 +206,13 @@ test "cancel: net_recv with loop.cancel()" {
     var recv: NetRecv = .init(accepted_sock, .fromSlice(&buf, &read_iov), .{});
     loop.add(&recv.c);
 
-    try loop.run(.no_wait);
+    try loop.poll(.zero);
     try std.testing.expectEqual(.running, recv.c.loadState().phase);
 
     // Cancel with loop.cancel()
     loop.cancel(&recv.c);
 
-    try loop.run(.until_done);
+    try loop.run();
 
     try std.testing.expectEqual(.dead, recv.c.loadState().phase);
     try std.testing.expectError(error.Canceled, recv.getResult());
@@ -224,7 +224,7 @@ test "cancel: net_recv with loop.cancel()" {
     loop.add(&close1.c);
     loop.add(&close2.c);
     loop.add(&close3.c);
-    try loop.run(.until_done);
+    try loop.run();
 }
 
 test "cancel: cancel_requested flag is set on completion" {
@@ -241,7 +241,7 @@ test "cancel: cancel_requested flag is set on completion" {
 
     try std.testing.expect(timer.c.loadState().cancel_requested);
 
-    try loop.run(.until_done);
+    try loop.run();
 }
 
 test "cancel: callback is invoked on canceled operation" {
@@ -268,7 +268,7 @@ test "cancel: callback is invoked on canceled operation" {
     loop.add(&timer.c);
 
     loop.cancel(&timer.c);
-    try loop.run(.until_done);
+    try loop.run();
 
     try std.testing.expect(ctx.called);
     try std.testing.expect(ctx.was_canceled);
@@ -285,7 +285,7 @@ test "cancel: race - operation completes before cancel" {
     loop.add(&timer.c);
 
     // Wait for it to complete
-    try loop.run(.until_done);
+    try loop.run();
     try std.testing.expectEqual(.dead, timer.c.loadState().phase);
     try timer.getResult(); // Should succeed
 
@@ -309,7 +309,7 @@ test "cancel: multiple timers, cancel one" {
     // Cancel middle timer
     loop.cancel(&timer2.c);
 
-    try loop.run(.until_done);
+    try loop.run();
 
     // timer1 and timer3 should complete normally
     try timer1.getResult();
@@ -348,7 +348,7 @@ test "cancel: work after completion is no-op" {
     loop.add(&work.c);
 
     // Wait for work to complete
-    try loop.run(.until_done);
+    try loop.run();
     try std.testing.expectEqual(.dead, work.c.loadState().phase);
     try work.getResult();
     try std.testing.expect(test_fn.called);
@@ -418,7 +418,7 @@ test "cancel: work before run" {
     // Unblock the first work so the loop can complete
     blocker_event.set();
 
-    try loop.run(.until_done);
+    try loop.run();
 
     try std.testing.expectEqual(.dead, work.c.loadState().phase);
     try std.testing.expectError(error.Canceled, work.getResult());
@@ -487,7 +487,7 @@ test "cancel: work double cancel is idempotent" {
     // Unblock the first work so the loop can complete
     blocker_event.set();
 
-    try loop.run(.until_done);
+    try loop.run();
     try std.testing.expectError(error.Canceled, work.getResult());
     try std.testing.expect(!test_fn.called);
 }
@@ -593,7 +593,7 @@ test "cancel: cross-thread cancellation" {
     // Run loop1 until completion (should be cancelled quickly)
     var wall_timer = time.Stopwatch.start();
     while (!completed.load(.acquire)) {
-        try loop1.run(.once);
+        try loop1.poll(.max);
         if (wall_timer.read().toSeconds() > 1) {
             return error.TestTimeout;
         }
