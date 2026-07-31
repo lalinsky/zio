@@ -2759,6 +2759,11 @@ test "io: processSetCurrentPath and processSetCurrentDir move the working direct
     var original_buf: [std.fs.max_path_bytes]u8 = undefined;
     const original = original_buf[0..try std.process.currentPath(io, &original_buf)];
 
+    // A previous run may have leaked the directory: the deferred cleanup below
+    // swallows errors, and on Windows CI a just-used directory can transiently
+    // resist deletion (e.g. an external scanner holds it open). Start from a
+    // clean slate so the test self-heals instead of failing on PathAlreadyExists.
+    dir.deleteDir(io, sub_path) catch {};
     try dir.createDir(io, sub_path, .default_dir);
     defer dir.deleteDir(io, sub_path) catch {};
 
