@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- When an executor with queued work wakes an idle one to help, the wake now carries a
+  hint saying whose queue is loaded, and the woken executor starts stealing there
+  instead of probing executors in random order. The work itself stays in the waker's
+  queue until it is actually stolen, so a task the waker gets to promptly still runs
+  where it was woken. This mainly speeds up fan-out patterns (one task waking many)
+  on multi-threaded runtimes.
+
 - Multi-threaded runtimes no longer steal work the moment an executor runs out of local
   tasks. A freshly idle executor now gives its own event loop a short grace window first
   (a non-blocking probe, then a park capped at 100us), since completions usually re-ready
