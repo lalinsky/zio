@@ -642,6 +642,13 @@ pub const Executor = struct {
                 self.processCleanup();
             }
 
+            // Quanta spent this cycle mean tasks ran here, which re-arms the
+            // doze grace window (see parkAndSearch). Same bookkeeping family
+            // as the tick budget, but consulted here rather than in the
+            // retune below: the park decision runs between the two, and it
+            // must see the fresh value.
+            if (self.tick_task_count > 0) self.dozed = false;
+
             // Exit if loop is stopped
             if (self.loop.stopped()) {
                 if (mode == .until_stopped) {
@@ -652,7 +659,6 @@ pub const Executor = struct {
 
             const has_work = self.checkLocalWork(check_ready);
             if (has_work) {
-                self.dozed = false;
                 try self.loop.poll(.zero);
             } else {
                 try self.parkAndSearch(check_ready);
