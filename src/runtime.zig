@@ -340,6 +340,8 @@ pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
 pub const Executor = struct {
     pub const max_executors = std.math.maxInt(ExecutorId) + 1;
 
+    const no_steal_hint = std.math.maxInt(u32);
+
     id: ExecutorId,
     loop: ev.Loop,
 
@@ -397,6 +399,14 @@ pub const Executor = struct {
     // park, see parkAndSearch) since it last had local work. Reset by any
     // local work; while set, empty passes go straight to the full park.
     dozed: bool = false,
+
+    // Where the pusher that elected this executor as searcher has surplus
+    // work (armSearcher writes it just before the wake; stealWork consumes
+    // it). The elected searcher starts its victim scan there instead of at a
+    // random executor, turning the wake into an invitation with directions:
+    // the work stays in the pusher's ring, and the usual wake-to-pop race
+    // still decides whether it migrates at all. `no_steal_hint` means none.
+    steal_hint: std.atomic.Value(u32) = .init(no_steal_hint),
 
     // Deferred cleanup for the task that just yielded away from this executor.
     // Processed by the next coroutine to run (at landing sites: startFn, yield resume, run loop).
@@ -807,7 +817,7 @@ pub const Executor = struct {
                 self.run_queue.refill(batch);
                 if (!self.run_queue.isEmpty()) {
                     _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
-                    if (!self.run_queue.overflow.isEmpty()) self.runtime.armSearcher();
+                    if (!self.run_queue.overflow.isEmpty()) self.runtime.armSearcher(null);
                     return;
                 }
             }
@@ -823,7 +833,7 @@ pub const Executor = struct {
             if (self.stealWork()) return;
             // No main-ready here: only queued (stealable) work justifies
             // arming a fresh searcher.
-            if (self.checkLocalWork(false)) self.runtime.armSearcher();
+            if (self.checkLocalWork(false)) self.runtime.armSearcher(self.id);
         }
     }
 
@@ -864,7 +874,14 @@ pub const Executor = struct {
         const executors = self.runtime.executors.items;
         if (executors.len <= 1) return false;
 
-        const start = self.steal_prng.random().uintLessThan(usize, executors.len);
+        // A pending hint from the electing pusher points at the loaded ring;
+        // start the scan there and fall back to the circular sweep, so a
+        // stale hint degrades to exactly the old behavior.
+        const hinted = self.steal_hint.swap(no_steal_hint, .acquire);
+        const start = if (hinted != no_steal_hint and hinted < executors.len)
+            hinted
+        else
+            self.steal_prng.random().uintLessThan(usize, executors.len);
         for (0..executors.len) |i| {
             const victim = executors[(start + i) % executors.len];
             if (victim == self) continue;
@@ -875,7 +892,9 @@ pub const Executor = struct {
 
             if (self.run_queue.steal(&victim.run_queue)) |node| {
                 _ = self.run_queue.push(node);
-                self.runtime.armSearcher();
+                // Propagation: the rest of the loaded ring is still at the
+                // victim; point the next searcher straight at it.
+                self.runtime.armSearcher(victim.id);
                 return true;
             }
         }
@@ -924,7 +943,7 @@ pub const Executor = struct {
         if (self.shed_quota > 0) {
             self.shed_quota -= 1;
             self.run_queue.overflow.push(&task.awaitable.wait_node);
-            self.runtime.armSearcher();
+            self.runtime.armSearcher(null);
             return;
         }
 
@@ -936,7 +955,7 @@ pub const Executor = struct {
         // still announce, since the waker may keep the executor busy.
         const was_empty = self.run_queue.push(&task.awaitable.wait_node);
         if (!was_empty or self.current_task != null) {
-            self.runtime.armSearcher();
+            self.runtime.armSearcher(self.id);
         }
     }
 
@@ -949,7 +968,7 @@ pub const Executor = struct {
 
         self.run_queue.overflow.push(&task.awaitable.wait_node);
         self.loop.wake();
-        self.runtime.armSearcher();
+        self.runtime.armSearcher(null);
     }
 
     /// Schedule a task for execution.
@@ -1509,7 +1528,7 @@ pub const Runtime = struct {
         return zio_options.task_migration and self.options.enable_task_migration and self.executors_stealable.load(.acquire);
     }
 
-    fn armSearcher(self: *Runtime) void {
+    fn armSearcher(self: *Runtime, hint: ?ExecutorId) void {
         // The two early-return loads pair with the parker: an executor sets its
         // idle bit (seq_cst RMW) and only then makes its final work check, while
         // a pusher publishes the task and only then reads idle_mask/searchers
@@ -1528,7 +1547,11 @@ pub const Runtime = struct {
             const bit = @as(usize, 1) << id;
             const previous_mask = self.idle_mask.fetchAnd(~bit, .acq_rel);
             if (previous_mask & bit != 0) {
-                self.executors.items[id].loop.wake();
+                const target = self.executors.items[id];
+                // Deliver (or clear) the hint before the wake; the wake edge
+                // publishes it. Exclusive: only the bit winner writes.
+                target.steal_hint.store(hint orelse Executor.no_steal_hint, .release);
+                target.loop.wake();
                 return;
             }
             candidates &= ~bit;

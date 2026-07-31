@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- When an executor with queued work wakes an idle one to help, the wake now carries a
+  hint saying whose queue is loaded, and the woken executor starts stealing there
+  instead of probing executors in random order. The work itself stays in the waker's
+  queue until it is actually stolen, so a task the waker gets to promptly still runs
+  where it was woken. This mainly speeds up fan-out patterns (one task waking many)
+  on multi-threaded runtimes.
+
 - **BREAKING**: Reworked coroutine stack allocation. On 64-bit POSIX targets, stacks
   are now carved from larger slab reservations (one syscall per cold stack instead of
   three, and no syscalls at all to release and reuse one), which sped up workloads
