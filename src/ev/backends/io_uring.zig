@@ -926,6 +926,11 @@ fn netSendFileIssue(self: *Self, c: *Completion) void {
             sqe.rw_flags = SPLICE_F_MOVE;
         },
         .to_socket => {
+            // splice has no MSG_NOSIGNAL equivalent, but a broken peer is
+            // safe here: the op runs in an io-wq worker, which does not
+            // deliver SIGPIPE to the process — the CQE carries -EPIPE
+            // instead (verified empirically; a *synchronous* splice to the
+            // same socket does raise SIGPIPE).
             sqe.prep_splice(data.internal.pipe_fds[0], splice_no_offset, data.handle, splice_no_offset, data.internal.in_pipe);
             // MORE (the MSG_MORE analog) batches segments while further chunks
             // are known to follow; it must be off for the final drain so the
@@ -943,6 +948,18 @@ fn netSendFileIssue(self: *Self, c: *Completion) void {
 fn netSendFileAdvance(self: *Self, state: *LoopState, c: *Completion, res: i32) void {
     const data = c.cast(NetSendFile);
 
+    // A cancel request can land between steps, and the kernel cancel only
+    // catches the SQE that was in flight when it was submitted — checked
+    // before issuing ANY further SQE (including the -EAGAIN poll bridge below:
+    // a cancel whose target CQE was already generated spends itself on
+    // -ENOENT, and a poll armed after that would never be canceled, hanging
+    // the op on a stalled socket forever).
+    if (c.loadState().cancel_requested) {
+        self.storeResult(c, -@as(i32, @intFromEnum(linux.E.CANCELED)));
+        state.markCompletedFromBackend(c);
+        return;
+    }
+
     if (res < 0) {
         const errno: linux.E = @enumFromInt(-res);
         if (errno == .AGAIN and !data.internal.polling) {
@@ -951,16 +968,6 @@ fn netSendFileAdvance(self: *Self, state: *LoopState, c: *Completion, res: i32) 
             return;
         }
         self.storeResult(c, res);
-        state.markCompletedFromBackend(c);
-        return;
-    }
-
-    // A cancel request can land between steps, and the kernel cancel only
-    // catches the SQE that was in flight when it was submitted — check here so
-    // the chain stops instead of running the whole transfer under a canceled
-    // op that will never get an -ECANCELED CQE.
-    if (c.loadState().cancel_requested) {
-        self.storeResult(c, -@as(i32, @intFromEnum(linux.E.CANCELED)));
         state.markCompletedFromBackend(c);
         return;
     }
