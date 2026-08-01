@@ -492,7 +492,7 @@ const FutexOpenBSD = struct {
         _ = sys.futex(
             &ptr.raw,
             sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
-            @intCast(expected),
+            @bitCast(expected),
             null,
             null,
         );
@@ -504,7 +504,7 @@ const FutexOpenBSD = struct {
         const rc = sys.futex(
             &ptr.raw,
             sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
-            @intCast(expected),
+            @bitCast(expected),
             &timeout_ts,
             null,
         );
@@ -539,7 +539,7 @@ const FutexNetBSD = struct {
         _ = sys.futex(
             &ptr.raw,
             sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
-            @intCast(expected),
+            @bitCast(expected),
             null,
             null,
             0,
@@ -553,7 +553,7 @@ const FutexNetBSD = struct {
         const rc = sys.futex(
             &ptr.raw,
             sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
-            @intCast(expected),
+            @bitCast(expected),
             &timeout_ts,
             null,
             0,
@@ -591,7 +591,7 @@ const FutexDragonFly = struct {
     pub fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
         _ = sys.umtx_sleep(
             &ptr.raw,
-            @intCast(expected),
+            @bitCast(expected),
             0, // 0 means infinite wait
         );
     }
@@ -602,7 +602,7 @@ const FutexDragonFly = struct {
 
         const rc = sys.umtx_sleep(
             &ptr.raw,
-            @intCast(expected),
+            @bitCast(expected),
             timeout_us,
         );
 
@@ -1320,6 +1320,11 @@ test "Futex - timedWait times out and sees changed values" {
     // Value already changed: the wait must return immediately, not block.
     word.store(1, .release);
     try Futex.timedWait(&word, 0, Duration.fromMilliseconds(1000));
+
+    // The high bit must survive the trip into the platform call: expected
+    // values are raw 32-bit words, not small integers.
+    word.store(0x8000_0000, .release);
+    try std.testing.expectError(error.Timeout, Futex.timedWait(&word, 0x8000_0000, Duration.fromMilliseconds(10)));
 }
 
 test "Notify - basic signal and wait" {

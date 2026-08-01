@@ -5,7 +5,9 @@ const std = @import("std");
 
 /// NetBSD specific system calls and definitions
 
-// Native futex, Linux-compatible semantics (sys/futex.h, NetBSD >= 9).
+// Native futex, Linux-compatible semantics (sys/futex.h, NetBSD >= 10;
+// NetBSD 9 leaves syscall 166 unimplemented, and Zig's minimum supported
+// NetBSD is 10.1).
 // FUTEX_WAIT blocks while *uaddr == val with a relative timeout (ETIMEDOUT on
 // expiry, EAGAIN when the value already changed); FUTEX_WAKE wakes up to val
 // waiters. libc ships no ___futex stub, so the call goes through the generic
