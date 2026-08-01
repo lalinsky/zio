@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Added scheduler event counters, readable as a summed snapshot via
+  `Runtime.schedulerMetrics()`: parks (doze and full), searcher elections, steal
+  attempts/hits and hint hits, dispatched-wake batches and their sizes, batched wake
+  claims, and load-shed wakes. Compiled in by default (each event is one plain
+  increment on an executor-local counter); `-Dscheduler-metrics=false` strips them.
+
 - When an executor with queued work wakes an idle one to help, the wake now carries a
   hint saying whose queue is loaded, and the woken executor starts stealing there
   instead of probing executors in random order. The work itself stays in the waker's
