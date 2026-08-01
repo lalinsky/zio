@@ -352,7 +352,13 @@ pub const LoopState = struct {
         // invoked here. `completion` was just popped from `completions`, so its
         // queue link is free to reuse. Rearm/group completions fall through and
         // run inline, since their machinery must stay synchronous.
-        if (self.loop.do_not_call_callbacks and !was_rearm and owner_callback == null) {
+        //
+        // A null callback opts a single completion into the same delivery: it
+        // is handed out through `nextDispatched` instead of being invoked.
+        // This is how the runtime's task wakes travel — the executor drains
+        // them after each poll and wakes the whole batch at once, instead of
+        // one announce per completion (see Executor.drainDispatched).
+        if ((self.loop.do_not_call_callbacks or completion.callback == null) and !was_rearm and owner_callback == null) {
             self.dispatched.push(completion);
             return;
         }
@@ -565,8 +571,11 @@ pub const Loop = struct {
     }
 
     /// Pop the next finished standalone completion awaiting user-callback
-    /// dispatch (only populated when created with `do_not_call_callbacks`).
-    /// Returns null when drained; the caller invokes `completion.call(loop)`.
+    /// dispatch: every finished completion when the loop was created with
+    /// `do_not_call_callbacks`, and completions with a null callback always.
+    /// Returns null when drained; the caller invokes `completion.call(loop)`
+    /// (or interprets the completion itself, as the runtime does for task
+    /// wakes).
     pub fn nextDispatched(self: *Loop) ?*Completion {
         return self.state.dispatched.pop();
     }
