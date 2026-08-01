@@ -8,7 +8,7 @@ All notable changes to this project will be documented in this file.
   `Runtime.schedulerMetrics()`: parks (doze and full), searcher elections, steal
   attempts/hits and hint hits, dispatched-wake batches and their sizes, batched wake
   claims, and load-shed wakes. Compiled in by default (each event is one plain
-  increment on an executor-local counter); `-Dscheduler-metrics=false` strips them.
+  increment on an executor-local counter); `-Dscheduler_metrics=false` strips them.
   The new `metrics_log_interval` runtime option starts a monitor thread that logs
   the counters' per-interval deltas at that cadence; being its own thread, it keeps
   reporting even when every executor is busy or parked.

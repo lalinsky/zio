@@ -24,7 +24,7 @@ pub fn build(b: *std.Build) void {
 
     const task_migration = b.option(bool, "task-migration", "Compile in task migration / work-stealing support. When false, tasks are pinned to their home executor and the scheduler can drop the machinery it needs (default true)") orelse true;
 
-    const scheduler_metrics = b.option(bool, "scheduler-metrics", "Count scheduler events (parks, steals, wake batches) in per-executor counters readable via Runtime.schedulerMetrics (default true; the counters sit on executor-local paths and cost one plain increment per event)") orelse true;
+    const scheduler_metrics = b.option(bool, "scheduler_metrics", "Count scheduler events (parks, steals, wake batches) in per-executor counters readable via Runtime.schedulerMetrics (default true; the counters sit on executor-local paths and cost one plain increment per event)") orelse true;
 
     // Create options for backend selection
     var options = b.addOptions();
