@@ -57,13 +57,17 @@ pub const Config = struct {
 
     /// How often the pool re-evaluates its size against recent demand.
     ///
-    /// The pool tracks a demand watermark: the peak number of stacks
-    /// simultaneously in use since the previous evaluation (but never below
-    /// `prewarm`). On each evaluation, free capacity beyond that watermark is
-    /// returned to the OS: whole slabs whose every slot is unused are
-    /// unmapped first, then individually mapped stacks, oldest first.
-    /// Between evaluations, releasing and reusing stacks never makes a
-    /// syscall. `.zero` disables shrinking entirely; the pool then holds its
+    /// The pool keeps a retain target that follows demand with a decay
+    /// curve: every interval it becomes the larger of the peak number of
+    /// stacks simultaneously in use since the previous evaluation and half
+    /// of the previous target (but never below `prewarm`). Free capacity
+    /// beyond the target is returned to the OS: whole slabs whose every
+    /// slot is unused are unmapped first (a bounded number per pass), then
+    /// individually mapped stacks, oldest first. A burst therefore
+    /// re-inflates the target instantly, while its capacity drains with a
+    /// half-life of one interval instead of falling off a cliff. Between
+    /// evaluations, releasing and reusing stacks never makes a syscall.
+    /// `.zero` disables shrinking entirely; the pool then holds its
     /// high-water mark until deinit.
     shrink_interval: Duration = .fromSeconds(60),
 
@@ -89,10 +93,12 @@ pub const StackPool = struct {
     slot_size: usize,
     /// Stacks currently acquired (both kinds).
     in_use: usize,
-    /// Peak of `in_use` since the last shrink evaluation: the demand
-    /// watermark that decides how much free capacity the next evaluation
-    /// keeps.
+    /// Peak of `in_use` since the last shrink evaluation.
     epoch_peak: usize,
+    /// The decayed demand watermark: how much total capacity the shrink
+    /// pass keeps. Ratchets up to every epoch's peak instantly and halves
+    /// per interval on the way down (see Config.shrink_interval).
+    retain_target: usize,
     last_shrink: Timestamp,
 
     pub fn init(config: Config) StackPool {
@@ -109,6 +115,7 @@ pub const StackPool = struct {
             .slot_size = @max(aligned_max + stack.page_size, stack.page_size * 2),
             .in_use = 0,
             .epoch_peak = 0,
+            .retain_target = 0,
             .last_shrink = .zero,
         };
     }
@@ -245,11 +252,12 @@ pub const StackPool = struct {
         self.mutex.unlock();
     }
 
-    /// Bound on individually mapped stacks freed per shrink pass, so a pass
-    /// after a large burst does not stall an executor on thousands of
-    /// munmaps. Whole-slab frees are not bounded; there are few slabs and
-    /// each unmap retires many slots at once.
+    /// Bounds on work per shrink pass, so a pass after a large burst does
+    /// not stall an executor's timer callback on hundreds of munmaps. The
+    /// decay curve already spreads reclamation over multiple intervals;
+    /// these bound the worst single pass.
     const max_stack_frees_per_shrink = 64;
+    const max_slab_frees_per_shrink = 16;
 
     /// Periodic shrink pass: rate-limited to `shrink_interval` internally,
     /// so any executor's timer may drive it. Frees the committed capacity
@@ -272,29 +280,38 @@ pub const StackPool = struct {
             }
             self.last_shrink = now;
 
-            const floor = @max(self.epoch_peak, if (slab_enabled) self.config.prewarm else 0);
+            // Decay curve: ratchet up to this epoch's peak immediately, halve
+            // per interval on the way down, never below the prewarm floor. A
+            // burst's capacity drains with a half-life of one interval
+            // instead of vanishing the moment one quiet epoch passes.
+            self.retain_target = @max(
+                @max(self.epoch_peak, self.retain_target / 2),
+                if (slab_enabled) self.config.prewarm else 0,
+            );
             self.epoch_peak = self.in_use;
 
             // Committed capacity = live stacks + everything parked on free
-            // lists. Anything beyond the watermark is up for release.
+            // lists. Anything beyond the retain target is up for release.
             var free_capacity: usize = self.pool_size;
             var slab = self.slabs;
             while (slab) |s| : (slab = s.next) {
                 free_capacity += s.carved - s.in_use;
             }
-            var excess = (self.in_use + free_capacity) -| floor;
+            var excess = (self.in_use + free_capacity) -| self.retain_target;
 
             // Unmap empty slabs first: one syscall retires a whole arena.
             // Strictly within the excess, so capacity never dips below the
-            // watermark (a mostly-empty slab bigger than the excess stays).
+            // target (a mostly-empty slab bigger than the excess stays).
             if (slab_enabled) {
+                var freed_slabs: usize = 0;
                 var prev: ?*Slab = null;
                 var cur = self.slabs;
                 while (cur) |s| {
                     const next = s.next;
-                    if (s.in_use == 0 and s.carved <= excess) {
+                    if (s.in_use == 0 and s.carved <= excess and freed_slabs < max_slab_frees_per_shrink) {
                         if (prev) |p| p.next = next else self.slabs = next;
                         excess -= s.carved;
+                        freed_slabs += 1;
                         s.next = slabs_to_free;
                         slabs_to_free = s;
                     } else {
@@ -516,14 +533,28 @@ test "StackPool slab: shrink unmaps empty slabs beyond the watermark" {
     try std.testing.expect(pool.slabs != null);
     try std.testing.expect(pool.slabs.?.next != null);
 
-    // Second pass: peak has decayed to the current demand (zero), so every
-    // empty slab goes back to the OS.
+    // Second pass: the retain target halves, which releases the small
+    // second slab but keeps the full one (its carved count exceeds the
+    // excess) - the decay curve, not a cliff.
     pool.shrink(.fromSeconds(20));
-    try std.testing.expect(pool.slabs == null);
+    try std.testing.expect(pool.slabs != null);
+    try std.testing.expect(pool.slabs.?.next == null);
 
-    // A pass inside the rate-limit window is a no-op even with demand at
-    // zero (nothing left to free here, but the guard must hold).
+    // A pass inside the rate-limit window is a no-op.
     pool.shrink(.fromSeconds(20));
+    try std.testing.expect(pool.slabs != null);
+
+    // With demand at zero the target halves each interval and reaches zero,
+    // at which point the last slab goes back to the OS too.
+    var t: u64 = 30;
+    var passes: usize = 0;
+    while (pool.slabs != null and passes < 16) : ({
+        t += 10;
+        passes += 1;
+    }) {
+        pool.shrink(.fromSeconds(t));
+    }
+    try std.testing.expect(pool.slabs == null);
 }
 
 test "StackPool slab: watermark keeps capacity for live stacks" {
@@ -602,9 +633,12 @@ test "StackPool fallback: shrink frees idle stacks beyond the watermark" {
     pool.release(stack3);
     try std.testing.expectEqual(3, pool.pool_size);
 
-    // Peak covers the burst on the first pass; decays on the second.
+    // Peak covers the burst on the first pass; then the target halves per
+    // interval (3 -> 1 -> 0), draining the pool over two more passes.
     pool.shrink(.fromSeconds(10));
     try std.testing.expectEqual(3, pool.pool_size);
     pool.shrink(.fromSeconds(20));
+    try std.testing.expectEqual(1, pool.pool_size);
+    pool.shrink(.fromSeconds(30));
     try std.testing.expectEqual(0, pool.pool_size);
 }
