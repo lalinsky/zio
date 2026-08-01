@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- **BREAKING**: Reworked coroutine stack allocation. On 64-bit POSIX targets, stacks
+  are now carved from larger slab reservations (one syscall per cold stack instead of
+  three, and no syscalls at all to release and reuse one), which sped up workloads
+  with many live coroutines: 10k concurrently sleeping tasks by ~25%, large fan-out
+  by ~10%. The pool's `max_unused_stacks` and `max_age` settings are gone, replaced
+  by a decaying demand watermark: a periodic pass returns capacity beyond the recent
+  peak usage to the OS, with a half-life of one `stack_pool.shrink_interval` (default
+  60s, `.zero` disables shrinking). The slots-per-slab count is a runtime option
+  (`stack_pool.slab_slots`, default 64; 0 restores the per-stack allocator), and the
+  new `stack_pool.prewarm` option commits that many slots at startup and floors the
+  watermark. (#436)
+
 - Multi-threaded runtimes no longer steal work the moment an executor runs out of local
   tasks. A freshly idle executor now gives its own event loop a short grace window first
   (a non-blocking probe, then a park capped at 100us), since completions usually re-ready
