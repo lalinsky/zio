@@ -11,9 +11,9 @@ All notable changes to this project will be documented in this file.
   by ~10%. The pool's `max_unused_stacks` and `max_age` settings are gone, replaced
   by a decaying demand watermark: a periodic pass returns capacity beyond the recent
   peak usage to the OS, with a half-life of one `stack_pool.shrink_interval` (default
-  60s, `.zero` disables shrinking). The slots-per-slab count is a build option
-  (`-Dstack-slab-slots`, 0 restores the per-stack allocator), and the new
-  `stack_pool.prewarm` option commits that many slots at startup and floors the
+  60s, `.zero` disables shrinking). The slots-per-slab count is a runtime option
+  (`stack_pool.slab_slots`, default 64; 0 restores the per-stack allocator), and the
+  new `stack_pool.prewarm` option commits that many slots at startup and floors the
   watermark. (#436)
 
 - Multi-threaded runtimes no longer steal work the moment an executor runs out of local

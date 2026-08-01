@@ -3,7 +3,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const zio_options = @import("zio_options");
 const stack = @import("stack.zig");
 const StackInfo = stack.StackInfo;
 const Timestamp = @import("../time.zig").Timestamp;
@@ -17,16 +16,13 @@ const FreeNode = struct {
     stack_info: StackInfo,
 };
 
-/// Number of stack slots carved from one slab reservation (build option
-/// `stack-slab-slots`; 0 disables slab allocation and every stack gets its
-/// own mapping as before).
-pub const slab_slots: usize = zio_options.stack_slab_slots;
-
-/// Slab allocation reserves slab_slots * (maximum_size + guard) of address
-/// space per slab, which is only affordable on 64-bit targets. Windows keeps
-/// RtlCreateUserStack (TEB integration), and OpenBSD requires MAP_STACK
-/// mappings that cannot start as PROT_NONE reservations.
-pub const slab_enabled = slab_slots > 0 and @sizeOf(usize) == 8 and switch (builtin.os.tag) {
+/// Whether this target can back stacks with slab reservations. Slabs reserve
+/// slab_slots * (maximum_size + guard) of address space each, which is only
+/// affordable on 64-bit targets. Windows keeps RtlCreateUserStack (TEB
+/// integration), and OpenBSD requires MAP_STACK mappings that cannot start
+/// as PROT_NONE reservations. Whether slabs are actually used is a runtime
+/// choice (Config.slab_slots).
+pub const slab_supported = @sizeOf(usize) == 8 and switch (builtin.os.tag) {
     .windows, .openbsd, .freestanding, .wasi => false,
     else => true,
 };
@@ -70,6 +66,11 @@ pub const Config = struct {
     /// `.zero` disables shrinking entirely; the pool then holds its
     /// high-water mark until deinit.
     shrink_interval: Duration = .fromSeconds(60),
+
+    /// Number of stack slots carved from one slab reservation. 0 disables
+    /// slab allocation and every stack gets its own mapping; ignored on
+    /// targets without slab support (see slab_supported).
+    slab_slots: usize = 64,
 
     /// Number of slab slots to carve and commit up front (at runtime init),
     /// so that a burst of early spawns skips the cold-allocation cost. Also
@@ -137,13 +138,15 @@ pub const StackPool = struct {
         self.pool_size = 0;
 
         // Free whole slab arenas; their FreeNodes and headers live inside.
-        var slab = self.slabs;
-        while (slab) |s| {
-            const next = s.next;
-            stack.slabFree(s.memory);
-            slab = next;
+        if (slab_supported) {
+            var slab = self.slabs;
+            while (slab) |s| {
+                const next = s.next;
+                stack.slabFree(s.memory);
+                slab = next;
+            }
+            self.slabs = null;
         }
-        self.slabs = null;
     }
 
     /// Acquires a stack from the pool, or allocates a new one if the pool is empty.
@@ -154,7 +157,7 @@ pub const StackPool = struct {
             self.mutex.lock();
             defer self.mutex.unlock();
 
-            if (slab_enabled) {
+            if (slab_supported) {
                 // Released slab slots first: still committed, still
                 // cache-warm, zero syscalls. First slab with a free slot
                 // wins, concentrating load near the head of the chain.
@@ -176,7 +179,7 @@ pub const StackPool = struct {
                 return stack_info;
             }
 
-            if (slab_enabled) {
+            if (slab_supported and self.config.slab_slots > 0) {
                 // Cold path: carve a fresh slot (one mprotect), creating a
                 // new slab if the current one is exhausted. Done under the
                 // lock — carving is rare and the bookkeeping needs it anyway.
@@ -214,7 +217,7 @@ pub const StackPool = struct {
 
         self.mutex.lock();
 
-        if (slab_enabled) {
+        if (slab_supported) {
             if (self.slabOfLocked(stack_info.allocation_ptr)) |slab| {
                 // Slab slots always commit at least one page, so the node fits.
                 std.debug.assert(node_addr >= stack_info.limit);
@@ -279,7 +282,7 @@ pub const StackPool = struct {
             // instead of vanishing the moment one quiet epoch passes.
             self.retain_target = @max(
                 @max(self.epoch_peak, self.retain_target / 2),
-                if (slab_enabled) self.config.prewarm else 0,
+                if (slab_supported) self.config.prewarm else 0,
             );
             self.epoch_peak = self.in_use;
 
@@ -305,7 +308,7 @@ pub const StackPool = struct {
             // Unmap empty slabs first: one syscall retires a whole arena.
             // Strictly within the excess, so capacity never dips below the
             // target (a mostly-empty slab bigger than the excess stays).
-            if (slab_enabled) {
+            if (slab_supported) {
                 var prev: ?*Slab = null;
                 var cur = self.slabs;
                 while (cur) |s| {
@@ -335,10 +338,12 @@ pub const StackPool = struct {
         }
 
         // Return memory to the OS outside the lock.
-        while (slabs_to_free) |s| {
-            const next = s.next;
-            stack.slabFree(s.memory);
-            slabs_to_free = next;
+        if (slab_supported) {
+            while (slabs_to_free) |s| {
+                const next = s.next;
+                stack.slabFree(s.memory);
+                slabs_to_free = next;
+            }
         }
         while (stacks_to_free) |node| {
             const next = node.next;
@@ -355,9 +360,9 @@ pub const StackPool = struct {
     fn carveSlotLocked(self: *StackPool) ?StackInfo {
         const slab = blk: {
             if (self.slabs) |s| {
-                if (s.carved < slab_slots) break :blk s;
+                if (s.carved < self.config.slab_slots) break :blk s;
             }
-            const len = stack.page_size + slab_slots * self.slot_size;
+            const len = stack.page_size + self.config.slab_slots * self.slot_size;
             const mem = stack.slabReserve(len) catch return null;
             const s: *Slab = @ptrCast(@alignCast(mem.ptr));
             s.* = .{ .next = self.slabs, .memory = mem, .carved = 0, .in_use = 0, .free = null };
@@ -391,7 +396,7 @@ pub const StackPool = struct {
     /// runtime init so that an early spawn burst finds warm slots instead of
     /// paying the cold-allocation cost inside the workload.
     pub fn prewarm(self: *StackPool) error{OutOfMemory}!void {
-        if (!slab_enabled) return;
+        if (!slab_supported or self.config.slab_slots == 0) return;
 
         var i: usize = 0;
         while (i < self.config.prewarm) : (i += 1) {
@@ -467,7 +472,7 @@ test "StackPool basic acquire and release" {
 }
 
 test "StackPool slab: carving spans slabs and slots are distinct" {
-    if (!slab_enabled) return error.SkipZigTest;
+    if (!slab_supported) return error.SkipZigTest;
 
     var pool = StackPool.init(.{
         .maximum_size = 256 * 1024,
@@ -476,7 +481,7 @@ test "StackPool slab: carving spans slabs and slots are distinct" {
     defer pool.deinit();
 
     // Acquire more slots than one slab holds to force a second slab.
-    const total = slab_slots + 2;
+    const total = pool.config.slab_slots + 2;
     const infos = try std.testing.allocator.alloc(StackInfo, total);
     defer std.testing.allocator.free(infos);
 
@@ -513,7 +518,7 @@ test "StackPool slab: carving spans slabs and slots are distinct" {
 }
 
 test "StackPool slab: shrink unmaps empty slabs beyond the watermark" {
-    if (!slab_enabled) return error.SkipZigTest;
+    if (!slab_supported) return error.SkipZigTest;
 
     var pool = StackPool.init(.{
         .maximum_size = 256 * 1024,
@@ -523,7 +528,7 @@ test "StackPool slab: shrink unmaps empty slabs beyond the watermark" {
     defer pool.deinit();
 
     // Two slabs' worth of concurrent stacks, then all released.
-    const total = slab_slots + 2;
+    const total = pool.config.slab_slots + 2;
     const infos = try std.testing.allocator.alloc(StackInfo, total);
     defer std.testing.allocator.free(infos);
     for (infos) |*info| info.* = try pool.acquire();
@@ -559,7 +564,7 @@ test "StackPool slab: shrink unmaps empty slabs beyond the watermark" {
 }
 
 test "StackPool slab: watermark keeps capacity for live stacks" {
-    if (!slab_enabled) return error.SkipZigTest;
+    if (!slab_supported) return error.SkipZigTest;
 
     var pool = StackPool.init(.{
         .maximum_size = 256 * 1024,
@@ -586,7 +591,7 @@ test "StackPool slab: watermark keeps capacity for live stacks" {
 }
 
 test "StackPool slab: prewarm fills the freelist and floors the watermark" {
-    if (!slab_enabled) return error.SkipZigTest;
+    if (!slab_supported) return error.SkipZigTest;
 
     var pool = StackPool.init(.{
         .maximum_size = 256 * 1024,
@@ -614,15 +619,13 @@ test "StackPool slab: prewarm fills the freelist and floors the watermark" {
 }
 
 test "StackPool fallback: shrink frees idle stacks beyond the watermark" {
-    // The individually-mapped path backs every stack when slabs are
-    // compiled out; with slabs enabled it only serves failure fallbacks, so
-    // exercise it directly here.
-    if (slab_enabled) return error.SkipZigTest;
-
+    // Disable slabs so the individually-mapped path backs every stack; on
+    // targets without slab support this is the only path anyway.
     var pool = StackPool.init(.{
         .maximum_size = 1024 * 1024,
         .committed_size = 64 * 1024,
         .shrink_interval = .fromSeconds(1),
+        .slab_slots = 0,
     });
     defer pool.deinit();
 
