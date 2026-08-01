@@ -202,13 +202,21 @@ test "timer on real clock fires (absolute deadline)" {
     // Absolute realtime deadline 100ms in the future. The deadline lives in the
     // realtime epoch (ns since 1970), so it must be compared against now(real),
     // not the monotonic clock.
-    const deadline = time.Timestamp.now(.real).addDuration(.fromMilliseconds(100));
+    const start = time.Timestamp.now(.real);
+    const deadline = start.addDuration(.fromMilliseconds(100));
     var timer: Timer = .initClock(.{ .deadline = deadline }, .real);
 
-    var wall_timer = time.Stopwatch.start();
     loop.add(&timer.c);
     try loop.run();
-    const elapsed = wall_timer.read();
+
+    // Measure elapsed on the realtime clock too, not a monotonic stopwatch: a
+    // realtime timer fires when the wall clock crosses the deadline, and the
+    // kernel re-evaluates it across clock steps. CI machines (macOS VMs
+    // especially) step the wall clock while tests run, which moves the firing
+    // moment in monotonic terms and made this test flaky; in the timer's own
+    // clock domain a step moves "now" and the crossing together, so the
+    // elapsed time stays ~100ms plus firing latency either way.
+    const elapsed = start.durationTo(time.Timestamp.now(.real));
 
     try std.testing.expectEqual(.dead, timer.c.loadState().phase);
     try std.testing.expect(elapsed.toMilliseconds() >= 90);
