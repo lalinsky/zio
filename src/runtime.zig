@@ -1478,6 +1478,8 @@ pub const Runtime = struct {
                 log.warn("metrics_log_interval set, but scheduler metrics are compiled out", .{});
             } else if (comptime builtin.single_threaded) {
                 log.warn("metrics_log_interval set, but a single-threaded build cannot start the monitor thread", .{});
+            } else if (comptime os.Futex == void) {
+                log.warn("metrics_log_interval set, but this target has no futex for the monitor thread", .{});
             } else {
                 self.metrics_monitor = try std.Thread.spawn(.{}, runMetricsMonitor, .{self});
             }
