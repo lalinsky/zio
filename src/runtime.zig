@@ -132,6 +132,14 @@ pub const RuntimeOptions = struct {
         .maximum_size = 8 * 1024 * 1024,
         .committed_size = 256 * 1024,
     },
+    /// When non-zero, a monitor thread logs the scheduler counters'
+    /// per-interval deltas at this cadence. A dedicated thread rather than
+    /// an executor timer, so it keeps reporting even when every executor is
+    /// wedged or asleep. Requires the counters compiled in (build option
+    /// `scheduler_metrics`) and a multi-threaded build; warns and stays off
+    /// otherwise.
+    metrics_log_interval: Duration = .zero,
+
     /// Total number of executors to run.
     /// When enable_main_executor is true (default), this includes the main executor on the calling thread.
     /// When enable_main_executor is false, all executors run as background worker threads.
@@ -336,6 +344,50 @@ pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
     return rt.executors.items[index % rt.executors.items.len];
 }
 
+/// Whether scheduler event counters are compiled in (build option
+/// `scheduler_metrics`).
+pub const metrics_enabled = zio_options.scheduler_metrics;
+
+/// Counts of scheduler events, kept per executor (plain increments on the
+/// owning thread) and summed by `Runtime.schedulerMetrics`. With
+/// `metrics_enabled` false the per-executor storage is zero-bit and the
+/// summed snapshot is all zeros.
+pub const SchedulerMetrics = struct {
+    /// Parks with the doze cap (the steal-free grace park).
+    parks_doze: u64 = 0,
+    /// Indefinite parks.
+    parks_full: u64 = 0,
+    /// Park exits where a pusher had claimed this executor's idle bit.
+    park_elections: u64 = 0,
+    /// stealWork scans that ran / that took work.
+    steal_attempts: u64 = 0,
+    steal_hits: u64 = 0,
+    /// Steals satisfied by the hinted victim on the first probe.
+    steal_hint_hits: u64 = 0,
+    /// Dispatched-queue drains that woke at least one task / tasks woken.
+    drain_batches: u64 = 0,
+    drain_woken: u64 = 0,
+    /// Sleepers woken by batched wake decisions.
+    batch_wake_claims: u64 = 0,
+    /// Wakes routed to the global queue by load shedding.
+    sheds: u64 = 0,
+
+    pub fn add(self: *SchedulerMetrics, other: SchedulerMetrics) void {
+        inline for (@typeInfo(SchedulerMetrics).@"struct".fields) |field| {
+            @field(self, field.name) += @field(other, field.name);
+        }
+    }
+
+    pub fn sub(self: *SchedulerMetrics, other: SchedulerMetrics) void {
+        inline for (@typeInfo(SchedulerMetrics).@"struct".fields) |field| {
+            @field(self, field.name) -= @field(other, field.name);
+        }
+    }
+};
+
+const MetricsStorage = if (metrics_enabled) SchedulerMetrics else void;
+const metrics_storage_init: MetricsStorage = if (metrics_enabled) .{} else {};
+
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
     pub const max_executors = std.math.maxInt(ExecutorId) + 1;
@@ -402,6 +454,9 @@ pub const Executor = struct {
     // park, see parkAndSearch) since it last had local work. Reset by any
     // local work; while set, empty passes go straight to the full park.
     dozed: bool = false,
+
+    // Scheduler event counters; written only by this executor's thread.
+    metrics: MetricsStorage = metrics_storage_init,
 
     // True while drainDispatched signals a batch of task wakes:
     // scheduleTaskLocal skips the per-push announce, the drain announces
@@ -549,6 +604,10 @@ pub const Executor = struct {
     }
 
     pub const YieldCancelMode = enum { allow_cancel, no_cancel };
+
+    inline fn bump(self: *Executor, comptime field: []const u8, n: u64) void {
+        if (comptime metrics_enabled) @field(self.metrics, field) += n;
+    }
 
     /// Aim to poll I/O roughly this often while running tasks back-to-back.
     const tick_target_ns = 100_000;
@@ -791,9 +850,11 @@ pub const Executor = struct {
                 try self.loop.poll(.zero);
                 self.drainDispatched();
                 if (self.checkLocalWork(check_ready)) return;
+                self.bump("parks_doze", 1);
                 return self.park(check_ready, doze_wait, .local_only);
             }
         }
+        self.bump("parks_full", 1);
         return self.park(check_ready, .max, .steal);
     }
 
@@ -835,6 +896,7 @@ pub const Executor = struct {
         const previous_bit = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel);
 
         if (previous_bit & my_bit == 0) {
+            self.bump("park_elections", 1);
             if (found_work or (check_ready and self.main_task.state.load(.acquire).tag == .ready) or !self.run_queue.isEmpty()) {
                 _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
                 return;
@@ -915,10 +977,12 @@ pub const Executor = struct {
         // the scan there. Stale hints are harmless: the circular sweep just
         // continues past them.
         const hinted = self.steal_hint.swap(no_steal_hint, .acquire);
-        const start = if (hinted != no_steal_hint and hinted < executors.len)
+        const hint_start = hinted != no_steal_hint and hinted < executors.len;
+        const start = if (hint_start)
             hinted
         else
             self.steal_prng.random().uintLessThan(usize, executors.len);
+        self.bump("steal_attempts", 1);
         for (0..executors.len) |i| {
             const victim = executors[(start + i) % executors.len];
             if (victim == self) continue;
@@ -929,6 +993,8 @@ pub const Executor = struct {
 
             if (self.run_queue.steal(&victim.run_queue)) |node| {
                 _ = self.run_queue.push(node);
+                self.bump("steal_hits", 1);
+                if (hint_start and i == 0) self.bump("steal_hint_hits", 1);
                 // The rest of the loaded ring is still at the victim; point
                 // the next searcher straight at it.
                 self.runtime.armSearcher(victim.id);
@@ -979,6 +1045,7 @@ pub const Executor = struct {
         // pull from it, and a shed task's I/O re-homes wherever it runs next.
         if (self.shed_quota > 0) {
             self.shed_quota -= 1;
+            self.bump("sheds", 1);
             self.run_queue.overflow.push(&task.awaitable.wait_node);
             self.runtime.armSearcher(null);
             return;
@@ -1024,7 +1091,10 @@ pub const Executor = struct {
         self.draining_wakes = false;
 
         if (count > 0) {
-            self.runtime.batchWakeSleepers(self.run_queue.len(), self.id);
+            self.bump("drain_batches", 1);
+            self.bump("drain_woken", count);
+            const claims = self.runtime.batchWakeSleepers(self.run_queue.len(), self.id);
+            self.bump("batch_wake_claims", claims);
         }
     }
 
@@ -1336,6 +1406,8 @@ pub const Runtime = struct {
     // so a worker cannot close its waker fds while a notifier is still using
     // them. See the wait in runWorker().
     teardown: os.ResetEvent = .init(),
+    metrics_monitor: ?std.Thread = null,
+    metrics_stop: std.atomic.Value(u32) = .init(0),
     own_self: bool = false,
 
     resolver: ?dns.Resolver = null,
@@ -1426,6 +1498,45 @@ pub const Runtime = struct {
             // false lets single-executor runtimes skip the steal machinery.
             if (num_workers > 0) self.executors_stealable.store(true, .release);
         }
+
+        if (options.metrics_log_interval.value > 0) {
+            if (comptime !metrics_enabled) {
+                log.warn("metrics_log_interval set, but scheduler metrics are compiled out", .{});
+            } else if (comptime builtin.single_threaded) {
+                log.warn("metrics_log_interval set, but a single-threaded build cannot start the monitor thread", .{});
+            } else if (comptime os.Futex == void) {
+                log.warn("metrics_log_interval set, but this target has no futex for the monitor thread", .{});
+            } else {
+                self.metrics_monitor = try std.Thread.spawn(.{}, runMetricsMonitor, .{self});
+            }
+        }
+    }
+
+    /// Logs scheduler counter deltas every metrics_log_interval until deinit
+    /// sets metrics_stop.
+    fn runMetricsMonitor(self: *Runtime) void {
+        const interval = self.options.metrics_log_interval;
+        var last: SchedulerMetrics = .{};
+        while (self.metrics_stop.load(.acquire) == 0) {
+            os.Futex.timedWait(&self.metrics_stop, 0, interval) catch {
+                const total = self.schedulerMetrics();
+                var delta = total;
+                delta.sub(last);
+                last = total;
+                log.info("scheduler: parks doze={d} full={d} elections={d} steals={d}/{d} hint_hits={d} drains={d} woken={d} batch_claims={d} sheds={d}", .{
+                    delta.parks_doze,
+                    delta.parks_full,
+                    delta.park_elections,
+                    delta.steal_hits,
+                    delta.steal_attempts,
+                    delta.steal_hint_hits,
+                    delta.drain_batches,
+                    delta.drain_woken,
+                    delta.batch_wake_claims,
+                    delta.sheds,
+                });
+            };
+        }
     }
 
     /// Stop worker executors and join threads. Used by deinit() and init() error path.
@@ -1456,6 +1567,15 @@ pub const Runtime = struct {
 
         // Set shutting_down flag to prevent new spawns
         self.shutting_down.store(true, .release);
+
+        // The monitor reads executor state, so it must go before any of the
+        // teardown below.
+        if (self.metrics_monitor) |monitor| {
+            self.metrics_stop.store(1, .release);
+            os.Futex.wake(&self.metrics_stop, .one);
+            monitor.join();
+            self.metrics_monitor = null;
+        }
 
         // Stop and join the thread pool first, while all executor loops are
         // still alive. Thread-pool completion callbacks wake the owning loop
@@ -1592,6 +1712,20 @@ pub const Runtime = struct {
         }
     }
 
+    /// Sum of all executors' scheduler event counters. The counters are
+    /// written without atomics by their owning threads, so this is an
+    /// approximate snapshot while executors are running; it is exact once
+    /// they are quiesced. All zeros when `metrics_enabled` is false.
+    pub fn schedulerMetrics(self: *Runtime) SchedulerMetrics {
+        var total: SchedulerMetrics = .{};
+        if (comptime metrics_enabled) {
+            for (self.executors.items) |executor| {
+                total.add(executor.metrics);
+            }
+        }
+        return total;
+    }
+
     /// Whether other executors can currently steal from this runtime's queues.
     pub inline fn stealingActive(self: *Runtime) bool {
         return zio_options.task_migration and self.options.enable_task_migration and self.executors_stealable.load(.acquire);
@@ -1648,16 +1782,20 @@ pub const Runtime = struct {
     ///
     /// A claimed searcher's park exit may release a token it never took;
     /// that lets one extra election through, it never loses a wake.
-    fn batchWakeSleepers(self: *Runtime, ready: usize, hint: ExecutorId) void {
-        if (!self.stealingActive() or ready < 2) return;
-        if (self.idle_mask.load(.seq_cst) == 0) return;
+    /// Returns the number of sleepers actually woken.
+    fn batchWakeSleepers(self: *Runtime, ready: usize, hint: ExecutorId) u64 {
+        if (!self.stealingActive() or ready < 2) return 0;
+        if (self.idle_mask.load(.seq_cst) == 0) return 0;
 
         var wakes: usize = 0;
         var covered: usize = 2; // wakes = ceil(log2(ready))
         while (covered < ready) : (covered *= 2) wakes += 1;
+        var woken: u64 = 0;
         while (wakes > 0) : (wakes -= 1) {
-            if (!self.claimAndWake(hint, hint)) return;
+            if (!self.claimAndWake(hint, hint)) break;
+            woken += 1;
         }
+        return woken;
     }
 
     // Convenience methods that operate on the current coroutine context
@@ -1717,6 +1855,49 @@ pub const Runtime = struct {
         return @import("io.zig").toRuntime(value);
     }
 };
+
+test "Runtime: scheduler metrics count parks and drained wakes" {
+    if (!metrics_enabled) return error.SkipZigTest;
+
+    const runtime = try Runtime.init(std.testing.allocator, .{
+        .executors = .exact(2),
+    });
+    defer runtime.deinit();
+
+    // An Async wait goes through waitForIo, so its wake is delivered through
+    // the dispatched queue whether it completes inline or after parking.
+    const waitForIo = @import("common.zig").waitForIo;
+    const Ctx = struct {
+        handle: ev.Async = ev.Async.init(),
+        fn wait(ctx: *@This()) void {
+            waitForIo(&ctx.handle.c) catch {};
+        }
+    };
+    var ctx: Ctx = .{};
+    var handle = try runtime.spawn(Ctx.wait, .{&ctx});
+    defer handle.cancel();
+
+    try runtime.sleep(.fromMilliseconds(1));
+    ctx.handle.notify();
+    handle.join();
+
+    const m = runtime.schedulerMetrics();
+    try std.testing.expect(m.drain_woken >= 1);
+    try std.testing.expect(m.drain_batches >= 1);
+    try std.testing.expect(m.parks_doze + m.parks_full >= 1);
+}
+
+test "Runtime: metrics monitor thread starts and stops" {
+    if (!metrics_enabled or builtin.single_threaded) return error.SkipZigTest;
+
+    const runtime = try Runtime.init(std.testing.allocator, .{
+        .metrics_log_interval = .fromMilliseconds(5),
+    });
+    defer runtime.deinit();
+
+    // Long enough for a couple of monitor reports.
+    try runtime.sleep(.fromMilliseconds(15));
+}
 
 test "runtime: spawnBlocking smoke test" {
     const runtime = try Runtime.init(std.testing.allocator, .{

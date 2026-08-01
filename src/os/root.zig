@@ -15,6 +15,7 @@ pub const syscall_cancel = @import("syscall_cancel.zig");
 pub const Mutex = thread.Mutex;
 pub const Condition = thread.Condition;
 pub const ResetEvent = thread.ResetEvent;
+pub const Futex = thread.Futex;
 
 /// Fill `buffer` with cryptographically secure random bytes from the OS.
 /// Blocking primitive (raw syscall on the calling thread).
