@@ -45,11 +45,14 @@ fn exitStatusToTerm(status: ev.ProcessWait.ExitStatus) std.process.Child.Term {
 fn terminateProcess(handle: ProcessHandle) void {
     if (builtin.os.tag == .windows) {
         _ = std.os.windows.ntdll.NtTerminateProcess(handle, @enumFromInt(1));
+    } else if (builtin.os.tag == .netbsd) {
+        // NetBSD 10 and older can discard a pending signal during execve
+        // (kern/58091). Retry after the exec window with an uncatchable signal.
+        _ = std.posix.system.kill(handle, .KILL);
+        os.time.sleep(.fromMilliseconds(10));
+        _ = std.posix.system.kill(handle, .KILL);
     } else {
-        // NetBSD 10 and older can discard a pending signal during execve,
-        // making an immediate SIGTERM after spawn unreliable (kern/58091).
-        const signal: std.posix.SIG = if (builtin.os.tag == .netbsd) .KILL else .TERM;
-        _ = std.posix.system.kill(handle, signal);
+        _ = std.posix.system.kill(handle, .TERM);
     }
 }
 
