@@ -330,13 +330,15 @@ pub const Waiter = struct {
 pub fn waitForIo(c: *ev.Completion) Cancelable!void {
     var waiter = Waiter.init();
     c.userdata = &waiter;
-    c.callback = Waiter.callback;
-    // The callback only wakes the parked task — nothing that needs the
-    // deferred-finish safety net, and the hot path skips the queue round trip.
+    // Null callback: the loop delivers the finished completion through its
+    // dispatched queue instead of calling anything, and the executor signals
+    // the waiter when it drains the queue after the poll — the whole poll's
+    // worth of task wakes becomes one batch with one wake decision, instead
+    // of an announce per completion (see Executor.drainDispatched).
+    c.callback = null;
     c.flags = .{ .defer_callback = false }; // single-shot wait: no rearm either
 
     defer if (std.debug.runtime_safety) {
-        c.callback = null;
         c.userdata = null;
     };
 
@@ -382,11 +384,10 @@ pub fn waitForIo(c: *ev.Completion) Cancelable!void {
 pub fn waitForIoUncancelable(c: *ev.Completion) void {
     var waiter = Waiter.init();
     c.userdata = &waiter;
-    c.callback = Waiter.callback;
+    c.callback = null; // batch-delivered via the dispatched queue, see waitForIo
     c.flags = .{ .defer_callback = false };
 
     defer if (std.debug.runtime_safety) {
-        c.callback = null;
         c.userdata = null;
     };
 
