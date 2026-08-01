@@ -34,7 +34,9 @@ pub const NetHandle = net.fd_t;
 const BackendCapabilities = @import("../completion.zig").BackendCapabilities;
 
 pub const capabilities: BackendCapabilities = .{
-    .process_wait = true,
+    // NetBSD cannot reliably attach EVFILT_PROC after a child exits
+    // (kern/60358). Use the blocking-pool waitpid path instead.
+    .process_wait = builtin.os.tag != .netbsd,
     // Only Darwin has usable absolute wall-clock EVFILT_TIMER semantics
     // (NOTE_ABSOLUTE = gettimeofday, NOTE_MACH_CONTINUOUS_TIME = suspend-aware).
     // The BSDs' EVFILT_TIMER absolute clock is monotonic-only and underspecified
