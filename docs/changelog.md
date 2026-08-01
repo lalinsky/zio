@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Load shedding no longer oscillates on evenly loaded runtimes. The imbalance
+  threshold now scales with the load average (12.5% over it, at least 2), and
+  shedding is evaluated every few milliseconds instead of every scheduler tick, so
+  momentary op-count jitter no longer reads as imbalance. On a steady 64-connection
+  pipelined echo workload this cut shed traffic from ~50k to under 1k migrations per
+  second with unchanged throughput, and steal hints hit their target much more often
+  once connections stopped circulating.
+  
 - Added scheduler event counters, readable as a summed snapshot via
   `Runtime.schedulerMetrics()`: parks (doze and full), searcher elections, steal
   attempts/hits and hint hits, dispatched-wake batches and their sizes, batched wake
