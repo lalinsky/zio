@@ -269,6 +269,11 @@ pub const StackPool = struct {
             self.mutex.lock();
             defer self.mutex.unlock();
 
+            // durationTo saturates to zero when `now` lags behind
+            // last_shrink (timestamps come from different loops' caches, and
+            // a loop's cached now can be stale), so a backwards timestamp
+            // lands in this early return and skips the pass: staleness can
+            // only delay shrinking, never speed it up.
             if (self.last_shrink.value != 0 and
                 self.last_shrink.durationTo(now).value < self.config.shrink_interval.value)
             {

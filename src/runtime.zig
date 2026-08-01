@@ -1289,9 +1289,11 @@ pub const Runtime = struct {
         errdefer if (self.resolver) |*r| r.deinit();
 
         // Carve the requested number of stack slots up front (no-op when
-        // prewarm is 0 or slab allocation is compiled out).
-        try self.stack_pool.prewarm();
+        // prewarm is 0 or slab allocation is compiled out). The errdefer
+        // comes first: a mid-loop failure in prewarm itself must unmap the
+        // slabs it already reserved.
         errdefer self.stack_pool.deinit();
+        try self.stack_pool.prewarm();
 
         if (comptime have_sig_pipe) sig_pipe_guard.acquire();
         errdefer if (comptime have_sig_pipe) sig_pipe_guard.release();
