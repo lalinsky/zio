@@ -1005,12 +1005,6 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
             return .completed;
         },
         .process_wait => {
-            if (builtin.os.tag == .netbsd) {
-                std.debug.print(
-                    "NETBSD processWait: kevent ident={} flags=0x{x} fflags=0x{x} data={}\n",
-                    .{ event.ident, event.flags, event.fflags, event.data },
-                );
-            }
             // Process exited - call waitpid to get exit status and reap zombie
             // Following libuv pattern: kevent just notifies us, waitpid gets the status
             const data = comp.cast(ProcessWait);

@@ -29,7 +29,7 @@ pub fn childWait(child: *std.process.Child) std.process.Child.WaitError!std.proc
 }
 
 pub fn childKill(child: *std.process.Child) void {
-    sendTermSignal(child.id.?);
+    terminateProcess(child.id.?);
     var op = ev.ProcessWait.init(child.id.?);
     waitForIoUncancelable(&op.c);
     childCleanup(child);
@@ -42,49 +42,15 @@ fn exitStatusToTerm(status: ev.ProcessWait.ExitStatus) std.process.Child.Term {
     return .{ .exited = status.code };
 }
 
-fn sendTermSignal(handle: ProcessHandle) void {
+fn terminateProcess(handle: ProcessHandle) void {
     if (builtin.os.tag == .windows) {
         _ = std.os.windows.ntdll.NtTerminateProcess(handle, @enumFromInt(1));
     } else {
-        const rc = std.posix.system.kill(handle, .TERM);
-        if (builtin.os.tag == .netbsd) {
-            std.debug.print("NETBSD childKill: kill(pid={}, SIGTERM) rc={} errno={}\n", .{
-                handle,
-                rc,
-                std.posix.errno(rc),
-            });
-        }
+        // NetBSD 10 and older can discard a pending signal during execve,
+        // making an immediate SIGTERM after spawn unreliable (kern/58091).
+        const signal: std.posix.SIG = if (builtin.os.tag == .netbsd) .KILL else .TERM;
+        _ = std.posix.system.kill(handle, signal);
     }
-}
-
-fn sendKillSignal(handle: ProcessHandle) void {
-    const rc = std.posix.system.kill(handle, .KILL);
-    std.debug.print("NETBSD childKill: kill(pid={}, SIGKILL) rc={} errno={}\n", .{
-        handle,
-        rc,
-        std.posix.errno(rc),
-    });
-}
-
-fn dumpTermSignalState() void {
-    if (builtin.os.tag != .netbsd) return;
-
-    var action: std.posix.Sigaction = undefined;
-    std.posix.sigaction(.TERM, null, &action);
-    var mask: std.posix.sigset_t = undefined;
-    std.posix.sigprocmask(std.posix.SIG.SETMASK, null, &mask);
-
-    const handler = action.handler.handler;
-    std.debug.print(
-        "NETBSD childKill: parent SIGTERM handler=0x{x} (DFL=0x{x}, IGN=0x{x}) blocked={} flags=0x{x}\n",
-        .{
-            if (handler) |h| @intFromPtr(h) else 0,
-            0,
-            1,
-            std.posix.sigismember(&mask, .TERM),
-            action.flags,
-        },
-    );
 }
 
 fn childCleanup(child: *std.process.Child) void {
@@ -120,14 +86,9 @@ else
     &.{"false"};
 
 const argv_sleep: []const []const u8 = if (builtin.os.tag == .windows)
-    &.{ "cmd.exe", "/c", "timeout /t 5 /nobreak" }
+    &.{ "cmd.exe", "/c", "timeout /t 100 /nobreak" }
 else
-    &.{ "sleep", "5" };
-
-const argv_sleep_short: []const []const u8 = if (builtin.os.tag == .windows)
-    &.{ "cmd.exe", "/c", "timeout /t 1 /nobreak" }
-else
-    &.{ "sleep", "1" };
+    &.{ "sleep", "100" };
 
 test "childWait: exit code 0" {
     const rt = try Runtime.init(std.testing.allocator, .{});
@@ -151,63 +112,9 @@ test "childKill: terminates process" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    dumpTermSignalState();
     var child = try std.process.spawn(rt.io(), .{ .argv = argv_sleep });
     childKill(&child);
     try std.testing.expect(child.id == null);
-}
-
-test "childKill: NetBSD child exits before process wait registration" {
-    if (builtin.os.tag != .netbsd) return error.SkipZigTest;
-
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    var child = try std.process.spawn(rt.io(), .{ .argv = argv_sleep_short });
-    std.debug.print("NETBSD delayed childKill: spawned pid={}\n", .{child.id.?});
-    sendTermSignal(child.id.?);
-    os.time.sleep(.fromMilliseconds(100));
-    std.debug.print("NETBSD delayed childKill: registering ProcessWait after 100ms\n", .{});
-    var op = ev.ProcessWait.init(child.id.?);
-    waitForIoUncancelable(&op.c);
-    childCleanup(&child);
-    try std.testing.expect(child.id == null);
-}
-
-test "childKill: NetBSD repeated immediate SIGKILL" {
-    if (builtin.os.tag != .netbsd) return error.SkipZigTest;
-
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    for (0..20) |iteration| {
-        var child = try std.process.spawn(rt.io(), .{ .argv = argv_sleep_short });
-        std.debug.print("NETBSD immediate SIGKILL: iteration={} pid={}\n", .{ iteration, child.id.? });
-        sendKillSignal(child.id.?);
-        var op = ev.ProcessWait.init(child.id.?);
-        waitForIoUncancelable(&op.c);
-        childCleanup(&child);
-        try std.testing.expect(child.id == null);
-    }
-}
-
-test "childKill: NetBSD repeated SIGTERM after 10ms" {
-    if (builtin.os.tag != .netbsd) return error.SkipZigTest;
-
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    for (0..20) |iteration| {
-        var child = try std.process.spawn(rt.io(), .{ .argv = argv_sleep_short });
-        std.debug.print("NETBSD repeated SIGTERM: iteration={} pid={}\n", .{ iteration, child.id.? });
-        sendTermSignal(child.id.?);
-        os.time.sleep(.fromMilliseconds(10));
-        sendTermSignal(child.id.?);
-        var op = ev.ProcessWait.init(child.id.?);
-        waitForIoUncancelable(&op.c);
-        childCleanup(&child);
-        try std.testing.expect(child.id == null);
-    }
 }
 
 test "childWait: spawn nonexistent binary returns FileNotFound" {
