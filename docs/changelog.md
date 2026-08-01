@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed blocking-path socket operations on Windows failing with `error.WouldBlock`
+  when the socket was in nonblocking mode, seen as a flaky CI failure in the blocking
+  sockets test. Accepted sockets are nonblocking by default (`NetAccept`'s flags), but
+  the Windows blocking executor called recv/send/accept once assuming blocking mode,
+  so a receive racing the peer's send surfaced `WouldBlock` instead of waiting.
+  Windows now uses the same poll-and-retry loop as the other platforms, which handles
+  both socket modes.
+
 - When an executor with queued work wakes an idle one to help, the wake now carries a
   hint saying whose queue is loaded, and the woken executor starts stealing there
   instead of probing executors in random order. The work itself stays in the waker's
