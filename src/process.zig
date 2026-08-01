@@ -111,9 +111,14 @@ else
     &.{"false"};
 
 const argv_sleep: []const []const u8 = if (builtin.os.tag == .windows)
-    &.{ "cmd.exe", "/c", "timeout /t 5 /nobreak" }
+    &.{ "cmd.exe", "/c", "timeout /t 100 /nobreak" }
 else
-    &.{ "sleep", "5" };
+    &.{ "sleep", "100" };
+
+const argv_sleep_short: []const []const u8 = if (builtin.os.tag == .windows)
+    &.{ "cmd.exe", "/c", "timeout /t 1 /nobreak" }
+else
+    &.{ "sleep", "1" };
 
 test "childWait: exit code 0" {
     const rt = try Runtime.init(std.testing.allocator, .{});
@@ -139,9 +144,6 @@ test "childKill: terminates process" {
 
     dumpTermSignalState();
     var child = try std.process.spawn(rt.io(), .{ .argv = argv_sleep });
-    if (builtin.os.tag == .netbsd) {
-        std.debug.print("NETBSD childKill: spawned pid={}\n", .{child.id.?});
-    }
     childKill(&child);
     try std.testing.expect(child.id == null);
 }
@@ -152,7 +154,7 @@ test "childKill: NetBSD child exits before process wait registration" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var child = try std.process.spawn(rt.io(), .{ .argv = argv_sleep });
+    var child = try std.process.spawn(rt.io(), .{ .argv = argv_sleep_short });
     std.debug.print("NETBSD delayed childKill: spawned pid={}\n", .{child.id.?});
     sendTermSignal(child.id.?);
     os.time.sleep(.fromMilliseconds(100));
@@ -170,8 +172,10 @@ test "childKill: NetBSD repeated immediate termination" {
     defer rt.deinit();
 
     for (0..100) |iteration| {
-        var child = try std.process.spawn(rt.io(), .{ .argv = argv_sleep });
-        std.debug.print("NETBSD repeated childKill: iteration={} pid={}\n", .{ iteration, child.id.? });
+        var child = try std.process.spawn(rt.io(), .{ .argv = argv_sleep_short });
+        if (iteration % 10 == 0) {
+            std.debug.print("NETBSD repeated childKill: iteration={} pid={}\n", .{ iteration, child.id.? });
+        }
         childKill(&child);
         try std.testing.expect(child.id == null);
     }
