@@ -744,7 +744,7 @@ pub const Executor = struct {
             self.shed_cooldown -= 1;
             return;
         }
-        self.shed_cooldown = shed_eval_interval;
+        self.shed_cooldown = shed_eval_interval - 1;
 
         const executors = self.runtime.executors.items;
         const mine = self.loop.state.loadActive();
@@ -757,7 +757,8 @@ pub const Executor = struct {
         // that cannot divide evenly across executors would otherwise
         // circulate through the global queue forever (a steady 64-connection
         // pipeline measured ~50k sheds/s under a flat margin of 1). Shedding
-        // starts at ~12.5% over average, and no less than 2 above it.
+        // starts strictly beyond the margin: past ~12.5% over the average,
+        // and never for an excess of 2 or less.
         const margin = @max(2, avg / 8);
         if (mine > avg + margin) {
             self.shed_quota = @intCast(@min(mine - avg, max_shed_per_tick));
