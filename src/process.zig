@@ -146,6 +146,37 @@ test "childKill: terminates process" {
     try std.testing.expect(child.id == null);
 }
 
+test "childKill: NetBSD child exits before process wait registration" {
+    if (builtin.os.tag != .netbsd) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var child = try std.process.spawn(rt.io(), .{ .argv = argv_sleep });
+    std.debug.print("NETBSD delayed childKill: spawned pid={}\n", .{child.id.?});
+    sendTermSignal(child.id.?);
+    os.time.sleep(.fromMilliseconds(100));
+    std.debug.print("NETBSD delayed childKill: registering ProcessWait after 100ms\n", .{});
+    var op = ev.ProcessWait.init(child.id.?);
+    waitForIoUncancelable(&op.c);
+    childCleanup(&child);
+    try std.testing.expect(child.id == null);
+}
+
+test "childKill: NetBSD repeated immediate termination" {
+    if (builtin.os.tag != .netbsd) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    for (0..100) |iteration| {
+        var child = try std.process.spawn(rt.io(), .{ .argv = argv_sleep });
+        std.debug.print("NETBSD repeated childKill: iteration={} pid={}\n", .{ iteration, child.id.? });
+        childKill(&child);
+        try std.testing.expect(child.id == null);
+    }
+}
+
 test "childWait: spawn nonexistent binary returns FileNotFound" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
