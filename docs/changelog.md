@@ -4,27 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-- Coroutine stacks are now carved out of larger slab reservations instead of each
-  getting its own mmap (on 64-bit POSIX targets; Windows and OpenBSD keep the previous
-  allocator). A cold stack costs one page-protection syscall instead of three mapping
-  syscalls, and releasing and reusing stacks never makes a syscall at all. This mainly
-  helps workloads holding many coroutines alive at once: 10k concurrently sleeping
-  tasks got about 25% faster, large fan-out about 10%. The slots-per-slab count is a
-  build option (`-Dstack-slab-slots=N`, default 64; 0 restores the per-stack
-  allocator), and the new `stack_pool.prewarm` runtime option commits that many slots
-  at startup so an early spawn burst skips stack allocation entirely.
-
-- **BREAKING**: The stack pool's `max_unused_stacks` and `max_age` settings are gone,
-  replaced by a decaying demand watermark. The pool keeps a retain target that jumps
-  to the peak number of stacks simultaneously in use whenever demand grows and halves
-  per `stack_pool.shrink_interval` (default 60 seconds, `.zero` disables shrinking) on
-  the way down. A periodic pass returns free capacity beyond the target to the OS,
-  unmapping whole empty slabs first (at most half of them per pass, matching the decay
-  shape) and then individually mapped stacks. Prewarmed slots act as a
-  floor and are never shrunk away. Compared to the old count cap and age limit, memory
-  follows what the workload actually needed recently: a burst's capacity drains with a
-  half-life of one interval, a repeat burst re-inflates it instantly, and a steady
-  load keeps its stacks indefinitely without periodic reallocation.
+- **BREAKING**: Reworked coroutine stack allocation. On 64-bit POSIX targets, stacks
+  are now carved from larger slab reservations (one syscall per cold stack instead of
+  three, and no syscalls at all to release and reuse one), which sped up workloads
+  with many live coroutines: 10k concurrently sleeping tasks by ~25%, large fan-out
+  by ~10%. The pool's `max_unused_stacks` and `max_age` settings are gone, replaced
+  by a decaying demand watermark: a periodic pass returns capacity beyond the recent
+  peak usage to the OS, with a half-life of one `stack_pool.shrink_interval` (default
+  60s, `.zero` disables shrinking). The slots-per-slab count is a build option
+  (`-Dstack-slab-slots`, 0 restores the per-stack allocator), and the new
+  `stack_pool.prewarm` option commits that many slots at startup and floors the
+  watermark.
 
 - Multi-threaded runtimes no longer steal work the moment an executor runs out of local
   tasks. A freshly idle executor now gives its own event loop a short grace window first
