@@ -40,6 +40,11 @@ const Slab = struct {
     in_use: usize,
     /// Released slots of this slab (LIFO). carved - in_use entries.
     free: ?*FreeNode,
+    /// Links in the pool's partial list: the slabs with at least one free
+    /// slot, so acquire finds one in O(1) instead of scanning the chain.
+    /// A slab is linked exactly when `free != null`.
+    partial_prev: ?*Slab,
+    partial_next: ?*Slab,
 };
 
 pub const Config = struct {
@@ -87,10 +92,14 @@ pub const StackPool = struct {
     head: ?*FreeNode,
     tail: ?*FreeNode,
     pool_size: usize,
-    /// Slab chain, newest first. Acquire prefers the first slab with a free
-    /// slot, so load concentrates at the head and older slabs drain toward
-    /// empty, where the shrink pass can unmap them wholesale.
+    /// Slab chain, newest first: every slab, walked only by carving (head
+    /// slab), the shrink pass, and deinit.
     slabs: ?*Slab,
+    /// Head of the partial list: slabs with free slots, most recently
+    /// released-to first. Acquire pops here in O(1); the LIFO order keeps
+    /// load concentrated on recently active slabs, so the rest drain toward
+    /// empty, where the shrink pass can unmap them wholesale.
+    partial: ?*Slab,
     slot_size: usize,
     /// Stacks currently acquired (both kinds).
     in_use: usize,
@@ -113,6 +122,7 @@ pub const StackPool = struct {
             .tail = null,
             .pool_size = 0,
             .slabs = null,
+            .partial = null,
             .slot_size = @max(aligned_max + stack.page_size, stack.page_size * 2),
             .in_use = 0,
             .epoch_peak = 0,
@@ -146,6 +156,7 @@ pub const StackPool = struct {
                 slab = next;
             }
             self.slabs = null;
+            self.partial = null;
         }
     }
 
@@ -159,16 +170,15 @@ pub const StackPool = struct {
 
             if (slab_supported) {
                 // Released slab slots first: still committed, still
-                // cache-warm, zero syscalls. First slab with a free slot
-                // wins, concentrating load near the head of the chain.
-                var slab = self.slabs;
-                while (slab) |s| : (slab = s.next) {
-                    if (s.free) |node| {
-                        s.free = node.next;
-                        s.in_use += 1;
-                        self.noteAcquireLocked();
-                        return node.stack_info;
-                    }
+                // cache-warm, zero syscalls. The partial list's head has one
+                // by definition.
+                if (self.partial) |s| {
+                    const node = s.free.?;
+                    s.free = node.next;
+                    if (s.free == null) self.unlinkPartial(s);
+                    s.in_use += 1;
+                    self.noteAcquireLocked();
+                    return node.stack_info;
                 }
             }
 
@@ -215,10 +225,20 @@ pub const StackPool = struct {
         // The FreeNode is stored at the base of the stack (aligned backward)
         const node_addr = std.mem.alignBackward(usize, stack_info.base - @sizeOf(FreeNode), @alignOf(FreeNode));
 
-        self.mutex.lock();
-
         if (slab_supported) {
-            if (self.slabOfLocked(stack_info.allocation_ptr)) |slab| {
+            // The owner tag at the top of the stack names the slab this slot
+            // was carved from (0 for an individually mapped stack): one read
+            // instead of scanning the slab chain.
+            const tag = stack.stackReadOwnerTag(stack_info);
+            if (tag != 0) {
+                const slab: *Slab = @ptrFromInt(tag);
+                // Stack overflow into the tag word is impossible (it sits
+                // above base), but cheap paranoia in safe builds: the slab
+                // must contain this slot.
+                self.mutex.lock();
+                if (builtin.mode == .Debug) {
+                    std.debug.assert(self.slabOfLocked(stack_info.allocation_ptr) == slab);
+                }
                 // Slab slots always commit at least one page, so the node fits.
                 std.debug.assert(node_addr >= stack_info.limit);
                 const node: *FreeNode = @ptrFromInt(node_addr);
@@ -227,6 +247,7 @@ pub const StackPool = struct {
                     .next = slab.free,
                     .stack_info = stack_info,
                 };
+                if (slab.free == null) self.linkPartial(slab);
                 slab.free = node;
                 slab.in_use -= 1;
                 self.in_use -= 1;
@@ -235,6 +256,7 @@ pub const StackPool = struct {
             }
         }
 
+        self.mutex.lock();
         self.in_use -= 1;
 
         // Verify the FreeNode fits within the committed region (between limit and base)
@@ -320,6 +342,7 @@ pub const StackPool = struct {
                     const next = s.next;
                     if (s.in_use == 0 and s.carved <= excess and slab_budget > 0) {
                         if (prev) |p| p.next = next else self.slabs = next;
+                        if (s.free != null) self.unlinkPartial(s);
                         excess -= s.carved;
                         slab_budget -= 1;
                         s.next = slabs_to_free;
@@ -370,7 +393,7 @@ pub const StackPool = struct {
             const len = stack.page_size + self.config.slab_slots * self.slot_size;
             const mem = stack.slabReserve(len) catch return null;
             const s: *Slab = @ptrCast(@alignCast(mem.ptr));
-            s.* = .{ .next = self.slabs, .memory = mem, .carved = 0, .in_use = 0, .free = null };
+            s.* = .{ .next = self.slabs, .memory = mem, .carved = 0, .in_use = 0, .free = null, .partial_prev = null, .partial_next = null };
             self.slabs = s;
             break :blk s;
         };
@@ -378,10 +401,26 @@ pub const StackPool = struct {
         const offset = stack.page_size + slab.carved * self.slot_size;
         const slot: []align(stack.page_size) u8 = @alignCast(slab.memory[offset .. offset + self.slot_size]);
         var stack_info: StackInfo = undefined;
-        stack.stackInitSlot(&stack_info, slot, self.config.committed_size) catch return null;
+        stack.stackInitSlot(&stack_info, slot, self.config.committed_size, @intFromPtr(slab)) catch return null;
         slab.carved += 1;
         slab.in_use += 1;
         return stack_info;
+    }
+
+    /// Link a slab at the head of the partial list. Must run under mutex.
+    fn linkPartial(self: *StackPool, s: *Slab) void {
+        std.debug.assert(s.partial_prev == null and s.partial_next == null and self.partial != s);
+        s.partial_next = self.partial;
+        if (self.partial) |head| head.partial_prev = s;
+        self.partial = s;
+    }
+
+    /// Unlink a slab from the partial list. Must run under mutex.
+    fn unlinkPartial(self: *StackPool, s: *Slab) void {
+        if (s.partial_prev) |prev| prev.partial_next = s.partial_next else self.partial = s.partial_next;
+        if (s.partial_next) |next| next.partial_prev = s.partial_prev;
+        s.partial_prev = null;
+        s.partial_next = null;
     }
 
     /// The slab this allocation was carved from, or null for an individually
@@ -520,6 +559,32 @@ test "StackPool slab: carving spans slabs and slots are distinct" {
         pool.release(info);
     }
     try std.testing.expectEqual(carved_before, pool.slabs.?.carved);
+}
+
+test "StackPool slab: releases route acquires to their slab via the partial list" {
+    if (!slab_supported) return error.SkipZigTest;
+
+    var pool = StackPool.init(.{
+        .maximum_size = 256 * 1024,
+        .committed_size = 16 * 1024,
+    });
+    defer pool.deinit();
+
+    // Fill two slabs; infos[0] was carved from the older slab.
+    const total = pool.config.slab_slots + 2;
+    const infos = try std.testing.allocator.alloc(StackInfo, total);
+    defer std.testing.allocator.free(infos);
+    for (infos) |*info| info.* = try pool.acquire();
+
+    // Release a single slot from the older slab: its slab becomes the
+    // partial head, and the next acquire must return exactly that slot,
+    // without scanning or carving.
+    pool.release(infos[0]);
+    const reused = try pool.acquire();
+    try std.testing.expectEqual(infos[0].allocation_ptr, reused.allocation_ptr);
+    infos[0] = reused;
+
+    for (infos) |info| pool.release(info);
 }
 
 test "StackPool slab: shrink unmaps empty slabs beyond the watermark" {
