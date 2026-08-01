@@ -340,6 +340,8 @@ pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
 pub const Executor = struct {
     pub const max_executors = std.math.maxInt(ExecutorId) + 1;
 
+    const no_steal_hint = std.math.maxInt(u32);
+
     id: ExecutorId,
     loop: ev.Loop,
 
@@ -397,6 +399,16 @@ pub const Executor = struct {
     // park, see parkAndSearch) since it last had local work. Reset by any
     // local work; while set, empty passes go straight to the full park.
     dozed: bool = false,
+
+    // True while drainDispatched signals a batch of task wakes:
+    // scheduleTaskLocal skips the per-push announce, the drain announces
+    // once at the end.
+    draining_wakes: bool = false,
+
+    // Where the pusher that elected this executor as searcher has surplus
+    // work; armSearcher writes it just before the wake, stealWork consumes
+    // it as the scan's starting victim. `no_steal_hint` means none.
+    steal_hint: std.atomic.Value(u32) = .init(no_steal_hint),
 
     // Deferred cleanup for the task that just yielded away from this executor.
     // Processed by the next coroutine to run (at landing sites: startFn, yield resume, run loop).
@@ -751,6 +763,7 @@ pub const Executor = struct {
                 // path without touching idle_mask or inviting a spurious
                 // searcher election.
                 try self.loop.poll(.zero);
+                self.drainDispatched();
                 if (self.checkLocalWork(check_ready)) return;
                 return self.park(check_ready, doze_wait, .local_only);
             }
@@ -789,6 +802,9 @@ pub const Executor = struct {
         var found_work = self.checkLocalWork(check_ready);
         if (!found_work and search == .steal) found_work = self.stealWork();
         try self.loop.poll(if (found_work) .zero else wait_cap);
+        // Drain before withdrawing the bit, so the post-park work checks
+        // below see the woken batch.
+        self.drainDispatched();
 
         const previous_bit = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel);
 
@@ -807,7 +823,7 @@ pub const Executor = struct {
                 self.run_queue.refill(batch);
                 if (!self.run_queue.isEmpty()) {
                     _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
-                    if (!self.run_queue.overflow.isEmpty()) self.runtime.armSearcher();
+                    if (!self.run_queue.overflow.isEmpty()) self.runtime.armSearcher(null);
                     return;
                 }
             }
@@ -823,7 +839,7 @@ pub const Executor = struct {
             if (self.stealWork()) return;
             // No main-ready here: only queued (stealable) work justifies
             // arming a fresh searcher.
-            if (self.checkLocalWork(false)) self.runtime.armSearcher();
+            if (self.checkLocalWork(false)) self.runtime.armSearcher(self.id);
         }
     }
 
@@ -831,6 +847,11 @@ pub const Executor = struct {
     /// and a refill from the overflow queue. Deliberately never steals — see
     /// parkAndSearch for when remote work is taken.
     fn checkLocalWork(self: *Executor, check_main_ready: bool) bool {
+        // Task wakes can enter the dispatched queue outside any poll: an
+        // operation that completes inline during loop.add finishes on this
+        // thread before its task parks. Every work check must see those, or
+        // a pre-park check can sleep on the only work in existence.
+        self.drainDispatched();
         const main_ready = check_main_ready and self.main_task.state.load(.acquire).tag == .ready;
         // Overflow work counts too: if the ring is empty but the overflow queue
         // still holds tasks (e.g. a local ring spill, which doesn't wake the
@@ -864,7 +885,14 @@ pub const Executor = struct {
         const executors = self.runtime.executors.items;
         if (executors.len <= 1) return false;
 
-        const start = self.steal_prng.random().uintLessThan(usize, executors.len);
+        // A pending hint points at the electing pusher's loaded ring; start
+        // the scan there. Stale hints are harmless: the circular sweep just
+        // continues past them.
+        const hinted = self.steal_hint.swap(no_steal_hint, .acquire);
+        const start = if (hinted != no_steal_hint and hinted < executors.len)
+            hinted
+        else
+            self.steal_prng.random().uintLessThan(usize, executors.len);
         for (0..executors.len) |i| {
             const victim = executors[(start + i) % executors.len];
             if (victim == self) continue;
@@ -875,7 +903,9 @@ pub const Executor = struct {
 
             if (self.run_queue.steal(&victim.run_queue)) |node| {
                 _ = self.run_queue.push(node);
-                self.runtime.armSearcher();
+                // The rest of the loaded ring is still at the victim; point
+                // the next searcher straight at it.
+                self.runtime.armSearcher(victim.id);
                 return true;
             }
         }
@@ -924,7 +954,7 @@ pub const Executor = struct {
         if (self.shed_quota > 0) {
             self.shed_quota -= 1;
             self.run_queue.overflow.push(&task.awaitable.wait_node);
-            self.runtime.armSearcher();
+            self.runtime.armSearcher(null);
             return;
         }
 
@@ -935,8 +965,40 @@ pub const Executor = struct {
         // home) to another executor for nothing. Wakes from a running task
         // still announce, since the waker may keep the executor busy.
         const was_empty = self.run_queue.push(&task.awaitable.wait_node);
+        if (self.draining_wakes) return; // one batched announce after the drain
         if (!was_empty or self.current_task != null) {
-            self.runtime.armSearcher();
+            self.runtime.armSearcher(self.id);
+        }
+    }
+
+    /// Drain the completions the loop handed out instead of calling (null
+    /// callback, see finishCompletion): signal every waiter with per-push
+    /// announces suppressed, then wake sleepers once for the whole batch.
+    /// Runs after every poll and from checkLocalWork, so no park decision
+    /// can miss a pending wake.
+    fn drainDispatched(self: *Executor) void {
+        var first = self.loop.nextDispatched() orelse return;
+
+        self.draining_wakes = true;
+        var count: usize = 0;
+        while (true) {
+            const c = first;
+            if (c.callback != null) {
+                // Not a task wake: a completion with a real callback, only
+                // possible under do_not_call_callbacks.
+                @branchHint(.unlikely);
+                c.call(&self.loop);
+            } else {
+                const waiter: *Waiter = @ptrCast(@alignCast(c.userdata.?));
+                waiter.signal();
+                count += 1;
+            }
+            first = self.loop.nextDispatched() orelse break;
+        }
+        self.draining_wakes = false;
+
+        if (count > 0) {
+            self.runtime.batchWakeSleepers(self.run_queue.len(), self.id);
         }
     }
 
@@ -949,7 +1011,7 @@ pub const Executor = struct {
 
         self.run_queue.overflow.push(&task.awaitable.wait_node);
         self.loop.wake();
-        self.runtime.armSearcher();
+        self.runtime.armSearcher(null);
     }
 
     /// Schedule a task for execution.
@@ -1509,7 +1571,7 @@ pub const Runtime = struct {
         return zio_options.task_migration and self.options.enable_task_migration and self.executors_stealable.load(.acquire);
     }
 
-    fn armSearcher(self: *Runtime) void {
+    fn armSearcher(self: *Runtime, hint: ?ExecutorId) void {
         // The two early-return loads pair with the parker: an executor sets its
         // idle bit (seq_cst RMW) and only then makes its final work check, while
         // a pusher publishes the task and only then reads idle_mask/searchers
@@ -1522,18 +1584,54 @@ pub const Runtime = struct {
         if (!self.stealingActive() or (self.idle_mask.load(.seq_cst) == 0) or (self.searchers.load(.seq_cst) != 0)) return;
         if (self.searchers.cmpxchgStrong(0, 1, .seq_cst, .monotonic)) |_| return;
 
+        if (!self.claimAndWake(hint, null)) {
+            _ = self.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
+        }
+    }
+
+    /// Claim one parked executor from the idle mask (skipping `exclude`),
+    /// deliver the hint, and wake it. The bit-clear is the claim: exactly one
+    /// caller wins a given bit, and only the winner writes the hint. Returns
+    /// false if no executor could be claimed.
+    fn claimAndWake(self: *Runtime, hint: ?ExecutorId, exclude: ?ExecutorId) bool {
         var candidates = self.idle_mask.load(.acquire);
+        if (exclude) |id| candidates &= ~(@as(usize, 1) << id);
         while (candidates != 0) {
             const id: ExecutorId = @intCast(@ctz(candidates));
             const bit = @as(usize, 1) << id;
             const previous_mask = self.idle_mask.fetchAnd(~bit, .acq_rel);
             if (previous_mask & bit != 0) {
-                self.executors.items[id].loop.wake();
-                return;
+                const target = self.executors.items[id];
+                // Deliver (or clear) the hint before the wake; the wake edge
+                // publishes it. Exclusive: only the bit winner writes.
+                target.steal_hint.store(hint orelse Executor.no_steal_hint, .release);
+                target.loop.wake();
+                return true;
             }
             candidates &= ~bit;
         }
-        _ = self.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
+        return false;
+    }
+
+    /// Wake several sleepers at once for `ready` freshly woken tasks in the
+    /// calling executor's ring (Go's injectglist). Bypasses the
+    /// single-searcher token: the token throttles speculative announces, and
+    /// a counted batch is not speculative. Each claimed searcher steals half
+    /// of what remains, so log2(ready) searchers cover the batch; more would
+    /// just race.
+    ///
+    /// A claimed searcher's park exit may release a token it never took;
+    /// that lets one extra election through, it never loses a wake.
+    fn batchWakeSleepers(self: *Runtime, ready: usize, hint: ExecutorId) void {
+        if (!self.stealingActive() or ready < 2) return;
+        if (self.idle_mask.load(.seq_cst) == 0) return;
+
+        var wakes: usize = 0;
+        var covered: usize = 2; // wakes = ceil(log2(ready))
+        while (covered < ready) : (covered *= 2) wakes += 1;
+        while (wakes > 0) : (wakes -= 1) {
+            if (!self.claimAndWake(hint, hint)) return;
+        }
     }
 
     // Convenience methods that operate on the current coroutine context
