@@ -12,6 +12,14 @@ All notable changes to this project will be documented in this file.
   The new `metrics_log_interval` runtime option starts a monitor thread that logs
   the counters' per-interval deltas at that cadence; being its own thread, it keeps
   reporting even when every executor is busy or parked.
+  
+- Fixed blocking-path socket operations on Windows failing with `error.WouldBlock`
+  when the socket was in nonblocking mode, seen as a flaky CI failure in the blocking
+  sockets test. Accepted sockets are nonblocking by default (`NetAccept`'s flags), but
+  the Windows blocking executor called recv/send/accept once assuming blocking mode,
+  so a receive racing the peer's send surfaced `WouldBlock` instead of waiting.
+  Windows now uses the same poll-and-retry loop as the other platforms, which handles
+  both socket modes.
 
 - When an executor with queued work wakes an idle one to help, the wake now carries a
   hint saying whose queue is loaded, and the woken executor starts stealing there
