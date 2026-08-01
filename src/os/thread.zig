@@ -60,6 +60,7 @@ pub const Futex = switch (builtin.os.tag) {
     .linux => FutexLinux,
     .windows => FutexWindows,
     .freebsd => FutexFreeBSD,
+    .netbsd => FutexNetBSD,
     .openbsd => FutexOpenBSD,
     .dragonfly => FutexDragonFly,
     else => |t| if (t.isDarwin()) FutexDarwin else void,
@@ -525,6 +526,59 @@ const FutexOpenBSD = struct {
             n,
             null,
             null,
+        );
+    }
+};
+
+// ============================================================================
+// NetBSD implementation
+// ============================================================================
+
+const FutexNetBSD = struct {
+    pub fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
+        _ = sys.futex(
+            &ptr.raw,
+            sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
+            @intCast(expected),
+            null,
+            null,
+            0,
+            0,
+        );
+    }
+
+    pub fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
+        const timeout_ts = timeout.toTimespec();
+
+        const rc = sys.futex(
+            &ptr.raw,
+            sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
+            @intCast(expected),
+            &timeout_ts,
+            null,
+            0,
+            0,
+        );
+
+        if (rc == -1) {
+            const err = posix.errno(rc);
+            if (err == .TIMEDOUT) return error.Timeout;
+        }
+    }
+
+    pub fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
+        const n: c_int = switch (count) {
+            .one => 1,
+            .all => std.math.maxInt(c_int),
+        };
+        _ = sys.futex(
+            &ptr.raw,
+            sys.FUTEX_WAKE | sys.FUTEX_PRIVATE_FLAG,
+            n,
+            null,
+            null,
+            0,
+            0,
         );
     }
 };
@@ -1252,6 +1306,20 @@ test "Futex - wake all" {
 
     _ = futex_value.fetchAdd(1, .monotonic);
     Futex.wake(&futex_value, .all);
+}
+
+test "Futex - timedWait times out and sees changed values" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    if (Futex == void) return error.SkipZigTest;
+
+    var word = std.atomic.Value(u32).init(0);
+
+    // Value unchanged: the wait must expire.
+    try std.testing.expectError(error.Timeout, Futex.timedWait(&word, 0, Duration.fromMilliseconds(10)));
+
+    // Value already changed: the wait must return immediately, not block.
+    word.store(1, .release);
+    try Futex.timedWait(&word, 0, Duration.fromMilliseconds(1000));
 }
 
 test "Notify - basic signal and wait" {
