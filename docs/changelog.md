@@ -14,7 +14,7 @@ All notable changes to this project will be documented in this file.
   60s, `.zero` disables shrinking). The slots-per-slab count is a build option
   (`-Dstack-slab-slots`, 0 restores the per-stack allocator), and the new
   `stack_pool.prewarm` option commits that many slots at startup and floors the
-  watermark.
+  watermark. (#436)
 
 - Multi-threaded runtimes no longer steal work the moment an executor runs out of local
   tasks. A freshly idle executor now gives its own event loop a short grace window first
