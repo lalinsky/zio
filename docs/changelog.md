@@ -19,8 +19,8 @@ All notable changes to this project will be documented in this file.
   to the peak number of stacks simultaneously in use whenever demand grows and halves
   per `stack_pool.shrink_interval` (default 60 seconds, `.zero` disables shrinking) on
   the way down. A periodic pass returns free capacity beyond the target to the OS,
-  unmapping whole empty slabs first (a bounded number per pass, so a single pass never
-  stalls an executor) and then individually mapped stacks. Prewarmed slots act as a
+  unmapping whole empty slabs first (at most half of them per pass, matching the decay
+  shape) and then individually mapped stacks. Prewarmed slots act as a
   floor and are never shrunk away. Compared to the old count cap and age limit, memory
   follows what the workload actually needed recently: a burst's capacity drains with a
   half-life of one interval, a repeat burst re-inflates it instantly, and a steady

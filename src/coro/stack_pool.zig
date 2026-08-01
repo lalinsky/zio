@@ -252,13 +252,6 @@ pub const StackPool = struct {
         self.mutex.unlock();
     }
 
-    /// Bounds on work per shrink pass, so a pass after a large burst does
-    /// not stall an executor's timer callback on hundreds of munmaps. The
-    /// decay curve already spreads reclamation over multiple intervals;
-    /// these bound the worst single pass.
-    const max_stack_frees_per_shrink = 64;
-    const max_slab_frees_per_shrink = 16;
-
     /// Periodic shrink pass: rate-limited to `shrink_interval` internally,
     /// so any executor's timer may drive it. Frees the committed capacity
     /// that the demand watermark says was not needed since the previous
@@ -293,25 +286,34 @@ pub const StackPool = struct {
             // Committed capacity = live stacks + everything parked on free
             // lists. Anything beyond the retain target is up for release.
             var free_capacity: usize = self.pool_size;
+            var slab_count: usize = 0;
             var slab = self.slabs;
             while (slab) |s| : (slab = s.next) {
                 free_capacity += s.carved - s.in_use;
+                slab_count += 1;
             }
             var excess = (self.in_use + free_capacity) -| self.retain_target;
+
+            // Per-pass work bounds are relative (half of what is currently
+            // there, rounded up), matching the decay curve's own shape: the
+            // worst pass after a burst scales with the burst, halves every
+            // interval after that, and never turns the exponential drain
+            // into a linear one the way an absolute cap would.
+            var slab_budget = (slab_count + 1) / 2;
+            var stack_budget = (self.pool_size + 1) / 2;
 
             // Unmap empty slabs first: one syscall retires a whole arena.
             // Strictly within the excess, so capacity never dips below the
             // target (a mostly-empty slab bigger than the excess stays).
             if (slab_enabled) {
-                var freed_slabs: usize = 0;
                 var prev: ?*Slab = null;
                 var cur = self.slabs;
                 while (cur) |s| {
                     const next = s.next;
-                    if (s.in_use == 0 and s.carved <= excess and freed_slabs < max_slab_frees_per_shrink) {
+                    if (s.in_use == 0 and s.carved <= excess and slab_budget > 0) {
                         if (prev) |p| p.next = next else self.slabs = next;
                         excess -= s.carved;
-                        freed_slabs += 1;
+                        slab_budget -= 1;
                         s.next = slabs_to_free;
                         slabs_to_free = s;
                     } else {
@@ -322,14 +324,13 @@ pub const StackPool = struct {
             }
 
             // Then individually mapped stacks, oldest first.
-            var freed: usize = 0;
-            while (excess > 0 and freed < max_stack_frees_per_shrink) {
+            while (excess > 0 and stack_budget > 0) {
                 const node = self.head orelse break;
                 self.removeNode(node);
                 node.next = stacks_to_free;
                 stacks_to_free = node;
                 excess -= 1;
-                freed += 1;
+                stack_budget -= 1;
             }
         }
 
