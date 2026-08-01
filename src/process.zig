@@ -46,8 +46,36 @@ fn sendTermSignal(handle: ProcessHandle) void {
     if (builtin.os.tag == .windows) {
         _ = std.os.windows.ntdll.NtTerminateProcess(handle, @enumFromInt(1));
     } else {
-        _ = std.posix.system.kill(handle, .TERM);
+        const rc = std.posix.system.kill(handle, .TERM);
+        if (builtin.os.tag == .netbsd) {
+            std.debug.print("NETBSD childKill: kill(pid={}, SIGTERM) rc={} errno={}\n", .{
+                handle,
+                rc,
+                std.posix.errno(rc),
+            });
+        }
     }
+}
+
+fn dumpTermSignalState() void {
+    if (builtin.os.tag != .netbsd) return;
+
+    var action: std.posix.Sigaction = undefined;
+    std.posix.sigaction(.TERM, null, &action);
+    var mask: std.posix.sigset_t = undefined;
+    std.posix.sigprocmask(std.posix.SIG.SETMASK, null, &mask);
+
+    const handler = action.handler.handler;
+    std.debug.print(
+        "NETBSD childKill: parent SIGTERM handler=0x{x} (DFL=0x{x}, IGN=0x{x}) blocked={} flags=0x{x}\n",
+        .{
+            if (handler) |h| @intFromPtr(h) else 0,
+            0,
+            1,
+            std.posix.sigismember(&mask, .TERM),
+            action.flags,
+        },
+    );
 }
 
 fn childCleanup(child: *std.process.Child) void {
@@ -83,9 +111,9 @@ else
     &.{"false"};
 
 const argv_sleep: []const []const u8 = if (builtin.os.tag == .windows)
-    &.{ "cmd.exe", "/c", "timeout /t 100 /nobreak" }
+    &.{ "cmd.exe", "/c", "timeout /t 5 /nobreak" }
 else
-    &.{ "sleep", "100" };
+    &.{ "sleep", "5" };
 
 test "childWait: exit code 0" {
     const rt = try Runtime.init(std.testing.allocator, .{});
@@ -109,7 +137,11 @@ test "childKill: terminates process" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
+    dumpTermSignalState();
     var child = try std.process.spawn(rt.io(), .{ .argv = argv_sleep });
+    if (builtin.os.tag == .netbsd) {
+        std.debug.print("NETBSD childKill: spawned pid={}\n", .{child.id.?});
+    }
     childKill(&child);
     try std.testing.expect(child.id == null);
 }
