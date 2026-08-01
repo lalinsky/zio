@@ -330,11 +330,9 @@ pub const Waiter = struct {
 pub fn waitForIo(c: *ev.Completion) Cancelable!void {
     var waiter = Waiter.init();
     c.userdata = &waiter;
-    // Null callback: the loop delivers the finished completion through its
-    // dispatched queue instead of calling anything, and the executor signals
-    // the waiter when it drains the queue after the poll — the whole poll's
-    // worth of task wakes becomes one batch with one wake decision, instead
-    // of an announce per completion (see Executor.drainDispatched).
+    // Null callback: the loop hands the finished completion out through its
+    // dispatched queue, and the executor signals the waiter when it drains
+    // the queue (see Executor.drainDispatched).
     c.callback = null;
     c.flags = .{ .defer_callback = false }; // single-shot wait: no rearm either
 
@@ -384,7 +382,7 @@ pub fn waitForIo(c: *ev.Completion) Cancelable!void {
 pub fn waitForIoUncancelable(c: *ev.Completion) void {
     var waiter = Waiter.init();
     c.userdata = &waiter;
-    c.callback = null; // batch-delivered via the dispatched queue, see waitForIo
+    c.callback = null; // dispatched-queue delivery, see waitForIo
     c.flags = .{ .defer_callback = false };
 
     defer if (std.debug.runtime_safety) {
