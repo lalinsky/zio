@@ -132,6 +132,12 @@ pub const RuntimeOptions = struct {
         .maximum_size = 8 * 1024 * 1024,
         .committed_size = 256 * 1024,
     },
+    /// When non-zero and scheduler metrics are compiled in, a monitor thread
+    /// logs the counters' per-interval deltas at this cadence. A dedicated
+    /// thread rather than an executor timer, so it keeps reporting even when
+    /// every executor is wedged or asleep.
+    metrics_log_interval: Duration = .zero,
+
     /// Total number of executors to run.
     /// When enable_main_executor is true (default), this includes the main executor on the calling thread.
     /// When enable_main_executor is false, all executors run as background worker threads.
@@ -366,6 +372,12 @@ pub const SchedulerMetrics = struct {
     pub fn add(self: *SchedulerMetrics, other: SchedulerMetrics) void {
         inline for (@typeInfo(SchedulerMetrics).@"struct".fields) |field| {
             @field(self, field.name) += @field(other, field.name);
+        }
+    }
+
+    pub fn sub(self: *SchedulerMetrics, other: SchedulerMetrics) void {
+        inline for (@typeInfo(SchedulerMetrics).@"struct".fields) |field| {
+            @field(self, field.name) -= @field(other, field.name);
         }
     }
 };
@@ -1362,6 +1374,8 @@ pub const Runtime = struct {
     // so a worker cannot close its waker fds while a notifier is still using
     // them. See the wait in runWorker().
     teardown: os.ResetEvent = .init(),
+    metrics_monitor: ?std.Thread = null,
+    metrics_stop: std.atomic.Value(u32) = .init(0),
     own_self: bool = false,
 
     resolver: ?dns.Resolver = null,
@@ -1452,6 +1466,41 @@ pub const Runtime = struct {
             // false lets single-executor runtimes skip the steal machinery.
             if (num_workers > 0) self.executors_stealable.store(true, .release);
         }
+
+        if (options.metrics_log_interval.value > 0) {
+            if (metrics_enabled and !builtin.single_threaded) {
+                self.metrics_monitor = try std.Thread.spawn(.{}, runMetricsMonitor, .{self});
+            } else {
+                log.warn("metrics_log_interval set, but scheduler metrics are compiled out", .{});
+            }
+        }
+    }
+
+    /// Logs scheduler counter deltas every metrics_log_interval until deinit
+    /// sets metrics_stop.
+    fn runMetricsMonitor(self: *Runtime) void {
+        const interval = self.options.metrics_log_interval;
+        var last: SchedulerMetrics = .{};
+        while (self.metrics_stop.load(.acquire) == 0) {
+            os.Futex.timedWait(&self.metrics_stop, 0, interval) catch {
+                const total = self.schedulerMetrics();
+                var delta = total;
+                delta.sub(last);
+                last = total;
+                log.info("scheduler: parks doze={d} full={d} elections={d} steals={d}/{d} hint_hits={d} drains={d} woken={d} batch_claims={d} sheds={d}", .{
+                    delta.parks_doze,
+                    delta.parks_full,
+                    delta.park_elections,
+                    delta.steal_hits,
+                    delta.steal_attempts,
+                    delta.steal_hint_hits,
+                    delta.drain_batches,
+                    delta.drain_woken,
+                    delta.batch_wake_claims,
+                    delta.sheds,
+                });
+            };
+        }
     }
 
     /// Stop worker executors and join threads. Used by deinit() and init() error path.
@@ -1482,6 +1531,15 @@ pub const Runtime = struct {
 
         // Set shutting_down flag to prevent new spawns
         self.shutting_down.store(true, .release);
+
+        // The monitor reads executor state, so it must go before any of the
+        // teardown below.
+        if (self.metrics_monitor) |monitor| {
+            self.metrics_stop.store(1, .release);
+            os.Futex.wake(&self.metrics_stop, .one);
+            monitor.join();
+            self.metrics_monitor = null;
+        }
 
         // Stop and join the thread pool first, while all executor loops are
         // still alive. Thread-pool completion callbacks wake the owning loop
@@ -1789,6 +1847,18 @@ test "Runtime: scheduler metrics count parks and drained wakes" {
     try std.testing.expect(m.drain_woken >= 1);
     try std.testing.expect(m.drain_batches >= 1);
     try std.testing.expect(m.parks_doze + m.parks_full >= 1);
+}
+
+test "Runtime: metrics monitor thread starts and stops" {
+    if (!metrics_enabled or builtin.single_threaded) return error.SkipZigTest;
+
+    const runtime = try Runtime.init(std.testing.allocator, .{
+        .metrics_log_interval = .fromMilliseconds(5),
+    });
+    defer runtime.deinit();
+
+    // Long enough for a couple of monitor reports.
+    try runtime.sleep(.fromMilliseconds(15));
 }
 
 test "runtime: spawnBlocking smoke test" {
