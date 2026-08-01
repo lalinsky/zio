@@ -60,6 +60,7 @@ pub const Futex = switch (builtin.os.tag) {
     .linux => FutexLinux,
     .windows => FutexWindows,
     .freebsd => FutexFreeBSD,
+    .netbsd => FutexNetBSD,
     .openbsd => FutexOpenBSD,
     .dragonfly => FutexDragonFly,
     else => |t| if (t.isDarwin()) FutexDarwin else void,
@@ -87,17 +88,13 @@ pub const Futex = switch (builtin.os.tag) {
 /// // Signaling thread
 /// notify.signal();
 /// ```
-pub const Notify = switch (builtin.os.tag) {
-    .netbsd => NotifyNetBSD,
-    else => NotifyFutex,
-};
+pub const Notify = NotifyFutex;
 
 /// Mutex for thread synchronization.
 ///
 /// A blocking mutex that uses platform-specific optimal primitives:
 /// - Windows: SRWLOCK (Slim Reader/Writer Lock)
 /// - Darwin/macOS: os_unfair_lock
-/// - NetBSD: Waiter-based with WaitQueue
 /// - Other platforms: futex-based implementation
 ///
 /// Example usage:
@@ -112,7 +109,6 @@ pub const Notify = switch (builtin.os.tag) {
 pub const Mutex = if (builtin.single_threaded) MutexNoop else switch (builtin.os.tag) {
     .windows => MutexWindows,
     .freebsd => MutexFreeBSD,
-    .netbsd => MutexNotify,
     else => |t| if (t.isDarwin()) MutexDarwin else MutexFutex,
 };
 
@@ -491,7 +487,7 @@ const FutexOpenBSD = struct {
         _ = sys.futex(
             &ptr.raw,
             sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
-            @intCast(expected),
+            @bitCast(expected),
             null,
             null,
         );
@@ -503,7 +499,7 @@ const FutexOpenBSD = struct {
         const rc = sys.futex(
             &ptr.raw,
             sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
-            @intCast(expected),
+            @bitCast(expected),
             &timeout_ts,
             null,
         );
@@ -530,6 +526,59 @@ const FutexOpenBSD = struct {
 };
 
 // ============================================================================
+// NetBSD implementation
+// ============================================================================
+
+const FutexNetBSD = struct {
+    pub fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
+        _ = sys.futex(
+            &ptr.raw,
+            sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
+            @bitCast(expected),
+            null,
+            null,
+            0,
+            0,
+        );
+    }
+
+    pub fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
+        const timeout_ts = timeout.toTimespec();
+
+        const rc = sys.futex(
+            &ptr.raw,
+            sys.FUTEX_WAIT | sys.FUTEX_PRIVATE_FLAG,
+            @bitCast(expected),
+            &timeout_ts,
+            null,
+            0,
+            0,
+        );
+
+        if (rc == -1) {
+            const err = posix.errno(rc);
+            if (err == .TIMEDOUT) return error.Timeout;
+        }
+    }
+
+    pub fn wake(ptr: *const std.atomic.Value(u32), count: WakeCount) void {
+        const n: c_int = switch (count) {
+            .one => 1,
+            .all => std.math.maxInt(c_int),
+        };
+        _ = sys.futex(
+            &ptr.raw,
+            sys.FUTEX_WAKE | sys.FUTEX_PRIVATE_FLAG,
+            n,
+            null,
+            null,
+            0,
+            0,
+        );
+    }
+};
+
+// ============================================================================
 // DragonFly BSD implementation
 // ============================================================================
 
@@ -537,7 +586,7 @@ const FutexDragonFly = struct {
     pub fn wait(ptr: *const std.atomic.Value(u32), expected: u32) void {
         _ = sys.umtx_sleep(
             &ptr.raw,
-            @intCast(expected),
+            @bitCast(expected),
             0, // 0 means infinite wait
         );
     }
@@ -548,7 +597,7 @@ const FutexDragonFly = struct {
 
         const rc = sys.umtx_sleep(
             &ptr.raw,
-            @intCast(expected),
+            @bitCast(expected),
             timeout_us,
         );
 
@@ -590,74 +639,6 @@ const NotifyFutex = struct {
     pub fn signal(self: *NotifyFutex) void {
         _ = self.state.fetchAdd(1, .release);
         Futex.wake(&self.state, .one);
-    }
-};
-
-/// NetBSD notify using native _lwp_park/_lwp_unpark
-///
-/// Implementation note: _lwp_park/_lwp_unpark handles signal-before-wait races safely.
-/// If _lwp_unpark() is called before the LWP calls _lwp_park(), the kernel sets the
-/// LW_UNPARKED flag on the target LWP. When that LWP later calls _lwp_park(), it
-/// immediately returns EALREADY without blocking. This means signal() can be called
-/// before wait() without losing the wakeup.
-///
-/// The lwp_id is captured at init() time, so this Notify must be created on the same
-/// thread that will call wait(). Other threads can safely call signal().
-const NotifyNetBSD = struct {
-    state: std.atomic.Value(u32) = .init(0),
-    lwp_id: c_int,
-
-    pub fn init() NotifyNetBSD {
-        return .{
-            .lwp_id = sys._lwp_self(),
-        };
-    }
-
-    pub fn wait(self: *NotifyNetBSD, current: u32) void {
-        _ = self;
-        _ = current; // Caller checks state, we just park
-
-        // Safe to call even if signal() was already called - the kernel remembers
-        // the unpark and will return EALREADY immediately without blocking.
-        _ = sys.___lwp_park60(
-            @intFromEnum(sys.CLOCK.MONOTONIC),
-            0,
-            null,
-            0, // unpark: don't unpark anyone
-            null, // hint
-            null, // unparkhint
-        );
-    }
-
-    pub fn timedWait(self: *NotifyNetBSD, current: u32, timeout: Duration) error{Timeout}!void {
-        _ = self;
-        _ = current; // Caller checks state, we just park
-
-        const timeout_ts = timeout.toTimespec();
-
-        // Safe to call even if signal() was already called - the kernel remembers
-        // the unpark and will return EALREADY immediately without blocking.
-        const result = sys.___lwp_park60(
-            @intFromEnum(sys.CLOCK.MONOTONIC),
-            0,
-            &timeout_ts,
-            0, // unpark: don't unpark anyone
-            null, // hint
-            null, // unparkhint
-        );
-
-        if (result == -1) {
-            const err = posix.errno(result);
-            if (err == .TIMEDOUT) {
-                return error.Timeout;
-            }
-        }
-    }
-
-    pub fn signal(self: *NotifyNetBSD) void {
-        _ = self.state.fetchAdd(1, .release);
-        // Safe to call before wait() - sets LW_UNPARKED flag that park() will check
-        _ = sys._lwp_unpark(self.lwp_id, null);
     }
 };
 
@@ -813,78 +794,6 @@ const MutexDarwin = struct {
 
     pub fn tryLock(self: *MutexDarwin) bool {
         return sys.os_unfair_lock_trylock(&self.unfair_lock);
-    }
-};
-
-/// Notify-based mutex using WaitQueue.
-///
-/// Uses the same pattern as zio.Mutex but for blocking OS threads:
-/// - Queue flag encodes lock status (flag set = unlocked)
-/// - Stack-allocated waiters block on Notify instead of suspending coroutines
-/// - FIFO ordering ensures fairness
-pub const MutexNotify = struct {
-    /// Stack-allocated waiter that blocks an OS thread
-    const Waiter = struct {
-        wait_node: WaitNode,
-        notify: Notify,
-
-        fn init() Waiter {
-            return .{
-                .wait_node = .{},
-                .notify = Notify.init(),
-            };
-        }
-    };
-
-    /// FIFO wait queue with lock state encoded in flag:
-    /// - flag set = unlocked
-    /// - flag clear = locked (with or without waiters)
-    queue: WaitQueue(WaitNode) = .empty_flagged,
-
-    pub fn init() MutexNotify {
-        return .{};
-    }
-
-    pub fn deinit(self: *MutexNotify) void {
-        _ = self;
-    }
-
-    pub fn tryLock(self: *MutexNotify) bool {
-        // Only succeeds if flag is set (unlocked) AND no waiters
-        return self.queue.tryClearFlagIfEmpty();
-    }
-
-    pub fn lock(self: *MutexNotify) void {
-        // Fast path: try to acquire unlocked mutex (flag set, no waiters)
-        if (self.queue.tryClearFlagIfEmpty()) {
-            return;
-        }
-
-        // Slow path: add to FIFO wait queue
-        var waiter = Waiter.init();
-
-        // Try to clear flag (acquire lock), or push to queue
-        const result = self.queue.pushOrClearFlag(&waiter.wait_node);
-        if (result == .flag_cleared) {
-            // Mutex was unlocked, we acquired it
-            return;
-        }
-
-        // Wait for lock - block on event, handling spurious wakeups
-        while (waiter.notify.state.load(.acquire) == 0) {
-            waiter.notify.wait(0);
-        }
-
-        // Acquire fence: synchronize-with unlock()'s .release in pop()
-        _ = self.queue.isFlagSet();
-    }
-
-    pub fn unlock(self: *MutexNotify) void {
-        // Pop one waiter (they inherit the lock, flag stays clear) or set flag (unlock)
-        if (self.queue.popOrSetFlag()) |wait_node| {
-            const waiter: *Waiter = @fieldParentPtr("wait_node", wait_node);
-            waiter.notify.signal();
-        }
     }
 };
 
@@ -1205,11 +1114,6 @@ test "Mutex - basic lock unlock" {
     try checkMutexBasicLockUnlock(Mutex);
 }
 
-test "MutexNotify - basic lock unlock" {
-    if (builtin.single_threaded) return error.SkipZigTest;
-    try checkMutexBasicLockUnlock(MutexNotify);
-}
-
 test "Futex - wake all" {
     if (builtin.single_threaded) return error.SkipZigTest;
     if (Futex == void) return error.SkipZigTest;
@@ -1252,6 +1156,25 @@ test "Futex - wake all" {
 
     _ = futex_value.fetchAdd(1, .monotonic);
     Futex.wake(&futex_value, .all);
+}
+
+test "Futex - timedWait times out and sees changed values" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    if (Futex == void) return error.SkipZigTest;
+
+    var word = std.atomic.Value(u32).init(0);
+
+    // Value unchanged: the wait must expire.
+    try std.testing.expectError(error.Timeout, Futex.timedWait(&word, 0, Duration.fromMilliseconds(10)));
+
+    // Value already changed: the wait must return immediately, not block.
+    word.store(1, .release);
+    try Futex.timedWait(&word, 0, Duration.fromMilliseconds(1000));
+
+    // The high bit must survive the trip into the platform call: expected
+    // values are raw 32-bit words, not small integers.
+    word.store(0x8000_0000, .release);
+    try std.testing.expectError(error.Timeout, Futex.timedWait(&word, 0x8000_0000, Duration.fromMilliseconds(10)));
 }
 
 test "Notify - basic signal and wait" {
@@ -1349,7 +1272,6 @@ test "Notify - timedWait success (signaled before timeout)" {
 
     const waiter = struct {
         fn run(ctx: *Context) void {
-            // Create Notify on the waiting thread (required for NetBSD)
             var notify = Notify.init();
             ctx.notify_ptr.store(&notify, .release);
             ctx.ready.store(true, .release);
@@ -1418,11 +1340,6 @@ test "Mutex - basic lock and unlock" {
     checkMutexBasicLockAndUnlock(Mutex);
 }
 
-test "MutexNotify - basic lock and unlock" {
-    if (builtin.single_threaded) return error.SkipZigTest;
-    checkMutexBasicLockAndUnlock(MutexNotify);
-}
-
 fn checkMutexTryLock(comptime MutexType: type) !void {
     var mutex = MutexType.init();
     defer mutex.deinit();
@@ -1437,11 +1354,6 @@ fn checkMutexTryLock(comptime MutexType: type) !void {
 test "Mutex - tryLock" {
     if (builtin.single_threaded) return error.SkipZigTest;
     try checkMutexTryLock(Mutex);
-}
-
-test "MutexNotify - tryLock" {
-    if (builtin.single_threaded) return error.SkipZigTest;
-    try checkMutexTryLock(MutexNotify);
 }
 
 fn checkMutexContention(comptime MutexType: type) !void {
@@ -1492,11 +1404,6 @@ fn checkMutexContention(comptime MutexType: type) !void {
 test "Mutex - contention" {
     if (builtin.single_threaded) return error.SkipZigTest;
     try checkMutexContention(Mutex);
-}
-
-test "MutexNotify - contention" {
-    if (builtin.single_threaded) return error.SkipZigTest;
-    try checkMutexContention(MutexNotify);
 }
 
 fn checkConditionBasicWaitAndSignal(comptime MutexType: type, comptime ConditionType: type) !void {
