@@ -732,9 +732,14 @@ pub const Executor = struct {
         var total: usize = 0;
         for (executors) |e| total += e.loop.state.loadActive();
         const avg = total / executors.len;
-        // The +1 keeps neighbors one apart from trading the same task back
-        // and forth forever.
-        if (mine > avg + 1) {
+        // The margin scales with the average so that integer division and
+        // moment-to-moment op jitter never read as imbalance; connections
+        // that cannot divide evenly across executors would otherwise
+        // circulate through the global queue forever (a steady 64-connection
+        // pipeline measured ~50k sheds/s under a flat margin of 1). Shedding
+        // starts at ~12.5% over average, and no less than 2 above it.
+        const margin = @max(2, avg / 8);
+        if (mine > avg + margin) {
             self.shed_quota = @intCast(@min(mine - avg, max_shed_per_tick));
         }
     }
