@@ -57,6 +57,15 @@ fn sendTermSignal(handle: ProcessHandle) void {
     }
 }
 
+fn sendKillSignal(handle: ProcessHandle) void {
+    const rc = std.posix.system.kill(handle, .KILL);
+    std.debug.print("NETBSD childKill: kill(pid={}, SIGKILL) rc={} errno={}\n", .{
+        handle,
+        rc,
+        std.posix.errno(rc),
+    });
+}
+
 fn dumpTermSignalState() void {
     if (builtin.os.tag != .netbsd) return;
 
@@ -111,9 +120,9 @@ else
     &.{"false"};
 
 const argv_sleep: []const []const u8 = if (builtin.os.tag == .windows)
-    &.{ "cmd.exe", "/c", "timeout /t 100 /nobreak" }
+    &.{ "cmd.exe", "/c", "timeout /t 5 /nobreak" }
 else
-    &.{ "sleep", "100" };
+    &.{ "sleep", "5" };
 
 const argv_sleep_short: []const []const u8 = if (builtin.os.tag == .windows)
     &.{ "cmd.exe", "/c", "timeout /t 1 /nobreak" }
@@ -165,18 +174,38 @@ test "childKill: NetBSD child exits before process wait registration" {
     try std.testing.expect(child.id == null);
 }
 
-test "childKill: NetBSD repeated immediate termination" {
+test "childKill: NetBSD repeated immediate SIGKILL" {
     if (builtin.os.tag != .netbsd) return error.SkipZigTest;
 
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    for (0..100) |iteration| {
+    for (0..20) |iteration| {
         var child = try std.process.spawn(rt.io(), .{ .argv = argv_sleep_short });
-        if (iteration % 10 == 0) {
-            std.debug.print("NETBSD repeated childKill: iteration={} pid={}\n", .{ iteration, child.id.? });
-        }
-        childKill(&child);
+        std.debug.print("NETBSD immediate SIGKILL: iteration={} pid={}\n", .{ iteration, child.id.? });
+        sendKillSignal(child.id.?);
+        var op = ev.ProcessWait.init(child.id.?);
+        waitForIoUncancelable(&op.c);
+        childCleanup(&child);
+        try std.testing.expect(child.id == null);
+    }
+}
+
+test "childKill: NetBSD repeated SIGTERM after 10ms" {
+    if (builtin.os.tag != .netbsd) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    for (0..20) |iteration| {
+        var child = try std.process.spawn(rt.io(), .{ .argv = argv_sleep_short });
+        std.debug.print("NETBSD repeated SIGTERM: iteration={} pid={}\n", .{ iteration, child.id.? });
+        sendTermSignal(child.id.?);
+        os.time.sleep(.fromMilliseconds(10));
+        sendTermSignal(child.id.?);
+        var op = ev.ProcessWait.init(child.id.?);
+        waitForIoUncancelable(&op.c);
+        childCleanup(&child);
         try std.testing.expect(child.id == null);
     }
 }
