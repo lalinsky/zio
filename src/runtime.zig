@@ -395,6 +395,9 @@ pub const Executor = struct {
     // average (see scheduleTaskLocal).
     shed_quota: u32 = 0,
 
+    // Ticks until the next shed evaluation (see recomputeShedQuota).
+    shed_cooldown: u32 = 0,
+
     // Whether this executor has already spent its doze (the steal-free grace
     // park, see parkAndSearch) since it last had local work. Reset by any
     // local work; while set, empty passes go straight to the full park.
@@ -716,6 +719,10 @@ pub const Executor = struct {
     /// queue into the primary scheduling path.
     const max_shed_per_tick = 4;
 
+    /// Ticks between shed evaluations; at the ~100us tick target this
+    /// samples load roughly every 6ms.
+    const shed_eval_interval = 64;
+
     /// Once per tick, compare this executor's resident load (active ops
     /// submitted on this loop, mostly tasks parked on I/O) against the
     /// runtime average; the excess becomes this tick's shed quota (see
@@ -725,6 +732,19 @@ pub const Executor = struct {
     fn recomputeShedQuota(self: *Executor) void {
         self.shed_quota = 0;
         if (!self.runtime.stealingActive()) return;
+
+        // Shedding corrects sustained imbalance, so it only needs to look
+        // every few milliseconds. Evaluating every tick lets instantaneous
+        // op-count spread (ops complete and resubmit continuously, so
+        // executors' loadActive counts scatter around the average at any
+        // given moment) grant a fresh quota tens of thousands of times per
+        // second, circulating connections through the global queue with no
+        // lasting rebalancing effect.
+        if (self.shed_cooldown > 0) {
+            self.shed_cooldown -= 1;
+            return;
+        }
+        self.shed_cooldown = shed_eval_interval;
 
         const executors = self.runtime.executors.items;
         const mine = self.loop.state.loadActive();
