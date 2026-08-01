@@ -132,10 +132,12 @@ pub const RuntimeOptions = struct {
         .maximum_size = 8 * 1024 * 1024,
         .committed_size = 256 * 1024,
     },
-    /// When non-zero and scheduler metrics are compiled in, a monitor thread
-    /// logs the counters' per-interval deltas at this cadence. A dedicated
-    /// thread rather than an executor timer, so it keeps reporting even when
-    /// every executor is wedged or asleep.
+    /// When non-zero, a monitor thread logs the scheduler counters'
+    /// per-interval deltas at this cadence. A dedicated thread rather than
+    /// an executor timer, so it keeps reporting even when every executor is
+    /// wedged or asleep. Requires the counters compiled in (build option
+    /// `scheduler_metrics`) and a multi-threaded build; warns and stays off
+    /// otherwise.
     metrics_log_interval: Duration = .zero,
 
     /// Total number of executors to run.
@@ -343,12 +345,13 @@ pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
 }
 
 /// Whether scheduler event counters are compiled in (build option
-/// `scheduler-metrics`).
+/// `scheduler_metrics`).
 pub const metrics_enabled = zio_options.scheduler_metrics;
 
 /// Counts of scheduler events, kept per executor (plain increments on the
-/// owning thread) and summed by `Runtime.schedulerMetrics`. All zeros when
-/// `metrics_enabled` is false.
+/// owning thread) and summed by `Runtime.schedulerMetrics`. With
+/// `metrics_enabled` false the per-executor storage is zero-bit and the
+/// summed snapshot is all zeros.
 pub const SchedulerMetrics = struct {
     /// Parks with the doze cap (the steal-free grace park).
     parks_doze: u64 = 0,
@@ -381,6 +384,9 @@ pub const SchedulerMetrics = struct {
         }
     }
 };
+
+const MetricsStorage = if (metrics_enabled) SchedulerMetrics else void;
+const metrics_storage_init: MetricsStorage = if (metrics_enabled) .{} else {};
 
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
@@ -447,7 +453,7 @@ pub const Executor = struct {
     dozed: bool = false,
 
     // Scheduler event counters; written only by this executor's thread.
-    metrics: SchedulerMetrics = .{},
+    metrics: MetricsStorage = metrics_storage_init,
 
     // True while drainDispatched signals a batch of task wakes:
     // scheduleTaskLocal skips the per-push announce, the drain announces
@@ -1468,10 +1474,12 @@ pub const Runtime = struct {
         }
 
         if (options.metrics_log_interval.value > 0) {
-            if (metrics_enabled and !builtin.single_threaded) {
-                self.metrics_monitor = try std.Thread.spawn(.{}, runMetricsMonitor, .{self});
-            } else {
+            if (comptime !metrics_enabled) {
                 log.warn("metrics_log_interval set, but scheduler metrics are compiled out", .{});
+            } else if (comptime builtin.single_threaded) {
+                log.warn("metrics_log_interval set, but a single-threaded build cannot start the monitor thread", .{});
+            } else {
+                self.metrics_monitor = try std.Thread.spawn(.{}, runMetricsMonitor, .{self});
             }
         }
     }
@@ -1682,8 +1690,10 @@ pub const Runtime = struct {
     /// they are quiesced. All zeros when `metrics_enabled` is false.
     pub fn schedulerMetrics(self: *Runtime) SchedulerMetrics {
         var total: SchedulerMetrics = .{};
-        for (self.executors.items) |executor| {
-            total.add(executor.metrics);
+        if (comptime metrics_enabled) {
+            for (self.executors.items) |executor| {
+                total.add(executor.metrics);
+            }
         }
         return total;
     }
