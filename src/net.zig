@@ -613,10 +613,12 @@ pub const IpAddress = extern union {
     pub const ListenOptions = struct {
         kernel_backlog: u31 = default_kernel_backlog,
         reuse_address: bool = false,
+        reuse_port: bool = false,
     };
 
     pub const BindOptions = struct {
         reuse_address: bool = false,
+        reuse_port: bool = false,
     };
 
     pub const ConnectOptions = struct {
@@ -628,7 +630,10 @@ pub const IpAddress = extern union {
         errdefer socket.close();
 
         if (options.reuse_address) {
-            try socket.setReuse(true);
+            try socket.setReuseAddress(true);
+        }
+        if (options.reuse_port) {
+            try socket.setReusePort(true);
         }
 
         try socket.bind(.{ .ip = self });
@@ -641,7 +646,10 @@ pub const IpAddress = extern union {
         errdefer socket.close();
 
         if (options.reuse_address) {
-            try socket.setReuse(true);
+            try socket.setReuseAddress(true);
+        }
+        if (options.reuse_port) {
+            try socket.setReusePort(true);
         }
 
         try socket.bind(.{ .ip = self });
@@ -718,7 +726,7 @@ pub const UnixAddress = extern union {
         errdefer socket.close();
 
         if (options.reuse_address) {
-            try socket.setReuse(true);
+            try socket.setReuseAddress(true);
         }
 
         try socket.bind(.{ .unix = self });
@@ -905,16 +913,6 @@ pub const Socket = struct {
             return error.Unsupported;
         }
         try self.setBoolOption(os.posix.SOL.SOCKET, os.posix.SO.REUSEPORT, enabled);
-    }
-
-    /// Set SO_REUSEADDR, plus SO_REUSEPORT where supported. Callers that ask for
-    /// address reuse want both: REUSEADDR alone still fails to rebind while a
-    /// prior process's socket lingers (e.g. right after a crash/restart), which
-    /// REUSEPORT allows. Keeps the native bind/listen paths consistent with the
-    /// std.Io listen path, which already sets both.
-    pub fn setReuse(self: Socket, enabled: bool) !void {
-        try self.setReuseAddress(enabled);
-        self.setReusePort(enabled) catch {}; // best-effort; unsupported on Windows
     }
 
     /// Enable or disable TCP keepalive (SO_KEEPALIVE)
@@ -2383,6 +2381,29 @@ test "IpAddress: listen/accept/connect/read/write IPv4" {
     var write_buffer: [32]u8 = undefined;
     const addr = try IpAddress.parseIp4("127.0.0.1", 0);
     try checkListen(addr, IpAddress.ListenOptions{}, &write_buffer);
+}
+
+test "IpAddress: reuse_address does not enable duplicate listeners" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const first_addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    const first = try first_addr.listen(.{});
+    defer first.close();
+
+    const second_addr = try IpAddress.parseIp4("127.0.0.1", first.socket.address.ip.getPort());
+    try std.testing.expectError(error.AddressInUse, second_addr.listen(.{ .reuse_address = true }));
+}
+
+test "IpAddress: reuse_port allows duplicate listeners" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const first_addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    const first = try first_addr.listen(.{ .reuse_port = true });
+    defer first.close();
+
+    const second_addr = try IpAddress.parseIp4("127.0.0.1", first.socket.address.ip.getPort());
+    const second = try second_addr.listen(.{ .reuse_port = true });
+    defer second.close();
 }
 
 test "IpAddress: listen/accept/connect/read/write IPv6" {
