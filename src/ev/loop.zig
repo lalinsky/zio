@@ -1078,14 +1078,19 @@ pub const Loop = struct {
     /// Completion callback for internal file ops with linked completion
     pub fn loopLinkedWorkComplete(ctx: ?*anyopaque, work: *Work) void {
         const context: *LinkedWorkContext = @ptrCast(@alignCast(ctx));
+        // Publishing `linked` hands the containing operation back to the loop;
+        // its waiter may then resume and free that operation before this worker
+        // returns. Snapshot everything stored in the operation before the push.
+        const loop = context.loop;
+        const linked = context.linked;
         // Propagate cancel error from work to linked completion
         if (work.c.err) |err| {
-            if (!context.linked.has_result) {
-                context.linked.setError(err);
+            if (!linked.has_result) {
+                linked.setError(err);
             }
         }
-        context.loop.state.work_completions.push(context.linked);
-        context.loop.wake();
+        loop.state.work_completions.push(linked);
+        loop.wake();
     }
 
     pub fn processAsyncHandles(self: *Loop) void {
