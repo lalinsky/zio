@@ -105,6 +105,15 @@ pub const Context = switch (builtin.cpu.arch) {
 
         pub const stack_alignment = 16;
     },
+    .x86 => extern struct {
+        esp: u32,  // stack pointer
+        ebp: u32,  // frame pointer
+        eip: u32,  // instruction pointer
+        stack_info: StackInfo,
+        tsan_fiber: tsan.Fiber = tsan.none,
+
+        pub const stack_alignment = 16;
+    },
     else => |arch| @compileError("unimplemented architecture: " ++ @tagName(arch)),
 };
 
@@ -159,6 +168,11 @@ pub fn setupContext(ctx: *Context, stack_ptr: usize, entry_point: *const EntryPo
             ctx.sp = stack_ptr - 2176;
             ctx.fp = stack_ptr;
             ctx.pc = @intFromPtr(entry_point);
+        },
+        .x86 => {
+            ctx.esp = @intCast(stack_ptr);
+            ctx.ebp = 0;
+            ctx.eip = @intCast(@intFromPtr(entry_point));
         },
         else => @compileError("unsupported architecture"),
     }
@@ -1290,6 +1304,50 @@ pub inline fn switchContext(
               .fsr = true, .fprs = true,
               .memory = true,
             }),
+        .x86 => asm volatile (
+            \\ leal 0f, %%edx
+            \\ movl %%esp, 0(%%eax)
+            \\ movl %%ebp, 4(%%eax)
+            \\ movl %%edx, 8(%%eax)
+            \\ movl 0(%%ecx), %%esp
+            \\ movl 4(%%ecx), %%ebp
+            \\ jmpl *8(%%ecx)
+            \\0:
+            :
+            : [current] "{eax}" (current_context_param),
+              [new] "{ecx}" (new_context),
+            : .{
+              .eax = true,
+              .ecx = true,
+              .edx = true,
+              .ebx = true,
+              .esi = true,
+              .edi = true,
+              .ebp = true,
+              .st0 = true,
+              .st1 = true,
+              .st2 = true,
+              .st3 = true,
+              .st4 = true,
+              .st5 = true,
+              .st6 = true,
+              .st7 = true,
+              .xmm0 = true,
+              .xmm1 = true,
+              .xmm2 = true,
+              .xmm3 = true,
+              .xmm4 = true,
+              .xmm5 = true,
+              .xmm6 = true,
+              .xmm7 = true,
+              // x86 32-bit does not guarantee AVX support,
+              // so ymm/zmm clobbers are omitted.
+              .mxcsr = true,
+              .eflags = true,
+              .fpsr = true,
+              .fpcr = true,
+              .memory = true,
+            }),
         else => @compileError("unsupported architecture"),
     }
 }
@@ -1418,6 +1476,13 @@ fn coroEntry() callconv(.naked) noreturn {
             \\ ldx [%%i6 + 8], %%o0
             \\ jmp %%o1
             \\ nop
+        ),
+        .x86 => asm volatile (
+            \\ xorl %%ebp, %%ebp
+            \\ pushl $0
+            \\ movl 8(%%esp), %%eax
+            \\ pushl %%eax
+            \\ call *8(%%esp)
         ),
         else => @compileError("unsupported architecture"),
     }
