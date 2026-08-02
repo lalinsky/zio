@@ -1514,10 +1514,11 @@ fn coroEntry() callconv(.naked) noreturn {
         ),
         .x86 => asm volatile (
             \\ xorl %%ebp, %%ebp
-            \\ movl 4(%%esp), %%eax
+            \\ subl $12, %%esp
+            \\ movl 16(%%esp), %%eax
             \\ pushl %%eax
             \\ pushl $0
-            \\ jmpl *8(%%esp)
+            \\ jmpl *20(%%esp)
         ),
         else => @compileError("unsupported architecture"),
     }
@@ -1882,4 +1883,3 @@ test "Coroutine: stack trace" {
         return err;
     };
 }
-
