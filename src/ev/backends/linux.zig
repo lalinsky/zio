@@ -176,7 +176,7 @@ pub fn Backend(comptime mode: Mode) type {
             };
         }
 
-        pub fn supports(self: *const Self, comptime op: Op, data: *const op.toType()) bool {
+        pub fn supports(self: *const Self, comptime op: Op, data: *op.toType()) bool {
             comptime std.debug.assert(capability(op) == .maybe);
             return switch (mode) {
                 .io_uring => self.engine.io_uring.supports(op, data),

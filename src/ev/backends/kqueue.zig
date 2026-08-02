@@ -109,10 +109,10 @@ pub fn capability(comptime op: Op) Support {
     };
 }
 
-pub fn supports(_: *const Self, comptime op: Op, data: *const op.toType()) bool {
+pub fn supports(_: *const Self, comptime op: Op, data: *op.toType()) bool {
     comptime std.debug.assert(capability(op) == .maybe);
     if (comptime op == .file_read_streaming or op == .file_write_streaming) {
-        return data.pollable orelse false;
+        return common.resolveStreamingSupport(data);
     }
     @compileError("unhandled runtime kqueue capability: " ++ @tagName(op));
 }

@@ -125,6 +125,22 @@ pub fn probePollable(handle: fs.fd_t) bool {
     }
 }
 
+/// Resolve and cache whether a streaming operation can use a readiness-based
+/// backend. Unknown Windows handles are deliberately delegated: unlike handles
+/// opened by zio, they are not known to be associated with our IOCP port.
+pub fn resolveStreamingSupport(data: anytype) bool {
+    if (data.pollable) |pollable| return pollable;
+
+    if (builtin.os.tag == .windows) {
+        data.pollable = false;
+        return false;
+    }
+
+    const pollable = probePollable(data.handle);
+    data.pollable = pollable;
+    return pollable;
+}
+
 pub fn handleFileOpen(c: *Completion, allocator: std.mem.Allocator) void {
     const data = c.cast(FileOpen);
     if (fs.openat(allocator, data.dir, data.path, data.flags)) |fd| {

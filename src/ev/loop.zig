@@ -914,25 +914,6 @@ pub const Loop = struct {
             },
             else => {
                 switch (completion.op) {
-                    inline .file_read_streaming, .file_write_streaming => |op| {
-                        // Runtime support for streaming operations can depend on
-                        // whether this particular handle is pollable. Classify it
-                        // once before asking the backend to resolve `.maybe`.
-                        const data = completion.cast(op.toType());
-                        _ = data.pollable orelse blk: {
-                            if (builtin.os.tag == .windows) {
-                                data.pollable = false;
-                                break :blk false;
-                            }
-                            const p = common.probePollable(data.handle);
-                            data.pollable = p;
-                            break :blk p;
-                        };
-                    },
-                    else => {},
-                }
-
-                switch (completion.op) {
                     inline else => |op| {
                         const op_data = completion.cast(op.toType());
                         switch (comptime Backend.capability(op)) {

@@ -152,9 +152,11 @@ pub fn capability(comptime op: Op) Support {
     };
 }
 
-const feature_unknown: u8 = 0;
-const feature_yes: u8 = 1;
-const feature_no: u8 = 2;
+const FeatureSupport = enum(u8) {
+    unknown,
+    yes,
+    no,
+};
 
 pub const SharedState = struct {
     master_fd: std.atomic.Value(c_int) = .init(-1),
@@ -162,9 +164,9 @@ pub const SharedState = struct {
     /// Whether the running kernel supports IORING_OP_FTRUNCATE (Linux >= 6.9),
     /// probed exactly once when the master ring is created and resolved by
     /// `supports()` for `.file_set_size`.
-    ftruncate_support: std.atomic.Value(u8) = .init(feature_unknown),
+    ftruncate_support: std.atomic.Value(FeatureSupport) = .init(.unknown),
     /// IORING_OP_WAITID was added after the minimum supported ring setup.
-    waitid_support: std.atomic.Value(u8) = .init(feature_unknown),
+    waitid_support: std.atomic.Value(FeatureSupport) = .init(.unknown),
 };
 
 pub const NetRecvData = struct {
@@ -359,21 +361,21 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
 /// Loop takes an always-correct fallback instead of submitting a rejected SQE.
 fn probeAndStoreFeatures(ring: *linux.IoUring, shared_state: *SharedState) void {
     const probe = ring.get_probe() catch {
-        shared_state.ftruncate_support.store(feature_no, .seq_cst);
-        shared_state.waitid_support.store(feature_no, .seq_cst);
+        shared_state.ftruncate_support.store(.no, .monotonic);
+        shared_state.waitid_support.store(.no, .monotonic);
         return;
     };
-    shared_state.ftruncate_support.store(if (probe.is_supported(.FTRUNCATE)) feature_yes else feature_no, .seq_cst);
-    shared_state.waitid_support.store(if (probe.is_supported(.WAITID)) feature_yes else feature_no, .seq_cst);
+    shared_state.ftruncate_support.store(if (probe.is_supported(.FTRUNCATE)) .yes else .no, .monotonic);
+    shared_state.waitid_support.store(if (probe.is_supported(.WAITID)) .yes else .no, .monotonic);
 }
 
-pub fn supports(self: *const Self, comptime op: Op, _: *const op.toType()) bool {
+pub fn supports(self: *const Self, comptime op: Op, _: *op.toType()) bool {
     comptime std.debug.assert(capability(op) == .maybe);
     if (comptime op == .file_set_size) {
-        return self.shared_state.ftruncate_support.load(.seq_cst) == feature_yes;
+        return self.shared_state.ftruncate_support.load(.monotonic) == .yes;
     }
     if (comptime op == .process_wait) {
-        return self.shared_state.waitid_support.load(.seq_cst) == feature_yes;
+        return self.shared_state.waitid_support.load(.monotonic) == .yes;
     }
     @compileError("unhandled runtime io_uring capability: " ++ @tagName(op));
 }

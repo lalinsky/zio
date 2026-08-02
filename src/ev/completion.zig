@@ -1274,9 +1274,10 @@ pub const FileReadStreaming = struct {
     handle: fs.fd_t,
     buffer: ReadBuf,
     /// Whether `handle` is pollable (non-seekable). `null` until classified by
-    /// the loop on first submission; backends with a readiness path use the
-    /// poll path when true and the thread pool when false. Callers may seed a
-    /// cached value to skip re-classification, and may read it back afterwards.
+    /// capability resolution on first submission; backends with a readiness
+    /// path use the poll path when true and the thread pool when false. Callers
+    /// may seed a cached value to skip re-classification, and may read it back
+    /// afterwards.
     pollable: ?bool = null,
 
     pub const Error = fs.FileReadError || Cancelable;
@@ -1303,9 +1304,10 @@ pub const FileWriteStreaming = struct {
     handle: fs.fd_t,
     buffer: WriteBuf,
     /// Whether `handle` is pollable (non-seekable). `null` until classified by
-    /// the loop on first submission; backends with a readiness path use the
-    /// poll path when true and the thread pool when false. Callers may seed a
-    /// cached value to skip re-classification, and may read it back afterwards.
+    /// capability resolution on first submission; backends with a readiness
+    /// path use the poll path when true and the thread pool when false. Callers
+    /// may seed a cached value to skip re-classification, and may read it back
+    /// afterwards.
     pollable: ?bool = null,
 
     pub const Error = fs.FileWriteError || Cancelable;
