@@ -1957,7 +1957,12 @@ fn netListenIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: Io
     var socket = zio_net.Socket.open(.fromStd(options.mode), .fromPosix(zio_addr.any.family), .fromStd(options.protocol)) catch |err| return openErrToListenErr(err);
     errdefer socket.close();
 
-    if (options.reuse_address) socket.setReuse(true) catch return error.OptionUnsupported;
+    if (options.reuse_address) {
+        socket.setReuseAddress(true) catch return error.OptionUnsupported;
+        // Preserve std.Io's existing behavior: reuse_address also enables
+        // SO_REUSEPORT where the platform supports it, best-effort.
+        socket.setReusePort(true) catch {};
+    }
 
     socket.bind(.{ .ip = zio_addr }) catch |err| return bindErrToListenErr(err);
     socket.listen(options.kernel_backlog) catch |err| return listenErrToListenErr(err);
