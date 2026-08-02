@@ -105,6 +105,16 @@ pub const Context = switch (builtin.cpu.arch) {
 
         pub const stack_alignment = 16;
     },
+    .x86 => extern struct {
+        esp: u32,  // stack pointer
+        ebp: u32,  // frame pointer
+        eip: u32,  // instruction pointer
+        fiber_data: if (builtin.os.tag == .windows) u32 else void = if (builtin.os.tag == .windows) 0 else {}, // Windows only (TEB offset 0x10)
+        stack_info: StackInfo,
+        tsan_fiber: tsan.Fiber = tsan.none,
+
+        pub const stack_alignment = 16;
+    },
     else => |arch| @compileError("unimplemented architecture: " ++ @tagName(arch)),
 };
 
@@ -159,6 +169,11 @@ pub fn setupContext(ctx: *Context, stack_ptr: usize, entry_point: *const EntryPo
             ctx.sp = stack_ptr - 2176;
             ctx.fp = stack_ptr;
             ctx.pc = @intFromPtr(entry_point);
+        },
+        .x86 => {
+            ctx.esp = @intCast(stack_ptr);
+            ctx.ebp = 0;
+            ctx.eip = @intCast(@intFromPtr(entry_point));
         },
         else => @compileError("unsupported architecture"),
     }
@@ -1290,6 +1305,84 @@ pub inline fn switchContext(
               .fsr = true, .fprs = true,
               .memory = true,
             }),
+        .x86 => asm volatile (
+            \\ leal 0f, %%edx
+            \\ movl %%esp, 0(%%eax)
+            \\ movl %%ebp, 4(%%eax)
+            \\ movl %%edx, 8(%%eax)
+            \\
+            ++ (if (is_windows)
+                \\ // Load NT_TIB via FS segment and save stack bookkeeping fields.
+                \\ // FS:[0x18] = pointer to TEB (= pointer to NT_TIB, since NT_TIB
+                \\ // is the first member of TEB). Fields at NT_TIB offsets:
+                \\ //   0x04 = StackBase, 0x08 = StackLimit, 0x10 = FiberData.
+                \\ // Without this, Windows panic handling will recursively panic
+                \\ // because the TIB still describes the parent stack.
+                \\ movl %%fs:0x18, %%esi
+                \\ movl 0x10(%%esi), %%edi
+                \\ movl %%edi, 12(%%eax)
+                \\ movl 0x04(%%esi), %%edi
+                \\ movl %%edi, 20(%%eax)
+                \\ movl 0x08(%%esi), %%edi
+                \\ movl %%edi, 24(%%eax)
+                \\
+            else
+                "")
+            ++
+            \\ // Restore stack pointer and base pointer
+            \\ movl 0(%%ecx), %%esp
+            \\ movl 4(%%ecx), %%ebp
+            \\
+            ++ (if (is_windows)
+                \\ // Load NT_TIB and restore stack bookkeeping fields.
+                \\ movl %%fs:0x18, %%esi
+                \\ movl 12(%%ecx), %%edi
+                \\ movl %%edi, 0x10(%%esi)
+                \\ movl 20(%%ecx), %%edi
+                \\ movl %%edi, 0x04(%%esi)
+                \\ movl 24(%%ecx), %%edi
+                \\ movl %%edi, 0x08(%%esi)
+                \\
+            else
+                "")
+            ++
+            \\ jmpl *8(%%ecx)
+            \\0:
+            :
+            : [current] "{eax}" (current_context_param),
+              [new] "{ecx}" (new_context),
+            : .{
+              .eax = true,
+              .ecx = true,
+              .edx = true,
+              .ebx = true,
+              .esi = true,
+              .edi = true,
+              .ebp = true,
+              .st0 = true,
+              .st1 = true,
+              .st2 = true,
+              .st3 = true,
+              .st4 = true,
+              .st5 = true,
+              .st6 = true,
+              .st7 = true,
+              .xmm0 = true,
+              .xmm1 = true,
+              .xmm2 = true,
+              .xmm3 = true,
+              .xmm4 = true,
+              .xmm5 = true,
+              .xmm6 = true,
+              .xmm7 = true,
+              // x86 32-bit does not guarantee AVX support,
+              // so ymm/zmm clobbers are omitted.
+              .mxcsr = true,
+              .eflags = true,
+              .fpsr = true,
+              .fpcr = true,
+              .memory = true,
+            }),
         else => @compileError("unsupported architecture"),
     }
 }
@@ -1418,6 +1511,14 @@ fn coroEntry() callconv(.naked) noreturn {
             \\ ldx [%%i6 + 8], %%o0
             \\ jmp %%o1
             \\ nop
+        ),
+        .x86 => asm volatile (
+            \\ xorl %%ebp, %%ebp
+            \\ subl $12, %%esp
+            \\ movl 16(%%esp), %%eax
+            \\ pushl %%eax
+            \\ pushl $0
+            \\ jmpl *20(%%esp)
         ),
         else => @compileError("unsupported architecture"),
     }
@@ -1782,4 +1883,3 @@ test "Coroutine: stack trace" {
         return err;
     };
 }
-

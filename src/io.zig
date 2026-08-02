@@ -2326,6 +2326,7 @@ fn recvErrToReadErr(err: ev.NetRecv.Error) Io.net.Stream.Reader.Error {
         error.MessageOversize,
         error.ProcessFdQuotaExceeded,
         error.SystemFdQuotaExceeded,
+        error.NetworkUnreachable,
         error.Unexpected,
         => error.Unexpected,
     };
@@ -2348,6 +2349,7 @@ fn recvMsgErrToReceiveErr(err: ev.NetRecvMsg.Error) Io.net.Socket.ReceiveError {
         error.WouldBlock,
         error.FileDescriptorNotASocket,
         error.OperationNotSupported,
+        error.NetworkUnreachable,
         error.Unexpected,
         => error.Unexpected,
     };

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 // Type aliases
 pub const DWORD = std.os.windows.DWORD;
@@ -598,7 +599,8 @@ pub extern "kernel32" fn CreateNamedPipeW(
     lpSecurityAttributes: ?*SECURITY_ATTRIBUTES,
 ) callconv(.winapi) HANDLE;
 
-var pipe_counter: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
+const PipeCounterInt = usize;
+var pipe_counter: std.atomic.Value(PipeCounterInt) = std.atomic.Value(PipeCounterInt).init(0);
 
 pub extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) DWORD;
 

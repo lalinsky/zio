@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const os = @import("../../os/root.zig");
 const windows = @import("../../os/windows.zig");
 const net = @import("../../os/net.zig");
@@ -311,6 +312,8 @@ const ExtensionFunctions = struct {
     transmitfile: LPFN_TRANSMITFILE,
 };
 
+pub const InflightInt = usize;
+
 pub const SharedState = struct {
     mutex: os.Mutex = .init(),
     refcount: usize = 0,
@@ -321,7 +324,7 @@ pub const SharedState = struct {
     /// shared port, so the count is a group-shared atomic (any instance's
     /// decrInflight balances any instance's increment). Read by hasInflight()
     /// to skip the wait syscall when nothing can arrive.
-    inflight_io: std.atomic.Value(u64) = .init(0),
+    inflight_io: std.atomic.Value(InflightInt) = .init(0),
 
     // Extension functions loaded once globally (family-independent)
     exts: ExtensionFunctions = undefined,

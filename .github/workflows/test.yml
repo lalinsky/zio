@@ -21,6 +21,7 @@ jobs:
           - { os: windows-latest, target: native, backends: 'iocp poll' }
           - { os: ubuntu-latest, target: arm-linux, qemu: true, backends: 'linux epoll poll' }
           - { os: ubuntu-latest, target: thumb-linux, qemu: true, backends: 'linux epoll poll' }
+          - { os: ubuntu-latest, target: x86-linux, qemu: true, backends: 'linux epoll poll' }
           - { os: ubuntu-latest, target: riscv32-linux, qemu: true, backends: 'linux epoll poll' }
           - { os: ubuntu-latest, target: riscv64-linux, qemu: true, backends: 'linux epoll poll' }
           - { os: ubuntu-latest, target: loongarch64-linux, qemu: true, backends: 'linux epoll poll' }
