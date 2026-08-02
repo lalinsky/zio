@@ -822,13 +822,7 @@ pub const File = struct {
     pub const ReadError = os.fs.FileReadError || Cancelable;
     pub const WriteError = os.fs.FileWriteError || Cancelable;
 
-    /// Wrap a caller-owned descriptor or handle. On Windows its provenance is
-    /// unknown, so it cannot safely use overlapped IOCP: default Reader/Writer
-    /// operations to streaming semantics and delegate them to the thread pool.
     pub fn fromFd(fd: Handle) File {
-        if (builtin.os.tag == .windows) {
-            return .{ .fd = fd, .pollable = false, .preferred_mode = .streaming };
-        }
         return .{ .fd = fd };
     }
 
@@ -1417,14 +1411,6 @@ test "File: streaming changes caller-owned descriptor flags only for epoll" {
     const flags_after = os.posix.system.fcntl(fds[1], os.posix.system.F.GETFL, @as(c_int, 0));
     try std.testing.expectEqual(.SUCCESS, os.posix.errno(flags_after));
     try std.testing.expectEqual(readiness_backend, flags_after & nonblocking != 0);
-}
-
-test "File.fromFd: Windows defaults foreign handles to delegated streaming" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const file = File.fromFd(os.fs.stdin());
-    try std.testing.expectEqual(false, file.pollable.?);
-    try std.testing.expectEqual(Mode.streaming, resolveMode(file));
 }
 
 test "File: direct I/O round-trip" {
