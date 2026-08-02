@@ -312,13 +312,7 @@ const ExtensionFunctions = struct {
     transmitfile: LPFN_TRANSMITFILE,
 };
 
-/// Integer type for the inflight-IO counter. Uses u32 on x86 (IA-32) because
-/// 64-bit atomics are not available; the counter is bounded by queue_size (u16)
-/// so u32 is always safe.
-pub const InflightInt = switch (builtin.cpu.arch) {
-    .x86 => u32,
-    else => u64,
-};
+pub const InflightInt = usize;
 
 pub const SharedState = struct {
     mutex: os.Mutex = .init(),

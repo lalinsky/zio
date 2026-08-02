@@ -109,6 +109,7 @@ pub const Context = switch (builtin.cpu.arch) {
         esp: u32,  // stack pointer
         ebp: u32,  // frame pointer
         eip: u32,  // instruction pointer
+        fiber_data: if (builtin.os.tag == .windows) u32 else void = if (builtin.os.tag == .windows) 0 else {}, // Windows only (TEB offset 0x10)
         stack_info: StackInfo,
         tsan_fiber: tsan.Fiber = tsan.none,
 
@@ -1309,8 +1310,42 @@ pub inline fn switchContext(
             \\ movl %%esp, 0(%%eax)
             \\ movl %%ebp, 4(%%eax)
             \\ movl %%edx, 8(%%eax)
+            \\
+            ++ (if (is_windows)
+                \\ // Load NT_TIB via FS segment and save stack bookkeeping fields.
+                \\ // FS:[0x18] = pointer to TEB (= pointer to NT_TIB, since NT_TIB
+                \\ // is the first member of TEB). Fields at NT_TIB offsets:
+                \\ //   0x04 = StackBase, 0x08 = StackLimit, 0x10 = FiberData.
+                \\ // Without this, Windows panic handling will recursively panic
+                \\ // because the TIB still describes the parent stack.
+                \\ movl %%fs:0x18, %%esi
+                \\ movl 0x10(%%esi), %%edi
+                \\ movl %%edi, 12(%%eax)
+                \\ movl 0x04(%%esi), %%edi
+                \\ movl %%edi, 20(%%eax)
+                \\ movl 0x08(%%esi), %%edi
+                \\ movl %%edi, 24(%%eax)
+                \\
+            else
+                "")
+            ++
+            \\ // Restore stack pointer and base pointer
             \\ movl 0(%%ecx), %%esp
             \\ movl 4(%%ecx), %%ebp
+            \\
+            ++ (if (is_windows)
+                \\ // Load NT_TIB and restore stack bookkeeping fields.
+                \\ movl %%fs:0x18, %%esi
+                \\ movl 12(%%ecx), %%edi
+                \\ movl %%edi, 0x10(%%esi)
+                \\ movl 20(%%ecx), %%edi
+                \\ movl %%edi, 0x04(%%esi)
+                \\ movl 24(%%ecx), %%edi
+                \\ movl %%edi, 0x08(%%esi)
+                \\
+            else
+                "")
+            ++
             \\ jmpl *8(%%ecx)
             \\0:
             :
@@ -1479,10 +1514,10 @@ fn coroEntry() callconv(.naked) noreturn {
         ),
         .x86 => asm volatile (
             \\ xorl %%ebp, %%ebp
-            \\ pushl $0
-            \\ movl 8(%%esp), %%eax
+            \\ movl 4(%%esp), %%eax
             \\ pushl %%eax
-            \\ call *8(%%esp)
+            \\ pushl $0
+            \\ jmpl *8(%%esp)
         ),
         else => @compileError("unsupported architecture"),
     }
