@@ -31,23 +31,91 @@ const sockreg = @import("../sockreg.zig");
 
 pub const NetHandle = net.fd_t;
 
-const BackendCapabilities = @import("../completion.zig").BackendCapabilities;
+const Op = @import("../completion.zig").Op;
+const Support = @import("../completion.zig").Support;
 
-pub const capabilities: BackendCapabilities = .{
-    .process_wait = true,
-    // Only Darwin has usable absolute wall-clock EVFILT_TIMER semantics
-    // (NOTE_ABSOLUTE = gettimeofday, NOTE_MACH_CONTINUOUS_TIME = suspend-aware).
-    // The BSDs' EVFILT_TIMER absolute clock is monotonic-only and underspecified
-    // with no CLOCK_REALTIME timer, so they keep the capped poll-timeout fallback.
-    .native_wall_timers = builtin.os.tag.isDarwin(),
-    // FreeBSD only: its sendfile never blocks the caller on disk I/O (the
-    // syscall returns before the reads complete and the kernel fills the
-    // socket asynchronously, in order; documented for ffs), so it is safe to
-    // drive from the loop thread. Darwin's sendfile blocks on disk I/O, so it
-    // deliberately stays on the generic fallback, which reads the file on the
-    // thread pool; the other BSDs have no std.c.sendfile declaration.
-    .net_send_file = builtin.os.tag == .freebsd,
-};
+// Only Darwin has usable absolute wall-clock EVFILT_TIMER semantics
+// (NOTE_ABSOLUTE = gettimeofday, NOTE_MACH_CONTINUOUS_TIME = suspend-aware).
+// The BSDs' EVFILT_TIMER absolute clock is monotonic-only and underspecified
+// with no CLOCK_REALTIME timer, so they keep the capped poll-timeout fallback.
+pub const native_wall_timers = builtin.os.tag.isDarwin();
+pub const supports_nonblocking_file_io = false;
+
+pub fn capability(comptime op: Op) Support {
+    return switch (op) {
+        .file_read_streaming, .file_write_streaming => .maybe,
+        // FreeBSD's sendfile is asynchronous with respect to file reads. The
+        // Darwin implementation can block the loop and deliberately falls back.
+        .net_send_file => if (builtin.os.tag == .freebsd) .yes else .no,
+        .file_open,
+        .file_create,
+        .file_close,
+        .file_read,
+        .file_write,
+        .file_sync,
+        .file_set_size,
+        .file_set_permissions,
+        .file_set_owner,
+        .file_set_timestamps,
+        .dir_create_dir,
+        .dir_rename,
+        .dir_rename_preserve,
+        .dir_delete_file,
+        .dir_delete_dir,
+        .file_size,
+        .file_stat,
+        .dir_open,
+        .dir_close,
+        .dir_set_permissions,
+        .dir_set_owner,
+        .dir_set_file_permissions,
+        .dir_set_file_owner,
+        .dir_set_file_timestamps,
+        .dir_sym_link,
+        .dir_read_link,
+        .dir_hard_link,
+        .dir_access,
+        .dir_read,
+        .dir_real_path,
+        .dir_real_path_file,
+        .file_real_path,
+        .file_hard_link,
+        .device_io_control,
+        => .no,
+        .group,
+        .timer,
+        .async,
+        .work,
+        .net_open,
+        .net_bind,
+        .net_listen,
+        .net_connect,
+        .net_accept,
+        .net_recv,
+        .net_send,
+        .net_recvfrom,
+        .net_sendto,
+        .net_recvmsg,
+        .net_sendmsg,
+        .net_poll,
+        .net_shutdown,
+        .net_close,
+        .pipe_poll,
+        .pipe_create,
+        .pipe_close,
+        .mach_port,
+        .process_wait,
+        => .yes,
+    };
+}
+
+pub fn supports(_: *const Self, comptime op: Op, data: *const op.toType()) bool {
+    comptime std.debug.assert(capability(op) == .maybe);
+    if (comptime op == .file_read_streaming or op == .file_write_streaming) {
+        return data.pollable orelse false;
+    }
+    @compileError("unhandled runtime kqueue capability: " ++ @tagName(op));
+}
 
 pub const SharedState = struct {
     /// Backend-internal inflight count: ops accepted by submit() and not yet
@@ -582,7 +650,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .net_send_file => {
             // Driven by Loop's generic read/write fallback on backends
             // without native sendfile, never reaches the backend there.
-            if (comptime !capabilities.net_send_file) unreachable;
+            if (comptime capability(.net_send_file) != .yes) unreachable;
             // Cap the request to the current file size once, so the
             // continuation can treat "remaining == 0" as done and never
             // spins on a writable socket at EOF. Then drive the sendfile
@@ -876,7 +944,7 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
             }
         },
         .net_send_file => {
-            if (comptime !capabilities.net_send_file) unreachable;
+            if (comptime capability(.net_send_file) != .yes) unreachable;
             const data = comp.cast(NetSendFile);
             if (handleKqueueError(event, net.errnoToSendError)) |err| {
                 comp.setError(err);

@@ -1928,7 +1928,7 @@ test "Dir: canceling a blocking open interrupts the worker" {
     // Only exercises the thread-pool-delegated path (kqueue/poll and friends);
     // backends that open natively (io_uring) cancel via the backend instead, and
     // the SIGURG mechanism is POSIX-only.
-    if (ev.Backend.capabilities.file_open) return;
+    if (ev.Backend.capability(.file_open) != .no) return;
     if (!os.syscall_cancel.enabled) return;
 
     // A FIFO opened O_RDONLY with no writer blocks in the worker's openat(). On

@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Completion = @import("../completion.zig").Completion;
 const Work = @import("../completion.zig").Work;
+const DelegatedWork = @import("../completion.zig").DelegatedWork;
 const NetOpen = @import("../completion.zig").NetOpen;
 const NetBind = @import("../completion.zig").NetBind;
 const NetListen = @import("../completion.zig").NetListen;
@@ -46,6 +47,14 @@ const DeviceIoControl = @import("../completion.zig").DeviceIoControl;
 const ProcessWait = @import("../completion.zig").ProcessWait;
 const net = @import("../../os/net.zig");
 const fs = @import("../../os/fs.zig");
+
+fn delegated(work: *Work) *DelegatedWork {
+    return @fieldParentPtr("work", work);
+}
+
+fn opFromWork(work: *Work, comptime T: type) *T {
+    return delegated(work).linked_context.linked.cast(T);
+}
 
 /// Helper to handle socket open operation
 pub fn handleNetOpen(c: *Completion) void {
@@ -290,15 +299,15 @@ pub fn handleFileSetTimestamps(c: *Completion) void {
 
 /// Work function for FileOpen - performs blocking openat() syscall
 pub fn fileOpenWork(work: *Work) void {
-    const internal: *@FieldType(FileOpen, "internal") = @fieldParentPtr("work", work);
-    const file_open: *FileOpen = @fieldParentPtr("internal", internal);
-    const loop = internal.linked_context.loop;
+    const linked_work = delegated(work);
+    const file_open = opFromWork(work, FileOpen);
+    const loop = linked_work.linked_context.loop;
 
-    if (@TypeOf(loop.backend).capabilities.supportsNonBlockingFileIo()) {
+    if (@TypeOf(loop.backend).supports_nonblocking_file_io) {
         file_open.flags.nonblocking = true;
     }
 
-    handleFileOpen(&file_open.c, file_open.internal.allocator);
+    handleFileOpen(&file_open.c, linked_work.allocator);
 
     // If the operation failed, exit early
     if (file_open.c.err != null) return;
@@ -316,15 +325,15 @@ pub fn fileOpenWork(work: *Work) void {
 
 /// Work function for FileCreate - performs blocking openat() syscall with O_CREAT
 pub fn fileCreateWork(work: *Work) void {
-    const internal: *@FieldType(FileCreate, "internal") = @fieldParentPtr("work", work);
-    const file_create: *FileCreate = @fieldParentPtr("internal", internal);
-    const loop = internal.linked_context.loop;
+    const linked_work = delegated(work);
+    const file_create = opFromWork(work, FileCreate);
+    const loop = linked_work.linked_context.loop;
 
-    if (@TypeOf(loop.backend).capabilities.supportsNonBlockingFileIo()) {
+    if (@TypeOf(loop.backend).supports_nonblocking_file_io) {
         file_create.flags.nonblocking = true;
     }
 
-    handleFileCreate(&file_create.c, file_create.internal.allocator);
+    handleFileCreate(&file_create.c, linked_work.allocator);
 
     // If the operation failed, exit early
     if (file_create.c.err != null) return;
@@ -342,71 +351,61 @@ pub fn fileCreateWork(work: *Work) void {
 
 /// Work function for FileClose - performs blocking close() syscall
 pub fn fileCloseWork(work: *Work) void {
-    const internal: *@FieldType(FileClose, "internal") = @fieldParentPtr("work", work);
-    const file_close: *FileClose = @fieldParentPtr("internal", internal);
+    const file_close = opFromWork(work, FileClose);
     handleFileClose(&file_close.c);
 }
 
 /// Work function for FileRead - performs blocking preadv() syscall
 pub fn fileReadWork(work: *Work) void {
-    const internal: *@FieldType(FileRead, "internal") = @fieldParentPtr("work", work);
-    const file_read: *FileRead = @alignCast(@fieldParentPtr("internal", internal));
+    const file_read = opFromWork(work, FileRead);
     handleFileRead(&file_read.c);
 }
 
 /// Work function for FileWrite - performs blocking pwritev() syscall
 pub fn fileWriteWork(work: *Work) void {
-    const internal: *@FieldType(FileWrite, "internal") = @fieldParentPtr("work", work);
-    const file_write: *FileWrite = @alignCast(@fieldParentPtr("internal", internal));
+    const file_write = opFromWork(work, FileWrite);
     handleFileWrite(&file_write.c);
 }
 
 /// Work function for FileReadStreaming - performs blocking readv() syscall
 pub fn fileReadStreamingWork(work: *Work) void {
-    const internal: *@FieldType(FileReadStreaming, "internal") = @fieldParentPtr("work", work);
-    const file_read: *FileReadStreaming = @alignCast(@fieldParentPtr("internal", internal));
+    const file_read = opFromWork(work, FileReadStreaming);
     handleFileReadStreaming(&file_read.c);
 }
 
 /// Work function for FileWriteStreaming - performs blocking writev() syscall
 pub fn fileWriteStreamingWork(work: *Work) void {
-    const internal: *@FieldType(FileWriteStreaming, "internal") = @fieldParentPtr("work", work);
-    const file_write: *FileWriteStreaming = @alignCast(@fieldParentPtr("internal", internal));
+    const file_write = opFromWork(work, FileWriteStreaming);
     handleFileWriteStreaming(&file_write.c);
 }
 
 /// Work function for FileSync - performs blocking fsync()/fdatasync() syscall
 pub fn fileSyncWork(work: *Work) void {
-    const internal: *@FieldType(FileSync, "internal") = @fieldParentPtr("work", work);
-    const file_sync: *FileSync = @fieldParentPtr("internal", internal);
+    const file_sync = opFromWork(work, FileSync);
     handleFileSync(&file_sync.c);
 }
 
 /// Work function for FileSetSize - performs blocking ftruncate() syscall
 pub fn fileSetSizeWork(work: *Work) void {
-    const internal: *@FieldType(FileSetSize, "internal") = @fieldParentPtr("work", work);
-    const file_set_size: *FileSetSize = @alignCast(@fieldParentPtr("internal", internal));
+    const file_set_size = opFromWork(work, FileSetSize);
     handleFileSetSize(&file_set_size.c);
 }
 
 /// Work function for FileSetPermissions - performs blocking fchmod() syscall
 pub fn fileSetPermissionsWork(work: *Work) void {
-    const internal: *@FieldType(FileSetPermissions, "internal") = @fieldParentPtr("work", work);
-    const file_set_permissions: *FileSetPermissions = @fieldParentPtr("internal", internal);
+    const file_set_permissions = opFromWork(work, FileSetPermissions);
     handleFileSetPermissions(&file_set_permissions.c);
 }
 
 /// Work function for FileSetOwner - performs blocking fchown() syscall
 pub fn fileSetOwnerWork(work: *Work) void {
-    const internal: *@FieldType(FileSetOwner, "internal") = @fieldParentPtr("work", work);
-    const file_set_owner: *FileSetOwner = @fieldParentPtr("internal", internal);
+    const file_set_owner = opFromWork(work, FileSetOwner);
     handleFileSetOwner(&file_set_owner.c);
 }
 
 /// Work function for FileSetTimestamps - performs blocking futimens() syscall
 pub fn fileSetTimestampsWork(work: *Work) void {
-    const internal: *@FieldType(FileSetTimestamps, "internal") = @fieldParentPtr("work", work);
-    const file_set_timestamps: *FileSetTimestamps = @alignCast(@fieldParentPtr("internal", internal));
+    const file_set_timestamps = opFromWork(work, FileSetTimestamps);
     handleFileSetTimestamps(&file_set_timestamps.c);
 }
 
@@ -422,8 +421,7 @@ pub fn handleDirSetPermissions(c: *Completion) void {
 
 /// Work function for DirSetPermissions
 pub fn dirSetPermissionsWork(work: *Work) void {
-    const internal: *@FieldType(DirSetPermissions, "internal") = @fieldParentPtr("work", work);
-    const data: *DirSetPermissions = @fieldParentPtr("internal", internal);
+    const data = opFromWork(work, DirSetPermissions);
     handleDirSetPermissions(&data.c);
 }
 
@@ -439,8 +437,7 @@ pub fn handleDirSetOwner(c: *Completion) void {
 
 /// Work function for DirSetOwner
 pub fn dirSetOwnerWork(work: *Work) void {
-    const internal: *@FieldType(DirSetOwner, "internal") = @fieldParentPtr("work", work);
-    const data: *DirSetOwner = @fieldParentPtr("internal", internal);
+    const data = opFromWork(work, DirSetOwner);
     handleDirSetOwner(&data.c);
 }
 
@@ -456,9 +453,9 @@ pub fn handleDirSetFilePermissions(c: *Completion, allocator: std.mem.Allocator)
 
 /// Work function for DirSetFilePermissions
 pub fn dirSetFilePermissionsWork(work: *Work) void {
-    const internal: *@FieldType(DirSetFilePermissions, "internal") = @fieldParentPtr("work", work);
-    const data: *DirSetFilePermissions = @fieldParentPtr("internal", internal);
-    handleDirSetFilePermissions(&data.c, data.internal.allocator);
+    const linked_work = delegated(work);
+    const data = opFromWork(work, DirSetFilePermissions);
+    handleDirSetFilePermissions(&data.c, linked_work.allocator);
 }
 
 /// Helper to handle dir set file owner operation
@@ -473,9 +470,9 @@ pub fn handleDirSetFileOwner(c: *Completion, allocator: std.mem.Allocator) void 
 
 /// Work function for DirSetFileOwner
 pub fn dirSetFileOwnerWork(work: *Work) void {
-    const internal: *@FieldType(DirSetFileOwner, "internal") = @fieldParentPtr("work", work);
-    const data: *DirSetFileOwner = @fieldParentPtr("internal", internal);
-    handleDirSetFileOwner(&data.c, data.internal.allocator);
+    const linked_work = delegated(work);
+    const data = opFromWork(work, DirSetFileOwner);
+    handleDirSetFileOwner(&data.c, linked_work.allocator);
 }
 
 /// Helper to handle dir set file timestamps operation
@@ -490,9 +487,9 @@ pub fn handleDirSetFileTimestamps(c: *Completion, allocator: std.mem.Allocator) 
 
 /// Work function for DirSetFileTimestamps
 pub fn dirSetFileTimestampsWork(work: *Work) void {
-    const internal: *@FieldType(DirSetFileTimestamps, "internal") = @fieldParentPtr("work", work);
-    const data: *DirSetFileTimestamps = @alignCast(@fieldParentPtr("internal", internal));
-    handleDirSetFileTimestamps(&data.c, data.internal.allocator);
+    const linked_work = delegated(work);
+    const data = opFromWork(work, DirSetFileTimestamps);
+    handleDirSetFileTimestamps(&data.c, linked_work.allocator);
 }
 
 /// Helper to handle dir sym link operation
@@ -507,9 +504,9 @@ pub fn handleDirSymLink(c: *Completion, allocator: std.mem.Allocator) void {
 
 /// Work function for DirSymLink
 pub fn dirSymLinkWork(work: *Work) void {
-    const internal: *@FieldType(DirSymLink, "internal") = @fieldParentPtr("work", work);
-    const data: *DirSymLink = @fieldParentPtr("internal", internal);
-    handleDirSymLink(&data.c, data.internal.allocator);
+    const linked_work = delegated(work);
+    const data = opFromWork(work, DirSymLink);
+    handleDirSymLink(&data.c, linked_work.allocator);
 }
 
 /// Helper to handle dir read link operation
@@ -524,9 +521,9 @@ pub fn handleDirReadLink(c: *Completion, allocator: std.mem.Allocator) void {
 
 /// Work function for DirReadLink
 pub fn dirReadLinkWork(work: *Work) void {
-    const internal: *@FieldType(DirReadLink, "internal") = @fieldParentPtr("work", work);
-    const data: *DirReadLink = @fieldParentPtr("internal", internal);
-    handleDirReadLink(&data.c, data.internal.allocator);
+    const linked_work = delegated(work);
+    const data = opFromWork(work, DirReadLink);
+    handleDirReadLink(&data.c, linked_work.allocator);
 }
 
 /// Helper to handle dir hard link operation
@@ -541,9 +538,9 @@ pub fn handleDirHardLink(c: *Completion, allocator: std.mem.Allocator) void {
 
 /// Work function for DirHardLink
 pub fn dirHardLinkWork(work: *Work) void {
-    const internal: *@FieldType(DirHardLink, "internal") = @fieldParentPtr("work", work);
-    const data: *DirHardLink = @fieldParentPtr("internal", internal);
-    handleDirHardLink(&data.c, data.internal.allocator);
+    const linked_work = delegated(work);
+    const data = opFromWork(work, DirHardLink);
+    handleDirHardLink(&data.c, linked_work.allocator);
 }
 
 /// Helper to handle dir access operation
@@ -558,9 +555,9 @@ pub fn handleDirAccess(c: *Completion, allocator: std.mem.Allocator) void {
 
 /// Work function for DirAccess
 pub fn dirAccessWork(work: *Work) void {
-    const internal: *@FieldType(DirAccess, "internal") = @fieldParentPtr("work", work);
-    const data: *DirAccess = @fieldParentPtr("internal", internal);
-    handleDirAccess(&data.c, data.internal.allocator);
+    const linked_work = delegated(work);
+    const data = opFromWork(work, DirAccess);
+    handleDirAccess(&data.c, linked_work.allocator);
 }
 
 /// Helper to handle dir read operation
@@ -576,8 +573,7 @@ pub fn handleDirRead(c: *Completion) void {
 
 /// Work function for DirRead
 pub fn dirReadWork(work: *Work) void {
-    const internal: *@FieldType(DirRead, "internal") = @fieldParentPtr("work", work);
-    const data: *DirRead = @fieldParentPtr("internal", internal);
+    const data = opFromWork(work, DirRead);
     handleDirRead(&data.c);
 }
 
@@ -593,8 +589,7 @@ pub fn handleDirRealPath(c: *Completion) void {
 
 /// Work function for DirRealPath
 pub fn dirRealPathWork(work: *Work) void {
-    const internal: *@FieldType(DirRealPath, "internal") = @fieldParentPtr("work", work);
-    const data: *DirRealPath = @fieldParentPtr("internal", internal);
+    const data = opFromWork(work, DirRealPath);
     handleDirRealPath(&data.c);
 }
 
@@ -610,9 +605,9 @@ pub fn handleDirRealPathFile(c: *Completion, allocator: std.mem.Allocator) void 
 
 /// Work function for DirRealPathFile
 pub fn dirRealPathFileWork(work: *Work) void {
-    const internal: *@FieldType(DirRealPathFile, "internal") = @fieldParentPtr("work", work);
-    const data: *DirRealPathFile = @fieldParentPtr("internal", internal);
-    handleDirRealPathFile(&data.c, data.internal.allocator);
+    const linked_work = delegated(work);
+    const data = opFromWork(work, DirRealPathFile);
+    handleDirRealPathFile(&data.c, linked_work.allocator);
 }
 
 /// Helper to handle file real path operation
@@ -627,8 +622,7 @@ pub fn handleFileRealPath(c: *Completion) void {
 
 /// Work function for FileRealPath
 pub fn fileRealPathWork(work: *Work) void {
-    const internal: *@FieldType(FileRealPath, "internal") = @fieldParentPtr("work", work);
-    const data: *FileRealPath = @fieldParentPtr("internal", internal);
+    const data = opFromWork(work, FileRealPath);
     handleFileRealPath(&data.c);
 }
 
@@ -644,9 +638,9 @@ pub fn handleFileHardLink(c: *Completion, allocator: std.mem.Allocator) void {
 
 /// Work function for FileHardLink
 pub fn fileHardLinkWork(work: *Work) void {
-    const internal: *@FieldType(FileHardLink, "internal") = @fieldParentPtr("work", work);
-    const data: *FileHardLink = @fieldParentPtr("internal", internal);
-    handleFileHardLink(&data.c, data.internal.allocator);
+    const linked_work = delegated(work);
+    const data = opFromWork(work, FileHardLink);
+    handleFileHardLink(&data.c, linked_work.allocator);
 }
 
 /// Helper to handle dir create dir operation
@@ -701,37 +695,37 @@ pub fn handleDirDeleteDir(c: *Completion, allocator: std.mem.Allocator) void {
 
 /// Work function for DirCreateDir - performs blocking mkdirat() syscall
 pub fn dirCreateDirWork(work: *Work) void {
-    const internal: *@FieldType(DirCreateDir, "internal") = @fieldParentPtr("work", work);
-    const dir_create_dir: *DirCreateDir = @fieldParentPtr("internal", internal);
-    handleDirCreateDir(&dir_create_dir.c, dir_create_dir.internal.allocator);
+    const linked_work = delegated(work);
+    const dir_create_dir = opFromWork(work, DirCreateDir);
+    handleDirCreateDir(&dir_create_dir.c, linked_work.allocator);
 }
 
 /// Work function for DirRename - performs blocking renameat() syscall
 pub fn dirRenameWork(work: *Work) void {
-    const internal: *@FieldType(DirRename, "internal") = @fieldParentPtr("work", work);
-    const dir_rename: *DirRename = @fieldParentPtr("internal", internal);
-    handleDirRename(&dir_rename.c, dir_rename.internal.allocator);
+    const linked_work = delegated(work);
+    const dir_rename = opFromWork(work, DirRename);
+    handleDirRename(&dir_rename.c, linked_work.allocator);
 }
 
 /// Work function for DirRenamePreserve - performs blocking renameat2() syscall with NOREPLACE
 pub fn dirRenamePreserveWork(work: *Work) void {
-    const internal: *@FieldType(DirRenamePreserve, "internal") = @fieldParentPtr("work", work);
-    const dir_rename_preserve: *DirRenamePreserve = @fieldParentPtr("internal", internal);
-    handleDirRenamePreserve(&dir_rename_preserve.c, dir_rename_preserve.internal.allocator);
+    const linked_work = delegated(work);
+    const dir_rename_preserve = opFromWork(work, DirRenamePreserve);
+    handleDirRenamePreserve(&dir_rename_preserve.c, linked_work.allocator);
 }
 
 /// Work function for DirDeleteFile - performs blocking unlinkat() syscall
 pub fn dirDeleteFileWork(work: *Work) void {
-    const internal: *@FieldType(DirDeleteFile, "internal") = @fieldParentPtr("work", work);
-    const dir_delete_file: *DirDeleteFile = @fieldParentPtr("internal", internal);
-    handleDirDeleteFile(&dir_delete_file.c, dir_delete_file.internal.allocator);
+    const linked_work = delegated(work);
+    const dir_delete_file = opFromWork(work, DirDeleteFile);
+    handleDirDeleteFile(&dir_delete_file.c, linked_work.allocator);
 }
 
 /// Work function for DirDeleteDir - performs blocking unlinkat() syscall with AT_REMOVEDIR
 pub fn dirDeleteDirWork(work: *Work) void {
-    const internal: *@FieldType(DirDeleteDir, "internal") = @fieldParentPtr("work", work);
-    const dir_delete_dir: *DirDeleteDir = @fieldParentPtr("internal", internal);
-    handleDirDeleteDir(&dir_delete_dir.c, dir_delete_dir.internal.allocator);
+    const linked_work = delegated(work);
+    const dir_delete_dir = opFromWork(work, DirDeleteDir);
+    handleDirDeleteDir(&dir_delete_dir.c, linked_work.allocator);
 }
 
 /// Helper to handle file size operation
@@ -746,8 +740,7 @@ pub fn handleFileSize(c: *Completion) void {
 
 /// Work function for FileSize - performs blocking fstat() syscall
 pub fn fileSizeWork(work: *Work) void {
-    const internal: *@FieldType(FileSize, "internal") = @fieldParentPtr("work", work);
-    const file_size: *FileSize = @alignCast(@fieldParentPtr("internal", internal));
+    const file_size = opFromWork(work, FileSize);
     handleFileSize(&file_size.c);
 }
 
@@ -770,9 +763,9 @@ pub fn handleFileStat(c: *Completion, allocator: std.mem.Allocator) void {
 
 /// Work function for FileStat - performs blocking fstat()/fstatat() syscall
 pub fn fileStatWork(work: *Work) void {
-    const internal: *@FieldType(FileStat, "internal") = @fieldParentPtr("work", work);
-    const file_stat: *FileStat = @alignCast(@fieldParentPtr("internal", internal));
-    handleFileStat(&file_stat.c, file_stat.internal.allocator);
+    const linked_work = delegated(work);
+    const file_stat = opFromWork(work, FileStat);
+    handleFileStat(&file_stat.c, linked_work.allocator);
 }
 
 /// Helper to handle directory open operation
@@ -787,9 +780,9 @@ pub fn handleDirOpen(c: *Completion, allocator: std.mem.Allocator) void {
 
 /// Work function for DirOpen - performs blocking openat() syscall
 pub fn dirOpenWork(work: *Work) void {
-    const internal: *@FieldType(DirOpen, "internal") = @fieldParentPtr("work", work);
-    const dir_open: *DirOpen = @fieldParentPtr("internal", internal);
-    handleDirOpen(&dir_open.c, dir_open.internal.allocator);
+    const linked_work = delegated(work);
+    const dir_open = opFromWork(work, DirOpen);
+    handleDirOpen(&dir_open.c, linked_work.allocator);
 }
 
 /// Helper to handle directory close operation
@@ -804,8 +797,7 @@ pub fn handleDirClose(c: *Completion) void {
 
 /// Work function for DirClose - performs blocking close() syscall
 pub fn dirCloseWork(work: *Work) void {
-    const internal: *@FieldType(DirClose, "internal") = @fieldParentPtr("work", work);
-    const dir_close: *DirClose = @fieldParentPtr("internal", internal);
+    const dir_close = opFromWork(work, DirClose);
     handleDirClose(&dir_close.c);
 }
 
@@ -874,15 +866,13 @@ pub fn handleProcessWait(c: *Completion) void {
 
 /// Work function for ProcessWait - performs blocking wait for process exit
 pub fn processWaitWork(work: *Work) void {
-    const internal: *@FieldType(ProcessWait, "internal") = @fieldParentPtr("work", work);
-    const process_wait: *ProcessWait = @fieldParentPtr("internal", internal);
+    const process_wait = opFromWork(work, ProcessWait);
     handleProcessWait(&process_wait.c);
 }
 
 /// Work function for DeviceIoControl - performs blocking ioctl
 pub fn deviceIoControlWork(work: *Work) void {
-    const internal: *@FieldType(DeviceIoControl, "internal") = @fieldParentPtr("work", work);
-    const device_io_control: *DeviceIoControl = @fieldParentPtr("internal", internal);
+    const device_io_control = opFromWork(work, DeviceIoControl);
     handleDeviceIoControl(&device_io_control.c);
 }
 

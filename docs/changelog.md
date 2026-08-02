@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Linux now uses one parametric backend that prefers `io_uring` and falls back
+  group-wide to `epoll` when ring setup is unavailable or blocked by policy.
+  Completion storage now separates backend syscall scratch from thread-pool
+  fallback work, with exhaustive compile-time `yes`/`no`/`maybe` capability
+  classification and a recorded runtime route for safe cancellation.
+
 - Load shedding no longer oscillates on evenly loaded runtimes. The imbalance
   threshold now scales with the load average (12.5% over it, at least 2), and
   shedding is evaluated every few milliseconds instead of every scheduler tick, so

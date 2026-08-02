@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Backend = @import("backend.zig").Backend;
-const BackendCapabilities = @import("completion.zig").BackendCapabilities;
 const Completion = @import("completion.zig").Completion;
 const Group = @import("completion.zig").Group;
 const Timer = @import("completion.zig").Timer;
@@ -766,58 +765,39 @@ pub const Loop = struct {
             },
             .net_send_file => {
                 const op = completion.cast(NetSendFile);
-                if (comptime Backend.capabilities.net_send_file) {
-                    self.backend.cancel(&self.state, completion);
-                } else {
-                    self.netSendFileCancel(op);
+                switch (comptime Backend.capability(.net_send_file)) {
+                    .yes => self.backend.cancel(&self.state, completion),
+                    .no => self.netSendFileCancel(op),
+                    .maybe => switch (op.route) {
+                        .none => unreachable,
+                        .backend => self.backend.cancel(&self.state, completion),
+                        .fallback => self.netSendFileCancel(op),
+                    },
                 }
             },
 
             inline else => |op| {
-                // File/dir ops that can fallback to thread pool
-                if (@hasField(BackendCapabilities, @tagName(op))) {
-                    if (!@field(Backend.capabilities, @tagName(op))) {
-                        // Pollable streaming ops took the backend poll path, not
-                        // the thread pool, so they must be canceled there. The
-                        // verdict was cached on the op at submission time.
-                        if (comptime (op == .file_read_streaming or op == .file_write_streaming)) {
-                            if (completion.cast(op.toType()).pollable orelse false) {
-                                self.backend.cancel(&self.state, completion);
-                                return;
-                            }
-                        }
-                        // file_set_size may have been submitted natively (the
-                        // FTRUNCATE SQE) when the runtime probe found kernel
-                        // support, so it must be canceled on the backend, not the
-                        // thread pool. The probe verdict is stable for the process,
-                        // so re-querying here agrees with the submission decision.
-                        if (comptime op == .file_set_size and @hasDecl(Backend, "fileSetSizeSupported")) {
-                            if (self.backend.fileSetSizeSupported()) {
-                                self.backend.cancel(&self.state, completion);
-                                return;
-                            }
-                        }
-                        const thread_pool = self.thread_pool orelse unreachable;
-                        const op_data = completion.cast(op.toType());
-                        thread_pool.cancel(&op_data.internal.work);
-                        // If the worker is blocked in the canceled syscall, the
-                        // first SIGURG (sent by cancel above) can be lost in the
-                        // begin()->sleep window. Track it so `tick` re-sends until
-                        // the worker acknowledges. Only DelegatedWork ops have a
-                        // token; the entry is removed when the op finalizes.
-                        if (@hasField(@TypeOf(op_data.internal), "token")) {
-                            if (op_data.internal.token.isCanceling()) {
-                                self.state.addResend(&op_data.internal.work, completion);
-                            }
-                        }
-                    } else {
-                        self.backend.cancel(&self.state, completion);
-                    }
-                } else {
-                    // Backend operations (net_*, etc)
-                    self.backend.cancel(&self.state, completion);
+                const op_data = completion.cast(op.toType());
+                switch (comptime Backend.capability(op)) {
+                    .yes => self.backend.cancel(&self.state, completion),
+                    .no => self.cancelLinkedWork(completion, &op_data.linked_work),
+                    .maybe => switch (op_data.route) {
+                        .none => unreachable,
+                        .backend => self.backend.cancel(&self.state, completion),
+                        .fallback => self.cancelLinkedWork(completion, &op_data.linked_work),
+                    },
                 }
             },
+        }
+    }
+
+    fn cancelLinkedWork(self: *Loop, completion: *Completion, linked_work: *DelegatedWork) void {
+        const thread_pool = self.thread_pool orelse unreachable;
+        thread_pool.cancel(&linked_work.work);
+        // A worker can enter its blocking syscall just after the first SIGURG.
+        // Keep re-sending until it acknowledges or the completion finalizes.
+        if (linked_work.token.isCanceling()) {
+            self.state.addResend(&linked_work.work, completion);
         }
     }
 
@@ -917,29 +897,30 @@ pub const Loop = struct {
             },
             .net_send_file => {
                 const op = completion.cast(NetSendFile);
-                if (comptime Backend.capabilities.net_send_file) {
-                    self.backend.submit(&self.state, completion);
-                } else {
-                    netSendFileStart(self, op);
+                switch (comptime Backend.capability(.net_send_file)) {
+                    .yes => self.backend.submit(&self.state, completion),
+                    .no => netSendFileStart(self, op),
+                    .maybe => {
+                        if (self.backend.supports(.net_send_file, op)) {
+                            op.route = .backend;
+                            self.backend.submit(&self.state, completion);
+                        } else {
+                            op.route = .fallback;
+                            netSendFileStart(self, op);
+                        }
+                    },
                 }
                 return;
             },
             else => {
-                // Streaming reads/writes on a pollable fd (pipe/socket/FIFO/tty)
-                // use the backend readiness poll path instead of the thread pool.
-                // Seekable fds (regular files, block devices) fall back to the pool.
                 switch (completion.op) {
                     inline .file_read_streaming, .file_write_streaming => |op| {
-                        // Classify lazily and cache the verdict on the op, so a
-                        // reused op (or the caller) can skip re-probing.
+                        // Runtime support for streaming operations can depend on
+                        // whether this particular handle is pollable. Classify it
+                        // once before asking the backend to resolve `.maybe`.
                         const data = completion.cast(op.toType());
-                        const pollable = data.pollable orelse blk: {
+                        _ = data.pollable orelse blk: {
                             if (builtin.os.tag == .windows) {
-                                // A streaming op reaching the lazy path on Windows is a
-                                // handle zio did not open/classify (foreign, e.g. inherited
-                                // stdio reached via std.Io). Such handles are not associated
-                                // with our IOCP port, so the loop cannot drive them — route
-                                // to the thread pool's blocking read/write.
                                 data.pollable = false;
                                 break :blk false;
                             }
@@ -947,50 +928,26 @@ pub const Loop = struct {
                             data.pollable = p;
                             break :blk p;
                         };
-                        if (comptime !@field(Backend.capabilities, @tagName(op))) {
-                            // Route pollable fds to the backend readiness/overlapped path;
-                            // seekable fds (regular files, block devices) to the thread pool.
-                            if (pollable) {
-                                self.backend.submit(&self.state, completion);
-                            } else {
-                                self.submitFileOpToThreadPool(completion);
-                            }
-                            return;
-                        }
                     },
                     else => {},
                 }
 
-                // Ops a backend can handle natively only on some kernels (probed at
-                // runtime): if the backend advertises a runtime query and it says
-                // yes, use the native SQE path; otherwise fall through to the
-                // capability-based routing below (which sends it to the thread pool).
-                switch (completion.op) {
-                    .file_set_size => {
-                        if (comptime @hasDecl(Backend, "fileSetSizeSupported")) {
-                            if (self.backend.fileSetSizeSupported()) {
-                                self.backend.submit(&self.state, completion);
-                                return;
-                            }
-                        }
-                    },
-                    else => {},
-                }
-
-                // Regular backend operation
-                // Route file/dir ops to thread pool for backends without native support
                 switch (completion.op) {
                     inline else => |op| {
-                        if (@hasField(BackendCapabilities, @tagName(op))) {
-                            if (!@field(Backend.capabilities, @tagName(op))) {
+                        const op_data = completion.cast(op.toType());
+                        switch (comptime Backend.capability(op)) {
+                            .yes => self.backend.submit(&self.state, completion),
+                            .no => self.submitFileOpToThreadPool(completion),
+                            .maybe => if (self.backend.supports(op, op_data)) {
+                                op_data.route = .backend;
+                                self.backend.submit(&self.state, completion);
+                            } else {
+                                op_data.route = .fallback;
                                 self.submitFileOpToThreadPool(completion);
-                                return;
-                            }
+                            },
                         }
                     },
                 }
-
-                self.backend.submit(&self.state, completion);
                 return;
             },
         }
@@ -1002,7 +959,7 @@ pub const Loop = struct {
     };
 
     fn checkTimers(self: *Loop) TimerCheckResult {
-        const native_wall = Backend.capabilities.native_wall_timers;
+        const native_wall = Backend.native_wall_timers;
 
         var fired = false;
         var next_timeout: ?Duration = null;
@@ -1212,7 +1169,7 @@ pub const Loop = struct {
 
         switch (completion.op) {
             inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_read_streaming, .file_write_streaming, .file_sync, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .dir_create_dir, .dir_rename, .dir_rename_preserve, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat, .dir_open, .dir_close, .dir_read, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps, .dir_sym_link, .dir_read_link, .dir_hard_link, .dir_access, .dir_real_path, .dir_real_path_file, .file_real_path, .file_hard_link, .device_io_control, .process_wait => |op| {
-                if (@field(Backend.capabilities, @tagName(op))) {
+                if (comptime Backend.capability(op) == .yes) {
                     unreachable;
                 }
 
@@ -1258,23 +1215,16 @@ pub const Loop = struct {
                 };
 
                 const op_data = completion.cast(op.toType());
-                if (@hasField(@TypeOf(op_data.internal), "allocator")) {
-                    op_data.internal.allocator = self.allocator;
-                }
-                op_data.internal.linked_context = .{
+                op_data.linked_work.allocator = self.allocator;
+                op_data.linked_work.linked_context = .{
                     .loop = self,
                     .linked = completion,
                 };
-                op_data.internal.work = Work.init(op_func, null);
-                op_data.internal.work.completion_fn = loopLinkedWorkComplete;
-                op_data.internal.work.completion_context = @ptrCast(&op_data.internal.linked_context);
-                // Ops whose internal is a DelegatedWork carry a cancellation
-                // token: bind it to the work so the worker enters/exits it and
-                // the blocking syscall becomes SIGURG-cancelable.
-                if (@hasField(@TypeOf(op_data.internal), "token")) {
-                    op_data.internal.work.cancel_token = &op_data.internal.token;
-                }
-                tp.submit(&op_data.internal.work);
+                op_data.linked_work.work = Work.init(op_func, null);
+                op_data.linked_work.work.completion_fn = loopLinkedWorkComplete;
+                op_data.linked_work.work.completion_context = @ptrCast(&op_data.linked_work.linked_context);
+                op_data.linked_work.work.cancel_token = &op_data.linked_work.token;
+                tp.submit(&op_data.linked_work.work);
             },
             else => unreachable,
         }
@@ -1295,17 +1245,17 @@ pub const Loop = struct {
     // from the same start, so buffers are sent in the order they were read.
 
     fn netSendFileStart(self: *Loop, op: *NetSendFile) void {
-        op.internal = .{};
-        op.internal.read_remaining = op.remaining;
+        op.fallback = .{};
+        op.fallback.read_remaining = op.remaining;
         // Lay out the working buffers from the (up to two) caller buffers. When
         // the result's bufs[1] is empty the index flips are suppressed (see
         // netSendFileStartRead / netSendFileOnSend), so the loop runs serially.
-        op.internal.bufs = sendfileLayout(op.bufs);
+        op.fallback.bufs = sendfileLayout(op.bufs);
         self.netSendFileAdvance(op);
     }
 
     fn netSendFileStartRead(self: *Loop, op: *NetSendFile) void {
-        const f = &op.internal;
+        const f = &op.fallback;
         const idx = f.next_read;
         const want = @min(f.bufs[idx].len, f.read_remaining);
         f.reading = idx;
@@ -1317,7 +1267,7 @@ pub const Loop = struct {
     }
 
     fn netSendFileStartSend(self: *Loop, op: *NetSendFile, idx: u1, from: usize) void {
-        const f = &op.internal;
+        const f = &op.fallback;
         f.sending = idx;
         f.send = NetSend.init(op.handle, WriteBuf.fromSlice(f.bufs[idx][from..f.filled[idx]], &f.send_iov), .{});
         f.send.c.userdata = op;
@@ -1329,12 +1279,12 @@ pub const Loop = struct {
     /// re-enter `netSendFileAdvance`, which finishes the parent only once both
     /// have drained.
     fn netSendFileCancel(self: *Loop, op: *NetSendFile) void {
-        if (op.internal.reading != null) self.cancel(&op.internal.read.c);
-        if (op.internal.sending != null) self.cancel(&op.internal.send.c);
+        if (op.fallback.reading != null) self.cancel(&op.fallback.read.c);
+        if (op.fallback.sending != null) self.cancel(&op.fallback.send.c);
     }
 
     fn netSendFileAdvance(self: *Loop, op: *NetSendFile) void {
-        const f = &op.internal;
+        const f = &op.fallback;
 
         // A cancel that arrived between callbacks turns into a parked error.
         if (op.c.loadState().cancel_requested and f.pending_err == null) {
@@ -1373,7 +1323,7 @@ pub const Loop = struct {
 
     fn netSendFileOnRead(loop: *Loop, child: *Completion) void {
         const op: *NetSendFile = @ptrCast(@alignCast(child.userdata.?));
-        const f = &op.internal;
+        const f = &op.fallback;
         const idx = f.reading.?;
         f.reading = null;
         const n = child.cast(FileRead).getResult() catch |err| {
@@ -1393,7 +1343,7 @@ pub const Loop = struct {
 
     fn netSendFileOnSend(loop: *Loop, child: *Completion) void {
         const op: *NetSendFile = @ptrCast(@alignCast(child.userdata.?));
-        const f = &op.internal;
+        const f = &op.fallback;
         const idx = f.sending.?;
         const m = child.cast(NetSend).getResult() catch |err| {
             f.sending = null;
@@ -1415,7 +1365,7 @@ pub const Loop = struct {
     }
 
     fn netSendFileFinish(self: *Loop, op: *NetSendFile, err: ?anyerror) void {
-        if (err) |e| op.c.setError(e) else op.c.setResult(.net_send_file, op.internal.total);
+        if (err) |e| op.c.setError(e) else op.c.setResult(.net_send_file, op.fallback.total);
         self.state.markCompleted(&op.c);
     }
 

@@ -1,17 +1,17 @@
 const std = @import("std");
 const linux = std.os.linux;
-const posix = @import("../../os/posix.zig");
-const net = @import("../../os/net.zig");
-const fs = @import("../../os/fs.zig");
-const linux_sys = @import("../../os/system/linux.zig");
-const time = @import("../../os/time.zig");
-const Duration = @import("../../time.zig").Duration;
-const Clock = @import("../../time.zig").Clock;
-const common = @import("common.zig");
-const LoopState = @import("../loop.zig").LoopState;
-const Completion = @import("../completion.zig").Completion;
-const Queue = @import("../queue.zig").Queue;
-const Cancel = @import("../completion.zig").Cancel;
+const posix = @import("../../../os/posix.zig");
+const net = @import("../../../os/net.zig");
+const fs = @import("../../../os/fs.zig");
+const linux_sys = @import("../../../os/system/linux.zig");
+const time = @import("../../../os/time.zig");
+const Duration = @import("../../../time.zig").Duration;
+const Clock = @import("../../../time.zig").Clock;
+const common = @import("../common.zig");
+const LoopState = @import("../../loop.zig").LoopState;
+const Completion = @import("../../completion.zig").Completion;
+const Queue = @import("../../queue.zig").Queue;
+const Cancel = @import("../../completion.zig").Cancel;
 
 // user_data encoding. A *Completion pointer is aligned, so its low bit is 0;
 // internal ops set the low bit and pack a kind (bits 1-2) plus, for the wall
@@ -41,90 +41,130 @@ fn wallKind(idx: usize) SpecialKind {
     return if (idx == 0) .wall_boot else .wall_real;
 }
 
-const NetOpen = @import("../completion.zig").NetOpen;
-const NetConnect = @import("../completion.zig").NetConnect;
-const NetAccept = @import("../completion.zig").NetAccept;
-const NetRecv = @import("../completion.zig").NetRecv;
-const NetSend = @import("../completion.zig").NetSend;
-const NetRecvFrom = @import("../completion.zig").NetRecvFrom;
-const NetSendTo = @import("../completion.zig").NetSendTo;
-const NetRecvMsg = @import("../completion.zig").NetRecvMsg;
-const NetSendMsg = @import("../completion.zig").NetSendMsg;
-const NetSendFile = @import("../completion.zig").NetSendFile;
-const NetPoll = @import("../completion.zig").NetPoll;
-const NetClose = @import("../completion.zig").NetClose;
-const NetShutdown = @import("../completion.zig").NetShutdown;
-const FileOpen = @import("../completion.zig").FileOpen;
-const FileCreate = @import("../completion.zig").FileCreate;
-const DirCreateDir = @import("../completion.zig").DirCreateDir;
-const DirRename = @import("../completion.zig").DirRename;
-const DirRenamePreserve = @import("../completion.zig").DirRenamePreserve;
-const DirDeleteFile = @import("../completion.zig").DirDeleteFile;
-const DirDeleteDir = @import("../completion.zig").DirDeleteDir;
-const FileSize = @import("../completion.zig").FileSize;
-const FileStat = @import("../completion.zig").FileStat;
-const FileClose = @import("../completion.zig").FileClose;
-const FileRead = @import("../completion.zig").FileRead;
-const FileWrite = @import("../completion.zig").FileWrite;
-const FileReadStreaming = @import("../completion.zig").FileReadStreaming;
-const FileWriteStreaming = @import("../completion.zig").FileWriteStreaming;
-const FileSync = @import("../completion.zig").FileSync;
-const FileSetSize = @import("../completion.zig").FileSetSize;
-const DirOpen = @import("../completion.zig").DirOpen;
-const DirClose = @import("../completion.zig").DirClose;
-const PipePoll = @import("../completion.zig").PipePoll;
-const PipeClose = @import("../completion.zig").PipeClose;
-const ProcessWait = @import("../completion.zig").ProcessWait;
+const NetOpen = @import("../../completion.zig").NetOpen;
+const NetConnect = @import("../../completion.zig").NetConnect;
+const NetAccept = @import("../../completion.zig").NetAccept;
+const NetRecv = @import("../../completion.zig").NetRecv;
+const NetSend = @import("../../completion.zig").NetSend;
+const NetRecvFrom = @import("../../completion.zig").NetRecvFrom;
+const NetSendTo = @import("../../completion.zig").NetSendTo;
+const NetRecvMsg = @import("../../completion.zig").NetRecvMsg;
+const NetSendMsg = @import("../../completion.zig").NetSendMsg;
+const NetSendFile = @import("../../completion.zig").NetSendFile;
+const NetPoll = @import("../../completion.zig").NetPoll;
+const NetClose = @import("../../completion.zig").NetClose;
+const NetShutdown = @import("../../completion.zig").NetShutdown;
+const FileOpen = @import("../../completion.zig").FileOpen;
+const FileCreate = @import("../../completion.zig").FileCreate;
+const DirCreateDir = @import("../../completion.zig").DirCreateDir;
+const DirRename = @import("../../completion.zig").DirRename;
+const DirRenamePreserve = @import("../../completion.zig").DirRenamePreserve;
+const DirDeleteFile = @import("../../completion.zig").DirDeleteFile;
+const DirDeleteDir = @import("../../completion.zig").DirDeleteDir;
+const FileSize = @import("../../completion.zig").FileSize;
+const FileStat = @import("../../completion.zig").FileStat;
+const FileClose = @import("../../completion.zig").FileClose;
+const FileRead = @import("../../completion.zig").FileRead;
+const FileWrite = @import("../../completion.zig").FileWrite;
+const FileReadStreaming = @import("../../completion.zig").FileReadStreaming;
+const FileWriteStreaming = @import("../../completion.zig").FileWriteStreaming;
+const FileSync = @import("../../completion.zig").FileSync;
+const FileSetSize = @import("../../completion.zig").FileSetSize;
+const DirOpen = @import("../../completion.zig").DirOpen;
+const DirClose = @import("../../completion.zig").DirClose;
+const PipePoll = @import("../../completion.zig").PipePoll;
+const PipeClose = @import("../../completion.zig").PipeClose;
+const ProcessWait = @import("../../completion.zig").ProcessWait;
 
 pub const NetHandle = net.fd_t;
 
-const BackendCapabilities = @import("../completion.zig").BackendCapabilities;
+const Op = @import("../../completion.zig").Op;
+const Support = @import("../../completion.zig").Support;
 
-pub const capabilities: BackendCapabilities = .{
-    .file_read = true,
-    .file_write = true,
-    .file_read_streaming = true,
-    .file_write_streaming = true,
-    .file_open = true,
-    .file_create = true,
-    .file_close = true,
-    .file_sync = true,
-    // Runtime-dispatched, not statically native: the native IORING_OP_FTRUNCATE
-    // needs Linux >= 6.9. `false` makes the completion carry a DelegatedWork so
-    // the thread-pool path is available; the Loop upgrades to the native SQE at
-    // runtime when `fileSetSizeSupported()` (probed once) says the kernel has it.
-    .file_set_size = false,
-    .dir_create_dir = true,
-    .dir_rename = true,
-    .dir_rename_preserve = true,
-    .dir_delete_file = true,
-    .dir_delete_dir = true,
-    .file_size = true,
-    .file_stat = true,
-    .dir_open = true,
-    .dir_close = true,
-    .process_wait = true,
-    .native_wall_timers = true,
-    // Native zero-copy sendfile via a two-hop splice chain (file -> pipe ->
-    // socket). IORING_OP_SPLICE needs Linux >= 5.7, comfortably below the
-    // >= 6.1 the ring setup flags already require, so no runtime probe.
-    .net_send_file = true,
-};
+pub const native_wall_timers = true;
+pub const supports_nonblocking_file_io = true;
 
-// Tri-state for the once-probed IORING_OP_FTRUNCATE support. `unknown` is treated
-// as `no` at the dispatch site, so a missed/failed probe is always safe (the
-// thread-pool fallback works on every kernel) — never a rejected SQE.
-const ftruncate_unknown: u8 = 0;
-const ftruncate_yes: u8 = 1;
-const ftruncate_no: u8 = 2;
+pub fn capability(comptime op: Op) Support {
+    return switch (op) {
+        // These opcodes postdate the minimum kernel accepted by ring setup and
+        // are resolved from IORING_REGISTER_PROBE at runtime.
+        .file_set_size, .process_wait => .maybe,
+        .file_set_permissions,
+        .file_set_owner,
+        .file_set_timestamps,
+        .dir_set_permissions,
+        .dir_set_owner,
+        .dir_set_file_permissions,
+        .dir_set_file_owner,
+        .dir_set_file_timestamps,
+        .dir_sym_link,
+        .dir_read_link,
+        .dir_hard_link,
+        .dir_access,
+        .dir_read,
+        .dir_real_path,
+        .dir_real_path_file,
+        .file_real_path,
+        .file_hard_link,
+        .device_io_control,
+        => .no,
+        .group,
+        .timer,
+        .async,
+        .work,
+        .net_open,
+        .net_bind,
+        .net_listen,
+        .net_connect,
+        .net_accept,
+        .net_recv,
+        .net_send,
+        .net_recvfrom,
+        .net_sendto,
+        .net_recvmsg,
+        .net_sendmsg,
+        .net_poll,
+        .net_shutdown,
+        .net_close,
+        .net_send_file,
+        .file_open,
+        .file_create,
+        .file_close,
+        .file_read,
+        .file_write,
+        .file_read_streaming,
+        .file_write_streaming,
+        .file_sync,
+        .dir_create_dir,
+        .dir_rename,
+        .dir_rename_preserve,
+        .dir_delete_file,
+        .dir_delete_dir,
+        .file_size,
+        .file_stat,
+        .dir_open,
+        .dir_close,
+        .pipe_poll,
+        .pipe_create,
+        .pipe_close,
+        .mach_port,
+        => .yes,
+    };
+}
+
+const feature_unknown: u8 = 0;
+const feature_yes: u8 = 1;
+const feature_no: u8 = 2;
 
 pub const SharedState = struct {
     master_fd: std.atomic.Value(c_int) = .init(-1),
     refcount: std.atomic.Value(usize) = .init(0),
     /// Whether the running kernel supports IORING_OP_FTRUNCATE (Linux >= 6.9),
-    /// probed exactly once when the master ring is created (see `init`). Read by
-    /// `fileSetSizeSupported()`.
-    ftruncate_support: std.atomic.Value(u8) = .init(ftruncate_unknown),
+    /// probed exactly once when the master ring is created and resolved by
+    /// `supports()` for `.file_set_size`.
+    ftruncate_support: std.atomic.Value(u8) = .init(feature_unknown),
+    /// IORING_OP_WAITID was added after the minimum supported ring setup.
+    waitid_support: std.atomic.Value(u8) = .init(feature_unknown),
 };
 
 pub const NetRecvData = struct {
@@ -240,7 +280,7 @@ const SPLICE_F_MORE: u32 = 4;
 
 const Self = @This();
 
-const log = @import("../../common.zig").log;
+const log = @import("../../../common.zig").log;
 
 allocator: std.mem.Allocator,
 ring: linux.IoUring,
@@ -277,25 +317,19 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
     flags |= linux.IORING_SETUP_DEFER_TASKRUN;
     flags |= linux.IORING_SETUP_COOP_TASKRUN;
 
+    const master_fd = shared_state.master_fd.load(.seq_cst);
+    const is_master = master_fd == -1;
     var ring = blk: {
-        const master_fd = shared_state.master_fd.load(.seq_cst);
-        if (master_fd != -1) {
+        if (!is_master) {
             flags |= linux.IORING_SETUP_ATTACH_WQ;
             break :blk try ringFromMasterFd(master_fd, flags, queue_size);
         } else {
             var ring = try linux.IoUring.init(queue_size, flags);
-            // Probe FTRUNCATE support once, on this fresh ring, and publish the
-            // verdict BEFORE master_fd. Any executor that later attaches sees a
-            // non-negative master_fd (seq_cst) and is thus guaranteed to observe
-            // the stored verdict. Racing creators store the same kernel-global
-            // value, so a redundant store by a CAS loser is harmless.
-            probeAndStoreFtruncate(&ring, shared_state);
-            const old_fd = shared_state.master_fd.cmpxchgStrong(-1, ring.fd, .seq_cst, .seq_cst);
-            if (old_fd != null) {
-                ring.deinit();
-                flags |= linux.IORING_SETUP_ATTACH_WQ;
-                break :blk try ringFromMasterFd(old_fd.?, flags, queue_size);
-            }
+            // The Linux facade serializes group initialization, so this first
+            // ring remains private until every fallible initialization step has
+            // succeeded. This prevents a failed eventfd setup from publishing a
+            // stale master fd that later loops would try to attach to.
+            probeAndStoreFeatures(&ring, shared_state);
             break :blk ring;
         }
     };
@@ -304,6 +338,7 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
     const waker_eventfd = try posix.eventfd(0, posix.EFD.CLOEXEC | posix.EFD.NONBLOCK);
     errdefer _ = linux.close(waker_eventfd);
 
+    if (is_master) shared_state.master_fd.store(ring.fd, .seq_cst);
     _ = shared_state.refcount.fetchAdd(1, .seq_cst);
 
     self.* = .{
@@ -320,23 +355,27 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
     _ = self.armWaker();
 }
 
-/// Probe (once, via IORING_REGISTER_PROBE) whether the kernel knows the
-/// IORING_OP_FTRUNCATE opcode (added in Linux 6.9) and record it in `SharedState`.
-/// A failed probe records "no", so file_set_size takes the always-correct
-/// thread-pool fallback rather than risk a rejected SQE.
-fn probeAndStoreFtruncate(ring: *linux.IoUring, shared_state: *SharedState) void {
-    const supported = blk: {
-        const probe = ring.get_probe() catch break :blk false;
-        break :blk probe.is_supported(.FTRUNCATE);
+/// Probe optional opcodes once. Failure records "no" for every feature so the
+/// Loop takes an always-correct fallback instead of submitting a rejected SQE.
+fn probeAndStoreFeatures(ring: *linux.IoUring, shared_state: *SharedState) void {
+    const probe = ring.get_probe() catch {
+        shared_state.ftruncate_support.store(feature_no, .seq_cst);
+        shared_state.waitid_support.store(feature_no, .seq_cst);
+        return;
     };
-    shared_state.ftruncate_support.store(if (supported) ftruncate_yes else ftruncate_no, .seq_cst);
+    shared_state.ftruncate_support.store(if (probe.is_supported(.FTRUNCATE)) feature_yes else feature_no, .seq_cst);
+    shared_state.waitid_support.store(if (probe.is_supported(.WAITID)) feature_yes else feature_no, .seq_cst);
 }
 
-/// Runtime capability query used by the Loop: may file_set_size use the native
-/// IORING_OP_FTRUNCATE SQE, or must it fall back to the thread pool? Probed once
-/// at ring creation; see `SharedState.ftruncate_support`.
-pub fn fileSetSizeSupported(self: *Self) bool {
-    return self.shared_state.ftruncate_support.load(.seq_cst) == ftruncate_yes;
+pub fn supports(self: *const Self, comptime op: Op, _: *const op.toType()) bool {
+    comptime std.debug.assert(capability(op) == .maybe);
+    if (comptime op == .file_set_size) {
+        return self.shared_state.ftruncate_support.load(.seq_cst) == feature_yes;
+    }
+    if (comptime op == .process_wait) {
+        return self.shared_state.waitid_support.load(.seq_cst) == feature_yes;
+    }
+    @compileError("unhandled runtime io_uring capability: " ++ @tagName(op));
 }
 
 fn ringFromMasterFd(master_fd: i32, flags: u32, queue_size: u16) !linux.IoUring {
@@ -1145,7 +1184,7 @@ pub fn syncWallTimer(self: *Self, clock: Clock, deadline: ?u64) bool {
 }
 
 pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
-    const linux_os = @import("../../os/linux.zig");
+    const linux_os = @import("../../../os/linux.zig");
 
     // The waker poll is normally already armed (a no-op here). It only needs
     // re-arming in the rare case the kernel dropped the multishot; if the SQ is
