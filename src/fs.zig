@@ -1387,6 +1387,32 @@ test "File: basic read and write" {
     try dir.deleteFile(file_path);
 }
 
+test "File: streaming changes caller-owned descriptor flags only for epoll" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (comptime !@hasDecl(ev.Backend, "selectedEngine")) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const readiness_backend = rt.main_executor.loop.backend.selectedEngine() == .epoll;
+
+    const fds = try os.posix.pipe(.{ .nonblocking = false });
+    defer os.posix.close(fds[0]);
+    defer os.posix.close(fds[1]);
+
+    const nonblocking = @as(c_int, 1) << @bitOffsetOf(os.posix.O, "NONBLOCK");
+    const flags_before = os.posix.system.fcntl(fds[1], os.posix.system.F.GETFL, @as(c_int, 0));
+    try std.testing.expectEqual(.SUCCESS, os.posix.errno(flags_before));
+    try std.testing.expect(flags_before & nonblocking == 0);
+
+    var iovecs: [1]os.iovec_const = undefined;
+    const file = File.fromFd(fds[1]);
+    try std.testing.expectEqual(1, try file.writeStreaming(ev.WriteBuf.fromSlice("x", &iovecs)));
+
+    const flags_after = os.posix.system.fcntl(fds[1], os.posix.system.F.GETFL, @as(c_int, 0));
+    try std.testing.expectEqual(.SUCCESS, os.posix.errno(flags_after));
+    try std.testing.expectEqual(readiness_backend, flags_after & nonblocking != 0);
+}
+
 test "File: direct I/O round-trip" {
     // Direct I/O requires the buffer, offset, and length to be aligned to the
     // device's logical block size (O_DIRECT on Linux/BSD, FILE_FLAG_NO_BUFFERING
@@ -1928,7 +1954,7 @@ test "Dir: canceling a blocking open interrupts the worker" {
     // Only exercises the thread-pool-delegated path (kqueue/poll and friends);
     // backends that open natively (io_uring) cancel via the backend instead, and
     // the SIGURG mechanism is POSIX-only.
-    if (ev.Backend.capabilities.file_open) return;
+    if (ev.Backend.capability(.file_open) != .no) return;
     if (!os.syscall_cancel.enabled) return;
 
     // A FIFO opened O_RDONLY with no writer blocks in the worker's openat(). On

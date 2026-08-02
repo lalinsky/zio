@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) void {
     const backend = b.option(
         []const u8,
         "backend",
-        "Override the default event loop backend (io_uring, epoll, kqueue, iocp, poll)",
+        "Override the default event loop backend (linux, io_uring, epoll, kqueue, iocp, poll)",
     );
 
     const ResolveBeneathMode = enum { strict, best_effort };

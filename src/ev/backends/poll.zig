@@ -23,10 +23,85 @@ const PipeClose = @import("../completion.zig").PipeClose;
 
 pub const NetHandle = net.fd_t;
 
-const BackendCapabilities = @import("../completion.zig").BackendCapabilities;
+const Support = @import("../completion.zig").Support;
 const fs = @import("../../os/fs.zig");
 
-pub const capabilities: BackendCapabilities = .{};
+pub const native_wall_timers = false;
+pub const supports_nonblocking_file_io = false;
+
+pub fn capability(comptime op: Op) Support {
+    return switch (op) {
+        .file_read_streaming, .file_write_streaming => .maybe,
+        .net_send_file,
+        .file_open,
+        .file_create,
+        .file_close,
+        .file_read,
+        .file_write,
+        .file_sync,
+        .file_set_size,
+        .file_set_permissions,
+        .file_set_owner,
+        .file_set_timestamps,
+        .dir_create_dir,
+        .dir_rename,
+        .dir_rename_preserve,
+        .dir_delete_file,
+        .dir_delete_dir,
+        .file_size,
+        .file_stat,
+        .dir_open,
+        .dir_close,
+        .dir_set_permissions,
+        .dir_set_owner,
+        .dir_set_file_permissions,
+        .dir_set_file_owner,
+        .dir_set_file_timestamps,
+        .dir_sym_link,
+        .dir_read_link,
+        .dir_hard_link,
+        .dir_access,
+        .dir_read,
+        .dir_real_path,
+        .dir_real_path_file,
+        .file_real_path,
+        .file_hard_link,
+        .device_io_control,
+        .process_wait,
+        => .no,
+        .group,
+        .timer,
+        .async,
+        .work,
+        .net_open,
+        .net_bind,
+        .net_listen,
+        .net_connect,
+        .net_accept,
+        .net_recv,
+        .net_send,
+        .net_recvfrom,
+        .net_sendto,
+        .net_recvmsg,
+        .net_sendmsg,
+        .net_poll,
+        .net_shutdown,
+        .net_close,
+        .pipe_poll,
+        .pipe_create,
+        .pipe_close,
+        .mach_port,
+        => .yes,
+    };
+}
+
+pub fn supports(_: *const Self, comptime op: Op, data: *op.toType()) bool {
+    comptime std.debug.assert(capability(op) == .maybe);
+    if (comptime op == .file_read_streaming or op == .file_write_streaming) {
+        return common.resolveStreamingSupport(data);
+    }
+    @compileError("unhandled runtime poll capability: " ++ @tagName(op));
+}
 
 pub const SharedState = struct {};
 

@@ -160,23 +160,89 @@ fn loadWinsockExtension(comptime T: type, sock: windows.SOCKET, guid: windows.GU
 
 pub const NetHandle = net.fd_t;
 
-const BackendCapabilities = @import("../completion.zig").BackendCapabilities;
+const Op = @import("../completion.zig").Op;
+const Support = @import("../completion.zig").Support;
 
-pub const capabilities: BackendCapabilities = .{
-    .file_read = true,
-    .file_write = true,
-    // Streaming (positionless) read/write uses overlapped ReadFile/WriteFile
-    // with a zero offset, but only for non-seekable handles (pipes/stdio).
-    // Loop routes pollable fds here; seekable fds go to the thread pool.
-    .file_read_streaming = false,
-    .file_write_streaming = false,
-    .process_wait = true,
-    // Zero-copy file-to-socket transfer via the TransmitFile extension.
-    .net_send_file = true,
-    // Boot/real deadlines are armed via per-loop waitable timers whose
-    // completion-routine APC fires during the alertable poll wait.
-    .native_wall_timers = true,
-};
+// Boot/real deadlines are armed via per-loop waitable timers whose
+// completion-routine APC fires during the alertable poll wait.
+pub const native_wall_timers = true;
+pub const supports_nonblocking_file_io = true;
+
+pub fn capability(comptime op: Op) Support {
+    return switch (op) {
+        // Streaming (positionless) read/write uses overlapped ReadFile/WriteFile
+        // only for non-seekable handles. Seekable handles use the thread pool.
+        .file_read_streaming, .file_write_streaming => .maybe,
+        .file_open,
+        .file_create,
+        .file_close,
+        .file_sync,
+        .file_set_size,
+        .file_set_permissions,
+        .file_set_owner,
+        .file_set_timestamps,
+        .dir_create_dir,
+        .dir_rename,
+        .dir_rename_preserve,
+        .dir_delete_file,
+        .dir_delete_dir,
+        .file_size,
+        .file_stat,
+        .dir_open,
+        .dir_close,
+        .dir_set_permissions,
+        .dir_set_owner,
+        .dir_set_file_permissions,
+        .dir_set_file_owner,
+        .dir_set_file_timestamps,
+        .dir_sym_link,
+        .dir_read_link,
+        .dir_hard_link,
+        .dir_access,
+        .dir_read,
+        .dir_real_path,
+        .dir_real_path_file,
+        .file_real_path,
+        .file_hard_link,
+        .device_io_control,
+        => .no,
+        .group,
+        .timer,
+        .async,
+        .work,
+        .net_open,
+        .net_bind,
+        .net_listen,
+        .net_connect,
+        .net_accept,
+        .net_recv,
+        .net_send,
+        .net_recvfrom,
+        .net_sendto,
+        .net_recvmsg,
+        .net_sendmsg,
+        .net_poll,
+        .net_shutdown,
+        .net_close,
+        .net_send_file,
+        .file_read,
+        .file_write,
+        .pipe_poll,
+        .pipe_create,
+        .pipe_close,
+        .mach_port,
+        .process_wait,
+        => .yes,
+    };
+}
+
+pub fn supports(_: *const Self, comptime op: Op, data: *op.toType()) bool {
+    comptime std.debug.assert(capability(op) == .maybe);
+    if (comptime op == .file_read_streaming or op == .file_write_streaming) {
+        return common.resolveStreamingSupport(data);
+    }
+    @compileError("unhandled runtime IOCP capability: " ++ @tagName(op));
+}
 
 // Backend-specific data stored in Completion.internal
 pub const CompletionData = struct {
@@ -631,7 +697,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .file_real_path,
         .file_hard_link,
         .device_io_control,
-        => unreachable, // These are handled by thread pool (capabilities = false)
+        => unreachable, // These are handled by thread pool (capability(op) == .no)
 
         .net_send_file => {
             const data = c.cast(NetSendFile);

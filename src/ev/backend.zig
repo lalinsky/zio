@@ -4,6 +4,7 @@ const options = @import("zio_options");
 
 pub const BackendType = enum {
     poll,
+    linux,
     epoll,
     kqueue,
     io_uring,
@@ -12,7 +13,9 @@ pub const BackendType = enum {
 
 pub const backend = blk: {
     if (options.backend) |backend_name| {
-        if (std.mem.eql(u8, backend_name, "epoll")) {
+        if (std.mem.eql(u8, backend_name, "linux")) {
+            break :blk BackendType.linux;
+        } else if (std.mem.eql(u8, backend_name, "epoll")) {
             break :blk BackendType.epoll;
         } else if (std.mem.eql(u8, backend_name, "poll")) {
             break :blk BackendType.poll;
@@ -28,7 +31,7 @@ pub const backend = blk: {
     }
 
     switch (builtin.os.tag) {
-        .linux => break :blk BackendType.io_uring,
+        .linux => break :blk BackendType.linux,
         .macos, .ios, .tvos, .visionos, .watchos, .freebsd, .netbsd, .openbsd, .dragonfly => break :blk BackendType.kqueue,
         .windows => break :blk BackendType.iocp,
         else => break :blk BackendType.poll,
@@ -37,8 +40,9 @@ pub const backend = blk: {
 
 pub const Backend = switch (backend) {
     .poll => @import("backends/poll.zig"),
-    .epoll => @import("backends/epoll.zig"),
+    .linux => @import("backends/linux.zig").Backend(.auto),
+    .epoll => @import("backends/linux.zig").Backend(.epoll),
     .kqueue => @import("backends/kqueue.zig"),
-    .io_uring => @import("backends/io_uring.zig"),
+    .io_uring => @import("backends/linux.zig").Backend(.io_uring),
     .iocp => @import("backends/iocp.zig"),
 };
