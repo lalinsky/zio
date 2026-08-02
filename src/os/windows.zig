@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 // Type aliases
 pub const DWORD = std.os.windows.DWORD;
@@ -598,7 +599,13 @@ pub extern "kernel32" fn CreateNamedPipeW(
     lpSecurityAttributes: ?*SECURITY_ATTRIBUTES,
 ) callconv(.winapi) HANDLE;
 
-var pipe_counter: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
+/// Integer type for the pipe counter. Uses u32 on x86 (IA-32) because
+/// 64-bit atomics are not available.
+const PipeCounterInt = switch (builtin.cpu.arch) {
+    .x86 => u32,
+    else => u64,
+};
+var pipe_counter: std.atomic.Value(PipeCounterInt) = std.atomic.Value(PipeCounterInt).init(0);
 
 pub extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) DWORD;
 
