@@ -42,6 +42,8 @@ fn wallKind(idx: usize) SpecialKind {
 }
 
 const NetOpen = @import("../../completion.zig").NetOpen;
+const NetBind = @import("../../completion.zig").NetBind;
+const NetListen = @import("../../completion.zig").NetListen;
 const NetConnect = @import("../../completion.zig").NetConnect;
 const NetAccept = @import("../../completion.zig").NetAccept;
 const NetRecv = @import("../../completion.zig").NetRecv;
@@ -167,6 +169,11 @@ pub const SharedState = struct {
     ftruncate_support: std.atomic.Value(FeatureSupport) = .init(.unknown),
     /// IORING_OP_WAITID was added after the minimum supported ring setup.
     waitid_support: std.atomic.Value(FeatureSupport) = .init(.unknown),
+    /// IORING_OP_BIND and IORING_OP_LISTEN arrived together in Linux 6.11, so
+    /// they are probed and gated as one feature. Unlike the two above there is
+    /// no thread-pool fallback — bind/listen never block, so the fallback is
+    /// the direct syscall on the loop thread, decided inside `submit`.
+    bind_listen_support: std.atomic.Value(FeatureSupport) = .init(.unknown),
 };
 
 pub const NetRecvData = struct {
@@ -363,10 +370,15 @@ fn probeAndStoreFeatures(ring: *linux.IoUring, shared_state: *SharedState) void 
     const probe = ring.get_probe() catch {
         shared_state.ftruncate_support.store(.no, .monotonic);
         shared_state.waitid_support.store(.no, .monotonic);
+        shared_state.bind_listen_support.store(.no, .monotonic);
         return;
     };
     shared_state.ftruncate_support.store(if (probe.is_supported(.FTRUNCATE)) .yes else .no, .monotonic);
     shared_state.waitid_support.store(if (probe.is_supported(.WAITID)) .yes else .no, .monotonic);
+    shared_state.bind_listen_support.store(
+        if (probe.is_supported(.BIND) and probe.is_supported(.LISTEN)) .yes else .no,
+        .monotonic,
+    );
 }
 
 pub fn supports(self: *const Self, comptime op: Op, _: *op.toType()) bool {
@@ -483,12 +495,29 @@ fn submitInner(self: *Self, state: *LoopState, c: *Completion, is_new: bool) voi
             state.markCompletedFromBackend(c);
         },
         .net_bind => {
-            common.handleNetBind(c);
-            state.markCompletedFromBackend(c);
+            // IORING_OP_BIND needs Linux >= 6.11 (probed once at master ring
+            // creation); otherwise complete synchronously — bind never blocks.
+            if (self.shared_state.bind_listen_support.load(.monotonic) == .yes) {
+                const data = c.cast(NetBind);
+                const sqe = self.getSqeOrDefer(c) orelse return;
+                sqe.prep_bind(data.handle, data.addr, data.addr_len.*, 0);
+                sqe.user_data = @intFromPtr(c);
+            } else {
+                common.handleNetBind(c);
+                state.markCompletedFromBackend(c);
+            }
         },
         .net_listen => {
-            common.handleNetListen(c);
-            state.markCompletedFromBackend(c);
+            // IORING_OP_LISTEN: same gate as .net_bind above.
+            if (self.shared_state.bind_listen_support.load(.monotonic) == .yes) {
+                const data = c.cast(NetListen);
+                const sqe = self.getSqeOrDefer(c) orelse return;
+                sqe.prep_listen(data.handle, data.backlog, 0);
+                sqe.user_data = @intFromPtr(c);
+            } else {
+                common.handleNetListen(c);
+                state.markCompletedFromBackend(c);
+            }
         },
 
         // Async operations through io_uring
@@ -1320,8 +1349,28 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
     switch (c.op) {
         .group, .timer, .async, .work => unreachable,
         .net_open => unreachable,
-        .net_bind => unreachable,
-        .net_listen => unreachable,
+        .net_bind => {
+            if (res < 0) {
+                c.setError(net.errnoToBindError(@enumFromInt(-res)));
+            } else {
+                const data = c.cast(NetBind);
+                // IORING_OP_BIND does not report the bound address, so fetch
+                // it here — callers rely on seeing the actual port after
+                // binding port 0 (mirrors handleNetBind).
+                if (net.getsockname(data.handle, data.addr, data.addr_len)) |_| {
+                    c.setResult(.net_bind, {});
+                } else |err| {
+                    c.setError(err);
+                }
+            }
+        },
+        .net_listen => {
+            if (res < 0) {
+                c.setError(net.errnoToListenError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.net_listen, {});
+            }
+        },
         .dir_set_permissions => unreachable, // Handled synchronously
         .dir_set_owner => unreachable, // Handled synchronously
         .dir_set_file_permissions => unreachable, // Handled synchronously
