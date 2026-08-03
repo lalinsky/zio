@@ -461,6 +461,7 @@ pub const BindError = error{
     NetworkDown,
     InputOutput,
     SystemResources,
+    Canceled,
     Unexpected,
 };
 
@@ -475,6 +476,7 @@ pub fn errnoToBindError(err: E) BindError {
                 .ENOTSOCK => error.FileDescriptorNotASocket,
                 .ENETDOWN => error.NetworkDown,
                 .ENOBUFS => error.SystemResources,
+                .OPERATION_ABORTED => error.Canceled,
                 else => unexpectedError(err),
             };
         },
@@ -495,6 +497,7 @@ pub fn errnoToBindError(err: E) BindError {
                 .ROFS => error.ReadOnlyFileSystem,
                 .IO => error.InputOutput,
                 .NETDOWN => error.NetworkDown,
+                .CANCELED => error.Canceled, // io_uring completion after cancel
                 else => |e| unexpectedError(e),
             };
         },
@@ -530,6 +533,7 @@ pub const ListenError = error{
     FileDescriptorNotASocket,
     NetworkDown,
     SystemResources,
+    Canceled,
     Unexpected,
 };
 
@@ -543,6 +547,7 @@ pub fn errnoToListenError(err: E) ListenError {
                 .ENOTSOCK => error.FileDescriptorNotASocket,
                 .ENETDOWN => error.NetworkDown,
                 .ENOBUFS, .EMFILE => error.SystemResources,
+                .OPERATION_ABORTED => error.Canceled,
                 else => unexpectedError(err),
             };
         },
@@ -553,6 +558,7 @@ pub fn errnoToListenError(err: E) ListenError {
                 .OPNOTSUPP => error.OperationNotSupported,
                 .NOTSOCK => error.FileDescriptorNotASocket,
                 .NETDOWN => error.NetworkDown,
+                .CANCELED => error.Canceled, // io_uring completion after cancel
                 else => |e| unexpectedError(e),
             };
         },

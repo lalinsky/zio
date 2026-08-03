@@ -118,6 +118,11 @@ test "Loop: socket create and bind" {
 
     try bind.c.getResult(.net_bind);
 
+    // Binding port 0 must write the actual bound address back — a contract
+    // every backend path has to keep, including IORING_OP_BIND (which does
+    // not report the address by itself).
+    try std.testing.expect(addr.port != 0);
+
     // Close socket
     var close: NetClose = .init(sock);
     loop.add(&close.c);
