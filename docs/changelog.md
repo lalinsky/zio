@@ -4,178 +4,160 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-- Linux now uses one parametric backend that prefers `io_uring` and falls back
-  group-wide to `epoll` when ring setup is unavailable or blocked by policy.
-  Completion storage now separates backend syscall scratch from thread-pool
-  fallback work, with exhaustive compile-time `yes`/`no`/`maybe` capability
-  classification and a recorded runtime route for safe cancellation.
+- Work-stealing is fully wired up now. Idle executors publish an `idle_mask` and coordinate
+  through a single-token searcher count; a newly-idle executor first does a short steal-free
+  doze (100us) on the theory that an I/O completion will re-ready the tasks that just ran
+  there, and only escalates to scanning other executors' local queues and stealing half a
+  loaded victim's backlog after that. A pusher waking a sleeper can leave a "steal hint"
+  pointing straight at the loaded ring instead of a random scan, and draining many ready
+  tasks at once now wakes `ceil(log2(n))` sleepers instead of one per task. An overloaded
+  executor also sheds new wakes to the global queue, covering the case where I/O-woken
+  tasks are re-run so quickly that a stealer never gets a chance to claim them; the doze
+  and steal-hint work above already narrows how often that's needed.
 
-- Load shedding no longer oscillates on evenly loaded runtimes. The imbalance
-  threshold now scales with the load average (12.5% over it, at least 2), and
-  shedding is evaluated every few milliseconds instead of every scheduler tick, so
-  momentary op-count jitter no longer reads as imbalance. On a steady 64-connection
-  pipelined echo workload this cut shed traffic from ~50k to under 1k migrations per
-  second with unchanged throughput, and steal hints hit their target much more often
-  once connections stopped circulating.
-  
-- Added scheduler event counters, readable as a summed snapshot via
-  `Runtime.schedulerMetrics()`: parks (doze and full), searcher elections, steal
-  attempts/hits and hint hits, dispatched-wake batches and their sizes, batched wake
-  claims, and load-shed wakes. Compiled in by default (each event is one plain
-  increment on an executor-local counter); `-Dscheduler_metrics=false` strips them.
-  The new `metrics_log_interval` runtime option starts a monitor thread that logs
-  the counters' per-interval deltas at that cadence; being its own thread, it keeps
-  reporting even when every executor is busy or parked.
-  
-- Fixed blocking-path socket operations on Windows failing with `error.WouldBlock`
-  when the socket was in nonblocking mode, seen as a flaky CI failure in the blocking
-  sockets test. Accepted sockets are nonblocking by default (`NetAccept`'s flags), but
-  the Windows blocking executor called recv/send/accept once assuming blocking mode,
-  so a receive racing the peer's send surfaced `WouldBlock` instead of waiting.
-  Windows now uses the same poll-and-retry loop as the other platforms, which handles
-  both socket modes.
+- Replaced the fixed 61-task scheduling quantum with an adaptive, time-based one, targeting
+  ~100us of task time between I/O polls using an EWMA of recent quantum costs. A cheap
+  clock checkpoint every 127 ticks (prime, to avoid resonating with periodic workloads)
+  catches a mispredicted budget mid-batch. `maybeYield()` is now a pure time-slice check
+  instead of a ready-queue-length threshold, and always checks cancellation on its fast
+  path.
 
-- When an executor with queued work wakes an idle one to help, the wake now carries a
-  hint saying whose queue is loaded, and the woken executor starts stealing there
-  instead of probing executors in random order. The work itself stays in the waker's
-  queue until it is actually stolen, so a task the waker gets to promptly still runs
-  where it was woken. This mainly speeds up fan-out patterns (one task waking many)
-  on multi-threaded runtimes.
+- Linux now auto-selects io_uring with an epoll fallback, instead of io_uring being the
+  only option. The choice is made once (behind a mutex, so a loop group can't split
+  between engines) and only falls back on `SystemOutdated`/`PermissionDenied`/
+  `ArgumentsInvalid` from ring setup - the case that had no recovery before, e.g.
+  containers with seccomp-restricted io_uring or old kernels.
 
-- Tasks woken by I/O completions are now scheduled as one batch per event loop poll,
-  with a single wake decision for the whole batch (waking several idle executors at
-  once for a large batch), instead of one announcement per completion. This mainly
-  helps servers with many connections completing I/O together (~10% more throughput
-  in the 1000-connection echo benchmark). In the low-level `ev` API, setting a
-  completion's `callback` to null now delivers it through `nextDispatched()` instead
-  of invoking anything, the per-completion form of `do_not_call_callbacks`.
+- The io_uring backend now submits `bind`/`listen` as native SQEs on kernels that support
+  it (Linux 6.11+), probed once at startup. It also gained a real zero-copy `sendfile`
+  via a splice/pipe chain instead of falling back to the generic read/write loop.
 
-- **BREAKING**: Reworked coroutine stack allocation. On 64-bit POSIX targets, stacks
-  are now carved from larger slab reservations (one syscall per cold stack instead of
-  three, and no syscalls at all to release and reuse one), which sped up workloads
-  with many live coroutines: 10k concurrently sleeping tasks by ~25%, large fan-out
-  by ~10%. The pool's `max_unused_stacks` and `max_age` settings are gone, replaced
-  by a decaying demand watermark: a periodic pass returns capacity beyond the recent
-  peak usage to the OS, with a half-life of one `stack_pool.shrink_interval` (default
-  60s, `.zero` disables shrinking). The slots-per-slab count is a runtime option
-  (`stack_pool.slab_slots`, default 64; 0 restores the per-stack allocator), and the
-  new `stack_pool.prewarm` option commits that many slots at startup and floors the
-  watermark. (#436)
+- `sendfile` on kqueue is now a native `sendfile(2)` implementation, but only on FreeBSD.
+  Darwin's `sendfile` is synchronous with respect to disk reads and would block the loop,
+  so Darwin and other BSDs keep the generic fallback.
 
-- Multi-threaded runtimes no longer steal work the moment an executor runs out of local
-  tasks. A freshly idle executor now gives its own event loop a short grace window first
-  (a non-blocking probe, then a park capped at 100us), since completions usually re-ready
-  the very tasks that just ran there. Stealing, which also migrates a task's pending I/O
-  to another loop, only starts once that window produces nothing, and an executor with
-  excess work still wakes an idle one immediately through the searcher protocol. This
-  removes speculative cross-executor task migration from the steady-state I/O path.
+- `Mutex` is rewritten around an explicit atomic state word instead of a flag in the wait
+  queue, switching from lock-handoff to barging: woken waiters now compete for the lock
+  instead of being handed direct ownership, so a transfer no longer serializes behind the
+  scheduler. Foreign-thread callers still block directly on the state word via a platform
+  futex, as before.
 
-- **BREAKING**: `Loop.run(mode)` and `ev.RunMode` are gone from the low-level event loop
-  API. Use `loop.poll(max_wait)` for a single pass, where `.zero` never blocks (the old
-  `.no_wait`), `.max` waits for the next event (the old `.once`), and anything in between
-  caps the wait. The parameterless `loop.run()` keeps the old `.until_done` behavior.
+- `RwLock` is rewritten around a single lock-free atomic state word plus a semaphore.
+  Uncontended readers acquire with one CAS and never touch the internal mutex; writers
+  wake via a semaphore post from the last departing reader instead of a broadcast condvar.
 
-- Fixed a deadlock in the io_uring backend when many operations were cancelled at once,
-  for example when a burst of operation timeouts expired together. A full submission
-  queue made the backend drop cancel requests with a "Failed to get io_uring SQE for
-  cancel" log line, leaving the cancelled operations running and the tasks awaiting them
-  blocked forever. The submission queue is now flushed to the kernel and the submission
-  retried whenever it fills up, for cancels and regular operations alike.
+- The DNS resolver cache no longer caps entries at 6 addresses. Addresses are now stored
+  in linked 4-address chunks from a shared pool, so one entry can hold up to 128 addresses
+  without inflating every other slot, and `put()` can no longer fail - a reclaim pass
+  evicts other entries if the pool runs short.
 
-- Added `withTimeout(timeout, func, args)`, the scoped form of `AutoCancel`: it arms the
-  timer, runs `func`, and turns the `error.Canceled` the timeout produced back into
-  `error.Timeout`. The result type is `func`'s own, with `error.Timeout` added to its
-  error set. An explicit cancel still wins over the deadline and is reported as
-  `error.Canceled`.
+- DNS lookups no longer return `error.TooManyAddresses`; results are truncated instead
+  and marked with a new `QueryResult.truncated` flag, and truncated results are never
+  cached. Dual-stack answers are now interleaved IPv6-first (RFC 6724) before caching,
+  so a cache hit and a fresh lookup return addresses in the same order.
 
-- Added `os.process.getCurrentPath`, `os.process.setCurrentPath` and
-  `os.process.setCurrentDir` for the working directory, and `os.fs.isTty` and
-  `os.fs.supportsAnsiEscapeCodes` for terminal detection. These also back the matching
-  `std.Io` operations.
+- Added `Dir.createFileAtomic()`/`fs.createFileAtomic()`, returning an `AtomicFile` you
+  write to and then finalize with `.link()` (fails if the destination exists) or
+  `.replace()`. If never finalized, the temp file is cleaned up on `deinit()`, including
+  under task cancellation.
 
-- Added `os.fs.fileSeekBy` and `os.fs.fileSeekTo`, which now also back the `std.Io` file
-  seek operations.
+- `currentPath`/`setCurrentDir`/`setCurrentPath`, `File.isTty`/`supportsAnsiEscapeCodes`,
+  and file seeking are now implemented natively instead of delegating to a throwaway
+  `Io.Threaded` instance per call. Windows' `isTty` now also recognizes an MSYS2/Cygwin
+  pty, which isn't a console handle and was previously misreported as not a tty.
 
-- Fixed pipes, FIFOs and terminals being treated as seekable on 32-bit Linux. Streaming
-  reads and writes on them were routed to a thread pool worker, where they occupy the
-  worker until they complete, instead of to the event loop.
+- `Socket.setReuse()` is removed. `reuse_address` and `reuse_port` are now independent
+  options on `IpAddress.ListenOptions`/`BindOptions` instead of `SO_REUSEPORT` being
+  bundled into `reuse_address`.
 
-- `net.HostName.validate` now counts the trailing dot of a fully qualified domain name
-  toward the 255 byte limit, matching how the name is encoded in a DNS packet. A 255 byte
-  name written with a trailing dot used to validate at 256 bytes, so a validated
-  `HostName` could be longer than `HostName.max_len`.
+- Added `Loop.Options.do_not_call_callbacks` and `Loop.nextDispatched()`, for embedding
+  zio in a foreign event loop: finished completions are queued instead of invoked inline,
+  so the embedder can drain and invoke them after reacquiring a lock it dropped for the
+  poll (e.g. Python's GIL).
 
-- File writes now report `EBUSY` as `error.DeviceBusy` and `ETXTBSY` as `error.FileBusy`
-  instead of `error.Unexpected`, which in debug builds also asked the user to file a bug
-  report and dumped a stack trace to stderr. Writing to a
-  device that is in use, or to a file the kernel is currently executing, is a normal
-  failure. Both are new members of `os.fs.FileWriteError`, so exhaustive switches over
-  file write errors need to handle them.
+- `Loop.run(mode: RunMode)` is replaced by `Loop.run()` (always runs to completion) and
+  `Loop.poll(wait_cap: Duration)`, which takes an arbitrary cap instead of an all-or-nothing
+  enum.
 
-- Fixed a use-after-free in timed waits, where a task could return and drop the stack
-  frame holding its timeout timer before the event loop was done with it. A timer that
-  has already fired cannot be disarmed, so `Loop.clearTimer` now returns false to say the
-  callback is still coming; low-level `ev` users need to handle the result.
+- zio now installs a do-nothing `SIGPIPE` handler at runtime init (refcounted across
+  overlapping runtimes, not inherited across `execve`) if the disposition is still
+  default. Zig 0.16 moved SIGPIPE-ignoring into `std.Io.Threaded.init`, which zio doesn't
+  use, so writes to a peer-closed socket would otherwise kill the process instead of
+  returning `error.BrokenPipe`.
 
-- `Waiter.timedWait` now returns `error.Timeout` instead of leaving callers to work out
-  whether the timeout or a real wakeup ended the wait. `CompletionQueue.timedWait` no
-  longer reports a timeout when a completion woke it.
+- Added opt-in scheduler metrics (`zio_options.scheduler_metrics` build option) and a
+  `RuntimeOptions.metrics_log_interval` that spawns a dedicated monitor thread to log
+  them, deliberately not tied to an executor timer so it keeps logging even if every
+  executor is wedged or asleep.
 
-- `AutoCancel` now claims the cancellation before handing it to the task, so `check()`
-  cannot miss a timeout it caused. Its `triggered` field became atomic, so code reading
-  it directly needs `.load(.acquire)`.
+- Exposed `withTimeout`/`WithTimeoutResult` at the top-level `zio` namespace, for running
+  a function under an automatic cancellation deadline while distinguishing the function's
+  own errors from a user cancel or a timeout.
 
-- Reworked completion state tracking in the low-level `ev` API: the lifecycle phase and
-  the cancellation flags now live in a single atomic `Completion.state` word, read
-  through `Completion.loadState()`. The separate `cancel_state` field is gone; code that
-  checked `c.state == .dead` now reads `c.loadState().phase == .dead`, and cancellation
-  checks use `loadState().cancel_requested`, which stays readable from the completion's
-  callback. Canceling a timer that was already cleared is now a harmless no-op instead
-  of hitting an assertion when the queued cancel arrived.
+- Fixed a cross-thread race between a firing timer and a concurrent `clearTimer` (e.g. a
+  migrated task clearing its own sleep timer from another loop's thread) that could
+  double-decrement the completion counter or clobber a result an assert relies on.
+  `clearTimer` now returns whether it actually reclaimed the timer.
 
-- The loop's thread-affine entry points (`Loop.add`, `Loop.cancel`, `Loop.setTimer` on
-  an armed timer, `Loop.deinit`) now assert in debug builds that they run on the thread
-  that owns the loop. `Loop.cancel` must be called on the calling thread's loop, which
-  routes the cancellation to the completion's loop; calling it on the completion's loop
-  from another thread was never safe and two internal callers doing so were fixed.
+- Consolidated completion lifecycle into a single atomic state word (phase + cancel
+  flags), replacing a plain enum plus a separately-mutated cancel state. Closes an entire
+  class of cross-thread lifecycle races, not just the timer one above.
 
-- Fixed writing to a terminal on macOS crashing with an unexpected `ENXIO` error. A
-  reader or writer starts in positional mode and expects the first `pread`/`pwrite` to
-  fail with `ESPIPE` if the file turns out not to be seekable, which is how it learns to
-  switch to streaming reads and writes. macOS reports a terminal as `ENXIO` instead, so
-  the fallback never happened and the error escaped to the caller as `error.Unexpected`,
-  with a stack trace dumped to stderr. `ENXIO` and `EOVERFLOW` are now both translated to
-  `error.Unseekable`, matching `std.Io.Threaded`.
+- Fixed a race in `Condition`/`Futex`/`Notify`/`ResetEvent`'s timed wait: when a wake
+  landed at the same moment its own timer fired, the wait still reported `error.Timeout`
+  to the caller after quietly consuming the wake internally. That case is now reported as
+  a successful wake instead of a timeout.
 
-- Added `Dir.createFileAtomic()` and `AtomicFile` to the native API, mirroring the
-  equivalent `std.Io` interface. The data is written to a randomly named temporary file
-  in the destination's directory and then moved into place with an atomic rename:
-  `AtomicFile.replace()` overwrites an existing destination, `AtomicFile.link()` fails
-  with `error.PathAlreadyExists` instead. Abandoned temporary files are cleaned up by
-  `AtomicFile.deinit()`, which runs even when the task is canceled.
+- Fixed two scheduler races around a task's `awaken` bit. In `yield`'s cancel path, the
+  state was blindly overwritten back to plain `.ready` on the way out, erasing a
+  concurrently-set awaken token. In `scheduleTask`, the wake CAS used to skip itself
+  entirely once the awaken bit was already set, but a coalescing waker still needs to
+  join the release sequence on `state`, or a payload published just ahead of a duplicate
+  wake isn't guaranteed visible to the eventual reschedule.
 
-- Fixed a race on the epoll and kqueue backends where a socket operation whose timeout
-  expired at the exact moment its data arrived could be completed twice. A socket op is
-  serviced by the loop that owns the fd's poller registration, which is not necessarily
-  the loop that submitted it, so an expiring timeout could cancel the op from one thread
-  while another was already storing its result. In safe builds this tripped an assertion;
-  in `ReleaseFast` it overwrote the natural result, so a read reported `error.Timeout`
-  after the bytes had already been consumed from the socket, and the event loop's
-  completion accounting was corrupted. This only affected multi-executor runtimes where
-  a socket is used from more than one executor.
+- Fixed a race on Windows where a blocking-executor fast path assumed a blocking-mode
+  socket handle for recv/send/accept, but accepted sockets are nonblocking by default -
+  a recv issued before the peer's send could spuriously fail instead of waiting.
 
-- `Group.wait()` no longer closes the group. Waiting used to close it permanently, so
-  every spawn afterwards failed with `error.Closed`, and through the `std.Io` vtable,
-  where `Group.async` cannot report an error, those spawns silently ran their work
-  synchronously on the calling task instead of concurrently. A group can now be spawned
-  into again after `wait()` returns, and a wait covers tasks spawned while it is in
-  progress, as long as the spawn happens before the group drains. This matches
-  `std.Io.Threaded` and the `select`-based wait.
+- Fixed a double-complete race in kqueue/epoll socket cancellation: canceling a parked op
+  could race the owning loop's `service()` finishing the same op naturally on another
+  thread. `sockreg.detach` now returns whether it actually still owned the op.
 
-- Fixed a crash in `Runtime.deinit()` on multi-threaded runtimes. A worker could act on
-  its shutdown notification and close its waker descriptors before the notifying thread
-  had made the syscall that wakes a sleeping loop, so that write hit a closed descriptor,
-  or a recycled one belonging to an unrelated file or socket.
+- Fixed silently-dropped wake failures on the kqueue and poll backends. A lost wake left
+  the loop thread stuck until its poll timeout (potentially indefinitely for parked ops);
+  both backends now retry `EINTR` and panic on anything else instead of swallowing it.
+
+- `ThreadPool` reservations are now additive to `max_threads`, guaranteeing a worker picks
+  up a reserved job even when the pool is saturated with blocked workers, fixing a
+  potential deadlock when a job is queued behind workers waiting on it (#567).
+
+- Fixed a task creation ordering bug where `spawnTask` registered the task with its group
+  before taking its own reference, letting a concurrent `Group.cancel()` free the task out
+  from under the spawning code.
+
+- Fixed a shutdown race where a worker's loop could be torn down, closing its waker fd,
+  while a cross-thread notifier was still mid-syscall writing to it.
+
+- Fixed a real truncation bug in the `lseek` wrapper on 32-bit platforms, where a 64-bit
+  resulting offset was truncated to `usize` instead of reported in full.
+
+- Fixed `renamePreserve`'s hardlink-then-delete fallback silently swallowing delete
+  errors, which could leave both the old and new name pointing at the same data with no
+  error reported.
+
+- Spawned child processes now inherit the parent's environment.
+
+- Fixed `HostName.validate` checking the 255-byte length limit after stripping the
+  trailing FQDN dot, letting a name that's actually 256 bytes pass validation.
+
+- Fixed ThreadSanitizer false-positive races on coroutine stack reuse: raw `mmap`/`munmap`
+  syscalls are invisible to TSan's shadow memory, so a recycled stack address looked like
+  a race between unrelated coroutines. Now routed through libc's wrappers under
+  `-fsanitize-thread`.
+
+- NetBSD switched from bespoke `_lwp_park`/`_lwp_unpark` synchronization to the same
+  generic futex-based path used elsewhere, removing ~150 lines of platform-specific code
+  (requires NetBSD 10+).
 
 ## [0.16.0] - 2026-07-12
 
