@@ -842,7 +842,7 @@ fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Oper
                 const result = data.net_receive.op.getResult() catch |err| break :blk .{ recvMsgErrToReceiveErr(err), 0 };
                 // Populate the message buffer with received data
                 data.net_receive.message_buffer.* = .{
-                    .from = zioIpToStdIo(data.net_receive.addr_storage.ip),
+                    .from = zioIpToStdIo(zio_net.Address.fromPosix(&data.net_receive.addr_storage.any, data.net_receive.addr_len).ip),
                     .data = data.net_receive.data_buffer[0..result.len],
                     .control = data.net_receive.message_buffer.control[0..result.controllen],
                     .flags = decodeIncomingFlags(result.flags),
@@ -2408,7 +2408,7 @@ fn netReceiveImpl(
     try timedWaitForIoClock(&op.c, timeout, clock);
     const result = op.getResult() catch |err| return recvMsgErrToReceiveErr(err);
     message.* = .{
-        .from = zioIpToStdIo(storage.ip),
+        .from = zioIpToStdIo(zio_net.Address.fromPosix(&storage.any, addr_len).ip),
         // When flags.trunc is set on Linux, result.len is the full datagram
         // length — which may exceed data_buffer.len. We slice verbatim to
         // match std.Io.Threaded; callers that enable .trunc are responsible
