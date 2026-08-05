@@ -5,44 +5,48 @@
 [![Zig](https://img.shields.io/badge/zig-0.16.0-orange.svg)](https://ziglang.org/download/)
 [![Documentation](https://img.shields.io/badge/docs-online-green.svg)](https://lalinsky.github.io/zio/)
 
-The project consists of a few high-level components:
-- Runtime for executing stackful coroutines (fibers, green threads) on one or more CPU threads.
-- Asynchronous I/O layer that makes it look like operations are blocking for easy state management, but using event-driven OS APIs under the hood.
-- Synchronization primitives that cooperate with this runtime.
-- Seamless integration with standard library interfaces:
-    * Full implementation of the [`std.Io`] interface, so that you can use any Zig 0.16+ networking library.
-    * All streams implement the [`std.Io.Reader`] and [`std.Io.Writer`] interfaces.
-    * Integration with `std.log` and `std.debug.print` via custom `debug_io`.
-
-It's similar to [goroutines] in Go, but with the pros and cons of being implemented in a language with manual memory management and without compiler support.
+ZIO is an asynchronous runtime for Zig, in the same spirit as Go's runtime or Tokio: it schedules lightweight coroutines onto a pool of OS threads, and gives you blocking-looking network, file, and process I/O that's actually backed by non-blocking, event-driven OS APIs under the hood. On top of that, it's a full implementation of the standard library's [`std.Io`] interface, so any Zig 0.16+ code written against `std.Io` runs on zio unmodified.
 
 > The main branch is for Zig 0.16 . For Zig master (0.17+), use the [`zig-0.17`](https://github.com/lalinsky/zio/tree/zig-0.17) branch.
 
 [`std.Io`]: https://ziglang.org/documentation/0.16.0/std/#std.Io
-[`std.Io.Reader`]: https://ziglang.org/documentation/0.16.0/std/#std.Io.Reader
-[`std.Io.Writer`]: https://ziglang.org/documentation/0.16.0/std/#std.Io.Writer
-[goroutines]: https://en.wikipedia.org/wiki/Go_(programming_language)#Concurrency
+
+## Architecture
+
+zio is built in layers, and each layer is usable on its own:
+
+- **`zio.ev`**: a cross-platform, callback-based event loop (`io_uring`/`epoll`/`kqueue`/`iocp`/`poll`), in the same space as [libuv] or [libxev]. You can use this independently for async I/O without coroutines, or to embed zio's I/O into an existing callback-driven loop. For example, see [blazio], a CPython `asyncio` event loop built on `zio.ev`.
+- **`zio.coro`**: stackful coroutine primitives (context switching, growable stacks, manual scheduling), with no I/O or scheduler attached. This is what you'd build a different kind of scheduler on top of, if `zio.Runtime`'s isn't the one you want.
+- **`zio.Runtime`**: the full runtime. It schedules `zio.coro` coroutines across executor threads, drives their I/O through `zio.ev`, and adds structured concurrency (task groups), cancellation, synchronization primitives, and the `std.Io` implementation. Most programs use this directly and never touch the layers below it.
+
+A runtime can run single-threaded, or multi-threaded in one of two modes. With work-stealing (the default), idle executors steal work from busy ones, and tasks whose I/O keeps re-waking them faster than a stealer can grab them get load-shed to another executor instead. This keeps every thread busy even when work isn't spread evenly to begin with, for example when one connection generates a lot more work than the others. With pinned scheduling, a task stays on whichever executor it was spawned on for its entire life, with no migration and no cross-executor synchronization on the scheduling path, at the cost of no rebalancing if load is uneven.
+
+[libuv]: https://github.com/libuv/libuv
+[libxev]: https://github.com/mitchellh/libxev
+[blazio]: https://github.com/lalinsky/blazio
 
 ## Features
 
 - Support for Linux (`io_uring` with automatic `epoll` fallback), Windows (`iocp`), macOS/FreeBSD/NetBSD/OpenBSD (`kqueue`), and many other systems (`poll`).
-- User-mode coroutine context switching for `x86_64`, `aarch64`, `arm`, `thumb`, `riscv32`, `riscv64`, `loongarch64` and `powerpc64` architectures.
+- User-mode coroutine context switching for `x86_64`, `x86`, `aarch64`, `arm`, `thumb`, `riscv32`, `riscv64`, `loongarch64` and `powerpc64` architectures.
 - Growable stacks for the coroutines implemented by auto-extending virtual memory reservations.
-- Single-threaded or multi-threaded coroutine scheduler.
+- Single-threaded or multi-threaded coroutine scheduler, with or without work-stealing.
 - Fully asynchronous network I/O on all systems. Supports TCP, UDP, Unix sockets, raw IP sockets, etc.
 - Fully asynchronous file I/O on Linux, partially asynchronous (read/write) on Windows. Using blocking syscalls in a thread pool on other systems.
 - Fully asynchronous DNS resolver on Linux, Windows and macOS. Using `getaddrinfo` in a thread pool on other systems.
-- Safe cancelation support for all operations.
-- Structured concurrency using task groups.
 - Synchronization primitives, including more advanced ones, like channels.
-- Low-level event loop access for integrating with existing C libraries.
+- Fast and safe cancellation support for all operations.
+- Full timeout support, both for individual I/O operations and for arbitrary user code, with proper cleanup on either a timeout or an external cancel.
+- Structured concurrency using task groups.
+- Waiting on a mix of different operations at once, tasks, channels, timeouts, and anything else implementing the wait protocol.
+- Integration with `std.log` and `std.debug.print` via custom `debug_io`, so logging and printing don't block the event loop.
 
 ## Installation
 
 1) Add zio as a dependency in your `build.zig.zon`:
 
 ```bash
-zig fetch --save "git+https://github.com/lalinsky/zio#v0.16.0"
+zig fetch --save "git+https://github.com/lalinsky/zio#v0.17.0"
 ```
 
 2) In your `build.zig`, add the `zio` module as a dependency to your program:

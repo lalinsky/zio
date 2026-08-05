@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.17.0] - 2026-08-05
 
 - Work-stealing is fully wired up now. Idle executors publish an `idle_mask` and coordinate
   through a single-token searcher count; a newly-idle executor first does a short steal-free
