@@ -46,6 +46,32 @@ All notable changes to this project will be documented in this file.
   Uncontended readers acquire with one CAS and never touch the internal mutex; writers
   wake via a semaphore post from the last departing reader instead of a broadcast condvar.
 
+- Added 32-bit x86 (IA-32) coroutine context-switching support, rounding out the set of
+  architectures zio's hand-written context switch covers.
+
+- OpenBSD is now a supported platform. Its coroutine stacks are mapped `MAP_STACK` and
+  fully committed up front, since OpenBSD requires every stack pointer the kernel sees to
+  fall inside a `MAP_STACK` mapping, and that flag can only be set at `mmap` time, not
+  added later with `mprotect`. That rules out zio's usual lazy on-demand growth on this
+  platform: an OpenBSD stack doesn't grow past its initial reservation, and overflowing it
+  faults on the guard page instead.
+
+- The coroutine stack pool is rewritten from per-stack `mmap` allocation with count/age
+  eviction to slab-based allocation with a demand-driven watermark. Stacks are now carved
+  out of large `mmap`'d slabs (64 slots each by default) instead of getting an individual
+  `mmap`, and releasing a stack no longer makes any syscalls at all - eviction moved to a
+  periodic pass that tracks peak concurrent usage and decays toward it, unmapping whole
+  empty slabs before falling back to individual stacks. `RuntimeOptions.stack_pool`'s
+  `max_unused_stacks`/`max_age` options are replaced by `shrink_interval`, `slab_slots`,
+  and a new `prewarm` option to commit stacks up front. 32-bit, Windows, OpenBSD, and WASI
+  keep the old per-stack path, since slabs need a `PROT_NONE`-reserve-then-grow scheme
+  those platforms can't use.
+
+- Fixed a crash destroying a coroutine's TSan fiber if it never ran (e.g. a task created
+  and torn down before it got to execute). Works around an upstream LLVM bug (fixed in
+  LLVM 22, not yet in the LLVM 21.x that Zig 0.16 bundles): destroying a fiber with no
+  recorded trace event corrupts TSan's own bookkeeping.
+
 - The DNS resolver cache no longer caps entries at 6 addresses. Addresses are now stored
   in linked 4-address chunks from a shared pool, so one entry can hold up to 128 addresses
   without inflating every other slot, and `put()` can no longer fail - a reclaim pass
@@ -90,9 +116,31 @@ All notable changes to this project will be documented in this file.
   them, deliberately not tied to an executor timer so it keeps logging even if every
   executor is wedged or asleep.
 
-- Exposed `withTimeout`/`WithTimeoutResult` at the top-level `zio` namespace, for running
-  a function under an automatic cancellation deadline while distinguishing the function's
-  own errors from a user cancel or a timeout.
+- Added `withTimeout(timeout, func, args)`, a scoped form of `AutoCancel`: it arms a timer
+  around the call and, if the call returns `error.Canceled` because this timeout (rather
+  than an external cancel) fired, rewrites it to `error.Timeout`. `WithTimeoutResult`
+  computes the right return type - the function's own error set plus `Timeout` - and
+  nested `withTimeout` calls each correctly report whichever deadline actually fired.
+
+- Fixed a race in `AutoCancel` where a task that had migrated to another executor and was
+  running (not parked) when its timer fired could observe the cancellation before the
+  timer's own "I did this" flag was set, misreporting an auto-cancel timeout as a plain
+  user cancel.
+
+- Fixed a use-after-free in `AutoCancel.clear()`: if the timer was already mid-fire,
+  `clear()` had no way to know its callback was still touching the (often
+  stack-allocated) `AutoCancel` struct, and could return while the callback was still
+  live. `clear()` now waits for an in-flight callback to finish before returning.
+
+- `Waiter`'s timed wait now returns `error.Timeout` explicitly instead of returning
+  success and leaving the caller to infer a timeout by rechecking its own condition, an
+  easy-to-misuse contract that also let a wake that was already queued but not yet
+  delivered read as a spurious timeout in `CompletionQueue`.
+
+- I/O completions now deliver through the executor's dispatch queue instead of a direct
+  callback, and an op that completes inline always charges the cooperative scheduling
+  budget now, closing a gap where a task whose I/O always completed immediately could run
+  indefinitely without ever hitting a yield point.
 
 - Fixed a cross-thread race between a firing timer and a concurrent `clearTimer` (e.g. a
   migrated task clearing its own sleep timer from another loop's thread) that could
@@ -115,6 +163,11 @@ All notable changes to this project will be documented in this file.
   join the release sequence on `state`, or a payload published just ahead of a duplicate
   wake isn't guaranteed visible to the eventual reschedule.
 
+- Fixed a race between `Async.notify()` and the loop registering the handle: both sides
+  decide who wakes whom from the same `pending` flag, and a plain `.release` store on the
+  notify side wasn't enough to guarantee the two sides agreed on it, occasionally
+  dropping the wake instead of either side handling it.
+
 - Fixed a race on Windows where a blocking-executor fast path assumed a blocking-mode
   socket handle for recv/send/accept, but accepted sockets are nonblocking by default -
   a recv issued before the peer's send could spuriously fail instead of waiting.
@@ -131,9 +184,15 @@ All notable changes to this project will be documented in this file.
   up a reserved job even when the pool is saturated with blocked workers, fixing a
   potential deadlock when a job is queued behind workers waiting on it (#567).
 
-- Fixed a task creation ordering bug where `spawnTask` registered the task with its group
-  before taking its own reference, letting a concurrent `Group.cancel()` free the task out
-  from under the spawning code.
+- Fixed a task creation ordering bug in `spawnTask` and `spawnBlockingTask`, which
+  registered a task with its group before taking their own reference, letting a
+  concurrent `Group.cancel()` free the task out from under the spawning code.
+
+- `Group.wait()` no longer closes the group. Previously, waiting once left the group
+  permanently closed, so spawning into it again failed with `error.Closed` - or, through
+  the `std.Io` vtable, silently ran the work synchronously instead of async. A group can
+  now be spawned into and waited on repeatedly; only a failure or a `cancel()` with
+  `fail_fast` set closes it for good.
 
 - Fixed a shutdown race where a worker's loop could be torn down, closing its waker fd,
   while a cross-thread notifier was still mid-syscall writing to it.
