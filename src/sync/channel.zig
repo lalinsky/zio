@@ -6,9 +6,12 @@ const Runtime = @import("../runtime.zig").Runtime;
 const yield = @import("../runtime.zig").yield;
 const Group = @import("../group.zig").Group;
 const SimpleQueue = @import("../utils/simple_queue.zig").SimpleQueue;
+const SimpleStack = @import("../utils/simple_stack.zig").SimpleStack;
 const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const select = @import("../select.zig").select;
-const Waiter = @import("../common.zig").Waiter;
+const common = @import("../common.zig");
+const Waiter = common.Waiter;
+const NO_WINNER = common.NO_WINNER;
 const Mutex = @import("Mutex.zig");
 
 /// Specifies how a channel should be closed.
@@ -187,16 +190,24 @@ const ChannelImpl = struct {
             self.count = 0;
         }
 
-        var receivers = self.receiver_queue.popAll();
-        var senders = self.sender_queue.popAll();
+        // Classify every waiter before unlocking; see Waiter.tryClaim().
+        var to_signal: SimpleStack(WaitNode) = .{};
+
+        while (self.receiver_queue.pop()) |node| {
+            if (Waiter.fromNode(node).tryClaim()) {
+                to_signal.push(node);
+            }
+        }
+
+        while (self.sender_queue.pop()) |node| {
+            if (Waiter.fromNode(node).tryClaim()) {
+                to_signal.push(node);
+            }
+        }
 
         self.mutex.unlock();
 
-        while (receivers.pop()) |node| {
-            Waiter.fromNode(node).signal();
-        }
-
-        while (senders.pop()) |node| {
+        while (to_signal.pop()) |node| {
             Waiter.fromNode(node).signal();
         }
     }
@@ -1524,4 +1535,136 @@ test "Channel: unbuffered - select with direct transfer" {
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());
+}
+
+test "Channel: close wakes blocked select receiver" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var channel = Channel(u32).init(&.{});
+
+    const TestFn = struct {
+        fn receiver(ch: *Channel(u32)) !void {
+            var recv = ch.asyncReceive();
+            const result = try select(.{ .recv = &recv });
+            switch (result) {
+                .recv => |value| try std.testing.expectError(error.ChannelClosed, value),
+            }
+        }
+
+        fn closer(ch: *Channel(u32)) !void {
+            try yield();
+            try yield();
+            ch.close(.graceful);
+        }
+    };
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(TestFn.receiver, .{&channel});
+    try group.spawn(TestFn.closer, .{&channel});
+
+    try group.wait();
+    try std.testing.expect(!group.hasFailed());
+}
+
+test "Channel: close wakes blocked select sender" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    var channel = Channel(u32).init(&.{});
+
+    const TestFn = struct {
+        fn sender(ch: *Channel(u32)) !void {
+            var send = ch.asyncSend(42);
+            const result = try select(.{ .send = &send });
+            switch (result) {
+                .send => |send_result| try std.testing.expectError(error.ChannelClosed, send_result),
+            }
+        }
+
+        fn closer(ch: *Channel(u32)) !void {
+            try yield();
+            try yield();
+            ch.close(.graceful);
+        }
+    };
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(TestFn.sender, .{&channel});
+    try group.spawn(TestFn.closer, .{&channel});
+
+    try group.wait();
+    try std.testing.expect(!group.hasFailed());
+}
+
+test "Channel: close classifies select waiters before signaling" {
+    const Helpers = struct {
+        fn notifyState(waiter: *Waiter) u32 {
+            return switch (waiter.mode) {
+                .direct => |*direct| direct.notify.state.load(.acquire),
+                .select => unreachable,
+            };
+        }
+    };
+
+    // Closing a pending receive claims it and commits to exactly one signal.
+    var claimed_receive_channel = Channel(u32).init(&.{});
+    var claimed_receive = claimed_receive_channel.asyncReceive();
+    var claimed_receive_ctx: AsyncReceive(u32).WaitContext = .{};
+    var claimed_receive_parent = Waiter.init();
+    var claimed_receive_winner: std.atomic.Value(usize) = .init(NO_WINNER);
+    var claimed_receive_waiter = Waiter.initSelect(&claimed_receive_parent, &claimed_receive_winner, 0);
+
+    try std.testing.expect(claimed_receive.asyncWait(&claimed_receive_waiter, &claimed_receive_ctx));
+    claimed_receive_channel.close(.graceful);
+    try std.testing.expectEqual(0, claimed_receive_winner.load(.acquire));
+    try std.testing.expect(!claimed_receive.asyncCancelWait(&claimed_receive_waiter, &claimed_receive_ctx));
+    try std.testing.expectEqual(1, Helpers.notifyState(&claimed_receive_parent));
+    try std.testing.expectError(error.ChannelClosed, claimed_receive.getResult(&claimed_receive_ctx));
+
+    // Exercise the same committed-signal handshake for a pending send.
+    var claimed_send_channel = Channel(u32).init(&.{});
+    var claimed_send = claimed_send_channel.asyncSend(42);
+    var claimed_send_ctx: AsyncSend(u32).WaitContext = .{};
+    var claimed_send_parent = Waiter.init();
+    var claimed_send_winner: std.atomic.Value(usize) = .init(NO_WINNER);
+    var claimed_send_waiter = Waiter.initSelect(&claimed_send_parent, &claimed_send_winner, 0);
+
+    try std.testing.expect(claimed_send.asyncWait(&claimed_send_waiter, &claimed_send_ctx));
+    claimed_send_channel.close(.graceful);
+    try std.testing.expectEqual(0, claimed_send_winner.load(.acquire));
+    try std.testing.expect(!claimed_send.asyncCancelWait(&claimed_send_waiter, &claimed_send_ctx));
+    try std.testing.expectEqual(1, Helpers.notifyState(&claimed_send_parent));
+    try std.testing.expectError(error.ChannelClosed, claimed_send.getResult(&claimed_send_ctx));
+
+    // Simulate another select arm having already won before close removes a
+    // pending receive. The losing waiter must be discarded without a signal.
+    var receive_channel = Channel(u32).init(&.{});
+    var receive = receive_channel.asyncReceive();
+    var receive_ctx: AsyncReceive(u32).WaitContext = .{};
+    var receive_parent = Waiter.init();
+    var receive_winner: std.atomic.Value(usize) = .init(1);
+    var receive_waiter = Waiter.initSelect(&receive_parent, &receive_winner, 0);
+
+    try std.testing.expect(receive.asyncWait(&receive_waiter, &receive_ctx));
+    receive_channel.close(.graceful);
+    try std.testing.expect(receive.asyncCancelWait(&receive_waiter, &receive_ctx));
+    try std.testing.expectEqual(0, Helpers.notifyState(&receive_parent));
+
+    // Exercise the same arbitration for a pending send.
+    var send_channel = Channel(u32).init(&.{});
+    var send = send_channel.asyncSend(42);
+    var send_ctx: AsyncSend(u32).WaitContext = .{};
+    var send_parent = Waiter.init();
+    var send_winner: std.atomic.Value(usize) = .init(1);
+    var send_waiter = Waiter.initSelect(&send_parent, &send_winner, 0);
+
+    try std.testing.expect(send.asyncWait(&send_waiter, &send_ctx));
+    send_channel.close(.graceful);
+    try std.testing.expect(send.asyncCancelWait(&send_waiter, &send_ctx));
+    try std.testing.expectEqual(0, Helpers.notifyState(&send_parent));
 }

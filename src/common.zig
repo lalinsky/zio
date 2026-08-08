@@ -123,6 +123,10 @@ pub const Waiter = struct {
 
     /// Try to claim this waiter as a winner in select().
     /// Returns true if claimed (or if direct waiter), false if another waiter already won.
+    ///
+    /// Queue consumers that discard losing select waiters must remove and claim
+    /// under the same lock used by cancellation. A successful claim commits the
+    /// caller to exactly one later signal; a failed claim must not be signaled.
     pub fn tryClaim(self: *Waiter) bool {
         return switch (self.mode) {
             .direct => true,
