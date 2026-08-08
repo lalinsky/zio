@@ -77,10 +77,11 @@ pub const Config = struct {
     /// targets without slab support (see slab_supported).
     slab_slots: usize = 64,
 
-    /// Number of slab slots to carve and commit up front (at runtime init),
+    /// Number of stacks to allocate and commit up front (at runtime init),
     /// so that a burst of early spawns skips the cold-allocation cost. Also
     /// acts as the floor for the demand watermark, so prewarmed capacity is
-    /// never shrunk away. Ignored when slab allocation is compiled out.
+    /// never shrunk away. Served by slab slots where supported and by
+    /// individually mapped stacks otherwise (Windows, 32-bit, OpenBSD).
     prewarm: usize = 0,
 };
 
@@ -309,7 +310,7 @@ pub const StackPool = struct {
             // instead of vanishing the moment one quiet epoch passes.
             self.retain_target = @max(
                 @max(self.epoch_peak, self.retain_target / 2),
-                if (slab_supported) self.config.prewarm else 0,
+                self.config.prewarm,
             );
             self.epoch_peak = self.in_use;
 
@@ -436,23 +437,47 @@ pub const StackPool = struct {
         return null;
     }
 
-    /// Carve and commit `config.prewarm` slots up front. Called once from
-    /// runtime init so that an early spawn burst finds warm slots instead of
-    /// paying the cold-allocation cost inside the workload.
+    /// Warm `config.prewarm` stacks up front. Called once from runtime init
+    /// so that an early spawn burst finds warm stacks instead of paying the
+    /// cold-allocation cost inside the workload. Works on the slab path and
+    /// the individually-mapped path (Windows, 32-bit, OpenBSD) alike.
+    ///
+    /// All stacks are acquired before any is released — otherwise each
+    /// iteration would just recycle the previous one — and the pending chain
+    /// is threaded through the stacks' own committed pages (the same trick
+    /// as `FreeNode`), so no allocator is needed.
     pub fn prewarm(self: *StackPool) error{OutOfMemory}!void {
-        if (!slab_supported or self.config.slab_slots == 0) return;
+        const Warm = struct { info: StackInfo, next: ?*@This() };
+        var head: ?*Warm = null;
+        var failed = false;
 
         var i: usize = 0;
         while (i < self.config.prewarm) : (i += 1) {
-            self.mutex.lock();
-            const stack_info = self.carveSlotLocked() orelse {
-                self.mutex.unlock();
-                return error.OutOfMemory;
+            const info = self.acquire() catch {
+                failed = true;
+                break;
             };
-            self.in_use += 1;
-            self.mutex.unlock();
-            self.release(stack_info);
+            const addr = std.mem.alignBackward(usize, info.base - @sizeOf(Warm), @alignOf(Warm));
+            if (addr < info.limit) {
+                // Committed region too small to thread the chain through;
+                // such stacks cannot be pooled either (see release), so
+                // there is nothing to warm.
+                self.release(info);
+                break;
+            }
+            const warm: *Warm = @ptrFromInt(addr);
+            warm.* = .{ .info = info, .next = head };
+            head = warm;
         }
+
+        while (head) |warm| {
+            // Copy out before release overwrites the page with its FreeNode.
+            const info = warm.info;
+            head = warm.next;
+            self.release(info);
+        }
+
+        if (failed) return error.OutOfMemory;
     }
 
     /// Removes a node from the doubly linked list and updates pool_size.
@@ -686,6 +711,35 @@ test "StackPool slab: prewarm fills the freelist and floors the watermark" {
     pool.shrink(.fromSeconds(20));
     pool.shrink(.fromSeconds(30));
     try std.testing.expect(pool.slabs != null);
+}
+
+test "StackPool fallback: prewarm fills the freelist and floors the watermark" {
+    // slab_slots = 0 forces the individually-mapped path even where slabs
+    // are supported — the same path Windows/32-bit/OpenBSD always take.
+    var pool = StackPool.init(.{
+        .maximum_size = 256 * 1024,
+        .committed_size = 16 * 1024,
+        .shrink_interval = .fromSeconds(1),
+        .slab_slots = 0,
+        .prewarm = 8,
+    });
+    defer pool.deinit();
+
+    try pool.prewarm();
+    try std.testing.expectEqual(8, pool.pool_size);
+    try std.testing.expectEqual(0, pool.in_use);
+
+    // Acquires are served from the prewarmed stacks without new mappings.
+    const s1 = try pool.acquire();
+    try std.testing.expectEqual(7, pool.pool_size);
+    pool.release(s1);
+    try std.testing.expectEqual(8, pool.pool_size);
+
+    // The prewarm floor keeps the warmed stacks through decayed shrink passes.
+    pool.shrink(.fromSeconds(10));
+    pool.shrink(.fromSeconds(20));
+    pool.shrink(.fromSeconds(30));
+    try std.testing.expectEqual(8, pool.pool_size);
 }
 
 test "StackPool fallback: shrink frees idle stacks beyond the watermark" {
