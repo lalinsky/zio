@@ -80,8 +80,9 @@ pub const Config = struct {
     /// Number of stacks to allocate and commit up front (at runtime init),
     /// so that a burst of early spawns skips the cold-allocation cost. Also
     /// acts as the floor for the demand watermark, so prewarmed capacity is
-    /// never shrunk away. Served by slab slots where supported and by
-    /// individually mapped stacks otherwise (Windows, 32-bit, OpenBSD).
+    /// never shrunk away. Served by slab slots when slab support is
+    /// available and `slab_slots` is nonzero; otherwise by individually
+    /// mapped stacks (Windows, 32-bit, OpenBSD, or slabs disabled).
     prewarm: usize = 0,
 };
 
