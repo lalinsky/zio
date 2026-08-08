@@ -1025,13 +1025,13 @@ fn netSendFileAdvance(self: *Self, state: *LoopState, c: *Completion, res: i32) 
     // -ENOENT, and a poll armed after that would never be canceled, hanging
     // the op on a stalled socket forever).
     if (c.loadState().cancel_requested) {
-        self.storeResult(c, -@as(i32, @intFromEnum(linux.E.CANCELED)));
+        self.storeResult(c, -@as(i32, @backingInt(linux.E.CANCELED)));
         state.markCompletedFromBackend(c);
         return;
     }
 
     if (res < 0) {
-        const errno: linux.E = @enumFromInt(-res);
+        const errno: linux.E = @fromBackingInt(@intCast(-res));
         if (errno == .AGAIN and !data.internal.polling) {
             data.internal.polling = true;
             self.netSendFileIssue(c);
@@ -1351,7 +1351,7 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
         .net_open => unreachable,
         .net_bind => {
             if (res < 0) {
-                c.setError(net.errnoToBindError(@enumFromInt(-res)));
+                c.setError(net.errnoToBindError(@fromBackingInt(@intCast(-res))));
             } else {
                 const data = c.cast(NetBind);
                 // IORING_OP_BIND does not report the bound address, so fetch
@@ -1366,7 +1366,7 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
         },
         .net_listen => {
             if (res < 0) {
-                c.setError(net.errnoToListenError(@enumFromInt(-res)));
+                c.setError(net.errnoToListenError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.net_listen, {});
             }
@@ -1701,7 +1701,7 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
             const data = c.cast(NetSendFile);
             self.netSendFileCleanup(c);
             if (res < 0) {
-                const errno: linux.E = @enumFromInt(-res);
+                const errno: linux.E = @fromBackingInt(@intCast(-res));
                 c.setError(switch (data.internal.stage) {
                     .to_pipe => fs.errnoToFileReadError(errno),
                     .to_socket => net.errnoToSendError(errno),

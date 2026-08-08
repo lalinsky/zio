@@ -258,7 +258,7 @@ pub fn stackInitSlot(info: *StackInfo, slot: []align(page_size) u8, committed_si
     };
     stackWriteOwnerTag(info.*, owner_tag);
 
-    if (builtin.mode == .Debug and builtin.valgrind_support) {
+    if (builtin.mode == .debug and builtin.valgrind_support) {
         const stack_slice: [*]u8 = @ptrFromInt(info.limit);
         info.valgrind_stack_id = std.valgrind.stackRegister(stack_slice[0 .. info.base - info.limit]);
     }
