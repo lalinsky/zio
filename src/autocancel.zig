@@ -138,9 +138,9 @@ pub fn withTimeout(
 /// Whether `error.Canceled` can travel out of an error set, and so whether a
 /// timeout on a `func` returning it could ever be observed.
 fn canBeCanceled(comptime ErrorSet: type) bool {
-    const errors = @typeInfo(ErrorSet).error_set orelse return true; // anyerror
-    for (errors) |e| {
-        if (std.mem.eql(u8, e.name, "Canceled")) return true;
+    const names = @typeInfo(ErrorSet).error_set.error_names orelse return true; // anyerror
+    for (names) |name| {
+        if (std.mem.eql(u8, name, "Canceled")) return true;
     }
     return false;
 }

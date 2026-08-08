@@ -373,14 +373,14 @@ pub const SchedulerMetrics = struct {
     sheds: u64 = 0,
 
     pub fn add(self: *SchedulerMetrics, other: SchedulerMetrics) void {
-        inline for (@typeInfo(SchedulerMetrics).@"struct".fields) |field| {
-            @field(self, field.name) += @field(other, field.name);
+        inline for (@typeInfo(SchedulerMetrics).@"struct".field_names) |field_name| {
+            @field(self, field_name) += @field(other, field_name);
         }
     }
 
     pub fn sub(self: *SchedulerMetrics, other: SchedulerMetrics) void {
-        inline for (@typeInfo(SchedulerMetrics).@"struct".fields) |field| {
-            @field(self, field.name) -= @field(other, field.name);
+        inline for (@typeInfo(SchedulerMetrics).@"struct".field_names) |field_name| {
+            @field(self, field_name) -= @field(other, field_name);
         }
     }
 };

@@ -969,7 +969,7 @@ fn buildTestResponse(out: []u8, query: []const u8, num_answers: u16, qtype: mess
     var w: usize = qend;
     for (0..num_answers) |i| {
         std.mem.writeInt(u16, out[w..][0..2], 0xC00C, .big); // name: ptr to question
-        std.mem.writeInt(u16, out[w + 2 ..][0..2], @intFromEnum(qtype), .big);
+        std.mem.writeInt(u16, out[w + 2 ..][0..2], @backingInt(qtype), .big);
         std.mem.writeInt(u16, out[w + 4 ..][0..2], 1, .big); // class IN
         std.mem.writeInt(u32, out[w + 6 ..][0..4], 60, .big); // ttl
         w += 10;
@@ -1008,7 +1008,7 @@ const TestDnsServer = struct {
             const r = try sock.receiveFrom(&qbuf, .none);
             var p: usize = 12;
             while (qbuf[p] != 0) p += qbuf[p] + 1;
-            const qtype: message.QType = @enumFromInt(std.mem.readInt(u16, qbuf[p + 1 ..][0..2], .big));
+            const qtype: message.QType = @fromBackingInt(@intCast(std.mem.readInt(u16, qbuf[p + 1 ..][0..2], .big)));
             const n = if (qtype == .a) num_a else num_aaaa;
             const len = buildTestResponse(&rbuf, qbuf[0..r.len], n, qtype);
             _ = try sock.sendTo(r.from, rbuf[0..len], .none);
