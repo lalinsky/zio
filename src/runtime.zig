@@ -1214,11 +1214,14 @@ pub fn markCrashed() void {
 /// Returns error.Canceled if the task was canceled.
 /// No-op if called from a thread without an executor (returns without error).
 pub fn yield() Cancelable!void {
-    const task = getCurrentTaskOrNull() orelse {
+    const exec = getCurrentExecutorOrNull() orelse {
         os.thread.yield();
         return;
     };
-    const exec = getCurrentExecutor();
+    const task = exec.current_task orelse {
+        os.thread.yield();
+        return;
+    };
     // Fast path: no other task is ready and there is tick budget left, so
     // there is nothing to switch to and no poll due yet — spend a quantum and
     // keep running. Budget exhaustion falls through to the real yield, which
@@ -1233,7 +1236,7 @@ pub fn yield() Cancelable!void {
         exec.spendQuantum();
         return;
     }
-    return task.yield(.reschedule, .allow_cancel);
+    return task.yieldFrom(exec, .reschedule, .allow_cancel);
 }
 
 /// Cooperatively yield, but only if enough other tasks are waiting (a cheap

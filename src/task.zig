@@ -268,7 +268,14 @@ pub const AnyTask = struct {
     /// - `.reschedule`: Reschedule immediately (cooperative yielding).
     ///   The task state remains `.ready`.
     pub fn yield(self: *AnyTask, comptime mode: YieldMode, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        var executor = getCurrentExecutor();
+        return self.yieldFrom(getCurrentExecutor(), mode, cancel_mode);
+    }
+
+    /// Yield using the executor already resolved by the caller. `executor` is
+    /// valid only until the context switch; the resume path still reloads TLS
+    /// because the task may have migrated to another executor thread.
+    pub fn yieldFrom(self: *AnyTask, initial_executor: *Executor, comptime mode: YieldMode, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+        var executor = initial_executor;
 
         // Check and consume cancellation flag before yielding (unless no_cancel).
         // On the cancel-error return, `state` must be left untouched: the tag is
