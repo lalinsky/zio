@@ -1358,7 +1358,6 @@ pub inline fn switchContext(
               .ebx = true,
               .esi = true,
               .edi = true,
-              .ebp = true,
               .st0 = true,
               .st1 = true,
               .st2 = true,
