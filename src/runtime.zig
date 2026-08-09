@@ -384,6 +384,8 @@ pub const SchedulerMetrics = struct {
 
 const MetricsStorage = if (metrics_enabled) SchedulerMetrics else void;
 const metrics_storage_init: MetricsStorage = if (metrics_enabled) .{} else {};
+const IdleMask = if (zio_options.task_migration) std.atomic.Value(usize) else void;
+const idle_mask_init: IdleMask = if (zio_options.task_migration) .init(0) else {};
 
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
@@ -773,6 +775,13 @@ pub const Executor = struct {
     /// then idleness is proven and the steal is also what makes the park's
     /// wake protocol sound (see park).
     fn parkAndSearch(self: *Executor, check_ready: bool) !void {
+        if (comptime !zio_options.task_migration) {
+            self.bump("parks_full", 1);
+            try self.loop.poll(.max);
+            self.drainDispatched();
+            return;
+        }
+
         if (!self.dozed) {
             self.dozed = true;
             // With nobody to steal from (or to) the probe and doze would only
@@ -1316,7 +1325,7 @@ pub const Runtime = struct {
     // submissions, cross-thread wakes, and per-executor ring overflow land here,
     // and every executor drains a fair batch from it once per tick.
     global_overflow: OverflowQueue(WaitNode) = .{},
-    idle_mask: std.atomic.Value(usize) = .init(0),
+    idle_mask: IdleMask = idle_mask_init,
     searchers: std.atomic.Value(u32) = .init(0),
     loop_group: ev.LoopGroup = .{},
     main_executor: Executor,
@@ -1654,6 +1663,8 @@ pub const Runtime = struct {
     }
 
     fn armSearcher(self: *Runtime, hint: ?ExecutorId) void {
+        if (comptime !zio_options.task_migration) return;
+
         // The two early-return loads pair with the parker: an executor sets its
         // idle bit (seq_cst RMW) and only then makes its final work check, while
         // a pusher publishes the task and only then reads idle_mask/searchers
@@ -1706,6 +1717,8 @@ pub const Runtime = struct {
     /// that lets one extra election through, it never loses a wake.
     /// Returns the number of sleepers actually woken.
     fn batchWakeSleepers(self: *Runtime, ready: usize, hint: ExecutorId) u64 {
+        if (comptime !zio_options.task_migration) return 0;
+
         if (!self.stealingActive() or ready < 2) return 0;
         if (self.idle_mask.load(.seq_cst) == 0) return 0;
 
