@@ -244,16 +244,14 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
             const t = self.ownTail();
             const h = self.loadHead();
             const space: usize = capacity - (t -% h);
-            var buf: [64]*T = undefined;
-            const want = @min(space, @min(max, buf.len));
+            const max_batch = 64;
+            const start: usize = t & mask;
+            const contiguous = capacity - start;
+            const want = @min(contiguous, @min(space, @min(max, max_batch)));
             if (want == 0) return;
-            const got = self.overflow.popBatch(buf[0..want]);
-            var tt = t;
-            for (buf[0..got]) |node| {
-                self.buffer[tt & mask] = node;
-                tt +%= 1;
-            }
-            if (got > 0) self.storeTail(tt);
+
+            const got = self.overflow.popBatch(self.buffer[start .. start + want]);
+            if (got > 0) self.storeTail(t +% @as(u32, @intCast(got)));
         }
 
         /// Number of tasks currently in the ring (used for maybeYield fairness).
@@ -411,6 +409,42 @@ test "LocalRunQueue: non-stealable variant pushes, pops, and overflows" {
         count += got;
     }
     try testing.expectEqual(total, count);
+    try testing.expect(q.isEmpty());
+}
+
+test "LocalRunQueue: refill writes directly on both sides of ring wrap" {
+    var ov: TestOverflow = .{};
+    var q = TestLocalQueue.init(&ov);
+    var nodes: [270]TestNode = undefined;
+
+    // Advance both cursors near the physical end while leaving the ring empty.
+    for (nodes[0..250], 0..) |*node, id| {
+        node.* = .{ .id = id };
+        _ = q.push(node);
+    }
+    for (0..250) |id| {
+        try testing.expectEqual(id, (q.pop() orelse return error.Unexpected).id);
+    }
+
+    // The first refill stops at the physical end of the ring.
+    for (nodes[250..], 250..) |*node, id| {
+        node.* = .{ .id = id };
+        ov.push(node);
+    }
+    q.refill(20);
+    try testing.expectEqual(6, q.len());
+    try testing.expectEqual(14, ov.len());
+    for (250..256) |id| {
+        try testing.expectEqual(id, (q.pop() orelse return error.Unexpected).id);
+    }
+
+    // Once tail wraps, the next refill writes directly at the ring's start.
+    q.refill(20);
+    try testing.expectEqual(14, q.len());
+    try testing.expect(ov.isEmpty());
+    for (256..270) |id| {
+        try testing.expectEqual(id, (q.pop() orelse return error.Unexpected).id);
+    }
     try testing.expect(q.isEmpty());
 }
 
