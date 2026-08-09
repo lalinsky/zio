@@ -228,8 +228,7 @@ pub const LoopState = struct {
     /// completion's owning loop (`completion.loop`): incremented at the submit
     /// sites, decremented in `finishCompletion` routed through
     /// `completion.loop`, which may run on a different loop's thread (epoll
-    /// single-owner servicing, the shared IOCP port) - hence the atomic. The
-    /// scheduler's load shedding also reads other loops' counters.
+    /// single-owner servicing, the shared IOCP port) - hence the atomic.
     active: std.atomic.Value(usize) = .init(0),
 
     wake_requested: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),

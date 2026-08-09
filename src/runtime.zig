@@ -369,9 +369,6 @@ pub const SchedulerMetrics = struct {
     drain_woken: u64 = 0,
     /// Sleepers woken by batched wake decisions.
     batch_wake_claims: u64 = 0,
-    /// Wakes routed to the global queue by load shedding.
-    sheds: u64 = 0,
-
     pub fn add(self: *SchedulerMetrics, other: SchedulerMetrics) void {
         inline for (@typeInfo(SchedulerMetrics).@"struct".fields) |field| {
             @field(self, field.name) += @field(other, field.name);
@@ -441,14 +438,6 @@ pub const Executor = struct {
     // Quanta left until the next clock checkpoint (cheaper than a modulo on
     // the hot path).
     tick_checkpoint_countdown: u32 = checkpoint_interval,
-
-    // How many wakes to shed to the global queue this tick, set by
-    // recomputeShedQuota() when this executor's I/O load is above the runtime
-    // average (see scheduleTaskLocal).
-    shed_quota: u32 = 0,
-
-    // Ticks until the next shed evaluation (see recomputeShedQuota).
-    shed_cooldown: u32 = 0,
 
     // Whether this executor has already spent its doze (the steal-free grace
     // park, see parkAndSearch) since it last had local work. Reset by any
@@ -759,8 +748,6 @@ pub const Executor = struct {
             self.tick_task_count = 0;
             self.tick_expired = false;
             self.tick_checkpoint_countdown = checkpoint_interval;
-            self.recomputeShedQuota();
-
             if (need_fresh_drain) {
                 need_fresh_drain = false;
                 continue;
@@ -770,57 +757,6 @@ pub const Executor = struct {
             if (check_ready and self.main_task.state.load(.acquire).tag == .ready) {
                 return;
             }
-        }
-    }
-
-    /// Maximum wakes shed to the global queue per tick; rebalancing a few
-    /// connections per ~100us converges quickly without turning the global
-    /// queue into the primary scheduling path.
-    const max_shed_per_tick = 4;
-
-    /// Ticks between shed evaluations; at the ~100us tick target this
-    /// samples load roughly every 6ms.
-    const shed_eval_interval = 64;
-
-    /// Once per tick, compare this executor's resident load (active ops
-    /// submitted on this loop, mostly tasks parked on I/O) against the
-    /// runtime average; the excess becomes this tick's shed quota (see
-    /// scheduleTaskLocal). Purely decentralized: every executor reads the
-    /// per-loop counters and makes its own call. Every executor carries the
-    /// same +1 baseline (its shutdown handle), so comparisons are unaffected.
-    fn recomputeShedQuota(self: *Executor) void {
-        self.shed_quota = 0;
-        if (!self.runtime.stealingActive()) return;
-
-        // Shedding corrects sustained imbalance, so it only needs to look
-        // every few milliseconds. Evaluating every tick lets instantaneous
-        // op-count spread (ops complete and resubmit continuously, so
-        // executors' loadActive counts scatter around the average at any
-        // given moment) grant a fresh quota tens of thousands of times per
-        // second, circulating connections through the global queue with no
-        // lasting rebalancing effect.
-        if (self.shed_cooldown > 0) {
-            self.shed_cooldown -= 1;
-            return;
-        }
-        self.shed_cooldown = shed_eval_interval - 1;
-
-        const executors = self.runtime.executors.items;
-        const mine = self.loop.state.loadActive();
-        if (mine < 2) return; // nothing worth shedding
-        var total: usize = 0;
-        for (executors) |e| total += e.loop.state.loadActive();
-        const avg = total / executors.len;
-        // The margin scales with the average so that integer division and
-        // moment-to-moment op jitter never read as imbalance; connections
-        // that cannot divide evenly across executors would otherwise
-        // circulate through the global queue forever (a steady 64-connection
-        // pipeline measured ~50k sheds/s under a flat margin of 1). Shedding
-        // starts strictly beyond the margin: past ~12.5% over the average,
-        // and never for an excess of 2 or less.
-        const margin = @max(2, avg / 8);
-        if (mine > avg + margin) {
-            self.shed_quota = @intCast(@min(mine - avg, max_shed_per_tick));
         }
     }
 
@@ -1034,22 +970,6 @@ pub const Executor = struct {
         if (task == &self.main_task) return;
 
         std.debug.assert(getCurrentExecutorOrNull() == self);
-
-        // Load shedding: I/O is sticky (a task's ops live on the ring of the
-        // executor it runs on — by preference on io_uring, by force on epoll
-        // and kqueue), so work stealing alone cannot rebalance I/O-bound
-        // tasks: their wakes are always local and the wake-to-pop window is
-        // too small for a thief. An executor that measured itself above the
-        // runtime's average I/O load at the last tick sheds the excess by
-        // routing that many wakes to the global queue; less loaded executors
-        // pull from it, and a shed task's I/O re-homes wherever it runs next.
-        if (self.shed_quota > 0) {
-            self.shed_quota -= 1;
-            self.bump("sheds", 1);
-            self.run_queue.overflow.push(&task.awaitable.wait_node);
-            self.runtime.armSearcher(null);
-            return;
-        }
 
         // A first task pushed onto an empty ring from scheduler context (an
         // I/O completion wake) needs no searcher: this executor is inside its
@@ -1523,7 +1443,7 @@ pub const Runtime = struct {
                 var delta = total;
                 delta.sub(last);
                 last = total;
-                log.info("scheduler: parks doze={d} full={d} elections={d} steals={d}/{d} hint_hits={d} drains={d} woken={d} batch_claims={d} sheds={d}", .{
+                log.info("scheduler: parks doze={d} full={d} elections={d} steals={d}/{d} hint_hits={d} drains={d} woken={d} batch_claims={d}", .{
                     delta.parks_doze,
                     delta.parks_full,
                     delta.park_elections,
@@ -1533,7 +1453,6 @@ pub const Runtime = struct {
                     delta.drain_batches,
                     delta.drain_woken,
                     delta.batch_wake_claims,
-                    delta.sheds,
                 });
             };
         }
