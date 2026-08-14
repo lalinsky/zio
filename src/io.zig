@@ -3840,6 +3840,37 @@ test "io: dir createDirPathOpen creates and opens" {
     sub2.close(io);
 }
 
+test "io: dir open/close from a thread that is not a task" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const dir: Io.Dir = .cwd();
+    const dir_path = "test_io_dir_close_off_runtime";
+    dir.deleteDir(io, dir_path) catch {};
+    try dir.createDir(io, dir_path, .default_dir);
+    defer dir.deleteDir(io, dir_path) catch {};
+
+    // A plain OS thread runs no task, so operations it submits through `io`
+    // take the blocking path. `Io.Dir.close` batches its handles into a gather
+    // group, which that path has to accept the same way it does file and
+    // socket close batches.
+    const Worker = struct {
+        fn run(worker_io: Io, path: []const u8, err_out: *?anyerror) void {
+            const sub = Io.Dir.cwd().openDir(worker_io, path, .{}) catch |err| {
+                err_out.* = err;
+                return;
+            };
+            sub.close(worker_io);
+        }
+    };
+
+    var worker_err: ?anyerror = null;
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{ io, dir_path, &worker_err });
+    thread.join();
+    if (worker_err) |err| return err;
+}
+
 test "io: dir iterate over files" {
     // NetBSD's getdirentries can return dirents with either 32-bit or
     // 64-bit d_fileno depending on the filesystem, shifting all field

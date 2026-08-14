@@ -133,10 +133,10 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
 ///
 /// Only gather groups whose children are all individually supported in blocking
 /// mode are handled. Today that means close batches (see `io.fileCloseImpl` /
-/// `io.netCloseImpl`), which the panic/crash path exercises when std's stack-trace
-/// symbolization opens and then closes the executable through `debug_io`. Anything
-/// else keeps the "requires event loop" panic. Children are validated before any is
-/// run so we never leave a group half-executed.
+/// `io.netCloseImpl` / `io.dirCloseImpl`), which the panic/crash path exercises when
+/// std's stack-trace symbolization opens and then closes the executable through
+/// `debug_io`. Anything else keeps the "requires event loop" panic. Children are
+/// validated before any is run so we never leave a group half-executed.
 fn handleBlockingGroup(c: *Completion, allocator: std.mem.Allocator) void {
     const group: *Group = @alignCast(@fieldParentPtr("c", c));
 
@@ -150,7 +150,7 @@ fn handleBlockingGroup(c: *Completion, allocator: std.mem.Allocator) void {
     while (node) |n| : (node = n.next) {
         const child: *Completion = @alignCast(@fieldParentPtr("group", n));
         switch (child.op) {
-            .file_close, .net_close => {},
+            .file_close, .net_close, .dir_close => {},
             else => @panic("Group contains an operation not supported in blocking mode"),
         }
     }
