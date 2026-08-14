@@ -54,11 +54,21 @@ pub const AutoCancel = struct {
     }
 
     pub fn set(self: *AutoCancel, timeout: Timeout) void {
-        // Disable timer if waiting forever
-        if (timeout == .none) {
-            self.clear();
-            return;
-        }
+        // Retire the previous arm before touching this struct again. Two
+        // things make that necessary: a timer still live on another
+        // executor's loop cannot be re-armed from this one, and a callback
+        // in flight is still writing `triggered` and `fired`, which the
+        // resets below would race. `setTimer` asserts both.
+        //
+        // TODO: a re-arm could take the new deadline and the in-flight race
+        // together, under the owning loop's timer lock where `phase` and
+        // `has_result` can be read without racing, instead of disarming and
+        // arming again. `Loop.clearTimer` has the states that would need
+        // telling apart.
+        self.clear();
+
+        // Waiting forever means no timer at all.
+        if (timeout == .none) return;
 
         const task = getCurrentTask();
         const executor = task.getExecutor();
@@ -579,4 +589,35 @@ test "withTimeout: nested, outer deadline fires while inner is running" {
     defer rt.deinit();
 
     try std.testing.expectError(error.Timeout, withTimeout(.fromMilliseconds(10), work, .{rt}));
+}
+
+test "AutoCancel: re-armed while the previous arm is still live on another executor" {
+    // The deadline is far past the end of the test, so every `set` below
+    // re-arms a timer that is still sitting in some loop's heap. After a
+    // migration that loop is not the one the task is running on, which is
+    // what `setTimer` refuses to do.
+    const worker = struct {
+        fn call(rounds: usize) void {
+            var timeout: AutoCancel = .init;
+            defer timeout.clear();
+
+            var round: usize = 0;
+            while (round < rounds) : (round += 1) {
+                timeout.set(.fromSeconds(60));
+                var spin: usize = 0;
+                while (spin < 16) : (spin += 1) yield() catch {};
+            }
+        }
+    }.call;
+
+    // More workers than executors, so they keep getting stolen and end up
+    // running on an executor other than the one that armed their timer.
+    const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
+    defer rt.deinit();
+
+    var handles: [8]JoinHandle(void) = undefined;
+    for (&handles) |*handle| {
+        handle.* = try rt.spawn(worker, .{@as(usize, 200)});
+    }
+    for (&handles) |*handle| handle.join();
 }
