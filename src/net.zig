@@ -3033,3 +3033,60 @@ test "multi-executor: full-duplex with task migration disabled" {
     try std.testing.expectEqual(@as(u32, 0), sh.errors.load(.monotonic));
     try std.testing.expectEqual(@as(u32, H.conns), sh.verified.load(.monotonic));
 }
+
+test "a canceled task does not start another operation" {
+    // The cancellation check has to happen before the operation is submitted.
+    // An operation that completes inline never parks -- `waitTask` returns on
+    // its fast path -- so a check that only lives in the park loop would let a
+    // canceled task keep issuing work indefinitely, as long as each one
+    // finished without blocking. A small write on a fresh socket is that case.
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const Outcome = struct {
+        after_recancel: ?anyerror = null,
+    };
+
+    const ServerTask = struct {
+        fn run(server_port: *Channel(u16)) !void {
+            const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+            const server = try addr.listen(.{});
+            defer server.close();
+            try server_port.send(server.socket.address.ip.getPort());
+            var stream = try server.accept(.{});
+            defer stream.close();
+            // Never reads; the client only needs a peer to exist.
+            runtime_mod.sleep(.fromMilliseconds(60_000)) catch {};
+        }
+    };
+
+    const ClientTask = struct {
+        fn run(server_port: *Channel(u16), outcome: *Outcome) !void {
+            const port = try server_port.receive();
+            const addr = try IpAddress.parseIp4("127.0.0.1", port);
+            var stream = try tcpConnectToAddress(addr, .{});
+            defer stream.close();
+
+            // Wait to be canceled, then put the cancellation back and try to
+            // write. The write must report it rather than run.
+            runtime_mod.sleep(.fromMilliseconds(60_000)) catch |err| {
+                std.debug.assert(err == error.Canceled);
+                runtime_mod.getCurrentTask().recancel();
+                outcome.after_recancel = if (stream.writeAll("x", .none)) |_| null else |e| e;
+            };
+        }
+    };
+
+    var server_port_buf: [1]u16 = undefined;
+    var server_port_ch = Channel(u16).init(&server_port_buf);
+    var outcome: Outcome = .{};
+
+    var group: Group = .init;
+    try group.spawn(ServerTask.run, .{&server_port_ch});
+    try group.spawn(ClientTask.run, .{ &server_port_ch, &outcome });
+
+    runtime_mod.sleep(.fromMilliseconds(100)) catch {};
+    group.cancel();
+
+    try std.testing.expectEqual(@as(?anyerror, error.Canceled), outcome.after_recancel);
+}
