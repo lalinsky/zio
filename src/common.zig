@@ -351,6 +351,23 @@ pub fn waitForIo(c: *ev.Completion) Cancelable!void {
         return;
     };
 
+    // A task that is already canceled must not start new work.
+    //
+    // Without this, a caller that loops on an operation which keeps failing
+    // for its own reasons never observes the cancellation. The wait below
+    // does see it, and cancels the operation -- but if the operation had
+    // already completed with a result of its own, that result is what the
+    // caller must be given, so the cancellation is re-armed and handed back
+    // for the next cancelation point to deliver. When the caller's next
+    // cancelation point is the same operation, and it fails the same way
+    // again, the cancellation is re-armed forever and never acted on.
+    //
+    // It has to be before `loop.add`, not after: once the operation has run,
+    // reporting the cancellation instead of its result would throw away an
+    // accepted socket or bytes already read, which is exactly what the
+    // re-arm below is protecting.
+    try task.checkCancel();
+
     // Async path: Submit to the event loop and wait for completion
     task.getExecutor().loop.add(c);
     // Inline completions never park; charge the coop budget so they still
