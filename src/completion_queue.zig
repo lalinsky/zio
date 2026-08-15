@@ -1,28 +1,115 @@
 // SPDX-FileCopyrightText: 2025 Lukáš Lalinský
 // SPDX-License-Identifier: MIT
 
-//! A queue for waiting on multiple I/O operations with an iterator-like interface.
-//!
-//! Unlike `waitForIo` (single operation) or `ev.Group` (combine into one virtual completion),
-//! `CompletionQueue` lets you submit multiple operations, dynamically add more, and process
-//! completions one at a time as they finish.
+//! Wait on several I/O operations at once and handle them one at a time, in
+//! the order they finish.
 //!
 //! Runtime-only: must be used from within an async task context.
 //!
-//! Usage:
-//! ```zig
-//! var cq = CompletionQueue.init();
+//! ## Which of the three waits you want
 //!
-//! var timer1 = ev.Timer.init(.{ .duration = .fromMilliseconds(100) });
-//! var timer2 = ev.Timer.init(.{ .duration = .fromMilliseconds(200) });
-//! cq.submit(&timer1.c);
-//! cq.submit(&timer2.c);
+//! - `waitForIo(&c)` - one operation, block until it finishes.
+//! - `ev.Group.init(.race)` - several operations collapsed into a single
+//!   virtual completion. The first to finish wins and **the rest are
+//!   cancelled**. Use it when the losers are worthless once you have a winner.
+//! - `CompletionQueue` - several operations kept individually. `wait` hands
+//!   back whichever finished, and **the others stay armed**. Use it when each
+//!   operation matters on its own, or when you want to keep waiting after the
+//!   first one lands.
+//!
+//! That last difference is the one that decides most designs. A completion is
+//! removed from the queue when it is returned to you; everything else is
+//! untouched, so a long-lived loop re-arms only what actually fired instead of
+//! tearing down and re-arming the whole set on every event.
+//!
+//! **A completion holds its result, so re-arming means re-initialising it.**
+//! Handing `submit` a completion that has already finished queues nothing, and
+//! the next `wait` reports the queue as empty rather than blocking. There is no
+//! recovering from it either: re-initialising that completion afterwards does
+//! not bring it back. Re-initialise before every submit.
+//!
+//! ## One fiber owning a socket, woken by both the socket and its peers
+//!
+//! The case that otherwise costs a fiber per connection: a fiber serving a
+//! WebSocket that must also deliver messages other connections send it. Rather
+//! than parking a second fiber on a mailbox, arm both sources and let one wait
+//! end on either.
+//!
+//! ```zig
+//! var poll = ev.NetPoll.init(stream.socket.handle, .recv);
+//! var mailbox = ev.Async.init(); // other fibers call mailbox.notify()
+//!
+//! var cq = CompletionQueue.init();
+//! defer cq.cancel();
+//! cq.submit(&poll.c);
+//! cq.submit(&mailbox.c);
 //!
 //! while (try cq.wait()) |c| {
-//!     // Process completion
-//!     // Can submit more operations here
+//!     if (c == &poll.c) {
+//!         const n = try stream.read(&buf, .none);
+//!         if (n == 0) break; // peer hung up
+//!         handleFrame(buf[0..n]);
+//!         poll = ev.NetPoll.init(stream.socket.handle, .recv);
+//!         cq.submit(&poll.c); // re-arm; the mailbox was never disturbed
+//!     } else if (c == &mailbox.c) {
+//!         while (outbox.pop()) |msg| try stream.writeAll(msg, .none);
+//!         mailbox = ev.Async.init();
+//!         cq.submit(&mailbox.c);
+//!     }
 //! }
 //! ```
+//!
+//! Only the completion that fired is re-submitted. With `ev.Group.init(.race)`
+//! the read would be cancelled and re-issued on every mailbox message, and vice
+//! versa.
+//!
+//! ## Fan out, then act on each result as it lands
+//!
+//! `wait` returns in completion order, not submission order, so slow work does
+//! not hold up fast work. New operations can be submitted from inside the loop,
+//! including from within the handler for a completion.
+//!
+//! ```zig
+//! var cq = CompletionQueue.init();
+//! for (shards) |*s| cq.submit(&s.recv.c);
+//!
+//! while (try cq.wait()) |c| {
+//!     const shard = shardFor(c);
+//!     try shard.consume();
+//!     if (!shard.done) {
+//!         shard.recv = .init(shard.handle, .recv);
+//!         cq.submit(&shard.recv.c); // keep this one going
+//!     }
+//! }
+//! ```
+//!
+//! `wait` returns `null` once nothing is pending and nothing is completed, so
+//! the loop ends on its own when the last shard stops re-submitting.
+//!
+//! ## Putting a deadline on the whole set
+//!
+//! `timedWait` bounds the wait for the *next* completion. To bound a whole
+//! batch, compute the deadline once and pass it each time round, rather than
+//! handing each call a fresh duration.
+//!
+//! ```zig
+//! const deadline = Timeout.fromMilliseconds(500).toDeadline();
+//! while (cq.timedWait(deadline)) |maybe_c| {
+//!     const c = maybe_c orelse break; // all done
+//!     handle(c);
+//! } else |err| switch (err) {
+//!     error.Timeout => {}, // out of time; cq.cancel() below cleans up
+//!     error.Canceled => |e| return e,
+//! }
+//! ```
+//!
+//! ## Teardown
+//!
+//! `cancel` cancels everything still pending and discards anything already
+//! completed, so it is safe as a `defer` regardless of how the loop exited. A
+//! cancelled `wait` does the same before returning `error.Canceled`, so a fiber
+//! cancelled while parked here does not leave operations armed against buffers
+//! that are about to go out of scope.
 
 const std = @import("std");
 
@@ -402,4 +489,64 @@ test "CompletionQueue: cancel pending operations" {
     // Queue should be empty after cancel
     const result = try cq.wait();
     try std.testing.expectEqual(null, result);
+}
+
+test "CompletionQueue: re-submitting the completion that fired leaves the others armed" {
+    // The property the docs lean on, and the one that separates this from
+    // `ev.Group.init(.race)`: returning a completion removes only that one.
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancel();
+
+    var fast = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
+    var slow = ev.Timer.init(.{ .duration = .fromMilliseconds(200) });
+    cq.submit(&fast.c);
+    cq.submit(&slow.c);
+
+    // Take the fast one three times, re-arming it each round. The slow timer is
+    // never resubmitted, so if any of this disturbed it we would see it here
+    // instead of `fast`.
+    for (0..3) |_| {
+        const c = (try cq.wait()).?;
+        try std.testing.expectEqual(&fast.c, c);
+        fast = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
+        cq.submit(&fast.c);
+    }
+
+    // `slow` survived all of that still pending.
+    try std.testing.expect(cq.hasPending());
+}
+
+test "CompletionQueue: one deadline can bound a whole batch" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancel();
+
+    var quick: [3]ev.Timer = undefined;
+    for (&quick) |*t| {
+        t.* = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
+        cq.submit(&t.c);
+    }
+    var never = ev.Timer.init(.{ .duration = .fromSeconds(60) });
+    cq.submit(&never.c);
+
+    // Computed once, passed unchanged each round: the budget covers the batch
+    // rather than restarting for every completion.
+    const deadline = Timeout.fromMilliseconds(500).toDeadline();
+    var seen: usize = 0;
+    while (cq.timedWait(deadline)) |maybe_c| {
+        _ = maybe_c orelse break;
+        seen += 1;
+    } else |err| switch (err) {
+        error.Timeout => {},
+        error.Canceled => |e| return e,
+    }
+
+    // The three quick timers land; the 60s one is what ends the loop, via the
+    // deadline rather than by completing.
+    try std.testing.expectEqual(3, seen);
 }

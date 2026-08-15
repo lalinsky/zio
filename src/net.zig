@@ -3166,3 +3166,69 @@ test "a canceled task does not start another operation" {
 
     try std.testing.expectEqual(@as(?anyerror, error.Canceled), outcome.after_recancel);
 }
+
+test "CompletionQueue: one fiber woken by both its socket and its peers" {
+    // The shape documented on `CompletionQueue`: a fiber that owns a socket and
+    // must also act on messages other fibers send it, without parking a second
+    // fiber on a mailbox. Sequenced rather than raced, so it asserts the
+    // re-arming contract instead of a coin flip.
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const CompletionQueue = @import("completion_queue.zig").CompletionQueue;
+    const ResetEvent = @import("sync/ResetEvent.zig");
+
+    const H = struct {
+        fn peer(stream: Stream, second: *ResetEvent) void {
+            defer stream.close();
+            stream.writeAll("a", .none) catch return;
+            second.wait() catch return;
+            stream.writeAll("b", .none) catch return;
+        }
+    };
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    defer runtime.deinit();
+
+    const listen_addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    const srv = try listen_addr.listen(.{ .reuse_address = true });
+    defer srv.close();
+    const connect_addr = try IpAddress.parseIp4("127.0.0.1", srv.socket.address.ip.getPort());
+
+    const client = try connect_addr.connect(.{ .timeout = Timeout.fromSeconds(5) });
+    const server = try srv.accept(.{ .timeout = Timeout.fromSeconds(5) });
+    defer server.close();
+
+    var second: ResetEvent = .init;
+    var tasks: Group = .init;
+    defer tasks.cancel();
+    try tasks.spawn(H.peer, .{ client, &second });
+
+    var poll = ev.NetPoll.init(server.socket.handle, .recv);
+    var mailbox = ev.Async.init();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancel();
+    cq.submit(&poll.c);
+    cq.submit(&mailbox.c);
+
+    var buf: [8]u8 = undefined;
+
+    // 1. The socket wakes us. Re-arm only the poll; the mailbox is untouched.
+    try std.testing.expectEqual(&poll.c, (try cq.wait()).?);
+    try std.testing.expectEqual(1, try server.read(&buf, .none));
+    try std.testing.expectEqual('a', buf[0]);
+    poll = ev.NetPoll.init(server.socket.handle, .recv);
+    cq.submit(&poll.c);
+
+    // 2. A peer wakes us on the same wait. Nothing arrived on the socket.
+    mailbox.notify();
+    try std.testing.expectEqual(&mailbox.c, (try cq.wait()).?);
+    mailbox = ev.Async.init();
+    cq.submit(&mailbox.c);
+
+    // 3. The poll armed back in step 1 is still live, and still ours.
+    second.set();
+    try std.testing.expectEqual(&poll.c, (try cq.wait()).?);
+    try std.testing.expectEqual(1, try server.read(&buf, .none));
+    try std.testing.expectEqual('b', buf[0]);
+}
