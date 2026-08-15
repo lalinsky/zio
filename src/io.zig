@@ -1692,15 +1692,15 @@ fn initLockedStderr(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.
         const io = Io{ .userdata = userdata, .vtable = &vtable };
         const zfile = zio_fs.stderr();
         var file: Io.File = .{ .handle = zfile.fd, .flags = .{ .nonblocking = false } };
-        // `pollable` controls routing (event loop vs thread pool); the mode
-        // (streaming vs positional) is resolved separately, since on Windows a
-        // console is streaming yet not loop-drivable.
+        // `pollable` controls routing (event loop vs thread pool). The writer is
+        // always streaming, even for a seekable stderr: stderr is a shared
+        // stream, and positional writes track an offset private to this writer,
+        // so they overwrite (and are overwritten by) anything else writing to the
+        // same file description -- child processes, external tools, or a second
+        // writer of our own. Streaming writes advance the shared file offset, so
+        // every writer appends after the others.
         flagsWritePollable(&file.flags, zfile.pollable orelse false);
-        if (zio_fs.resolveMode(zfile) == .streaming) {
-            stderr_writer = Io.File.Writer.initStreaming(file, io, &.{});
-        } else {
-            stderr_writer = Io.File.Writer.init(file, io, &.{});
-        }
+        stderr_writer = Io.File.Writer.initStreaming(file, io, &.{});
         stderr_writer_initialized = true;
     }
     beginShield();
