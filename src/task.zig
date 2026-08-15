@@ -12,6 +12,7 @@ const Awaitable = @import("awaitable.zig").Awaitable;
 const Coroutine = @import("coro/coroutines.zig").Coroutine;
 const WaitNode = @import("utils/wait_queue.zig").WaitNode;
 const Cancelable = @import("common.zig").Cancelable;
+const log = @import("common.zig").log;
 const getCurrentExecutor = @import("runtime.zig").getCurrentExecutor;
 const Group = @import("group.zig").Group;
 const registerGroupTask = @import("group.zig").registerGroupTask;
@@ -297,7 +298,7 @@ pub const AnyTask = struct {
         if (self == &executor.main_task) {
             // Main task enters the run loop instead of context switching
             executor.run(.until_ready) catch |err| {
-                std.log.err("Event loop error during yield: {}", .{err});
+                log.err("Event loop error during yield: {}", .{err});
             };
         } else {
             executor.switchOut(&self.coro);

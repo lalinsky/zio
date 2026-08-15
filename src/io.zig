@@ -30,6 +30,7 @@ const groupSpawnTask = @import("group.zig").groupSpawnTask;
 const select = @import("select.zig");
 const Futex = @import("sync/Futex.zig");
 const Mutex = @import("sync/Mutex.zig");
+const stderr = @import("stderr.zig");
 const time = @import("time.zig");
 const common = @import("common.zig");
 const Waiter = common.Waiter;
@@ -270,6 +271,13 @@ fn crashHandlerImpl(_: ?*anyopaque) void {
     coro.crashHandler();
     // Route any panic-message I/O through the blocking path, never the event loop.
     runtime_mod.markCrashed();
+    // Route the panic message itself to the scheduler writer, so it never
+    // waits on the user lock, which a task may hold while parked, and never
+    // touches that task's writer, whose drain may be suspended mid-call. The
+    // scheduler lock is only ever held across one blocking write, so waiting
+    // for it is bounded: the crashing thread re-enters if it already held it,
+    // and otherwise waits briefly for whichever thread does.
+    stderr.markCrashed();
 }
 
 fn asyncImpl(
@@ -1673,48 +1681,16 @@ fn processExecutablePathImpl(_: ?*anyopaque, buffer: []u8) std.process.Executabl
     return io.vtable.processExecutablePath(io.userdata, buffer);
 }
 
-var stderr_mutex: Mutex.Recursive = .init;
-var stderr_writer_initialized = false;
-var stderr_writer: Io.File.Writer = undefined;
-
 fn lockStderrImpl(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.Cancelable!Io.LockedStderr {
-    try stderr_mutex.lock();
-    return initLockedStderr(userdata, terminal_mode);
+    return stderr.lock(.{ .userdata = userdata, .vtable = &vtable }, terminal_mode);
 }
 
 fn tryLockStderrImpl(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.Cancelable!?Io.LockedStderr {
-    if (!stderr_mutex.tryLock()) return null;
-    return initLockedStderr(userdata, terminal_mode);
-}
-
-fn initLockedStderr(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.LockedStderr {
-    if (!stderr_writer_initialized) {
-        const io = Io{ .userdata = userdata, .vtable = &vtable };
-        const zfile = zio_fs.stderr();
-        var file: Io.File = .{ .handle = zfile.fd, .flags = .{ .nonblocking = false } };
-        // `pollable` controls routing (event loop vs thread pool). The writer is
-        // always streaming, even for a seekable stderr: stderr is a shared
-        // stream, and positional writes track an offset private to this writer,
-        // so they overwrite (and are overwritten by) anything else writing to the
-        // same file description -- child processes, external tools, or a second
-        // writer of our own. Streaming writes advance the shared file offset, so
-        // every writer appends after the others.
-        flagsWritePollable(&file.flags, zfile.pollable orelse false);
-        stderr_writer = Io.File.Writer.initStreaming(file, io, &.{});
-        stderr_writer_initialized = true;
-    }
-    beginShield();
-    return .{
-        .file_writer = &stderr_writer,
-        .terminal_mode = terminal_mode orelse .no_color,
-    };
+    return stderr.tryLock(.{ .userdata = userdata, .vtable = &vtable }, terminal_mode);
 }
 
 fn unlockStderrImpl(_: ?*anyopaque) void {
-    if (stderr_writer.err == null) stderr_writer.interface.flush() catch {};
-    stderr_writer.err = null;
-    endShield();
-    stderr_mutex.unlock();
+    stderr.unlock();
 }
 
 fn processCurrentPathImpl(userdata: ?*anyopaque, buffer: []u8) std.process.CurrentPathError!usize {

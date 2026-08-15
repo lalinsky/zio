@@ -92,5 +92,6 @@ test {
     _ = @import("io.zig");
     _ = @import("random.zig");
     _ = @import("task.zig");
+    _ = @import("stderr.zig");
     _ = @import("os/syscall_cancel.zig");
 }

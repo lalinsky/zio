@@ -4,7 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const log = std.log.scoped(.zio);
+pub const log = @import("log.zig");
 
 const ev = @import("ev/root.zig");
 const Timeout = @import("time.zig").Timeout;
