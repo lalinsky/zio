@@ -244,8 +244,6 @@ pub const vtable: Io.VTable = .{
     .netListenUnix = netListenUnixImpl,
     .netConnectUnix = netConnectUnixImpl,
     .netSocketCreatePair = netSocketCreatePairImpl,
-    .netSend = netSendImpl,
-    .netWrite = netWriteImpl,
     .netWriteFile = netWriteFileImpl,
     .netClose = netCloseImpl,
     .netShutdown = netShutdownImpl,
@@ -439,10 +437,25 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout, clock: time.Cloc
             };
             break :result .{ null, 1 };
         } },
+        .net_send => |*o| return .{ .net_send = result: {
+            const maybe_err, const n = netSendImpl(o.socket_handle, o.messages, o.flags);
+            if (maybe_err) |err| switch (err) {
+                error.Canceled => |e| return e,
+                else => |e| break :result .{ e, 0 },
+            };
+            break :result .{ null, n };
+        } },
         .net_read => |*o| return .{ .net_read = result: {
             const n = netReadOpImpl(o.socket_handle, o.data, timeout) catch |err| switch (err) {
                 error.Canceled => |e| return e,
                 error.Timeout => |e| return e,
+                else => |e| break :result e,
+            };
+            break :result n;
+        } },
+        .net_write => |*o| return .{ .net_write = result: {
+            const n = netWriteImpl(o.socket_handle, o.header, o.data, o.splat) catch |err| switch (err) {
+                error.Canceled => |e| return e,
                 else => |e| break :result e,
             };
             break :result n;
@@ -532,9 +545,20 @@ const BatchCompletionData = union(Io.Operation.Tag) {
         message_buffer: *Io.net.IncomingMessage,
         data_buffer: []u8,
     },
+    net_send: struct {
+        op: ev.NetSendMsg,
+        iov: os_net.iovec_const,
+        addr_storage: zio_net.Address,
+        addr_len: os_net.socklen_t,
+        messages: *Io.net.OutgoingMessage,
+    },
     net_read: struct {
         op: ev.NetRecv,
         iovecs: [max_iovecs_len]os_net.iovec,
+    },
+    net_write: struct {
+        op: ev.NetSend,
+        iovecs: [max_iovecs_len]os_net.iovec_const,
     },
 
     fn getCompletion(self: *BatchCompletionData) *ev.Completion {
@@ -543,7 +567,9 @@ const BatchCompletionData = union(Io.Operation.Tag) {
             .file_write_streaming => |*d| &d.op.c,
             .device_io_control => |*d| &d.op.c,
             .net_receive => |*d| &d.op.c,
+            .net_send => |*d| &d.op.c,
             .net_read => |*d| &d.op.c,
+            .net_write => |*d| &d.op.c,
         };
     }
 };
@@ -793,6 +819,33 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
             );
             return &data.net_receive.op.c;
         },
+        .net_send => |*o| {
+            const zio_flags: os_net.SendFlags = .{
+                .no_signal = true,
+                .confirm = o.flags.confirm,
+                .dont_route = o.flags.dont_route,
+                .eor = o.flags.eor,
+                .oob = o.flags.oob,
+                .fastopen = o.flags.fastopen,
+            };
+            const has_control = o.messages[0].control.len != 0;
+            data.* = .{ .net_send = .{
+                .op = undefined,
+                .iov = os_net.iovecConstFromSlice(o.messages[0].data_ptr[0..o.messages[0].data_len]),
+                .addr_storage = undefined,
+                .addr_len = @sizeOf(zio_net.Address),
+                .messages = &o.messages[0],
+            } };
+            data.net_send.op = ev.NetSendMsg.init(
+                stdIoHandleToZio(o.socket_handle),
+                .{ .iovecs = (&data.net_send.iov)[0..1] },
+                zio_flags,
+                &data.net_send.addr_storage.any,
+                data.net_send.addr_len,
+                if (has_control) o.messages[0].control else null,
+            );
+            return &data.net_send.op.c;
+        },
         .net_read => |*o| {
             data.* = .{ .net_read = .{ .op = undefined, .iovecs = undefined } };
             data.net_read.op = ev.NetRecv.init(
@@ -801,6 +854,15 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
                 .{},
             );
             return &data.net_read.op.c;
+        },
+        .net_write => |*o| {
+            data.* = .{ .net_write = .{ .op = undefined, .iovecs = undefined } };
+            data.net_write.op = ev.NetSend.init(
+                stdIoHandleToZio(o.socket_handle),
+                ev.WriteBuf.fromSlices(o.data, &data.net_write.iovecs),
+                .{},
+            );
+            return &data.net_write.op.c;
         },
     }
 }
@@ -871,8 +933,24 @@ fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Oper
                 break :blk .{ null, 1 };
             },
         },
+        .net_send => .{
+            .net_send = blk: {
+                const result = data.net_send.op.getResult() catch |err| break :blk .{ sendMsgErrToSendErr(err), 0 };
+                // Populate the message buffer with received data
+                data.net_send.messages.* = .{
+                    .address = zioIpToStdIo(zio_net.Address.fromPosix(&data.net_send.addr_storage.any, data.net_send.addr_len).ip),
+                    .data_ptr = data.net_send.data_buffer[0..result.len],
+                    .data_len = 0,
+                    .control = data.net_send.message_buffer.control[0..result.controllen],
+                };
+                break :blk .{ null, 1 };
+            },
+        },
         .net_read => .{
             .net_read = data.net_read.op.getResult() catch |err| recvErrToReadErr(err),
+        },
+        .net_write => .{
+            .net_write = data.net_write.op.getResult() catch |err| sendErrToWriteErr(err),
         },
     };
 }
@@ -2297,7 +2375,7 @@ fn sendErrToSocketSendErr(err: ev.NetSendMsg.Error) Io.net.Socket.SendError {
     };
 }
 
-fn netSendImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, messages: []Io.net.OutgoingMessage, flags: Io.net.SendFlags) struct { ?Io.net.Socket.SendError, usize } {
+fn netSendImpl(handle: Io.net.Socket.Handle, messages: []Io.net.OutgoingMessage, flags: Io.net.SendFlags) struct { ?Io.net.Socket.SendError, usize } {
     const zio_flags: os_net.SendFlags = .{
         .confirm = flags.confirm,
         .dont_route = flags.dont_route,
@@ -2468,7 +2546,28 @@ fn sendErrToWriteErr(err: ev.NetSend.Error) Io.net.Stream.Writer.Error {
     };
 }
 
-fn netWriteImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) Io.net.Stream.Writer.Error!usize {
+fn sendMsgErrToSendErr(err: ev.NetSendMsg.Error) Io.net.Socket.SendError {
+    return switch (err) {
+        error.Canceled => error.Canceled,
+        error.SystemResources => error.SystemResources,
+        error.ConnectionResetByPeer => error.ConnectionResetByPeer,
+        error.AccessDenied => error.AccessDenied,
+        error.NetworkDown => error.NetworkDown,
+        error.NetworkUnreachable => error.NetworkUnreachable,
+        error.MessageTooBig => error.MessageOversize,
+        error.WouldBlock,
+        error.BrokenPipe,
+        error.ConnectionAborted,
+        error.FileDescriptorNotASocket,
+        error.ConnectionTimedOut,
+        error.OperationNotSupported,
+        error.Unexpected,
+        error.SocketNotConnected,
+        => error.Unexpected,
+    };
+}
+
+fn netWriteImpl(handle: Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) Io.net.Stream.Writer.Error!usize {
     var slices: [max_iovecs_len][]const u8 = undefined;
     var splat_buf: [64]u8 = undefined;
     const n = fillBuf(&slices, header, data, splat, &splat_buf);
@@ -2490,14 +2589,14 @@ fn netWriteFileImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: []const u8, _: *
     @panic("netWriteFile is unused by std.Io as of Zig 0.16");
 }
 
-fn netCloseImpl(_: ?*anyopaque, handles: []const Io.net.Socket.Handle) void {
+fn netCloseImpl(_: ?*anyopaque, handles: []const Io.net.Socket) void {
     var i: usize = 0;
     while (i < handles.len) {
         var ops: [8]ev.NetClose = undefined;
         var group = ev.Group.init(.gather);
         const n = @min(ops.len, handles.len - i);
         for (0..n) |j| {
-            ops[j] = ev.NetClose.init(stdIoHandleToZio(handles[i + j]));
+            ops[j] = ev.NetClose.init(stdIoHandleToZio(handles[i + j].handle));
             group.add(&ops[j].c);
         }
         waitForIoUncancelable(&group.c);
