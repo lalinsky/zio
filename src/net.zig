@@ -2844,6 +2844,13 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
 // receive, so the reader runs out of input and sees EOF early. That holds in any
 // build mode, though safe builds usually trip the double-completion assertion
 // first.
+/// Decodes an `@intFromError` code stored in an atomic slot. 0 means nothing
+/// was recorded.
+fn errName(code: u16) []const u8 {
+    if (code == 0) return "none";
+    return @errorName(@errorFromInt(code));
+}
+
 test "multi-executor: timeout cancel racing a cross-loop readiness edge" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
@@ -2851,12 +2858,30 @@ test "multi-executor: timeout cancel racing a cross-loop readiness edge" {
         const pairs = 8;
         const per_pair = 300;
 
+        // Failures are counted per cause, not lumped together: when this test
+        // fails it is on a machine nobody can attach a debugger to, and
+        // "expected 0, found 2" does not say whether a reader lost a byte or a
+        // writer tripped over a peer that had already gone away. The two mean
+        // different things - the first is the bug this test hunts, the second
+        // is usually a consequence of it - and the counters have to tell them
+        // apart on their own.
         const Shared = struct {
-            errors: std.atomic.Value(u32) = .init(0),
+            /// Reader saw EOF before the peer had sent `per_pair` bytes.
+            short_reads: std.atomic.Value(u32) = .init(0),
+            read_errors: std.atomic.Value(u32) = .init(0),
+            write_errors: std.atomic.Value(u32) = .init(0),
+            /// First error of each kind, as `@intFromError`; 0 means none.
+            first_read_err: std.atomic.Value(u16) = .init(0),
+            first_write_err: std.atomic.Value(u16) = .init(0),
             // u32, not u64: 32-bit targets have no lock-free 64-bit atomics, and
             // the total (pairs * per_pair) is far below 2^32 anyway.
             bytes: std.atomic.Value(u32) = .init(0),
             timeouts: std.atomic.Value(u32) = .init(0),
+
+            /// Keeps the first error only, so a cascade cannot bury the cause.
+            fn note(slot: *std.atomic.Value(u16), err: anyerror) void {
+                _ = slot.cmpxchgStrong(0, @intCast(@intFromError(err)), .monotonic, .monotonic);
+            }
         };
 
         fn nudge() void {}
@@ -2880,8 +2905,9 @@ test "multi-executor: timeout cancel racing a cross-loop readiness edge" {
                         _ = sh.timeouts.fetchAdd(1, .monotonic);
                         continue;
                     },
-                    else => {
-                        _ = sh.errors.fetchAdd(1, .monotonic);
+                    else => |e| {
+                        Shared.note(&sh.first_read_err, e);
+                        _ = sh.read_errors.fetchAdd(1, .monotonic);
                         return;
                     },
                 };
@@ -2890,15 +2916,16 @@ test "multi-executor: timeout cancel racing a cross-loop readiness edge" {
                 // This is also what terminates the loop if the race eats a byte,
                 // instead of hanging.
                 if (n == 0) {
-                    _ = sh.errors.fetchAdd(1, .monotonic);
+                    _ = sh.short_reads.fetchAdd(1, .monotonic);
                     return;
                 }
                 got += n;
                 _ = sh.bytes.fetchAdd(@intCast(n), .monotonic);
                 // Hop to another executor, so the next recv is submitted from a
                 // loop other than the one owning this fd's registration.
-                var h = runtime_mod.spawn(nudge, .{}) catch {
-                    _ = sh.errors.fetchAdd(1, .monotonic);
+                var h = runtime_mod.spawn(nudge, .{}) catch |e| {
+                    Shared.note(&sh.first_read_err, e);
+                    _ = sh.read_errors.fetchAdd(1, .monotonic);
                     return;
                 };
                 h.join();
@@ -2909,12 +2936,14 @@ test "multi-executor: timeout cancel racing a cross-loop readiness edge" {
             defer stream.close();
             var rng = std.Random.DefaultPrng.init(seed);
             for (0..per_pair) |_| {
-                runtime_mod.sleep(delay(rng.random())) catch {
-                    _ = sh.errors.fetchAdd(1, .monotonic);
+                runtime_mod.sleep(delay(rng.random())) catch |e| {
+                    Shared.note(&sh.first_write_err, e);
+                    _ = sh.write_errors.fetchAdd(1, .monotonic);
                     return;
                 };
-                stream.writeAll("x", .none) catch {
-                    _ = sh.errors.fetchAdd(1, .monotonic);
+                stream.writeAll("x", .none) catch |e| {
+                    Shared.note(&sh.first_write_err, e);
+                    _ = sh.write_errors.fetchAdd(1, .monotonic);
                     return;
                 };
             }
@@ -2944,7 +2973,33 @@ test "multi-executor: timeout cancel racing a cross-loop readiness edge" {
     }
     try tasks.wait();
 
-    try std.testing.expectEqual(0, sh.errors.load(.monotonic));
+    const short_reads = sh.short_reads.load(.monotonic);
+    const read_errors = sh.read_errors.load(.monotonic);
+    const write_errors = sh.write_errors.load(.monotonic);
+    if (short_reads != 0 or read_errors != 0 or write_errors != 0) {
+        std.debug.print(
+            \\
+            \\  short reads (EOF before {d} bytes): {d}
+            \\  read errors:  {d} (first: {s})
+            \\  write errors: {d} (first: {s})
+            \\  bytes: {d} of {d}, timeouts: {d}
+            \\
+        , .{
+            H.per_pair,                   short_reads,
+            read_errors,                  errName(sh.first_read_err.load(.monotonic)),
+            write_errors,                 errName(sh.first_write_err.load(.monotonic)),
+            sh.bytes.load(.monotonic),    H.pairs * H.per_pair,
+            sh.timeouts.load(.monotonic),
+        });
+    }
+    // A short read is the failure this test exists to catch: the peer sends
+    // exactly `per_pair` bytes before closing, so an early EOF means a
+    // completed recv was discarded by a racing cancel. Write errors are
+    // reported separately because they are usually the downstream effect of a
+    // reader that already gave up and closed, not an independent fault.
+    try std.testing.expectEqual(0, short_reads);
+    try std.testing.expectEqual(0, read_errors);
+    try std.testing.expectEqual(0, write_errors);
     try std.testing.expectEqual(H.pairs * H.per_pair, sh.bytes.load(.monotonic));
     // The cancel path has to have been taken at all, or nothing above is evidence.
     // How often it lands in the window is machine-dependent, so this asserts only
