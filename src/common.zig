@@ -514,7 +514,11 @@ test "Waiter: futex-based timed wait with timeout" {
 /// Execute a blocking function on the thread pool, blocking the current task until completion.
 ///
 /// Unlike `spawnBlocking`, this does not allocate - all state is kept on the stack.
-/// The calling task is parked while the blocking work executes on a thread pool worker.
+/// The calling task is parked while the blocking work executes on a thread pool
+/// worker. Two cases run `func` inline on the calling thread instead, where
+/// parking is not an option: no task at all, and a task inside a no-suspend
+/// region. Inline execution is uncancelable - it never binds a `syscall_cancel`
+/// token, so a cancel cannot interrupt it.
 ///
 /// Usage:
 /// ```zig

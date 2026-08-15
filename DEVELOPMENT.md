@@ -16,8 +16,11 @@ Logging and stderr:
   `loopSetTimer` and `runtime.loopClearTimer` wrap the loop entry points, and `runtime.markCrashed`
   pins the crash path as one permanently. Inside a region (and on threads with no mounted task),
   waits block the thread instead of parking (`runtime.getWaitableTaskOrNull`), and stderr locking
-  never waits on a lock a parked task can hold (#661). Use `runtime.beginNoSuspend`/`endNoSuspend`
-  for scheduler code that writes to stderr outside those wrappers.
+  never waits on a lock a parked task can hold (#661). `runtime.beginNoSuspend`/`endNoSuspend` are
+  for scheduler code that writes to stderr outside those wrappers, and are not exported from `zio`:
+  ordinary code, including anything that logs from a task, needs none of this. They must be paired
+  on one thread with no suspension point in between -- the depth lives on the `Executor`, so a task
+  that suspends mid-region unbalances two of them and nothing detects it.
 - The stderr locks and writers live in `src/stderr.zig` (user sink plus a scheduler fallback
   sink that no-suspend callers divert to only while a task holds the user lock); the `lockStderr`
   vtable shims are in `src/io.zig`.

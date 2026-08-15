@@ -1257,23 +1257,35 @@ pub fn getWaitableTaskOrNull() ?*AnyTask {
     return exec.current_task;
 }
 
-/// Whether this thread is inside a no-suspend region.
-pub fn inNoSuspend() bool {
-    const exec = getCurrentExecutorOrNull() orelse return false;
-    return exec.no_suspend != 0;
-}
-
-/// Enter a no-suspend region on this thread. Regions nest and must be exited
-/// on the same thread, without a suspension point in between; `Executor.loopAdd`
-/// and `loopCancel` are the usual entry points, this is for code that writes
-/// to stderr from scheduler machinery some other way. No-op without an
-/// executor: such threads never park to begin with.
+/// Enter a no-suspend region on this thread.
+///
+/// **Internal to the runtime, and not exported from `zio`.** This is for code
+/// that runs the scheduler itself -- the event loop, the paths that submit to
+/// it, the crash handler. Ordinary code, including code that logs or writes to
+/// stderr from a task, needs none of it: a task parks like it does for any
+/// other I/O and everything works. `Executor.loopAdd`/`loopCancel`/
+/// `loopSetTimer` and `loopClearTimer` already wrap the loop entry points, so
+/// even inside the runtime this is only for scheduler code that reaches stderr
+/// some other way.
+///
+/// Inside a region, waits block the calling thread instead of parking the task
+/// (`getWaitableTaskOrNull` reports no task) and the stderr lock treats the
+/// caller as one that must never wait for a parked holder.
+///
+/// **Regions must be exited on the thread that entered them, with no
+/// suspension point in between.** The depth lives on the `Executor`, so a task
+/// that suspends and migrates mid-region decrements a different executor:
+/// the one it left stays no-suspend forever, and every task that runs there
+/// afterwards blocks its thread instead of parking. Nothing detects this, which
+/// is the main reason not to reach for these outside the runtime.
+///
+/// No-op without an executor: such threads never park to begin with.
 pub fn beginNoSuspend() void {
     const exec = getCurrentExecutorOrNull() orelse return;
     exec.no_suspend += 1;
 }
 
-/// Exit a no-suspend region.
+/// Exit a no-suspend region. See `beginNoSuspend` for the pairing rules.
 pub fn endNoSuspend() void {
     const exec = getCurrentExecutorOrNull() orelse return;
     std.debug.assert(exec.no_suspend > 0);
