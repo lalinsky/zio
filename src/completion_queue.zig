@@ -64,6 +64,17 @@ pub const CompletionQueue = struct {
 
     /// Submit a completion to the queue and event loop.
     pub fn submit(self: *CompletionQueue, c: *Completion) void {
+        // A completion carries its result, so it must be re-initialised before
+        // it is armed again. Submitting a finished one used to corrupt the
+        // queue silently: `Loop.add` resets a `.dead` completion, `reset`
+        // clears the whole `group` sub-struct, and that unlinks the node from
+        // `pending` right after we pushed it - leaving `head`/`tail` pointing
+        // at a node that no longer belongs, dropping `owner_callback` so the
+        // completion could never be reported, and making a later `cancel()`
+        // walk the wreckage. Fail here instead, at the call site that got it
+        // wrong.
+        std.debug.assert(c.loadState().phase != .dead);
+
         c.group.owner = self;
         c.group.owner_callback = &ownerCallback;
 
