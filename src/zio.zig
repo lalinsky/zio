@@ -23,6 +23,8 @@ pub const RandomSecureError = @import("random.zig").RandomSecureError;
 pub const beginShield = runtime.beginShield;
 pub const endShield = runtime.endShield;
 pub const checkCancel = runtime.checkCancel;
+pub const beginNoSuspend = runtime.beginNoSuspend;
+pub const endNoSuspend = runtime.endNoSuspend;
 
 pub const AutoCancel = @import("autocancel.zig").AutoCancel;
 pub const withTimeout = @import("autocancel.zig").withTimeout;

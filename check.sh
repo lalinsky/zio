@@ -143,6 +143,36 @@ fi
 if [ "$FULL_MODE" = true ]; then
     echo "=== Building examples ==="
     zig build examples
+
+    # Run the stderr locking smoke test on native targets. It exercises the
+    # debug_io lockStderr path, which the unit-test runner never installs:
+    # logging from tasks, threads, pool workers, and no-suspend regions, plus
+    # a panic while a task holds the stderr lock. Only message presence is
+    # asserted; the two stderr sinks interleave without an order by design.
+    if [ "$NO_EXEC" = false ] && [ "$USE_QEMU" = false ] && [ "$USE_WINE" = false ] && [ -z "$TARGET" ]; then
+        echo "=== Running stderr smoke test ==="
+        SMOKE=zig-out/bin/stderr-smoke
+        [ -f "$SMOKE" ] || SMOKE=zig-out/bin/stderr-smoke.exe
+        SMOKE_OUT=$("$SMOKE" 2>&1) || { echo "$SMOKE_OUT"; echo "stderr smoke test exited with an error"; exit 1; }
+        for tag in "smoke: main task" "smoke: task 0" "smoke: task 1" "smoke: task 2" "smoke: task 3" \
+                   "smoke: foreign thread" "smoke: pool worker" \
+                   "smoke: holder before sleep" "smoke: holder after sleep" \
+                   "smoke: no-suspend divert" "smoke: waited for user lock" "smoke: done"; do
+            if ! grep -qF "$tag" <<< "$SMOKE_OUT"; then
+                echo "$SMOKE_OUT"
+                echo "stderr smoke test: missing output: $tag"
+                exit 1
+            fi
+        done
+        PANIC_OUT=$("$SMOKE" --panic 2>&1) && { echo "$PANIC_OUT"; echo "stderr smoke test: --panic did not abort"; exit 1; }
+        for tag in "smoke: panicking while holding stderr" "stderr smoke panic"; do
+            if ! grep -qF "$tag" <<< "$PANIC_OUT"; then
+                echo "$PANIC_OUT"
+                echo "stderr smoke test: missing panic output: $tag"
+                exit 1
+            fi
+        done
+    fi
 fi
 
 echo "=== All checks passed! ==="
