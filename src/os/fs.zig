@@ -7,6 +7,7 @@ const options = @import("zio_options");
 
 const unexpectedError = @import("base.zig").unexpectedError;
 const syscall_cancel = @import("syscall_cancel.zig");
+const log = @import("../log.zig");
 
 // Cached probe result: once we see ENOSYS from openat2, skip future attempts.
 var openat2_nosys: std.atomic.Value(bool) = .init(false);
@@ -626,7 +627,7 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
     if (builtin.os.tag == .windows) {
         if (flags.resolve_beneath) {
             if (options.resolve_beneath_mode == .strict) return error.Unsupported;
-            std.log.warn("resolve_beneath is not supported on Windows, path escapes will not be detected", .{});
+            log.warn("resolve_beneath is not supported on Windows, path escapes will not be detected", .{});
         }
         const path_w = try w.pathToWide(allocator, dir, path);
         defer allocator.free(path_w);
@@ -692,7 +693,7 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
         } else if (!builtin.os.tag.isDarwin()) {
             // Darwin has no open-time flag; it is applied via fcntl(F_NOCACHE)
             // after a successful open (see below). Everything else is unsupported.
-            std.log.warn("direct I/O is not supported on {s}, buffering will not be disabled", .{@tagName(builtin.os.tag)});
+            log.warn("direct I/O is not supported on {s}, buffering will not be disabled", .{@tagName(builtin.os.tag)});
         }
     }
 
@@ -726,7 +727,7 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
                     .NOSYS => {
                         openat2_nosys.store(true, .monotonic);
                         if (options.resolve_beneath_mode == .strict) return error.Unsupported;
-                        std.log.warn("openat2 not available (requires Linux 5.6+), resolve_beneath will not be enforced", .{});
+                        log.warn("openat2 not available (requires Linux 5.6+), resolve_beneath will not be enforced", .{});
                         break;
                     },
                     else => |err| return errnoToFileOpenError(err, flags),
@@ -739,7 +740,7 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
         open_flags.RESOLVE_BENEATH = true;
     } else if (flags.resolve_beneath) {
         if (options.resolve_beneath_mode == .strict) return error.Unsupported;
-        std.log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
+        log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
     }
 
     while (true) {
@@ -751,7 +752,7 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
                 if (builtin.os.tag.isDarwin() and flags.direct) {
                     const err = posix.errno(posix.system.fcntl(opened_fd, posix.system.F.NOCACHE, @as(c_int, 1)));
                     if (err != .SUCCESS) {
-                        std.log.warn("failed to enable direct I/O (F_NOCACHE) on fd {d}: {s}, caching remains enabled", .{ opened_fd, @tagName(err) });
+                        log.warn("failed to enable direct I/O (F_NOCACHE) on fd {d}: {s}, caching remains enabled", .{ opened_fd, @tagName(err) });
                     }
                 }
                 return opened_fd;
@@ -778,7 +779,7 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
     if (builtin.os.tag == .windows) {
         if (flags.resolve_beneath) {
             if (options.resolve_beneath_mode == .strict) return error.Unsupported;
-            std.log.warn("resolve_beneath is not supported on Windows, path escapes will not be detected", .{});
+            log.warn("resolve_beneath is not supported on Windows, path escapes will not be detected", .{});
         }
         const path_w = try w.pathToWide(allocator, dir, path);
         defer allocator.free(path_w);
@@ -850,7 +851,7 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
                     .NOSYS => {
                         openat2_nosys.store(true, .monotonic);
                         if (options.resolve_beneath_mode == .strict) return error.Unsupported;
-                        std.log.warn("openat2 not available (requires Linux 5.6+), resolve_beneath will not be enforced", .{});
+                        log.warn("openat2 not available (requires Linux 5.6+), resolve_beneath will not be enforced", .{});
                         break;
                     },
                     else => |err| return errnoToDirOpenError(err, flags),
@@ -863,7 +864,7 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
         open_flags.RESOLVE_BENEATH = true;
     } else if (flags.resolve_beneath) {
         if (options.resolve_beneath_mode == .strict) return error.Unsupported;
-        std.log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
+        log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
     }
 
     while (true) {
@@ -892,7 +893,7 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
     if (builtin.os.tag == .windows) {
         if (flags.resolve_beneath) {
             if (options.resolve_beneath_mode == .strict) return error.Unsupported;
-            std.log.warn("resolve_beneath is not supported on Windows, path escapes will not be detected", .{});
+            log.warn("resolve_beneath is not supported on Windows, path escapes will not be detected", .{});
         }
         const path_w = try w.pathToWide(allocator, dir, path);
         defer allocator.free(path_w);
@@ -954,7 +955,7 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
         } else if (!builtin.os.tag.isDarwin()) {
             // Darwin has no open-time flag; it is applied via fcntl(F_NOCACHE)
             // after a successful open (see below). Everything else is unsupported.
-            std.log.warn("direct I/O is not supported on {s}, buffering will not be disabled", .{@tagName(builtin.os.tag)});
+            log.warn("direct I/O is not supported on {s}, buffering will not be disabled", .{@tagName(builtin.os.tag)});
         }
     }
 
@@ -985,7 +986,7 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
                     .NOSYS => {
                         openat2_nosys.store(true, .monotonic);
                         if (options.resolve_beneath_mode == .strict) return error.Unsupported;
-                        std.log.warn("openat2 not available (requires Linux 5.6+), resolve_beneath will not be enforced", .{});
+                        log.warn("openat2 not available (requires Linux 5.6+), resolve_beneath will not be enforced", .{});
                         break;
                     },
                     else => |err| return errnoToFileOpenError(err, flags),
@@ -998,7 +999,7 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
         open_flags.RESOLVE_BENEATH = true;
     } else if (flags.resolve_beneath) {
         if (options.resolve_beneath_mode == .strict) return error.Unsupported;
-        std.log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
+        log.warn("resolve_beneath is not supported on {s}, path escapes will not be detected", .{@tagName(builtin.os.tag)});
     }
 
     while (true) {
@@ -1010,7 +1011,7 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
                 if (builtin.os.tag.isDarwin() and flags.direct) {
                     const err = posix.errno(posix.system.fcntl(opened_fd, posix.system.F.NOCACHE, @as(c_int, 1)));
                     if (err != .SUCCESS) {
-                        std.log.warn("failed to enable direct I/O (F_NOCACHE) on fd {d}: {s}, caching remains enabled", .{ opened_fd, @tagName(err) });
+                        log.warn("failed to enable direct I/O (F_NOCACHE) on fd {d}: {s}, caching remains enabled", .{ opened_fd, @tagName(err) });
                     }
                 }
                 return opened_fd;

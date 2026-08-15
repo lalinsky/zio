@@ -8,6 +8,14 @@ Code organization:
 - In `src/runtime.zig` and `src/runtime/` we have the task scheduler and other runtime internals
 - The rest of the code is implementing the higher-level APIs or the `std.Io` vtable
 
+Logging:
+- Never call `std.log` or `std.debug.print` in library code, use the shims in `src/log.zig` (also exported
+  as `common.log`): `log.debug/info/warn/err` and `log.print`. Tests are user code and use `std.log`.
+- They mark the call as scheduler context, so it uses the scheduler stderr lock and writer instead of the
+  one a task can hold while parked, which deadlocks the runtime (#661). Code that writes to stderr some
+  other way (a stack dump) wraps itself in `log.enterSchedulerContext`.
+- The locks live in `src/stderr_lock.zig`, the writers and the `lockStderr` vtable in `src/io.zig`.
+
 Testing:
 - Use `./check.sh` to format code, run unit tests
 - Use `./check.sh --filter "test name"` to run specific tests

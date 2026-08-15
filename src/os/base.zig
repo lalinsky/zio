@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const windows = @import("windows.zig");
+const log = @import("../log.zig");
 
 pub const iovec = switch (builtin.os.tag) {
     .windows => windows.WSABUF,
@@ -24,6 +25,11 @@ pub const GetRandomError = error{EntropyUnavailable};
 
 pub fn unexpectedError(err: anytype) error{Unexpected} {
     if (unexpected_error_tracing) {
+        // Reachable from the loop and from pool workers, so it must not take
+        // the stderr lock a parked task can hold. Covers the stack dump too,
+        // which writes to stderr as well.
+        const region = log.enterSchedulerContext();
+        defer log.exitSchedulerContext(region);
         std.debug.print(
             \\unexpected error: {}
             \\please file a bug report: https://github.com/lalinsky/zio/issues/new
