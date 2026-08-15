@@ -44,9 +44,14 @@ const BroadcastChannelImpl = struct {
     }
 
     fn receive(self: *Self, consumer: *BroadcastChannelConsumer, elem_ptr: [*]u8) !void {
-        var waiter: Waiter = .init();
-
         while (true) {
+            // A `Waiter` is single-use: `Waiter.wait` compares the signal count
+            // against `expected` and never consumes it, so a waiter that has
+            // been signaled once satisfies every later `wait(1, ...)`
+            // immediately. Reusing one across iterations lets a woken-but-empty
+            // consumer spin here, re-pushing a node that is still queued.
+            var waiter: Waiter = .init();
+
             self.mutex.lockUncancelable();
 
             const unread = self.write_pos -% consumer.read_pos;
@@ -974,4 +979,46 @@ test "BroadcastChannel: position counter overflow handling" {
     // After lag, we should be at the oldest available message (201)
     const val7 = try channel.tryReceive(&consumer);
     try std.testing.expectEqual(201, val7);
+}
+
+test "BroadcastChannel: cancelling parked consumers does not re-queue a live wait node" {
+    // Regression test for a reused `Waiter` in `receive`. Cancelling a consumer
+    // that is parked in `receive` hands its pending signal to the next queued
+    // consumer, which then wakes with nothing to read and loops. With a single
+    // waiter shared across those iterations, the second `wait(1, ...)` returned
+    // immediately off the already-satisfied signal count and the loop pushed a
+    // wait node that was still linked into the queue. Under runtime safety that
+    // trips `assert(!item.in_list)` in `SimpleQueue.push`; without it, the queue
+    // is corrupted and the runtime deadlocks.
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(8) });
+    defer runtime.deinit();
+
+    var buffer: [4]u32 = undefined;
+    var channel = BroadcastChannel(u32).init(&buffer);
+
+    const TestFn = struct {
+        fn consumer(ch: *BroadcastChannel(u32)) void {
+            var seat = ch.subscribe();
+            while (true) {
+                _ = ch.receive(&seat) catch return;
+            }
+        }
+
+        fn producer(ch: *BroadcastChannel(u32), n: u32) void {
+            var i: u32 = 0;
+            while (i < n) : (i += 1) {
+                ch.send(i) catch return;
+                yield() catch return;
+            }
+        }
+    };
+
+    // Each round parks several consumers on the same channel and then cancels
+    // them out from under it while the producer is still waking them.
+    for (0..200) |_| {
+        var group: Group = .init;
+        for (0..32) |_| try group.spawn(TestFn.consumer, .{&channel});
+        try group.spawn(TestFn.producer, .{ &channel, 16 });
+        group.cancel();
+    }
 }
