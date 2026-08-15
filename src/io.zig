@@ -1994,7 +1994,6 @@ fn netAcceptImpl(_: ?*anyopaque, server: Io.net.Socket.Handle, _: Io.net.Server.
             error.BlockedByFirewall => return error.BlockedByFirewall,
             error.NetworkDown => return error.NetworkDown,
             error.Canceled => return error.Canceled,
-            error.ConnectionResetByPeer,
             error.FileDescriptorNotASocket,
             error.OperationNotSupported,
             error.Unexpected,

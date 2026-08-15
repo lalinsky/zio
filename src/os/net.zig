@@ -635,7 +635,6 @@ pub fn connect(fd: fd_t, addr: *const sockaddr, addr_len: socklen_t) ConnectErro
 pub const AcceptError = error{
     WouldBlock,
     ConnectionAborted,
-    ConnectionResetByPeer,
     ProcessFdQuotaExceeded,
     SystemFdQuotaExceeded,
     SystemResources,
@@ -836,19 +835,14 @@ pub fn errnoToConnectError(err: E) ConnectError {
     }
 }
 
+// Winsock reports "the queued connection went away before we took it" as
+// ECONNRESET, POSIX as ECONNABORTED; both collapse into ConnectionAborted.
 pub fn errnoToAcceptError(err: E) AcceptError {
     switch (builtin.os.tag) {
         .windows => {
             return switch (err) {
                 .EWOULDBLOCK => error.WouldBlock,
-                .ECONNABORTED => error.ConnectionAborted,
-                // Winsock spells "the queued connection went away before we got
-                // to it" as WSAECONNRESET ("An incoming connection was
-                // indicated, but was subsequently terminated by the remote peer
-                // prior to accepting the call"), where POSIX uses ECONNABORTED.
-                // Report the POSIX spelling so callers have one condition to
-                // reason about.
-                .ECONNRESET => error.ConnectionAborted,
+                .ECONNABORTED, .ECONNRESET => error.ConnectionAborted,
                 .EMFILE => error.ProcessFdQuotaExceeded,
                 .ENOBUFS => error.SystemResources,
                 .ENOTSOCK => error.FileDescriptorNotASocket,
@@ -864,8 +858,7 @@ pub fn errnoToAcceptError(err: E) AcceptError {
             return switch (err) {
                 .SUCCESS => unreachable,
                 .AGAIN => error.WouldBlock,
-                .CONNABORTED => error.ConnectionAborted,
-                .CONNRESET => error.ConnectionResetByPeer,
+                .CONNABORTED, .CONNRESET => error.ConnectionAborted,
                 .MFILE => error.ProcessFdQuotaExceeded,
                 .NFILE => error.SystemFdQuotaExceeded,
                 .NOMEM, .NOBUFS => error.SystemResources,
