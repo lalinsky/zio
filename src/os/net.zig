@@ -842,7 +842,13 @@ pub fn errnoToAcceptError(err: E) AcceptError {
             return switch (err) {
                 .EWOULDBLOCK => error.WouldBlock,
                 .ECONNABORTED => error.ConnectionAborted,
-                .ECONNRESET => error.ConnectionResetByPeer,
+                // Winsock spells "the queued connection went away before we got
+                // to it" as WSAECONNRESET ("An incoming connection was
+                // indicated, but was subsequently terminated by the remote peer
+                // prior to accepting the call"), where POSIX uses ECONNABORTED.
+                // Report the POSIX spelling so callers have one condition to
+                // reason about.
+                .ECONNRESET => error.ConnectionAborted,
                 .EMFILE => error.ProcessFdQuotaExceeded,
                 .ENOBUFS => error.SystemResources,
                 .ENOTSOCK => error.FileDescriptorNotASocket,

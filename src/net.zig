@@ -1123,14 +1123,27 @@ pub const Server = struct {
         timeout: Timeout = .none,
     };
 
+    /// Accepts the next incoming connection.
+    ///
+    /// `ConnectionAborted` is not reported: it means a connection sitting in the
+    /// accept queue went away before we got to it, which says nothing about the
+    /// listener, so the next connection is taken instead. The timeout covers the
+    /// whole call, not each attempt, so a stream of aborted connections cannot
+    /// extend it.
     pub fn accept(self: Server, options: AcceptOptions) !Stream {
-        var peer_addr: Address = undefined;
-        var peer_addr_len: os.net.socklen_t = @sizeOf(Address);
+        const deadline = options.timeout.toDeadline();
+        while (true) {
+            var peer_addr: Address = undefined;
+            var peer_addr_len: os.net.socklen_t = @sizeOf(Address);
 
-        var op = ev.NetAccept.init(self.socket.handle, &peer_addr.any, &peer_addr_len);
-        try timedWaitForIo(&op.c, options.timeout);
-        const handle = try op.getResult();
-        return .{ .socket = .{ .handle = handle, .address = .fromPosix(&peer_addr.any, peer_addr_len) } };
+            var op = ev.NetAccept.init(self.socket.handle, &peer_addr.any, &peer_addr_len);
+            try timedWaitForIo(&op.c, deadline);
+            const handle = op.getResult() catch |err| switch (err) {
+                error.ConnectionAborted => continue,
+                else => |e| return e,
+            };
+            return .{ .socket = .{ .handle = handle, .address = .fromPosix(&peer_addr.any, peer_addr_len) } };
+        }
     }
 
     pub fn shutdown(self: Server, how: ShutdownHow) !void {
@@ -2530,6 +2543,69 @@ test "Server: accept timeout" {
 
     const result = server.accept(.{ .timeout = Timeout.fromMilliseconds(10) });
     try std.testing.expectError(error.Timeout, result);
+}
+
+test "Server: accept deadline timeout" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(.{});
+    defer server.close();
+
+    const deadline = Timeout.fromMilliseconds(10).toDeadline();
+    const result = server.accept(.{ .timeout = deadline });
+    try std.testing.expectError(error.Timeout, result);
+}
+
+test "Server: accept never reports ConnectionAborted" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(.{});
+    defer server.close();
+
+    // Call it first so the inferred error set is resolved by the time the check
+    // below runs.
+    const result = server.accept(.{ .timeout = Timeout.fromMilliseconds(10) });
+    try std.testing.expectError(error.Timeout, result);
+
+    const AcceptError = @typeInfo(@typeInfo(@TypeOf(Server.accept)).@"fn".return_type.?).error_union.error_set;
+    comptime {
+        for (@typeInfo(AcceptError).error_set.?) |e| {
+            if (std.mem.eql(u8, e.name, "ConnectionAborted")) {
+                @compileError("Server.accept must retry ConnectionAborted, not report it");
+            }
+        }
+    }
+}
+
+test "Server: accept cancellation" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(.{});
+    defer server.close();
+
+    const Acceptor = struct {
+        fn run(srv: Server) !void {
+            const stream = try srv.accept(.{});
+            stream.close();
+        }
+    };
+
+    // The test body runs as the runtime's main task, so spawn the acceptor and
+    // give it time to block in accept before canceling. cancel() blocks until
+    // the acceptor finishes, which only happens if the cancellation broke out of
+    // the accept retry loop (a hang here means it did not).
+    var handle = try runtime.spawn(Acceptor.run, .{server});
+    defer handle.cancel();
+    try runtime_mod.sleep(.fromMilliseconds(50));
+    handle.cancel();
+
+    try std.testing.expectError(error.Canceled, handle.join());
 }
 
 test "Stream.Reader/Writer.fromStd" {

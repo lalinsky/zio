@@ -1973,39 +1973,44 @@ fn netListenIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: Io
     };
 }
 
+/// `ConnectionAborted` stays in `AcceptError` because the error set is std's, but
+/// zio never returns it: a connection that left the accept queue before we got to
+/// it says nothing about the listener, so the next one is taken instead.
 fn netAcceptImpl(_: ?*anyopaque, server: Io.net.Socket.Handle, _: Io.net.Server.AcceptOptions) Io.net.Server.AcceptError!Io.net.Socket {
-    var peer_addr: zio_net.Address = undefined;
-    var peer_addr_len: os_net.socklen_t = @sizeOf(zio_net.Address);
+    while (true) {
+        var peer_addr: zio_net.Address = undefined;
+        var peer_addr_len: os_net.socklen_t = @sizeOf(zio_net.Address);
 
-    var op = ev.NetAccept.init(stdIoHandleToZio(server), &peer_addr.any, &peer_addr_len);
-    try waitForIo(&op.c);
-    const handle = op.getResult() catch |err| switch (err) {
-        error.WouldBlock => return error.WouldBlock,
-        error.ConnectionAborted => return error.ConnectionAborted,
-        error.ProcessFdQuotaExceeded => return error.ProcessFdQuotaExceeded,
-        error.SystemFdQuotaExceeded => return error.SystemFdQuotaExceeded,
-        error.SystemResources => return error.SystemResources,
-        error.SocketNotListening => return error.SocketNotListening,
-        error.ProtocolFailure => return error.ProtocolFailure,
-        error.BlockedByFirewall => return error.BlockedByFirewall,
-        error.NetworkDown => return error.NetworkDown,
-        error.Canceled => return error.Canceled,
-        error.ConnectionResetByPeer,
-        error.FileDescriptorNotASocket,
-        error.OperationNotSupported,
-        error.Unexpected,
-        => return error.Unexpected,
-    };
+        var op = ev.NetAccept.init(stdIoHandleToZio(server), &peer_addr.any, &peer_addr_len);
+        try waitForIo(&op.c);
+        const handle = op.getResult() catch |err| switch (err) {
+            error.ConnectionAborted => continue,
+            error.WouldBlock => return error.WouldBlock,
+            error.ProcessFdQuotaExceeded => return error.ProcessFdQuotaExceeded,
+            error.SystemFdQuotaExceeded => return error.SystemFdQuotaExceeded,
+            error.SystemResources => return error.SystemResources,
+            error.SocketNotListening => return error.SocketNotListening,
+            error.ProtocolFailure => return error.ProtocolFailure,
+            error.BlockedByFirewall => return error.BlockedByFirewall,
+            error.NetworkDown => return error.NetworkDown,
+            error.Canceled => return error.Canceled,
+            error.ConnectionResetByPeer,
+            error.FileDescriptorNotASocket,
+            error.OperationNotSupported,
+            error.Unexpected,
+            => return error.Unexpected,
+        };
 
-    return .{
-        .handle = handle,
-        .address = switch (peer_addr.any.family) {
-            os_net.AF.INET, os_net.AF.INET6 => zioIpToStdIo(peer_addr.ip),
-            // std.Io.net.Socket.address is an IpAddress; use an IPv4 loopback
-            // placeholder for Unix peers, matching std.Io.UnixAddress.listen.
-            else => .{ .ip4 = .loopback(0) },
-        },
-    };
+        return .{
+            .handle = handle,
+            .address = switch (peer_addr.any.family) {
+                os_net.AF.INET, os_net.AF.INET6 => zioIpToStdIo(peer_addr.ip),
+                // std.Io.net.Socket.address is an IpAddress; use an IPv4 loopback
+                // placeholder for Unix peers, matching std.Io.UnixAddress.listen.
+                else => .{ .ip4 = .loopback(0) },
+            },
+        };
+    }
 }
 
 fn openErrToBindErr(err: OpenOrCancel) Io.net.IpAddress.BindError {
