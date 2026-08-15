@@ -8,13 +8,19 @@ Code organization:
 - In `src/runtime.zig` and `src/runtime/` we have the task scheduler and other runtime internals
 - The rest of the code is implementing the higher-level APIs or the `std.Io` vtable
 
-Logging:
-- Never call `std.log` or `std.debug.print` in library code, use the shims in `src/log.zig` (also exported
-  as `common.log`): `log.debug/info/warn/err` and `log.print`. Tests are user code and use `std.log`.
-- They mark the call as scheduler context, so it uses the scheduler stderr lock and writer instead of the
-  one a task can hold while parked, which deadlocks the runtime (#661). Code that writes to stderr some
-  other way (a stack dump) wraps itself in `log.enterSchedulerContext`.
-- The locks live in `src/stderr_lock.zig`, the writers and the `lockStderr` vtable in `src/io.zig`.
+Logging and stderr:
+- Library code logs with plain `std.log` (`common.log` is the `.zio`-scoped alias). Logging is
+  task-aware: a log line from a task parks like any other I/O, and the user's `std.options.logFn`
+  runs with the task context intact.
+- Code that must not suspend runs inside a no-suspend region: `Executor.loopAdd`/`loopCancel`/
+  `loopSetTimer` and `runtime.loopClearTimer` wrap the loop entry points, and `runtime.markCrashed`
+  pins the crash path as one permanently. Inside a region (and on threads with no mounted task),
+  waits block the thread instead of parking (`runtime.getWaitableTaskOrNull`), and stderr locking
+  never waits on a lock a parked task can hold (#661). Use `runtime.beginNoSuspend`/`endNoSuspend`
+  for scheduler code that writes to stderr outside those wrappers.
+- The stderr locks and writers live in `src/stderr.zig` (user sink plus a scheduler fallback
+  sink that no-suspend callers divert to only while a task holds the user lock); the `lockStderr`
+  vtable shims are in `src/io.zig`.
 
 Testing:
 - Use `./check.sh` to format code, run unit tests

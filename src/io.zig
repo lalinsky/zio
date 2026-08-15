@@ -269,14 +269,15 @@ fn globalIo() Io {
 
 fn crashHandlerImpl(_: ?*anyopaque) void {
     coro.crashHandler();
-    // Route any panic-message I/O through the blocking path, never the event loop.
+    // Pin this thread as a permanent no-suspend region: any panic-message I/O
+    // takes the blocking path, never the event loop. current_task stays
+    // mounted, so the stderr lock can recognize it as this stack's own.
     runtime_mod.markCrashed();
-    // Route the panic message itself to the scheduler writer, so it never
-    // waits on the user lock, which a task may hold while parked, and never
-    // touches that task's writer, whose drain may be suspended mid-call. The
-    // scheduler lock is only ever held across one blocking write, so waiting
-    // for it is bounded: the crashing thread re-enters if it already held it,
-    // and otherwise waits briefly for whichever thread does.
+    // Classify this thread as crashed for stderr locking: it never waits on a
+    // lock a parked task holds (it diverts to the scheduler writer instead),
+    // with one exception -- a lock held by the task mounted on this very
+    // thread is taken over, since that task is mid-panic here and will never
+    // resume, and the panic message lands in the stream it was writing to.
     stderr.markCrashed();
 }
 
@@ -631,8 +632,8 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
         break :blk s;
     };
 
-    // Get the event loop
-    const loop = &getCurrentExecutor().loop;
+    // Get the event loop's executor
+    const executor = getCurrentExecutor();
 
     // Submit all pending operations
     var index = batch.submitted.head;
@@ -672,7 +673,7 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
         batch.pending.tail = index;
 
         // Submit to loop
-        loop.add(completion);
+        executor.loopAdd(completion);
 
         index = next_index;
     }
@@ -916,7 +917,7 @@ fn batchCancelPending(batch: *Io.Batch, state: *BatchState) void {
     batchDrainReady(batch, state);
 
     // Cancel all pending operations (only those not yet ready)
-    const loop = &getCurrentExecutor().loop;
+    const executor = getCurrentExecutor();
     var index = batch.pending.head;
     while (index != .none) {
         const storage = &batch.storage[index.toIndex()];
@@ -926,7 +927,7 @@ fn batchCancelPending(batch: *Io.Batch, state: *BatchState) void {
         if (data_ptr & 1 == 0) {
             const data: *BatchCompletionData = @ptrFromInt(data_ptr);
             const completion = data.getCompletion();
-            loop.cancel(completion);
+            executor.loopCancel(completion);
         }
         index = storage.pending.node.next;
     }

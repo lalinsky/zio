@@ -489,6 +489,17 @@ pub const Executor = struct {
     // Used by getCurrentTaskOrNull() instead of the TLS current_context chain.
     current_task: ?*AnyTask,
 
+    // Depth of no-suspend regions on this thread. While non-zero, code here
+    // must not park: `Waiter.Direct.init` captures no task (waits block the
+    // thread instead), and the stderr lock treats the caller as one that can
+    // never wait for a parked task (see stderr.zig). Entered around calls
+    // into the event loop (`loopAdd`/`loopCancel`) and permanently by
+    // `markCrashed`. Unlike clearing `current_task`, it leaves the task
+    // identity visible to everything else: locks, user log callbacks, and
+    // the wake path's "inside the run loop" test keep working.
+    // Only the owning thread reads or writes it; plain non-atomic field.
+    no_suspend: u32 = 0,
+
     // Executor dedicated to this thread. Written once on init, never updated.
     pub threadlocal var current_DO_NOT_ACCESS_DIRECTLY: ?*Executor = null;
 
@@ -594,6 +605,33 @@ pub const Executor = struct {
         self.runtime.stack_pool.shrink(loop.now());
     }
 
+    /// Submit a completion to this executor's loop. The call is a no-suspend
+    /// region: loop internals must not park, so any wait they perform (the
+    /// stderr write behind a backend's log line, for example) blocks the
+    /// thread instead of suspending the task. Must be called on the
+    /// executor's own thread.
+    pub fn loopAdd(self: *Executor, c: *ev.Completion) void {
+        self.no_suspend += 1;
+        defer self.no_suspend -= 1;
+        self.loop.add(c);
+    }
+
+    /// Cancel a completion on this executor's loop. A no-suspend region,
+    /// see `loopAdd`.
+    pub fn loopCancel(self: *Executor, c: *ev.Completion) void {
+        self.no_suspend += 1;
+        defer self.no_suspend -= 1;
+        self.loop.cancel(c);
+    }
+
+    /// Arm a timer on this executor's loop. A no-suspend region, see
+    /// `loopAdd`.
+    pub fn loopSetTimer(self: *Executor, timer: *ev.Timer, timeout: time.Timeout) void {
+        self.no_suspend += 1;
+        defer self.no_suspend -= 1;
+        self.loop.setTimer(timer, timeout);
+    }
+
     pub const YieldCancelMode = enum { allow_cancel, no_cancel };
 
     inline fn bump(self: *Executor, comptime field: []const u8, n: u64) void {
@@ -676,9 +714,10 @@ pub const Executor = struct {
         // it performs (a completion callback, std.log, a debug_io write) takes the
         // blocking path rather than recursing into the event loop. Restored to the
         // main task on return, since control goes back to the main task's user code
-        // (or, for worker executors, to shutdown). This defer does not run on the
-        // crash path: markCrashed()'s callers are noreturn and a panic does not
-        // unwind through defers, so the null marker it sets survives until abort().
+        // (or, for worker executors, to shutdown). On the crash path this defer
+        // does not run (a panic does not unwind), so the null marker survives
+        // until abort(); markCrashed additionally pins the thread as a
+        // no-suspend region.
         self.current_task = null;
         defer self.current_task = &self.main_task;
 
@@ -1206,16 +1245,64 @@ pub fn getCurrentTaskOrNull() ?*AnyTask {
     return exec.current_task;
 }
 
-/// Called from the panic/crash handler. Marks this thread as not running a task so
-/// that any I/O performed while unwinding — in particular writing the panic message
-/// through debug_io — takes the blocking path in waitForIo instead of re-entering
-/// the event loop (which would recurse into Loop.add and abort with no message).
-/// The marker is never restored: markCrashed()'s callers (defaultPanic,
-/// defaultHandleSegfault) are noreturn and a panic does not unwind through defers,
-/// so no scheduler code runs again on this thread before abort(). See issue #545.
+/// The current task for wait routing: null when this thread must not park,
+/// because there is no mounted task or because it is inside a no-suspend
+/// region. `Waiter.Direct.init` uses this, so every wait in a no-suspend
+/// region blocks the thread instead of suspending. Identity readers (the
+/// stderr lock, user log callbacks, diagnostics) use `getCurrentTaskOrNull`,
+/// which reports the mounted task even inside a region.
+pub fn getWaitableTaskOrNull() ?*AnyTask {
+    const exec = getCurrentExecutorOrNull() orelse return null;
+    if (exec.no_suspend != 0) return null;
+    return exec.current_task;
+}
+
+/// Whether this thread is inside a no-suspend region.
+pub fn inNoSuspend() bool {
+    const exec = getCurrentExecutorOrNull() orelse return false;
+    return exec.no_suspend != 0;
+}
+
+/// Enter a no-suspend region on this thread. Regions nest and must be exited
+/// on the same thread, without a suspension point in between; `Executor.loopAdd`
+/// and `loopCancel` are the usual entry points, this is for code that writes
+/// to stderr from scheduler machinery some other way. No-op without an
+/// executor: such threads never park to begin with.
+pub fn beginNoSuspend() void {
+    const exec = getCurrentExecutorOrNull() orelse return;
+    exec.no_suspend += 1;
+}
+
+/// Exit a no-suspend region.
+pub fn endNoSuspend() void {
+    const exec = getCurrentExecutorOrNull() orelse return;
+    std.debug.assert(exec.no_suspend > 0);
+    exec.no_suspend -= 1;
+}
+
+/// Disarm a timer inside a no-suspend region. `loop` is the loop the timer
+/// was armed on, which after a migration is not necessarily the current
+/// executor's; the region is entered on the current thread regardless, since
+/// that is where any wait during the call would run.
+pub fn loopClearTimer(loop: *ev.Loop, timer: *ev.Timer) bool {
+    beginNoSuspend();
+    defer endNoSuspend();
+    return loop.clearTimer(timer);
+}
+
+/// Called from the panic/crash handler. Makes this thread a permanent
+/// no-suspend region so any I/O performed while producing the panic message —
+/// in particular writing it through debug_io — takes the blocking path in
+/// waitForIo instead of re-entering the event loop (which would recurse into
+/// Loop.add and abort with no message, see issue #545). `current_task` is
+/// deliberately left in place: the stderr lock uses it to recognize that the
+/// crashing thread's own task holds the user lock and take it over (see
+/// stderr.zig). Never undone: markCrashed()'s callers (defaultPanic,
+/// defaultHandleSegfault) are noreturn and a panic does not unwind through
+/// defers, so no scheduler code runs again on this thread before abort().
 pub fn markCrashed() void {
     const exec = getCurrentExecutorOrNull() orelse return;
-    exec.current_task = null;
+    exec.no_suspend += 1;
 }
 
 /// Cooperatively yield control to allow other tasks to run.

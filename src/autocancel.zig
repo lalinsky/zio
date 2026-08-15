@@ -6,6 +6,7 @@ const ev = @import("ev/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTask = @import("runtime.zig").getCurrentTask;
 const yield = @import("runtime.zig").yield;
+const loopClearTimer = @import("runtime.zig").loopClearTimer;
 const JoinHandle = @import("runtime.zig").JoinHandle;
 const Duration = @import("time.zig").Duration;
 const Timeout = @import("time.zig").Timeout;
@@ -38,7 +39,7 @@ pub const AutoCancel = struct {
     pub fn clear(self: *AutoCancel) void {
         const loop = self.timer.c.getLoop() orelse return;
 
-        if (loop.clearTimer(&self.timer)) {
+        if (loopClearTimer(loop, &self.timer)) {
             self.task = null;
             return;
         }
@@ -83,7 +84,7 @@ pub const AutoCancel = struct {
         self.timer.c.callback = autoCancelCallback;
 
         // Activate the timer
-        executor.loop.setTimer(&self.timer, timeout);
+        executor.loopSetTimer(&self.timer, timeout);
     }
 
     /// Check if this auto-cancel triggered the cancellation and consume it.
