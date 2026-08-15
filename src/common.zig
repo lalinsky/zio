@@ -44,6 +44,33 @@ pub const NO_WINNER = std.math.maxInt(usize);
 /// future.asyncWait(&waiter);
 /// try waiter.wait(1, .allow_cancel);
 /// ```
+///
+/// **A waiter is good for one wait.** The signal count only ever increases:
+/// `signal` adds to it and `wait` compares against it without consuming, so
+/// once a waiter has been signaled it satisfies every later `wait(1, ...)`
+/// immediately. Do not reuse one for a second, independent wait.
+///
+/// The one legitimate second call is the cancellation handshake, where both
+/// calls are waiting for the *same* signal:
+///
+/// ```zig
+/// waiter.wait(1, .allow_cancel) catch |err| {
+///     if (!queue.remove(&waiter.node)) {
+///         // Already dequeued by a waker; its signal is in flight and the
+///         // waker still owns our node, so block until it lands.
+///         waiter.wait(1, .no_cancel);
+///         // We are not going to act on it, so pass it to someone who will.
+///         if (queue.pop()) |node| Waiter.fromNode(node).signal();
+///     }
+///     return err;
+/// };
+/// ```
+///
+/// A primitive that retries must therefore construct a fresh waiter on each
+/// attempt, inside the loop rather than outside it - see `Mutex.lock`. Hoisting
+/// it out is silent: the second attempt's `wait` returns at once, and a
+/// primitive that re-queues its node per attempt will push a node that is still
+/// linked into the queue.
 pub const Waiter = struct {
     node: WaitNode = .{},
     mode: union(enum) {
@@ -160,6 +187,11 @@ pub const Waiter = struct {
 
     /// Wait for at least `expected` signals, handling spurious wakeups internally.
     /// Only valid for direct waiters.
+    ///
+    /// Level-triggered: this checks `count >= expected` and does not consume
+    /// anything, so calling it twice for two different signals does not work.
+    /// See the note on `Waiter` - one waiter, one wait, plus the `.no_cancel`
+    /// re-wait of the cancellation handshake.
     pub fn wait(self: *Waiter, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         const d = &self.mode.direct;
         if (d.task) |task| {
