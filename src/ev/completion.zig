@@ -406,18 +406,17 @@ pub const Completion = struct {
     }
 
     /// Clear per-incarnation fields when re-adding a dead completion.
+    ///
+    /// `group` is not one of them: it is membership state belonging to whoever
+    /// linked the completion, and its links are maintained by that owner. A
+    /// caller that links and then arms - `CompletionQueue.submit`, the batch
+    /// path in `io.zig` - would have its bookkeeping erased here. Each owner
+    /// drops its own `owner`/`owner_callback` when it takes delivery, so a dead
+    /// completion is free of them by the time anyone can re-arm it.
     pub fn reset(c: *Completion) void {
         c.has_result = false;
         c.err = null;
         c.cancel_next = null;
-        c.group.next = null;
-        c.group.prev = null;
-        c.group.owner = null;
-        c.group.owner_callback = null;
-        c.group.userdata = 0;
-        if (std.debug.runtime_safety) {
-            c.group.in_list = false;
-        }
     }
 
     pub fn call(c: *Completion, loop: *Loop) void {
@@ -518,6 +517,15 @@ pub const Group = struct {
                 node = next;
             }
         }
+
+        // This child is delivered, so drop its link to us: the loop no longer
+        // clears `group` when a dead completion is re-armed, and a stale
+        // `owner_callback` would dispatch a later incarnation into a Group that
+        // is finished, or gone. `next` stays - the walk above needs the chain,
+        // and a group is single-shot anyway. Like the walk, this must happen
+        // before the decrement that can free the frame `completion` lives on.
+        completion.group.owner = null;
+        completion.group.owner_callback = null;
 
         const prev = self.remaining.fetchSub(1, .acq_rel);
         if (prev == 1) {

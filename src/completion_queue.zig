@@ -63,7 +63,12 @@ pub const CompletionQueue = struct {
     }
 
     /// Submit a completion to the queue and event loop.
+    ///
+    /// A completion that has already finished may be submitted again; the loop
+    /// re-arms it. It must not be one that some queue or group still owns.
     pub fn submit(self: *CompletionQueue, c: *Completion) void {
+        std.debug.assert(c.group.owner == null); // still owned by a queue or a group
+        std.debug.assert(!c.flags.rearm); // the loop re-adds these itself, behind the queue's back
         c.group.owner = self;
         c.group.owner_callback = &ownerCallback;
 
@@ -240,6 +245,14 @@ pub const CompletionQueue = struct {
         self.mutex.lock();
         const removed = self.pending.remove(&c.group);
         std.debug.assert(removed);
+        // Drop our claim on the completion before it becomes visible in
+        // `completed`: from there a waiter can take it and re-submit it, which
+        // sets these again. The loop no longer clears `group` when re-arming a
+        // dead completion, so an owner that keeps a stale `owner_callback`
+        // would push a later incarnation into a queue nobody is waiting on.
+        // `next`/`prev` belong to the queue and stay.
+        c.group.owner = null;
+        c.group.owner_callback = null;
         self.completed.push(&c.group);
         self.mutex.unlock();
 
@@ -402,4 +415,74 @@ test "CompletionQueue: cancel pending operations" {
     // Queue should be empty after cancel
     const result = try cq.wait();
     try std.testing.expectEqual(null, result);
+}
+
+test "CompletionQueue: a finished completion can be submitted again (#673)" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancel();
+
+    var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
+    cq.submit(&timer.c);
+
+    const first = try cq.wait();
+    try std.testing.expectEqual(&timer.c, first.?);
+
+    // Dead completion, re-armed. `Loop.add` used to clear the whole `group`
+    // sub-struct here, unlinking the node from `pending` the instant after
+    // `submit` pushed it and dropping the callback that reports completion.
+    cq.submit(&timer.c);
+    try std.testing.expect(cq.hasPending());
+
+    const second = try cq.wait();
+    try std.testing.expectEqual(&timer.c, second.?);
+    try std.testing.expectEqual(null, try cq.wait());
+}
+
+test "CompletionQueue: re-submitting the completion that fired leaves the others armed (#673)" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancel();
+
+    var fast = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
+    var slow = ev.Timer.init(.{ .duration = .fromMilliseconds(150) });
+    cq.submit(&fast.c);
+    cq.submit(&slow.c);
+
+    const first = try cq.wait();
+    try std.testing.expectEqual(&fast.c, first.?);
+
+    cq.submit(&fast.c);
+
+    // Both must come back: the re-armed one, then the one that stayed armed
+    // across the re-submission.
+    const second = try cq.wait();
+    try std.testing.expectEqual(&fast.c, second.?);
+    const third = try cq.wait();
+    try std.testing.expectEqual(&slow.c, third.?);
+    try std.testing.expectEqual(null, try cq.wait());
+}
+
+test "CompletionQueue: a delivered completion is no longer owned by the queue (#673)" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancel();
+
+    var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
+    cq.submit(&timer.c);
+    const c = try cq.wait();
+    try std.testing.expectEqual(&timer.c, c.?);
+
+    // The queue dropped its claim when it handed the completion back, so this
+    // one is free to be used on its own. A stale `owner_callback` would send
+    // the result to the queue instead of the waiter, and hang here.
+    try common.waitForIo(&timer.c);
+    try timer.getResult();
+    try std.testing.expect(cq.isEmpty());
 }
