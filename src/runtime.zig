@@ -489,15 +489,10 @@ pub const Executor = struct {
     // Used by getCurrentTaskOrNull() instead of the TLS current_context chain.
     current_task: ?*AnyTask,
 
-    // Depth of no-suspend regions on this thread. While non-zero, code here
-    // must not park: `Waiter.Direct.init` captures no task (waits block the
-    // thread instead), and the stderr lock treats the caller as one that can
-    // never wait for a parked task (see stderr.zig). Entered around calls
-    // into the event loop (`loopAdd`/`loopCancel`) and permanently by
-    // `markCrashed`. Unlike clearing `current_task`, it leaves the task
-    // identity visible to everything else: locks, user log callbacks, and
-    // the wake path's "inside the run loop" test keep working.
-    // Only the owning thread reads or writes it; plain non-atomic field.
+    // Depth of no-suspend regions on this thread; see `beginNoSuspend`. Unlike
+    // clearing `current_task`, this leaves the task identity visible to locks,
+    // user log callbacks and the wake path's "inside the run loop" test.
+    // Owning thread only, so no atomics.
     no_suspend: u32 = 0,
 
     // Executor dedicated to this thread. Written once on init, never updated.

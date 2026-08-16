@@ -269,15 +269,10 @@ fn globalIo() Io {
 
 fn crashHandlerImpl(_: ?*anyopaque) void {
     coro.crashHandler();
-    // Pin this thread as a permanent no-suspend region: any panic-message I/O
-    // takes the blocking path, never the event loop. current_task stays
-    // mounted, so the stderr lock can recognize it as this stack's own.
+    // Two markers, deliberately: the runtime's keeps panic-message I/O off the
+    // event loop, the stderr one lets the panic handler take over a lock the
+    // crashing thread's own task holds.
     runtime_mod.markCrashed();
-    // Classify this thread as crashed for stderr locking: it never waits on a
-    // lock a parked task holds (it diverts to the scheduler writer instead),
-    // with one exception -- a lock held by the task mounted on this very
-    // thread is taken over, since that task is mid-panic here and will never
-    // resume, and the panic message lands in the stream it was writing to.
     stderr.markCrashed();
 }
 
@@ -632,7 +627,6 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
         break :blk s;
     };
 
-    // Get the event loop's executor
     const executor = getCurrentExecutor();
 
     // Submit all pending operations

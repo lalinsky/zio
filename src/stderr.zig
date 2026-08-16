@@ -349,19 +349,12 @@ pub fn unlock() void {
 threadlocal var dropped_sections: u8 = 0;
 
 fn pushSection(section: Section) void {
-    // Depth is bounded by nesting of no-suspend stderr sections on one thread:
-    // std pairs every lock with an unlock in the same scope, so this only
-    // stacks up through re-entry (a panic inside a locked section, then a
-    // panic inside that panic's own section, and so on). The bound is enforced
-    // in every build mode, not just where asserts survive -- overflowing this
-    // array would corrupt the neighbouring thread-locals, on the crash path,
-    // which is the worst possible place to do it.
+    // Only re-entry stacks these up (a panic inside a locked section), so eight
+    // is deep. Checked in every build mode, not just where asserts survive: an
+    // overflow here corrupts the neighbouring thread-locals, on the crash path.
+    // Dropping leaks one level of recursion depth and leaves stderr locked,
+    // which beats aborting silently on a thread already headed for abort().
     if (section_count == sections.len) {
-        // Deliberately leaks one level of the lock's recursion depth: the
-        // section stays locked, so stderr is never released. Nesting this deep
-        // means a panic inside a panic inside a panic, and this thread is on
-        // its way to abort() -- printing the message and leaking a lock nobody
-        // will need again beats aborting silently with it.
         dropped_sections +|= 1;
         return;
     }

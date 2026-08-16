@@ -540,9 +540,7 @@ pub fn blockInPlace(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) meta
 
     var ctx: Context = .{ .args = args };
 
-    // Outside a task (or inside a no-suspend region, where parking is not an
-    // option) there is no handing off to the loop: run the function inline on
-    // the calling thread.
+    // Nothing to park, so nothing to hand off to: run it here.
     if (getWaitableTaskOrNull() == null) {
         return @call(.auto, func, args);
     }
