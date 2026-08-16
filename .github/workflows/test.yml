@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, zig-0.17 ]
     tags:
   pull_request:
 
@@ -11,7 +11,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        zig_version: ['0.16.0']
+        # This branch is the port to current Zig master, so it is the only
+        # thing that can build it. Deliberately not pinned to an exact dev
+        # build: ziglang.org prunes old master tarballs, so a pin eventually
+        # fails to download rather than failing to compile. Drift breaking
+        # this branch is the signal it exists to produce.
+        zig_version: ['master']
         mode: [debug, release]
         config:
           - { os: ubuntu-24.04, target: native, backends: 'linux io_uring epoll poll' }
