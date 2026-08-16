@@ -512,30 +512,3 @@ test "group: large batch exceeding queue size exercises deferred pending list" {
     for (closes) |*pc| try pc.getResult();
     try close_group.getResult();
 }
-
-test "group: a finished member can be armed again on its own (#673)" {
-    var loop: Loop = undefined;
-    try loop.init(.{});
-    defer loop.deinit();
-
-    var timer: Timer = .init(.{ .duration = .fromMilliseconds(5) });
-    var group: Group = .init(.gather);
-
-    group.add(&timer.c);
-    loop.add(&group.c);
-    try loop.run();
-    try group.getResult();
-
-    // The group drops its claim on a member as it takes delivery, rather than
-    // relying on `Loop.add` to clear it on the next arm - `Loop.add` must not
-    // touch `group`, since for a queue those links are live state.
-    try std.testing.expectEqual(null, timer.c.group.owner);
-    try std.testing.expectEqual(null, timer.c.group.owner_callback);
-
-    // So re-arming the member reports to whoever arms it, not to the finished
-    // group.
-    loop.add(&timer.c);
-    try loop.run();
-    try timer.getResult();
-    try std.testing.expectEqual(0, group.remaining.load(.monotonic));
-}

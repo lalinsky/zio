@@ -64,10 +64,11 @@ pub const CompletionQueue = struct {
 
     /// Submit a completion to the queue and event loop.
     ///
-    /// A completion that has already finished may be submitted again; the loop
-    /// re-arms it. It must not be one that some queue or group still owns.
+    /// A completion that this queue has already handed back may be submitted
+    /// again; the loop re-arms it. Ownership is sticky, so one that belongs to
+    /// a group or to another queue must be re-initialised first.
     pub fn submit(self: *CompletionQueue, c: *Completion) void {
-        std.debug.assert(c.group.owner == null); // still owned by a queue or a group
+        std.debug.assert(c.group.owner == null or c.group.owner == @as(*anyopaque, @ptrCast(self))); // owned elsewhere
         std.debug.assert(!c.flags.rearm); // the loop re-adds these itself, behind the queue's back
         c.group.owner = self;
         c.group.owner_callback = &ownerCallback;
@@ -245,14 +246,6 @@ pub const CompletionQueue = struct {
         self.mutex.lock();
         const removed = self.pending.remove(&c.group);
         std.debug.assert(removed);
-        // Drop our claim on the completion before it becomes visible in
-        // `completed`: from there a waiter can take it and re-submit it, which
-        // sets these again. The loop no longer clears `group` when re-arming a
-        // dead completion, so an owner that keeps a stale `owner_callback`
-        // would push a later incarnation into a queue nobody is waiting on.
-        // `next`/`prev` belong to the queue and stay.
-        c.group.owner = null;
-        c.group.owner_callback = null;
         self.completed.push(&c.group);
         self.mutex.unlock();
 
@@ -467,22 +460,26 @@ test "CompletionQueue: re-submitting the completion that fired leaves the others
     try std.testing.expectEqual(null, try cq.wait());
 }
 
-test "CompletionQueue: a delivered completion is no longer owned by the queue (#673)" {
+test "CompletionQueue: a notify that lands while an Async is unarmed is not lost (#673)" {
     var rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
     var cq = CompletionQueue.init();
     defer cq.cancel();
 
-    var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
-    cq.submit(&timer.c);
-    const c = try cq.wait();
-    try std.testing.expectEqual(&timer.c, c.?);
+    var mailbox = ev.Async.init();
+    cq.submit(&mailbox.c);
+    mailbox.notify();
+    const first = try cq.wait();
+    try std.testing.expectEqual(&mailbox.c, first.?);
 
-    // The queue dropped its claim when it handed the completion back, so this
-    // one is free to be used on its own. A stale `owner_callback` would send
-    // the result to the queue instead of the waiter, and hang here.
-    try common.waitForIo(&timer.c);
-    try timer.getResult();
-    try std.testing.expect(cq.isEmpty());
+    // The handle is unarmed now. `notify` latches on the handle itself, and
+    // the re-submit below picks the latch up through `Loop.add`. Handing the
+    // same completion back is what makes this lossless: re-initialising the
+    // handle here would zero the latch and drop this notify.
+    mailbox.notify();
+    cq.submit(&mailbox.c);
+
+    const second = try cq.wait();
+    try std.testing.expectEqual(&mailbox.c, second.?);
 }
