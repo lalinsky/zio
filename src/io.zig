@@ -476,14 +476,7 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout, clock: time.Cloc
             };
             break :result .{ null, 1 };
         } },
-        .net_send => |*o| return .{ .net_send = result: {
-            const maybe_err, const n = netSendImpl(o.socket_handle, o.messages, o.flags);
-            if (maybe_err) |err| switch (err) {
-                error.Canceled => |e| return e,
-                else => |e| break :result .{ e, 0 },
-            };
-            break :result .{ null, n };
-        } },
+        .net_send => |*o| return .{ .net_send = try netSendOpImpl(o.socket_handle, o.messages, o.flags, timeout) },
         .net_read => |*o| return .{ .net_read = result: {
             const n = netReadOpImpl(o.socket_handle, o.data, timeout) catch |err| switch (err) {
                 error.Canceled => |e| return e,
@@ -493,8 +486,9 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout, clock: time.Cloc
             break :result n;
         } },
         .net_write => |*o| return .{ .net_write = result: {
-            const n = netWriteImpl(o.socket_handle, o.header, o.data, o.splat) catch |err| switch (err) {
+            const n = netWriteOpImpl(o.socket_handle, o.header, o.data, o.splat, timeout) catch |err| switch (err) {
                 error.Canceled => |e| return e,
+                error.Timeout => |e| return e,
                 else => |e| break :result e,
             };
             break :result n;
@@ -587,9 +581,9 @@ const BatchCompletionData = union(Io.Operation.Tag) {
     net_send: struct {
         op: ev.NetSendMsg,
         iov: os_net.iovec_const,
-        addr_storage: zio_net.Address,
+        addr_storage: zio_net.IpAddress,
         addr_len: os_net.socklen_t,
-        messages: *Io.net.OutgoingMessage,
+        message: *Io.net.OutgoingMessage,
     },
     net_read: struct {
         op: ev.NetRecv,
@@ -598,6 +592,7 @@ const BatchCompletionData = union(Io.Operation.Tag) {
     net_write: struct {
         op: ev.NetSend,
         iovecs: [max_iovecs_len]os_net.iovec_const,
+        splat_buf: [8]u8,
     },
 
     fn getCompletion(self: *BatchCompletionData) *ev.Completion {
@@ -858,29 +853,25 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
             return &data.net_receive.op.c;
         },
         .net_send => |*o| {
-            const zio_flags: os_net.SendFlags = .{
-                .no_signal = true,
-                .confirm = o.flags.confirm,
-                .dont_route = o.flags.dont_route,
-                .eor = o.flags.eor,
-                .oob = o.flags.oob,
-                .fastopen = o.flags.fastopen,
-            };
-            const has_control = o.messages[0].control.len != 0;
+            // One completion is one sendmsg, so only the first message goes out
+            // here and the result reports 1. Partial counts are contractual, so
+            // the caller re-submits the rest; `net_receive` above does the same.
+            const msg = &o.messages[0];
             data.* = .{ .net_send = .{
                 .op = undefined,
-                .iov = os_net.iovecConstFromSlice(o.messages[0].data_ptr[0..o.messages[0].data_len]),
-                .addr_storage = undefined,
-                .addr_len = @sizeOf(zio_net.Address),
-                .messages = &o.messages[0],
+                .iov = os_net.iovecConstFromSlice(msg.data_ptr[0..msg.data_len]),
+                .addr_storage = stdIoIpToZio(msg.address.*),
+                .addr_len = undefined,
+                .message = msg,
             } };
+            data.net_send.addr_len = sockAddrLen(&data.net_send.addr_storage.any);
             data.net_send.op = ev.NetSendMsg.init(
                 stdIoHandleToZio(o.socket_handle),
                 .{ .iovecs = (&data.net_send.iov)[0..1] },
-                zio_flags,
+                zioSendFlags(o.flags),
                 &data.net_send.addr_storage.any,
                 data.net_send.addr_len,
-                if (has_control) o.messages[0].control else null,
+                if (msg.control.len != 0) msg.control else null,
             );
             return &data.net_send.op.c;
         },
@@ -894,10 +885,16 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
             return &data.net_read.op.c;
         },
         .net_write => |*o| {
-            data.* = .{ .net_write = .{ .op = undefined, .iovecs = undefined } };
+            data.* = .{ .net_write = .{
+                .op = undefined,
+                .iovecs = undefined,
+                .splat_buf = undefined,
+            } };
+            var slices: [max_iovecs_len][]const u8 = undefined;
+            const n = fillBuf(&slices, o.header, o.data, o.splat, &data.net_write.splat_buf);
             data.net_write.op = ev.NetSend.init(
                 stdIoHandleToZio(o.socket_handle),
-                ev.WriteBuf.fromSlices(o.data, &data.net_write.iovecs),
+                ev.WriteBuf.fromSlices(slices[0..n], &data.net_write.iovecs),
                 .{},
             );
             return &data.net_write.op.c;
@@ -971,19 +968,11 @@ fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Oper
                 break :blk .{ null, 1 };
             },
         },
-        .net_send => .{
-            .net_send = blk: {
-                const result = data.net_send.op.getResult() catch |err| break :blk .{ sendMsgErrToSendErr(err), 0 };
-                // Populate the message buffer with received data
-                data.net_send.messages.* = .{
-                    .address = zioIpToStdIo(zio_net.Address.fromPosix(&data.net_send.addr_storage.any, data.net_send.addr_len).ip),
-                    .data_ptr = data.net_send.data_buffer[0..result.len],
-                    .data_len = 0,
-                    .control = data.net_send.message_buffer.control[0..result.controllen],
-                };
-                break :blk .{ null, 1 };
-            },
-        },
+        .net_send => .{ .net_send = blk: {
+            const sent = data.net_send.op.getResult() catch |err| break :blk .{ sendErrToSocketSendErr(err), 0 };
+            data.net_send.message.data_len = sent;
+            break :blk .{ null, 1 };
+        } },
         .net_read => .{
             .net_read = data.net_read.op.getResult() catch |err| recvErrToReadErr(err),
         },
@@ -2394,14 +2383,26 @@ fn sendErrToSocketSendErr(err: ev.NetSendMsg.Error) Io.net.Socket.SendError {
     };
 }
 
-fn netSendImpl(handle: Io.net.Socket.Handle, messages: []Io.net.OutgoingMessage, flags: Io.net.SendFlags) struct { ?Io.net.Socket.SendError, usize } {
-    const zio_flags: os_net.SendFlags = .{
+fn zioSendFlags(flags: Io.net.SendFlags) os_net.SendFlags {
+    return .{
         .confirm = flags.confirm,
         .dont_route = flags.dont_route,
         .eor = flags.eor,
         .oob = flags.oob,
         .fastopen = flags.fastopen,
     };
+}
+
+/// Sends each message in turn, reporting how many made it. A partial count is
+/// part of the contract, so a caller that gets fewer than it passed re-submits
+/// the rest; that is what lets the batch path below send just one.
+fn netSendOpImpl(
+    handle: Io.net.Socket.Handle,
+    messages: []Io.net.OutgoingMessage,
+    flags: Io.net.SendFlags,
+    timeout: time.Timeout,
+) (Io.Cancelable || common.Timeoutable)!Io.Operation.NetSend.Result {
+    const zio_flags = zioSendFlags(flags);
 
     for (messages, 0..) |*msg, i| {
         const zio_addr = stdIoIpToZio(msg.address.*);
@@ -2415,7 +2416,7 @@ fn netSendImpl(handle: Io.net.Socket.Handle, messages: []Io.net.OutgoingMessage,
             sockAddrLen(&zio_addr.any),
             if (msg.control.len != 0) msg.control else null,
         );
-        waitForIo(&op.c) catch |err| return .{ err, i };
+        try timedWaitForIo(&op.c, timeout);
         const sent = op.getResult() catch |err| return .{ sendErrToSocketSendErr(err), i };
         msg.data_len = sent;
     }
@@ -2546,7 +2547,7 @@ fn netReceiveImpl(
     };
 }
 
-fn sendErrToWriteErr(err: ev.NetSend.Error) Io.net.Stream.Writer.Error {
+fn sendErrToWriteErr(err: ev.NetSend.Error) Io.Operation.NetWrite.Error {
     return switch (err) {
         error.ConnectionResetByPeer, error.ConnectionAborted => error.ConnectionResetByPeer,
         error.ConnectionTimedOut => error.ConnectionResetByPeer,
@@ -2554,7 +2555,10 @@ fn sendErrToWriteErr(err: ev.NetSend.Error) Io.net.Stream.Writer.Error {
         error.NetworkUnreachable => error.NetworkUnreachable,
         error.NetworkDown => error.NetworkDown,
         error.SystemResources => error.SystemResources,
-        error.Canceled => error.Canceled,
+        // Cancellation reaches the caller from the wait, not from the result,
+        // so seeing it here means the operation ended some other way. Same
+        // reasoning as `recvErrToReadErr`.
+        error.Canceled,
         error.WouldBlock,
         error.AccessDenied,
         error.FileDescriptorNotASocket,
@@ -2565,28 +2569,13 @@ fn sendErrToWriteErr(err: ev.NetSend.Error) Io.net.Stream.Writer.Error {
     };
 }
 
-fn sendMsgErrToSendErr(err: ev.NetSendMsg.Error) Io.net.Socket.SendError {
-    return switch (err) {
-        error.Canceled => error.Canceled,
-        error.SystemResources => error.SystemResources,
-        error.ConnectionResetByPeer => error.ConnectionResetByPeer,
-        error.AccessDenied => error.AccessDenied,
-        error.NetworkDown => error.NetworkDown,
-        error.NetworkUnreachable => error.NetworkUnreachable,
-        error.MessageTooBig => error.MessageOversize,
-        error.WouldBlock,
-        error.BrokenPipe,
-        error.ConnectionAborted,
-        error.FileDescriptorNotASocket,
-        error.ConnectionTimedOut,
-        error.OperationNotSupported,
-        error.Unexpected,
-        error.SocketNotConnected,
-        => error.Unexpected,
-    };
-}
-
-fn netWriteImpl(handle: Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) Io.net.Stream.Writer.Error!usize {
+fn netWriteOpImpl(
+    handle: Io.net.Socket.Handle,
+    header: []const u8,
+    data: []const []const u8,
+    splat: usize,
+    timeout: time.Timeout,
+) (Io.Operation.NetWrite.Error || Io.Cancelable || common.Timeoutable)!usize {
     var slices: [max_iovecs_len][]const u8 = undefined;
     var splat_buf: [64]u8 = undefined;
     const n = fillBuf(&slices, header, data, splat, &splat_buf);
@@ -2596,7 +2585,7 @@ fn netWriteImpl(handle: Io.net.Socket.Handle, header: []const u8, data: []const 
     const wbuf = ev.WriteBuf.fromSlices(slices[0..n], &iovecs);
 
     var op = ev.NetSend.init(stdIoHandleToZio(handle), wbuf, .{});
-    try waitForIo(&op.c);
+    try timedWaitForIo(&op.c, timeout);
     return op.getResult() catch |err| return sendErrToWriteErr(err);
 }
 
@@ -2608,14 +2597,14 @@ fn netWriteFileImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: []const u8, _: *
     @panic("netWriteFile is unused by std.Io as of Zig 0.16");
 }
 
-fn netCloseImpl(_: ?*anyopaque, handles: []const Io.net.Socket) void {
+fn netCloseImpl(_: ?*anyopaque, sockets: []const Io.net.Socket) void {
     var i: usize = 0;
-    while (i < handles.len) {
+    while (i < sockets.len) {
         var ops: [8]ev.NetClose = undefined;
         var group = ev.Group.init(.gather);
-        const n = @min(ops.len, handles.len - i);
+        const n = @min(ops.len, sockets.len - i);
         for (0..n) |j| {
-            ops[j] = ev.NetClose.init(stdIoHandleToZio(handles[i + j].handle));
+            ops[j] = ev.NetClose.init(stdIoHandleToZio(sockets[i + j].handle));
             group.add(&ops[j].c);
         }
         waitForIoUncancelable(&group.c);
@@ -4544,6 +4533,126 @@ test "io: batch awaitConcurrent with two net_receive operations" {
 
     // Clean up
     batch.cancel(io);
+}
+
+test "io: batch awaitConcurrent with a net_send operation" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var receiver = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer receiver.close(io);
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+
+    var storage: [1]Io.Operation.Storage = undefined;
+    var batch: Io.Batch = .init(&storage);
+
+    // The destination comes from the message, so this also pins that the batch
+    // path copies the address into its own storage: the op holds a pointer to
+    // it for as long as the send is in flight.
+    const payload = "batched";
+    var out: [1]Io.net.OutgoingMessage = .{.{
+        .address = &receiver.address,
+        .data_ptr = payload,
+        .data_len = payload.len,
+        .control = &.{},
+    }};
+    _ = batch.add(.{ .net_send = .{
+        .socket_handle = sender.handle,
+        .messages = &out,
+        .flags = .{},
+    } });
+
+    try batch.awaitConcurrent(io, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+
+    const completion = batch.next();
+    try std.testing.expect(completion != null);
+    const err, const n = completion.?.result.net_send;
+    try std.testing.expectEqual(null, err);
+    // One completion is one sendmsg, so exactly one message goes out.
+    try std.testing.expectEqual(1, n);
+
+    // Bounded, so a send that goes to the wrong address fails here instead of
+    // parking the suite forever.
+    var msg: Io.net.IncomingMessage = .init;
+    var buf: [32]u8 = undefined;
+    const received = try io.operateTimeout(.{ .net_receive = .{
+        .socket_handle = receiver.handle,
+        .message_buffer = (&msg)[0..1],
+        .data_buffer = &buf,
+        .flags = .{},
+    } }, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+    const recv_err, _ = received.net_receive;
+    try std.testing.expectEqual(null, recv_err);
+    try std.testing.expectEqualStrings(payload, msg.data);
+
+    batch.cancel(io);
+}
+
+test "io: batch awaitConcurrent with a net_write operation" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const expected = "head:midababab";
+
+    const Worker = struct {
+        fn sink(io: Io, server: *Io.net.Server, out: *anyerror!void) void {
+            out.* = collect(io, server);
+        }
+
+        fn collect(io: Io, server: *Io.net.Server) !void {
+            const peer = try server.accept(io);
+            defer peer.close(io);
+
+            var recv_buf: [64]u8 = undefined;
+            var reader = peer.reader(io, &recv_buf);
+            var got: [64]u8 = undefined;
+            const n = try reader.interface.readSliceShort(&got);
+            try std.testing.expectEqualStrings(expected, got[0..n]);
+        }
+
+        fn run(io: Io) !void {
+            var server = try Io.net.IpAddress.listen(&.{ .ip4 = .loopback(0) }, io, .{});
+            defer server.deinit(io);
+
+            var sink_err: anyerror!void = {};
+            var future = io.async(sink, .{ io, &server, &sink_err });
+            defer future.cancel(io);
+
+            const client = try Io.net.IpAddress.connect(&server.socket.address, io, .{ .mode = .stream });
+            defer client.close(io);
+
+            var storage: [1]Io.Operation.Storage = undefined;
+            var batch: Io.Batch = .init(&storage);
+
+            // header + data + splat, so the batch path's own fillBuf and
+            // splat_buf are what assemble the iovecs.
+            const data: []const []const u8 = &.{ "mid", "ab" };
+            _ = batch.add(.{ .net_write = .{
+                .socket_handle = client.socket.handle,
+                .header = "head:",
+                .data = data,
+                .splat = 3,
+            } });
+
+            try batch.awaitConcurrent(io, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+
+            const completion = batch.next();
+            try std.testing.expect(completion != null);
+            const written = try completion.?.result.net_write;
+            try std.testing.expectEqual(expected.len, written);
+
+            batch.cancel(io);
+            try client.shutdown(io, .send);
+
+            future.await(io);
+            try sink_err;
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
 }
 
 test "io: batch awaitConcurrent times out when no data arrives" {
