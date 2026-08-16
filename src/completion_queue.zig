@@ -71,7 +71,7 @@ pub const CompletionQueue = struct {
         self.pending.push(&c.group);
         self.mutex.unlock();
 
-        getCurrentExecutor().loop.add(c);
+        getCurrentExecutor().loopAdd(c);
     }
 
     /// Reset the signal counter before checking the completed queue.
@@ -209,11 +209,11 @@ pub const CompletionQueue = struct {
 
         // Cancel each pending operation. We don't hold the lock while calling
         // loop.cancel() because the callback needs to acquire it.
-        const loop = &getCurrentExecutor().loop;
+        const executor = getCurrentExecutor();
         while (node) |n| {
             const next_node = n.next;
             const c = completionFromGroup(n);
-            loop.cancel(c);
+            executor.loopCancel(c);
             node = next_node;
         }
     }

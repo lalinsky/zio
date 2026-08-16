@@ -30,6 +30,7 @@ const groupSpawnTask = @import("group.zig").groupSpawnTask;
 const select = @import("select.zig");
 const Futex = @import("sync/Futex.zig");
 const Mutex = @import("sync/Mutex.zig");
+const stderr = @import("stderr.zig");
 const time = @import("time.zig");
 const common = @import("common.zig");
 const Waiter = common.Waiter;
@@ -268,8 +269,11 @@ fn globalIo() Io {
 
 fn crashHandlerImpl(_: ?*anyopaque) void {
     coro.crashHandler();
-    // Route any panic-message I/O through the blocking path, never the event loop.
+    // Two markers, deliberately: the runtime's keeps panic-message I/O off the
+    // event loop, the stderr one lets the panic handler take over a lock the
+    // crashing thread's own task holds.
     runtime_mod.markCrashed();
+    stderr.markCrashed();
 }
 
 fn asyncImpl(
@@ -623,8 +627,7 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
         break :blk s;
     };
 
-    // Get the event loop
-    const loop = &getCurrentExecutor().loop;
+    const executor = getCurrentExecutor();
 
     // Submit all pending operations
     var index = batch.submitted.head;
@@ -664,7 +667,7 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
         batch.pending.tail = index;
 
         // Submit to loop
-        loop.add(completion);
+        executor.loopAdd(completion);
 
         index = next_index;
     }
@@ -908,7 +911,7 @@ fn batchCancelPending(batch: *Io.Batch, state: *BatchState) void {
     batchDrainReady(batch, state);
 
     // Cancel all pending operations (only those not yet ready)
-    const loop = &getCurrentExecutor().loop;
+    const executor = getCurrentExecutor();
     var index = batch.pending.head;
     while (index != .none) {
         const storage = &batch.storage[index.toIndex()];
@@ -918,7 +921,7 @@ fn batchCancelPending(batch: *Io.Batch, state: *BatchState) void {
         if (data_ptr & 1 == 0) {
             const data: *BatchCompletionData = @ptrFromInt(data_ptr);
             const completion = data.getCompletion();
-            loop.cancel(completion);
+            executor.loopCancel(completion);
         }
         index = storage.pending.node.next;
     }
@@ -1673,48 +1676,16 @@ fn processExecutablePathImpl(_: ?*anyopaque, buffer: []u8) std.process.Executabl
     return io.vtable.processExecutablePath(io.userdata, buffer);
 }
 
-var stderr_mutex: Mutex.Recursive = .init;
-var stderr_writer_initialized = false;
-var stderr_writer: Io.File.Writer = undefined;
-
 fn lockStderrImpl(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.Cancelable!Io.LockedStderr {
-    try stderr_mutex.lock();
-    return initLockedStderr(userdata, terminal_mode);
+    return stderr.lock(.{ .userdata = userdata, .vtable = &vtable }, terminal_mode);
 }
 
 fn tryLockStderrImpl(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.Cancelable!?Io.LockedStderr {
-    if (!stderr_mutex.tryLock()) return null;
-    return initLockedStderr(userdata, terminal_mode);
-}
-
-fn initLockedStderr(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.LockedStderr {
-    if (!stderr_writer_initialized) {
-        const io = Io{ .userdata = userdata, .vtable = &vtable };
-        const zfile = zio_fs.stderr();
-        var file: Io.File = .{ .handle = zfile.fd, .flags = .{ .nonblocking = false } };
-        // `pollable` controls routing (event loop vs thread pool); the mode
-        // (streaming vs positional) is resolved separately, since on Windows a
-        // console is streaming yet not loop-drivable.
-        flagsWritePollable(&file.flags, zfile.pollable orelse false);
-        if (zio_fs.resolveMode(zfile) == .streaming) {
-            stderr_writer = Io.File.Writer.initStreaming(file, io, &.{});
-        } else {
-            stderr_writer = Io.File.Writer.init(file, io, &.{});
-        }
-        stderr_writer_initialized = true;
-    }
-    beginShield();
-    return .{
-        .file_writer = &stderr_writer,
-        .terminal_mode = terminal_mode orelse .no_color,
-    };
+    return stderr.tryLock(.{ .userdata = userdata, .vtable = &vtable }, terminal_mode);
 }
 
 fn unlockStderrImpl(_: ?*anyopaque) void {
-    if (stderr_writer.err == null) stderr_writer.interface.flush() catch {};
-    stderr_writer.err = null;
-    endShield();
-    stderr_mutex.unlock();
+    stderr.unlock();
 }
 
 fn processCurrentPathImpl(userdata: ?*anyopaque, buffer: []u8) std.process.CurrentPathError!usize {

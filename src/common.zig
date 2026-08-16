@@ -14,6 +14,8 @@ const Stopwatch = @import("time.zig").Stopwatch;
 const Duration = @import("time.zig").Duration;
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTaskOrNull = @import("runtime.zig").getCurrentTaskOrNull;
+const getWaitableTaskOrNull = @import("runtime.zig").getWaitableTaskOrNull;
+const loopClearTimer = @import("runtime.zig").loopClearTimer;
 const AnyTask = @import("task.zig").AnyTask;
 const Executor = @import("runtime.zig").Executor;
 const WaitNode = @import("utils/wait_queue.zig").WaitNode;
@@ -86,7 +88,9 @@ pub const Waiter = struct {
         pub fn init() Direct {
             return .{
                 .notify = .init(),
-                .task = getCurrentTaskOrNull(),
+                // Waitable, not current: inside a no-suspend region the wait
+                // must block the thread, not park the task.
+                .task = getWaitableTaskOrNull(),
             };
         }
     };
@@ -241,13 +245,13 @@ pub const Waiter = struct {
         timer.c.userdata = self;
         timer.c.callback = timeoutCallback;
 
-        task.getExecutor().loop.setTimer(&timer, timeout);
+        task.getExecutor().loopSetTimer(&timer, timeout);
         defer {
             // A clear that loses its race leaves the timer completing, and its
             // callback still runs against `timer`, which lives in this frame.
             // The callback sets the flag before waking us, so parking on it
             // keeps the frame alive for exactly as long as the callback needs.
-            if (!timer.c.getLoop().?.clearTimer(&timer)) {
+            if (!loopClearTimer(timer.c.getLoop().?, &timer)) {
                 while (!self.timedOut()) {
                     task.yield(.park, .no_cancel);
                 }
@@ -401,14 +405,14 @@ pub fn waitForIo(c: *ev.Completion) Cancelable!void {
     try task.checkCancel();
 
     // Async path: Submit to the event loop and wait for completion
-    task.getExecutor().loop.add(c);
+    task.getExecutor().loopAdd(c);
     // Inline completions never park; charge the coop budget so they still
     // hit a yield point.
     const completed_inline = waiter.mode.direct.notify.state.load(.acquire) != 0;
     waiter.wait(1, .allow_cancel) catch |err| switch (err) {
         error.Canceled => {
             // On cancellation, cancel the I/O and wait for completion
-            task.getExecutor().loop.cancel(c);
+            task.getExecutor().loopCancel(c);
             waiter.wait(1, .no_cancel);
 
             // Check if I/O was actually canceled
@@ -450,7 +454,7 @@ pub fn waitForIoUncancelable(c: *ev.Completion) void {
     };
 
     // Async path: Submit to the event loop and wait for completion (no cancel)
-    task.getExecutor().loop.add(c);
+    task.getExecutor().loopAdd(c);
     const completed_inline = waiter.mode.direct.notify.state.load(.acquire) != 0;
     waiter.wait(1, .no_cancel);
     if (completed_inline) {
@@ -542,7 +546,11 @@ test "Waiter: futex-based timed wait with timeout" {
 /// Execute a blocking function on the thread pool, blocking the current task until completion.
 ///
 /// Unlike `spawnBlocking`, this does not allocate - all state is kept on the stack.
-/// The calling task is parked while the blocking work executes on a thread pool worker.
+/// The calling task is parked while the blocking work executes on a thread pool
+/// worker. Two cases run `func` inline on the calling thread instead, where
+/// parking is not an option: no task at all, and a task inside a no-suspend
+/// region. Inline execution is uncancelable - it never binds a `syscall_cancel`
+/// token, so a cancel cannot interrupt it.
 ///
 /// Usage:
 /// ```zig
@@ -564,9 +572,8 @@ pub fn blockInPlace(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) meta
 
     var ctx: Context = .{ .args = args };
 
-    // Outside a task there is no event loop / thread pool to hand off to, so run
-    // the function inline on the calling thread.
-    if (getCurrentTaskOrNull() == null) {
+    // Nothing to park, so nothing to hand off to: run it here.
+    if (getWaitableTaskOrNull() == null) {
         return @call(.auto, func, args);
     }
 

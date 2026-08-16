@@ -12,6 +12,7 @@ const os = @import("os/root.zig");
 const ev = @import("ev/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentExecutor = @import("runtime.zig").getCurrentExecutor;
+const loopClearTimer = @import("runtime.zig").loopClearTimer;
 const Waiter = @import("common.zig").Waiter;
 
 // Time configuration - adjust these for different platforms
@@ -562,7 +563,7 @@ pub const Timeout = union(enum) {
         ctx.timer.c.callback = timerCallback;
 
         const executor = getCurrentExecutor();
-        executor.loop.add(&ctx.timer.c);
+        executor.loopAdd(&ctx.timer.c);
         return true;
     }
 
@@ -582,7 +583,7 @@ pub const Timeout = union(enum) {
         // Disarmed: no callback, no signal. Otherwise the timer is completing
         // and its callback still signals `ctx.waiter`, so report the wake as
         // in flight and let the caller wait for it.
-        return loop.clearTimer(&ctx.timer);
+        return loopClearTimer(loop, &ctx.timer);
     }
 
     pub fn getResult(self: *const Timeout, ctx: *WaitContext) void {
