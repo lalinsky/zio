@@ -429,7 +429,7 @@ test "CompletionQueue: a finished completion can be submitted again (#673)" {
     cq.submit(&timer.c);
     try std.testing.expect(cq.hasPending());
 
-    const second = try cq.wait();
+    const second = try cq.timedWait(.fromSeconds(5));
     try std.testing.expectEqual(&timer.c, second.?);
     try std.testing.expectEqual(null, try cq.wait());
 }
@@ -446,17 +446,21 @@ test "CompletionQueue: re-submitting the completion that fired leaves the others
     cq.submit(&fast.c);
     cq.submit(&slow.c);
 
-    const first = try cq.wait();
+    const first = try cq.timedWait(.fromSeconds(5));
     try std.testing.expectEqual(&fast.c, first.?);
 
     cq.submit(&fast.c);
 
-    // Both must come back: the re-armed one, then the one that stayed armed
-    // across the re-submission.
-    const second = try cq.wait();
-    try std.testing.expectEqual(&fast.c, second.?);
-    const third = try cq.wait();
-    try std.testing.expectEqual(&slow.c, third.?);
+    // Both must come back: the re-armed one, and the one that stayed armed
+    // across the re-submission. Which lands first is a wall-clock question and
+    // not what this pins, so take them in either order. A lost queue link
+    // shows up as `error.Timeout` here rather than as a test that hangs.
+    const second = try cq.timedWait(.fromSeconds(5));
+    const third = try cq.timedWait(.fromSeconds(5));
+    try std.testing.expect(
+        (second.? == &fast.c and third.? == &slow.c) or
+            (second.? == &slow.c and third.? == &fast.c),
+    );
     try std.testing.expectEqual(null, try cq.wait());
 }
 
@@ -480,6 +484,6 @@ test "CompletionQueue: a notify that lands while an Async is unarmed is not lost
     mailbox.notify();
     cq.submit(&mailbox.c);
 
-    const second = try cq.wait();
+    const second = try cq.timedWait(.fromSeconds(5));
     try std.testing.expectEqual(&mailbox.c, second.?);
 }
