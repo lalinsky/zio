@@ -1527,13 +1527,15 @@ pub fn createLoopbackSocketPair() CreateLoopbackSocketPairError![2]fd_t {
     errdefer close(listen_sock);
 
     // Bind to 127.0.0.1:0 (any available port)
-    var bind_addr: sockaddr = @bitCast(posix.system.sockaddr.in{
+    // 0.17 std's windows sockaddr no longer @bitCasts from sockaddr.in;
+    // pass the concrete type through a pointer cast instead.
+    const bind_addr_in = posix.system.sockaddr.in{
         .family = AF.INET,
         .port = 0, // Let OS choose port
         .addr = 0x0100007F, // 127.0.0.1 in network byte order (little-endian)
         .zero = @splat(0),
-    });
-    try bind(listen_sock, &bind_addr, @sizeOf(posix.system.sockaddr.in));
+    };
+    try bind(listen_sock, @ptrCast(&bind_addr_in), @sizeOf(posix.system.sockaddr.in));
 
     // Listen for connections
     try listen(listen_sock, 1);
