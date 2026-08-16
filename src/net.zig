@@ -2573,8 +2573,8 @@ test "Server: accept never reports ConnectionAborted" {
 
     const AcceptError = @typeInfo(@typeInfo(@TypeOf(Server.accept)).@"fn".return_type.?).error_union.error_set;
     comptime {
-        for (@typeInfo(AcceptError).error_set.?) |e| {
-            if (std.mem.eql(u8, e.name, "ConnectionAborted")) {
+        for (@typeInfo(AcceptError).error_set.error_names.?) |name| {
+            if (std.mem.eql(u8, name, "ConnectionAborted")) {
                 @compileError("Server.accept must retry ConnectionAborted, not report it");
             }
         }
