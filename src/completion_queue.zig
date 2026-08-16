@@ -63,7 +63,13 @@ pub const CompletionQueue = struct {
     }
 
     /// Submit a completion to the queue and event loop.
+    ///
+    /// A completion that this queue has already handed back may be submitted
+    /// again; the loop re-arms it. Ownership is sticky, so one that belongs to
+    /// a group or to another queue must be re-initialised first.
     pub fn submit(self: *CompletionQueue, c: *Completion) void {
+        std.debug.assert(c.group.owner == null or c.group.owner == @as(*anyopaque, @ptrCast(self))); // owned elsewhere
+        std.debug.assert(!c.flags.rearm); // the loop re-adds these itself, behind the queue's back
         c.group.owner = self;
         c.group.owner_callback = &ownerCallback;
 
@@ -402,4 +408,82 @@ test "CompletionQueue: cancel pending operations" {
     // Queue should be empty after cancel
     const result = try cq.wait();
     try std.testing.expectEqual(null, result);
+}
+
+test "CompletionQueue: a finished completion can be submitted again (#673)" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancel();
+
+    var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
+    cq.submit(&timer.c);
+
+    const first = try cq.wait();
+    try std.testing.expectEqual(&timer.c, first.?);
+
+    // Dead completion, re-armed. `Loop.add` used to clear the whole `group`
+    // sub-struct here, unlinking the node from `pending` the instant after
+    // `submit` pushed it and dropping the callback that reports completion.
+    cq.submit(&timer.c);
+    try std.testing.expect(cq.hasPending());
+
+    const second = try cq.timedWait(.fromSeconds(5));
+    try std.testing.expectEqual(&timer.c, second.?);
+    try std.testing.expectEqual(null, try cq.wait());
+}
+
+test "CompletionQueue: re-submitting the completion that fired leaves the others armed (#673)" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancel();
+
+    var fast = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
+    var slow = ev.Timer.init(.{ .duration = .fromMilliseconds(150) });
+    cq.submit(&fast.c);
+    cq.submit(&slow.c);
+
+    const first = try cq.timedWait(.fromSeconds(5));
+    try std.testing.expectEqual(&fast.c, first.?);
+
+    cq.submit(&fast.c);
+
+    // Both must come back: the re-armed one, and the one that stayed armed
+    // across the re-submission. Which lands first is a wall-clock question and
+    // not what this pins, so take them in either order. A lost queue link
+    // shows up as `error.Timeout` here rather than as a test that hangs.
+    const second = try cq.timedWait(.fromSeconds(5));
+    const third = try cq.timedWait(.fromSeconds(5));
+    try std.testing.expect(
+        (second.? == &fast.c and third.? == &slow.c) or
+            (second.? == &slow.c and third.? == &fast.c),
+    );
+    try std.testing.expectEqual(null, try cq.wait());
+}
+
+test "CompletionQueue: a notify that lands while an Async is unarmed is not lost (#673)" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancel();
+
+    var mailbox = ev.Async.init();
+    cq.submit(&mailbox.c);
+    mailbox.notify();
+    const first = try cq.wait();
+    try std.testing.expectEqual(&mailbox.c, first.?);
+
+    // The handle is unarmed now. `notify` latches on the handle itself, and
+    // the re-submit below picks the latch up through `Loop.add`. Handing the
+    // same completion back is what makes this lossless: re-initialising the
+    // handle here would zero the latch and drop this notify.
+    mailbox.notify();
+    cq.submit(&mailbox.c);
+
+    const second = try cq.timedWait(.fromSeconds(5));
+    try std.testing.expectEqual(&mailbox.c, second.?);
 }

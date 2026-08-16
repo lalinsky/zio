@@ -406,18 +406,20 @@ pub const Completion = struct {
     }
 
     /// Clear per-incarnation fields when re-adding a dead completion.
+    ///
+    /// `group` is not one of them: it is membership state belonging to whoever
+    /// linked the completion, and its links are maintained by that owner. A
+    /// caller that links and then arms - `CompletionQueue.submit`, the batch
+    /// path in `io.zig` - would have its bookkeeping erased here.
+    ///
+    /// Ownership is sticky: a completion that has been in a group or a queue
+    /// stays marked as that owner's until it is re-initialised. Its owner may
+    /// arm it again (a queue re-submitting a finished completion does), anyone
+    /// else must `init` it first.
     pub fn reset(c: *Completion) void {
         c.has_result = false;
         c.err = null;
         c.cancel_next = null;
-        c.group.next = null;
-        c.group.prev = null;
-        c.group.owner = null;
-        c.group.owner_callback = null;
-        c.group.userdata = 0;
-        if (std.debug.runtime_safety) {
-            c.group.in_list = false;
-        }
     }
 
     pub fn call(c: *Completion, loop: *Loop) void {
