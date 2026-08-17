@@ -844,6 +844,59 @@ test "CompletionQueue: another task's submit satisfies a wait blocked on an empt
     try handle.join();
 }
 
+test "CompletionQueue: race group of I/O and timer works as an idle timeout (#677)" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancelAll(.discard);
+
+    // The I/O side wins: the group comes back through the queue with the
+    // timer canceled alongside it.
+    var mail1 = ev.Async.init();
+    var idle1 = ev.Timer.init(.{ .duration = .fromSeconds(10) });
+    var grp1 = ev.Group.init(.race);
+    grp1.add(&mail1.c);
+    grp1.add(&idle1.c);
+    try cq.submit(&grp1.c);
+
+    mail1.notify();
+    const first = try cq.timedWait(.fromSeconds(5));
+    try std.testing.expectEqual(&grp1.c, first);
+    try grp1.getResult();
+    try mail1.getResult();
+    try std.testing.expectError(error.Canceled, idle1.getResult());
+
+    // The timer wins: the queue reports the idle timeout. Group membership is
+    // sticky, so a re-park builds a fresh group over re-initialised members
+    // rather than re-submitting the finished one.
+    var mail2 = ev.Async.init();
+    var idle2 = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
+    var grp2 = ev.Group.init(.race);
+    grp2.add(&mail2.c);
+    grp2.add(&idle2.c);
+    try cq.submit(&grp2.c);
+
+    const second = try cq.timedWait(.fromSeconds(5));
+    try std.testing.expectEqual(&grp2.c, second);
+    try grp2.getResult();
+    try idle2.getResult();
+    try std.testing.expectError(error.Canceled, mail2.getResult());
+
+    // A group still parked in the queue is torn down by cancelAll: the cancel
+    // reaches the group root and takes its members down with it.
+    var mail3 = ev.Async.init();
+    var idle3 = ev.Timer.init(.{ .duration = .fromSeconds(10) });
+    var grp3 = ev.Group.init(.race);
+    grp3.add(&mail3.c);
+    grp3.add(&idle3.c);
+    try cq.submit(&grp3.c);
+
+    cq.cancelAll(.discard);
+    try std.testing.expect(cq.isEmpty());
+    try std.testing.expectError(error.Canceled, grp3.getResult());
+}
+
 test "CompletionQueue: canceling the waiting driver closes the queue and keeps results" {
     var rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
