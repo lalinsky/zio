@@ -198,13 +198,15 @@ pub const CompletionQueue = struct {
                     return error.Canceled;
                 },
                 error.Timeout => {
-                    // A completion can still have landed together with the
-                    // timeout; hand it out rather than reporting a timeout
-                    // that did not happen.
+                    // A completion, or the close, can still have landed
+                    // together with the timeout; report those rather than a
+                    // timeout that did not happen.
                     self.mutex.lock();
                     const n = self.completed.pop();
+                    const drained_now = n == null and self.closed and self.pending.isEmpty();
                     self.mutex.unlock();
-                    return if (n) |x| completionFromGroup(x) else error.Timeout;
+                    if (n) |x| return completionFromGroup(x);
+                    return if (drained_now) error.Closed else error.Timeout;
                 },
             };
         }
