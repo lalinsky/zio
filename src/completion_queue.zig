@@ -291,18 +291,35 @@ pub const CompletionQueue = struct {
     }
 
     fn requestCancelAll(self: *CompletionQueue) void {
-        self.mutex.lock();
-        var node = self.pending.head;
-        self.mutex.unlock();
-
-        // Cancel each pending operation. We don't hold the lock while calling
-        // loop.cancel() because the callback needs to acquire it.
+        // `ownerCallback` relinks `pending` nodes under the mutex from the
+        // loop threads, so walking the list is only safe with the mutex held.
+        // `loopCancel` cannot be called with it held (the callback takes it),
+        // so each pass walks to one operation that still needs a cancel,
+        // drops the lock, and cancels just that one.
+        //
+        // The walk terminates: `requestCancel` latches `cancel_requested`
+        // before `loopCancel` returns (or the operation is already completed
+        // or dead), and an operation cannot leave those states while it sits
+        // in `pending`, so every pass permanently disqualifies one node.
         const executor = getCurrentExecutor();
-        while (node) |n| {
-            const next_node = n.next;
-            const c = completionFromGroup(n);
-            executor.loopCancel(c);
-            node = next_node;
+        while (true) {
+            self.mutex.lock();
+            const target: ?*Completion = blk: {
+                var node = self.pending.head;
+                while (node) |n| : (node = n.next) {
+                    const c = completionFromGroup(n);
+                    const state = c.loadState();
+                    if (state.cancel_requested) continue;
+                    // Finished already: `requestCancel` would not latch, only
+                    // its dispatch to `completed` is still in flight.
+                    if (state.phase == .completed or state.phase == .dead) continue;
+                    break :blk c;
+                }
+                break :blk null;
+            };
+            self.mutex.unlock();
+
+            executor.loopCancel(target orelse return);
         }
     }
 
