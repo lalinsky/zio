@@ -281,8 +281,15 @@ pub const CompletionQueue = struct {
     /// finish. A cancel that lost the race leaves a real result behind, so read
     /// the operation's own `getResult` rather than assuming `error.Canceled`.
     ///
-    /// Like `wait`, this belongs to the task that drives the queue, and its
-    /// wait cannot itself be canceled.
+    /// NOT thread-safe, unlike `submit` and `close`: this belongs to the task
+    /// that drives the queue and must never run concurrently with `wait`,
+    /// `timedWait`, `next` or `cancelAll`. A concurrent consumer could take
+    /// the finished `c` out of the queue first, leaving the wait below stuck
+    /// forever on a node that already left; the single-driver rule is what
+    /// makes that impossible. To cancel a specific operation from another
+    /// task, ask the driver instead: park an `ev.Async` doorbell in the queue
+    /// and let the driver do the cancel. The wait here cannot itself be
+    /// canceled.
     pub fn cancel(self: *CompletionQueue, c: *Completion) void {
         self.mutex.lock();
         if (unlink(&self.completed, &c.group)) {
