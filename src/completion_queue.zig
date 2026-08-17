@@ -95,17 +95,29 @@ pub const CompletionQueue = struct {
         return @fieldParentPtr("group", node);
     }
 
+    pub const SubmitError = Closeable || error{
+        /// The queue cannot own this completion: it belongs to a group or to
+        /// another queue (ownership is sticky, re-initialise it first), or it
+        /// is a rearm completion, which the loop re-adds itself, behind the
+        /// queue's back.
+        InvalidCompletion,
+    };
+
     /// Submit a completion to the queue and event loop. Thread-safe: any task
     /// may submit, and the operation is added to the submitter's own loop.
     ///
     /// A completion that this queue has already handed back may be submitted
-    /// again; the loop re-arms it. Ownership is sticky, so one that belongs to
-    /// a group or to another queue must be re-initialised first.
+    /// again; the loop re-arms it.
     ///
-    /// Returns `error.Closed` once the queue is closed, leaving `c` untouched.
-    pub fn submit(self: *CompletionQueue, c: *Completion) Closeable!void {
-        std.debug.assert(c.group.owner == null or c.group.owner == @as(*anyopaque, @ptrCast(self))); // owned elsewhere
-        std.debug.assert(!c.flags.rearm); // the loop re-adds these itself, behind the queue's back
+    /// Returns `error.Closed` once the queue is closed. A refused completion
+    /// is left untouched, whatever the error.
+    pub fn submit(self: *CompletionQueue, c: *Completion) SubmitError!void {
+        if (c.group.owner != null and c.group.owner != @as(*anyopaque, @ptrCast(self))) {
+            return error.InvalidCompletion;
+        }
+        if (c.flags.rearm) {
+            return error.InvalidCompletion;
+        }
 
         self.mutex.lock();
         if (self.closed) {
@@ -793,6 +805,35 @@ test "CompletionQueue: submit after close returns error.Closed" {
     // The refused completion was left untouched: no ownership taken, nothing
     // queued, free to go to another queue.
     try std.testing.expectEqual(null, timer.c.group.owner);
+    try std.testing.expect(cq.isEmpty());
+}
+
+test "CompletionQueue: submit refuses completions the queue cannot own" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancelAll(.discard);
+
+    // A group member is owned by its group.
+    var member = ev.Timer.init(.{ .duration = .fromSeconds(10) });
+    var grp = ev.Group.init(.race);
+    grp.add(&member.c);
+    try std.testing.expectError(error.InvalidCompletion, cq.submit(&member.c));
+
+    // An operation parked in another queue is owned by that queue.
+    var other = CompletionQueue.init();
+    defer other.cancelAll(.discard);
+    var parked = ev.Timer.init(.{ .duration = .fromSeconds(10) });
+    try other.submit(&parked.c);
+    try std.testing.expectError(error.InvalidCompletion, cq.submit(&parked.c));
+
+    // Rearm completions re-add themselves; the queue can never own one.
+    var mail = ev.Async.init();
+    mail.c.flags.rearm = true;
+    try std.testing.expectError(error.InvalidCompletion, cq.submit(&mail.c));
+
+    // Every refusal left the queue and the completions untouched.
     try std.testing.expect(cq.isEmpty());
 }
 
