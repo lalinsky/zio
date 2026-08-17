@@ -31,6 +31,11 @@ pub const Timeoutable = error{
     Timeout,
 };
 
+/// Error set for operations against something that can be closed
+pub const Closeable = error{
+    Closed,
+};
+
 /// Sentinel value indicating no winner has been selected yet in select operations
 pub const NO_WINNER = std.math.maxInt(usize);
 

@@ -59,7 +59,7 @@ fn worker(
 ) zio.Cancelable!void {
     while (true) {
         const path = work_channel.receive() catch |err| switch (err) {
-            error.ChannelClosed => {
+            error.Closed => {
                 std.log.info("Worker {} exiting", .{id});
                 return;
             },
@@ -85,7 +85,7 @@ fn collector(
 
     while (true) {
         const result = results_channel.receive() catch |err| switch (err) {
-            error.ChannelClosed => return,
+            error.Closed => return,
             error.Canceled => return error.Canceled,
         };
 
@@ -148,7 +148,7 @@ pub fn main(init: std.process.Init) !void {
     // Distribute work
     for (files) |file_path| {
         work_channel.send(file_path) catch |err| switch (err) {
-            error.ChannelClosed => break,
+            error.Closed => break,
             error.Canceled => return error.Canceled,
         };
     }

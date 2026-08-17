@@ -71,7 +71,7 @@ const meta = @import("meta.zig");
 //     Must only be called after asyncWait() returns false or after waiter.wake() is called.
 //
 //     Returns: The result value. For operations that can fail, Result may be an error union
-//              (e.g., error{ChannelClosed}!T).
+//              (e.g., error{Closed}!T).
 //
 //     Guarantees:
 //       - All side effects from the operation that produced the result are visible
