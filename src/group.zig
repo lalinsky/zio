@@ -299,7 +299,7 @@ pub fn groupSpawnBlockingTask(
 /// Register an awaitable with a group.
 /// Increments counter, sets group_node.group, and adds to task list.
 /// Returns error.Closed if group is closed.
-pub fn registerGroupTask(group: *Group, awaitable: *Awaitable) error{Closed}!void {
+pub fn registerGroupTask(group: *Group, awaitable: *Awaitable) Closeable!void {
     if (group.isClosed()) return error.Closed;
     const prev_state = @atomicRmw(u32, group.getState(), .Add, 1, .acq_rel);
     const prev_counter = prev_state & Group.counter_mask;
@@ -343,6 +343,7 @@ pub const GroupNode = struct {
 };
 
 const Cancelable = @import("common.zig").Cancelable;
+const Closeable = @import("common.zig").Closeable;
 
 fn testFn(arg: usize) usize {
     return arg + 1;

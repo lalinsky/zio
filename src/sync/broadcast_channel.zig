@@ -10,6 +10,7 @@ const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const Barrier = @import("Barrier.zig");
 const select = @import("../select.zig").select;
 const Waiter = @import("../common.zig").Waiter;
+const Closeable = @import("../common.zig").Closeable;
 const Mutex = @import("Mutex.zig");
 
 /// Consumer position tracker.
@@ -163,7 +164,7 @@ const AsyncReceiveImpl = struct {
 
     pub const WaitContext = struct {
         result_ptr: [*]u8 = undefined,
-        result: ?error{ Closed, Lagged }!void = null,
+        result: ?(Closeable || error{Lagged})!void = null,
     };
 
     pub fn asyncWait(self: *const RecvSelf, waiter: *Waiter, ctx: *WaitContext, result_ptr: [*]u8) bool {
@@ -213,7 +214,7 @@ const AsyncReceiveImpl = struct {
         return was_in_queue;
     }
 
-    pub fn getResult(self: *const RecvSelf, ctx: *WaitContext) error{ Closed, Lagged }!void {
+    pub fn getResult(self: *const RecvSelf, ctx: *WaitContext) (Closeable || error{Lagged})!void {
         // Fast path: result already set by asyncWait
         if (ctx.result) |r| {
             return r;
