@@ -3,25 +3,49 @@
 
 //! A queue for waiting on multiple I/O operations with an iterator-like interface.
 //!
-//! Unlike `waitForIo` (single operation) or `ev.Group` (combine into one virtual completion),
-//! `CompletionQueue` lets you submit multiple operations, dynamically add more, and process
-//! completions one at a time as they finish.
+//! Unlike `waitForIo` (single operation) or `ev.Group` (combine into one virtual
+//! completion), `CompletionQueue` lets you submit multiple operations, dynamically
+//! add more, and process completions one at a time as they finish.
 //!
 //! Runtime-only: must be used from within an async task context.
 //!
-//! Usage:
+//! One task drives the queue: `wait`, `timedWait`, `next`, `cancel` and
+//! `cancelAll` belong to it. `submit` and `close` are thread-safe, so other
+//! tasks can park their own operations here for the driver to process. An
+//! operation submitted from another task must not live in that task's frame:
+//! the submitter may unwind before the driver takes the completion, so such
+//! operations belong on the heap, with the driver owning their results and
+//! memory. Heap-backed operations rule out `cancelAll(.discard)` — it drops
+//! the only pointers to them — so shut such a queue down with
+//! `cancelAll(.keep)` and free each operation as `next` hands it out.
+//!
+//! Waiting for a batch to finish (the driver submits everything itself):
 //! ```zig
 //! var cq = CompletionQueue.init();
 //! defer cq.cancelAll(.discard);
 //!
 //! var timer1 = ev.Timer.init(.{ .duration = .fromMilliseconds(100) });
 //! var timer2 = ev.Timer.init(.{ .duration = .fromMilliseconds(200) });
-//! cq.submit(&timer1.c);
-//! cq.submit(&timer2.c);
+//! try cq.submit(&timer1.c);
+//! try cq.submit(&timer2.c);
 //!
-//! while (try cq.wait()) |c| {
+//! while (!cq.isEmpty()) {
+//!     const c = try cq.wait();
+//!     // Process completion; can submit more operations here
+//! }
+//! ```
+//!
+//! Long-lived dispatcher (operations submitted by other tasks):
+//! ```zig
+//! while (true) {
+//!     const c = cq.wait() catch |err| switch (err) {
+//!         // Closed and fully drained.
+//!         error.Closed => break,
+//!         // The queue is closed and every operation is canceled with its
+//!         // result kept; drain with `next` before freeing them.
+//!         error.Canceled => return err,
+//!     };
 //!     // Process completion
-//!     // Can submit more operations here
 //! }
 //! ```
 
@@ -30,13 +54,14 @@ const std = @import("std");
 const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
 const common = @import("common.zig");
+const Futex = @import("sync/Futex.zig");
 const SimpleQueue = @import("utils/simple_queue.zig").SimpleQueue;
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentExecutor = @import("runtime.zig").getCurrentExecutor;
 
-const Waiter = common.Waiter;
 const Cancelable = common.Cancelable;
 const Timeoutable = common.Timeoutable;
+const Closeable = common.Closeable;
 const Timeout = @import("time.zig").Timeout;
 const Completion = ev.Completion;
 
@@ -44,7 +69,13 @@ pub const CompletionQueue = struct {
     mutex: os.Mutex,
     pending: Queue,
     completed: Queue,
-    waiter: Waiter,
+    /// Futex word the driver waits on. Counts completion arrivals and the
+    /// close, and is never reset: waiters snapshot it before checking the
+    /// queues, so a push landing between the check and the wait flips the
+    /// word and the wait returns immediately.
+    signal: std.atomic.Value(u32),
+    /// No new submissions. Written under `mutex`.
+    closed: bool,
 
     const GroupNode = @FieldType(Completion, "group");
     const Queue = SimpleQueue(GroupNode);
@@ -54,7 +85,8 @@ pub const CompletionQueue = struct {
             .mutex = .init(),
             .pending = .empty,
             .completed = .empty,
-            .waiter = Waiter.init(),
+            .signal = .init(0),
+            .closed = false,
         };
     }
 
@@ -63,107 +95,118 @@ pub const CompletionQueue = struct {
         return @fieldParentPtr("group", node);
     }
 
-    /// Submit a completion to the queue and event loop.
+    /// Submit a completion to the queue and event loop. Thread-safe: any task
+    /// may submit, and the operation is added to the submitter's own loop.
     ///
     /// A completion that this queue has already handed back may be submitted
     /// again; the loop re-arms it. Ownership is sticky, so one that belongs to
     /// a group or to another queue must be re-initialised first.
-    pub fn submit(self: *CompletionQueue, c: *Completion) void {
+    ///
+    /// Returns `error.Closed` once the queue is closed, leaving `c` untouched.
+    pub fn submit(self: *CompletionQueue, c: *Completion) Closeable!void {
         std.debug.assert(c.group.owner == null or c.group.owner == @as(*anyopaque, @ptrCast(self))); // owned elsewhere
         std.debug.assert(!c.flags.rearm); // the loop re-adds these itself, behind the queue's back
-        c.group.owner = self;
-        c.group.owner_callback = &ownerCallback;
 
         self.mutex.lock();
+        if (self.closed) {
+            self.mutex.unlock();
+            return error.Closed;
+        }
+        c.group.owner = self;
+        c.group.owner_callback = &ownerCallback;
         self.pending.push(&c.group);
         self.mutex.unlock();
 
         getCurrentExecutor().loopAdd(c);
     }
 
-    /// Reset the signal counter before checking the completed queue.
-    /// This must be called BEFORE checking the completed queue to avoid
-    /// a race where a signal is lost between checking and waiting.
-    fn resetSignals(self: *CompletionQueue) void {
-        self.waiter.mode.direct.notify.state.store(0, .monotonic);
+    /// Close the queue: `submit` fails with `error.Closed` from now on, and
+    /// the driver's `wait` returns `error.Closed` once everything already in
+    /// the queue has been handed out. Operations in flight keep running and
+    /// are still delivered; use `cancelAll` to stop them. Thread-safe and
+    /// idempotent.
+    pub fn close(self: *CompletionQueue) void {
+        self.mutex.lock();
+        const was_closed = self.closed;
+        self.closed = true;
+        self.mutex.unlock();
+        if (was_closed) return;
+
+        _ = self.signal.fetchAdd(1, .release);
+        Futex.wake(&self.signal.raw, 1);
     }
 
-    /// Wait for the next completion. Blocks until one is available.
-    /// Returns null when there are no more pending or completed operations.
-    pub fn wait(self: *CompletionQueue) Cancelable!?*Completion {
+    /// Wait for the next completion. Blocks while the queue is open, even if
+    /// it is momentarily empty: operations submitted later (also by other
+    /// tasks) satisfy a wait already in progress. To wait only for what is
+    /// already in the queue, guard with `isEmpty`:
+    /// `while (!cq.isEmpty()) { const c = try cq.wait(); ... }`
+    ///
+    /// Returns `error.Closed` when the queue is closed and fully drained.
+    ///
+    /// On cancellation the queue is closed and every operation is canceled
+    /// with its result kept: drain with `next` (nothing blocks at that point)
+    /// before freeing the operations.
+    pub fn wait(self: *CompletionQueue) (Cancelable || Closeable)!*Completion {
         while (true) {
-            self.resetSignals();
+            const seen = self.signal.load(.acquire);
 
             self.mutex.lock();
-            const completed_node = self.completed.pop();
-            const pending_empty = self.pending.isEmpty();
+            const node = self.completed.pop();
+            const drained = node == null and self.closed and self.pending.isEmpty();
             self.mutex.unlock();
 
-            if (completed_node) |node| {
-                return completionFromGroup(node);
-            }
+            if (node) |n| return completionFromGroup(n);
+            if (drained) return error.Closed;
 
-            if (pending_empty) {
-                return null;
-            }
-
-            self.waiter.wait(1, .allow_cancel) catch |err| switch (err) {
+            // A bare submit does not bump `signal`: a driver parked here is
+            // waiting for a completion, and the submitted operation delivers
+            // one through `ownerCallback` when it finishes.
+            Futex.wait(&self.signal.raw, seen) catch |err| switch (err) {
                 error.Canceled => {
-                    self.cancelAll(.discard);
+                    self.closeAndKeepResults();
                     return error.Canceled;
                 },
             };
         }
     }
 
-    /// Wait for the next completion with a timeout.
-    /// Returns `error.Timeout` if no completion is ready before the timeout expires.
-    /// Returns null when there are no more pending or completed operations.
-    pub fn timedWait(self: *CompletionQueue, timeout: Timeout) (Timeoutable || Cancelable)!?*Completion {
+    /// Wait for the next completion with a timeout. Blocks like `wait` while
+    /// the queue is open and returns `error.Timeout` if no completion is
+    /// ready before the timeout expires.
+    ///
+    /// Returns `error.Closed` when the queue is closed and fully drained.
+    pub fn timedWait(self: *CompletionQueue, timeout: Timeout) (Timeoutable || Cancelable || Closeable)!*Completion {
         if (timeout == .none) {
             return self.wait();
         }
 
         while (true) {
-            self.resetSignals();
+            const seen = self.signal.load(.acquire);
 
-            self.mutex.lock();
-            const completed_node = self.completed.pop();
-            const pending_empty = self.pending.isEmpty();
-            self.mutex.unlock();
-
-            if (completed_node) |node| {
-                return completionFromGroup(node);
-            }
-
-            if (pending_empty) {
-                return null;
-            }
-
-            const timed_out = if (self.waiter.timedWait(1, timeout, .allow_cancel)) |_| false else |err| switch (err) {
-                error.Canceled => {
-                    self.cancelAll(.discard);
-                    return error.Canceled;
-                },
-                error.Timeout => true,
-            };
-
-            // A completion can still have landed together with the timeout.
             self.mutex.lock();
             const node = self.completed.pop();
+            const drained = node == null and self.closed and self.pending.isEmpty();
             self.mutex.unlock();
 
-            if (node) |n| {
-                return completionFromGroup(n);
-            }
+            if (node) |n| return completionFromGroup(n);
+            if (drained) return error.Closed;
 
-            if (timed_out) {
-                return error.Timeout;
-            }
-
-            // Signaled without a completion to hand out (a pending op finished
-            // into the queue and was taken, or the signal raced the pop): go
-            // around rather than reporting a timeout that did not happen.
+            Futex.timedWait(&self.signal.raw, seen, timeout) catch |err| switch (err) {
+                error.Canceled => {
+                    self.closeAndKeepResults();
+                    return error.Canceled;
+                },
+                error.Timeout => {
+                    // A completion can still have landed together with the
+                    // timeout; hand it out rather than reporting a timeout
+                    // that did not happen.
+                    self.mutex.lock();
+                    const n = self.completed.pop();
+                    self.mutex.unlock();
+                    return if (n) |x| completionFromGroup(x) else error.Timeout;
+                },
+            };
         }
     }
 
@@ -206,9 +249,12 @@ pub const CompletionQueue = struct {
         /// Leave them in the queue, to be taken with `wait` or `next`. An
         /// operation that completed before its cancellation landed is in
         /// there too, carrying a real result rather than `error.Canceled`.
+        /// The only correct choice when other tasks submitted heap-backed
+        /// operations: whoever drains the queue frees them.
         keep,
         /// Drop them, leaving the queue empty. This also drops results that
-        /// were already waiting to be taken.
+        /// were already waiting to be taken. Only for operations the caller
+        /// still holds by other means (a batch in the driver's own frame).
         discard,
     };
 
@@ -244,7 +290,7 @@ pub const CompletionQueue = struct {
         getCurrentExecutor().loopCancel(c);
 
         while (true) {
-            self.resetSignals();
+            const seen = self.signal.load(.acquire);
 
             self.mutex.lock();
             const taken = unlink(&self.completed, &c.group);
@@ -254,7 +300,7 @@ pub const CompletionQueue = struct {
 
             // Under the lock the node is in exactly one of the two queues, so
             // not being in `completed` means it is still pending.
-            self.waiter.wait(1, .no_cancel);
+            Futex.waitUncancelable(&self.signal.raw, seen);
         }
     }
 
@@ -263,7 +309,8 @@ pub const CompletionQueue = struct {
     ///
     /// Safe to call more than once, and safe with nothing pending. Like `wait`,
     /// this belongs to the task that drives the queue, and its wait cannot
-    /// itself be canceled.
+    /// itself be canceled. Does not close the queue: on an open queue another
+    /// task can submit while this drains, extending the wait.
     pub fn cancelAll(self: *CompletionQueue, results: Results) void {
         self.requestCancelAll();
         self.drainPending(results);
@@ -325,7 +372,7 @@ pub const CompletionQueue = struct {
 
     fn drainPending(self: *CompletionQueue, results: Results) void {
         while (true) {
-            self.resetSignals();
+            const seen = self.signal.load(.acquire);
 
             self.mutex.lock();
             const pending_empty = self.pending.isEmpty();
@@ -338,8 +385,17 @@ pub const CompletionQueue = struct {
 
             if (pending_empty) break;
 
-            self.waiter.wait(1, .no_cancel);
+            Futex.waitUncancelable(&self.signal.raw, seen);
         }
+    }
+
+    /// Shut the queue down from a canceled wait: no new submissions, every
+    /// operation canceled, all results kept in `completed` for `next` to hand
+    /// out. Close comes first so no submission can slip in behind the drain
+    /// and extend it.
+    fn closeAndKeepResults(self: *CompletionQueue) void {
+        self.close();
+        self.cancelAll(.keep);
     }
 
     fn ownerCallback(_: *ev.Loop, c: *Completion) void {
@@ -351,11 +407,12 @@ pub const CompletionQueue = struct {
         self.completed.push(&c.group);
         self.mutex.unlock();
 
-        self.waiter.signal();
+        _ = self.signal.fetchAdd(1, .release);
+        Futex.wake(&self.signal.raw, 1);
     }
 };
 
-test "CompletionQueue: wait on empty queue returns null" {
+test "CompletionQueue: wait on a closed empty queue returns error.Closed" {
     var rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
@@ -364,8 +421,13 @@ test "CompletionQueue: wait on empty queue returns null" {
     try std.testing.expect(!cq.hasPending());
     try std.testing.expect(!cq.hasCompleted());
 
-    const result = try cq.wait();
-    try std.testing.expectEqual(null, result);
+    cq.close();
+    try std.testing.expectError(error.Closed, cq.wait());
+    try std.testing.expectError(error.Closed, cq.timedWait(.fromMilliseconds(10)));
+
+    // Idempotent.
+    cq.close();
+    try std.testing.expectError(error.Closed, cq.wait());
 }
 
 test "CompletionQueue: single timer" {
@@ -375,22 +437,18 @@ test "CompletionQueue: single timer" {
     var cq = CompletionQueue.init();
 
     var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
-    cq.submit(&timer.c);
+    try cq.submit(&timer.c);
 
     try std.testing.expect(!cq.isEmpty());
     try std.testing.expect(cq.hasPending());
 
     const c = try cq.wait();
-    try std.testing.expect(c != null);
-    try std.testing.expectEqual(&timer.c, c.?);
+    try std.testing.expectEqual(&timer.c, c);
 
     // Queue is now empty
     try std.testing.expect(cq.isEmpty());
     try std.testing.expect(!cq.hasPending());
     try std.testing.expect(!cq.hasCompleted());
-
-    const end = try cq.wait();
-    try std.testing.expectEqual(null, end);
 }
 
 test "CompletionQueue: multiple timers" {
@@ -402,12 +460,13 @@ test "CompletionQueue: multiple timers" {
     var timer1 = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
     var timer2 = ev.Timer.init(.{ .duration = .fromMilliseconds(20) });
     var timer3 = ev.Timer.init(.{ .duration = .fromMilliseconds(30) });
-    cq.submit(&timer1.c);
-    cq.submit(&timer2.c);
-    cq.submit(&timer3.c);
+    try cq.submit(&timer1.c);
+    try cq.submit(&timer2.c);
+    try cq.submit(&timer3.c);
 
     var count: u32 = 0;
-    while (try cq.wait()) |_| {
+    while (!cq.isEmpty()) {
+        _ = try cq.wait();
         count += 1;
     }
     try std.testing.expectEqual(3, count);
@@ -420,16 +479,17 @@ test "CompletionQueue: dynamic submit during iteration" {
     var cq = CompletionQueue.init();
 
     var timer1 = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
-    cq.submit(&timer1.c);
+    try cq.submit(&timer1.c);
 
     var timer2 = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
     var submitted_second = false;
 
     var count: u32 = 0;
-    while (try cq.wait()) |_| {
+    while (!cq.isEmpty()) {
+        _ = try cq.wait();
         count += 1;
         if (!submitted_second) {
-            cq.submit(&timer2.c);
+            try cq.submit(&timer2.c);
             submitted_second = true;
         }
     }
@@ -444,15 +504,15 @@ test "CompletionQueue: wait then timedWait does not false-timeout" {
 
     // First: submit and wait() — pops without blocking, consuming a signal
     var timer1 = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
-    cq.submit(&timer1.c);
+    try cq.submit(&timer1.c);
     const c1 = try cq.wait();
-    try std.testing.expectEqual(&timer1.c, c1.?);
+    try std.testing.expectEqual(&timer1.c, c1);
 
     // Second: submit and timedWait() — must not return false Timeout
     var timer2 = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
-    cq.submit(&timer2.c);
+    try cq.submit(&timer2.c);
     const c2 = try cq.timedWait(.{ .duration = .fromSeconds(1) });
-    try std.testing.expectEqual(&timer2.c, c2.?);
+    try std.testing.expectEqual(&timer2.c, c2);
 }
 
 test "CompletionQueue: timedWait completes before timeout" {
@@ -462,11 +522,10 @@ test "CompletionQueue: timedWait completes before timeout" {
     var cq = CompletionQueue.init();
 
     var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
-    cq.submit(&timer.c);
+    try cq.submit(&timer.c);
 
     const c = try cq.timedWait(.{ .duration = .fromSeconds(1) });
-    try std.testing.expect(c != null);
-    try std.testing.expectEqual(&timer.c, c.?);
+    try std.testing.expectEqual(&timer.c, c);
 }
 
 test "CompletionQueue: timedWait returns timeout" {
@@ -477,7 +536,7 @@ test "CompletionQueue: timedWait returns timeout" {
 
     // Long timer with short timeout
     var timer = ev.Timer.init(.{ .duration = .fromSeconds(10) });
-    cq.submit(&timer.c);
+    try cq.submit(&timer.c);
 
     try std.testing.expectError(error.Timeout, cq.timedWait(.fromMilliseconds(10)));
 
@@ -485,13 +544,14 @@ test "CompletionQueue: timedWait returns timeout" {
     cq.cancelAll(.discard);
 }
 
-test "CompletionQueue: timedWait on empty queue returns null" {
+test "CompletionQueue: timedWait on an open empty queue waits for the timeout" {
     var rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
+    // An open queue blocks on empty rather than reporting exhaustion, so
+    // with nothing submitted the timeout is the only way out.
     var cq = CompletionQueue.init();
-    const result = try cq.timedWait(.fromMilliseconds(10));
-    try std.testing.expectEqual(null, result);
+    try std.testing.expectError(error.Timeout, cq.timedWait(.fromMilliseconds(10)));
 }
 
 test "CompletionQueue: cancel pending operations" {
@@ -502,14 +562,13 @@ test "CompletionQueue: cancel pending operations" {
 
     // Submit a long timer
     var timer = ev.Timer.init(.{ .duration = .fromSeconds(10) });
-    cq.submit(&timer.c);
+    try cq.submit(&timer.c);
 
     // Cancel should complete without waiting 10 seconds
     cq.cancelAll(.discard);
 
     // Queue should be empty after cancel
-    const result = try cq.wait();
-    try std.testing.expectEqual(null, result);
+    try std.testing.expect(cq.isEmpty());
 }
 
 test "CompletionQueue: a finished completion can be submitted again (#673)" {
@@ -520,20 +579,20 @@ test "CompletionQueue: a finished completion can be submitted again (#673)" {
     defer cq.cancelAll(.discard);
 
     var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
-    cq.submit(&timer.c);
+    try cq.submit(&timer.c);
 
     const first = try cq.wait();
-    try std.testing.expectEqual(&timer.c, first.?);
+    try std.testing.expectEqual(&timer.c, first);
 
     // Dead completion, re-armed. `Loop.add` used to clear the whole `group`
     // sub-struct here, unlinking the node from `pending` the instant after
     // `submit` pushed it and dropping the callback that reports completion.
-    cq.submit(&timer.c);
+    try cq.submit(&timer.c);
     try std.testing.expect(cq.hasPending());
 
     const second = try cq.timedWait(.fromSeconds(5));
-    try std.testing.expectEqual(&timer.c, second.?);
-    try std.testing.expectEqual(null, try cq.wait());
+    try std.testing.expectEqual(&timer.c, second);
+    try std.testing.expect(cq.isEmpty());
 }
 
 test "CompletionQueue: re-submitting the completion that fired leaves the others armed (#673)" {
@@ -545,13 +604,13 @@ test "CompletionQueue: re-submitting the completion that fired leaves the others
 
     var fast = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
     var slow = ev.Timer.init(.{ .duration = .fromMilliseconds(150) });
-    cq.submit(&fast.c);
-    cq.submit(&slow.c);
+    try cq.submit(&fast.c);
+    try cq.submit(&slow.c);
 
     const first = try cq.timedWait(.fromSeconds(5));
-    try std.testing.expectEqual(&fast.c, first.?);
+    try std.testing.expectEqual(&fast.c, first);
 
-    cq.submit(&fast.c);
+    try cq.submit(&fast.c);
 
     // Both must come back: the re-armed one, and the one that stayed armed
     // across the re-submission. Which lands first is a wall-clock question and
@@ -560,10 +619,10 @@ test "CompletionQueue: re-submitting the completion that fired leaves the others
     const second = try cq.timedWait(.fromSeconds(5));
     const third = try cq.timedWait(.fromSeconds(5));
     try std.testing.expect(
-        (second.? == &fast.c and third.? == &slow.c) or
-            (second.? == &slow.c and third.? == &fast.c),
+        (second == &fast.c and third == &slow.c) or
+            (second == &slow.c and third == &fast.c),
     );
-    try std.testing.expectEqual(null, try cq.wait());
+    try std.testing.expect(cq.isEmpty());
 }
 
 test "CompletionQueue: a notify that lands while an Async is unarmed is not lost (#673)" {
@@ -574,20 +633,20 @@ test "CompletionQueue: a notify that lands while an Async is unarmed is not lost
     defer cq.cancelAll(.discard);
 
     var mailbox = ev.Async.init();
-    cq.submit(&mailbox.c);
+    try cq.submit(&mailbox.c);
     mailbox.notify();
     const first = try cq.wait();
-    try std.testing.expectEqual(&mailbox.c, first.?);
+    try std.testing.expectEqual(&mailbox.c, first);
 
     // The handle is unarmed now. `notify` latches on the handle itself, and
     // the re-submit below picks the latch up through `Loop.add`. Handing the
     // same completion back is what makes this lossless: re-initialising the
     // handle here would zero the latch and drop this notify.
     mailbox.notify();
-    cq.submit(&mailbox.c);
+    try cq.submit(&mailbox.c);
 
     const second = try cq.timedWait(.fromSeconds(5));
-    try std.testing.expectEqual(&mailbox.c, second.?);
+    try std.testing.expectEqual(&mailbox.c, second);
 }
 
 test "CompletionQueue: cancel takes one operation out and leaves the rest armed" {
@@ -601,10 +660,10 @@ test "CompletionQueue: cancel takes one operation out and leaves the rest armed"
     var doomed = ev.Timer.init(.{ .duration = .fromSeconds(10) });
     var tail = ev.Timer.init(.{ .duration = .fromSeconds(10) });
     var keeper = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
-    cq.submit(&head.c);
-    cq.submit(&doomed.c);
-    cq.submit(&tail.c);
-    cq.submit(&keeper.c);
+    try cq.submit(&head.c);
+    try cq.submit(&doomed.c);
+    try cq.submit(&tail.c);
+    try cq.submit(&keeper.c);
 
     // Let `keeper` finish, so the cancel below has to find `doomed` in the
     // middle of a non-empty `pending` while `completed` is non-empty too.
@@ -618,7 +677,7 @@ test "CompletionQueue: cancel takes one operation out and leaves the rest armed"
 
     // `doomed` is out of the queue; everything else is where it was.
     const c = try cq.wait();
-    try std.testing.expectEqual(&keeper.c, c.?);
+    try std.testing.expectEqual(&keeper.c, c);
     try keeper.getResult();
     try std.testing.expect(cq.hasPending());
 
@@ -636,9 +695,9 @@ test "CompletionQueue: cancel of an operation that already finished keeps its re
     var first = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
     var middle = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
     var last = ev.Timer.init(.{ .duration = .fromMilliseconds(15) });
-    cq.submit(&first.c);
-    cq.submit(&middle.c);
-    cq.submit(&last.c);
+    try cq.submit(&first.c);
+    try cq.submit(&middle.c);
+    try cq.submit(&last.c);
 
     // Let all three finish into `completed` without taking any of them.
     var pause = ev.Timer.init(.{ .duration = .fromMilliseconds(80) });
@@ -652,10 +711,9 @@ test "CompletionQueue: cancel of an operation that already finished keeps its re
     try middle.getResult();
 
     const a = try cq.wait();
-    try std.testing.expectEqual(&first.c, a.?);
+    try std.testing.expectEqual(&first.c, a);
     const b = try cq.wait();
-    try std.testing.expectEqual(&last.c, b.?);
-    try std.testing.expectEqual(null, try cq.wait());
+    try std.testing.expectEqual(&last.c, b);
     try std.testing.expect(cq.isEmpty());
 }
 
@@ -667,9 +725,9 @@ test "CompletionQueue: cancel of an operation the queue already handed out" {
     defer cq.cancelAll(.discard);
 
     var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
-    cq.submit(&timer.c);
+    try cq.submit(&timer.c);
     const c = try cq.wait();
-    try std.testing.expectEqual(&timer.c, c.?);
+    try std.testing.expectEqual(&timer.c, c);
 
     // In neither queue any more: a no-op rather than a broken list walk.
     cq.cancel(&timer.c);
@@ -684,17 +742,17 @@ test "CompletionQueue: cancelAll(.keep) hands back what the operations returned"
     var cq = CompletionQueue.init();
 
     var slow: [3]ev.Timer = @splat(ev.Timer.init(.{ .duration = .fromSeconds(10) }));
-    for (&slow) |*t| cq.submit(&t.c);
+    for (&slow) |*t| try cq.submit(&t.c);
 
     cq.cancelAll(.keep);
     try std.testing.expect(!cq.hasPending());
 
     var seen: usize = 0;
-    while (try cq.wait()) |c| : (seen += 1) {
+    while (!cq.isEmpty()) : (seen += 1) {
+        const c = try cq.wait();
         try std.testing.expectError(error.Canceled, c.cast(ev.Timer).getResult());
     }
     try std.testing.expectEqual(3, seen);
-    try std.testing.expect(cq.isEmpty());
 }
 
 test "CompletionQueue: cancelAll(.discard) leaves the queue empty" {
@@ -705,8 +763,8 @@ test "CompletionQueue: cancelAll(.discard) leaves the queue empty" {
 
     var slow = ev.Timer.init(.{ .duration = .fromSeconds(10) });
     var done = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
-    cq.submit(&slow.c);
-    cq.submit(&done.c);
+    try cq.submit(&slow.c);
+    try cq.submit(&done.c);
 
     // Let the short one finish so a result is sitting in `completed` too.
     var pause = ev.Timer.init(.{ .duration = .fromMilliseconds(80) });
@@ -715,8 +773,107 @@ test "CompletionQueue: cancelAll(.discard) leaves the queue empty" {
 
     cq.cancelAll(.discard);
     try std.testing.expect(cq.isEmpty());
-    try std.testing.expectEqual(null, try cq.wait());
 
     // Calling it again with nothing left is fine.
     cq.cancelAll(.discard);
+}
+
+test "CompletionQueue: submit after close returns error.Closed" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    cq.close();
+
+    var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
+    try std.testing.expectError(error.Closed, cq.submit(&timer.c));
+
+    // The refused completion was left untouched: no ownership taken, nothing
+    // queued, free to go to another queue.
+    try std.testing.expectEqual(null, timer.c.group.owner);
+    try std.testing.expect(cq.isEmpty());
+}
+
+test "CompletionQueue: close hands out in-flight completions before error.Closed" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+
+    var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
+    try cq.submit(&timer.c);
+    cq.close();
+
+    // Closed but not drained: the wait still blocks for the in-flight
+    // operation and delivers it.
+    const c = try cq.timedWait(.fromSeconds(5));
+    try std.testing.expectEqual(&timer.c, c);
+    try timer.getResult();
+
+    try std.testing.expectError(error.Closed, cq.wait());
+}
+
+test "CompletionQueue: another task's submit satisfies a wait blocked on an empty queue" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancelAll(.discard);
+
+    const Producer = struct {
+        fn run(cq_: *CompletionQueue, timer: *ev.Timer) !void {
+            // Give the driver time to park on the empty queue first.
+            var pause = ev.Timer.init(.{ .duration = .fromMilliseconds(20) });
+            try common.waitForIo(&pause.c);
+            try cq_.submit(&timer.c);
+        }
+    };
+
+    // The timer outlives the producer task: it is handed to the driver, not
+    // kept in the producer's frame.
+    var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
+    var handle = try rt.spawn(Producer.run, .{ &cq, &timer });
+    defer handle.cancel();
+
+    // Empty and open: parks until the producer's operation completes.
+    const c = try cq.timedWait(.fromSeconds(5));
+    try std.testing.expectEqual(&timer.c, c);
+    try timer.getResult();
+    try handle.join();
+}
+
+test "CompletionQueue: canceling the waiting driver closes the queue and keeps results" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+
+    var slow = ev.Timer.init(.{ .duration = .fromSeconds(10) });
+    try cq.submit(&slow.c);
+
+    const Driver = struct {
+        fn run(cq_: *CompletionQueue) (Cancelable || Closeable)!void {
+            _ = try cq_.wait();
+        }
+    };
+
+    var handle = try rt.spawn(Driver.run, .{&cq});
+
+    // Let the driver park on the queue, then cancel it.
+    var pause = ev.Timer.init(.{ .duration = .fromMilliseconds(20) });
+    try common.waitForIo(&pause.c);
+    handle.cancel();
+
+    // The canceled wait closed the queue and canceled every operation with
+    // its result kept, so producers are turned away and the cleanup path can
+    // take the results without blocking.
+    var other = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
+    try std.testing.expectError(error.Closed, cq.submit(&other.c));
+    try std.testing.expect(!cq.hasPending());
+
+    const c = cq.next().?;
+    try std.testing.expectEqual(&slow.c, c);
+    try std.testing.expectError(error.Canceled, slow.getResult());
+    try std.testing.expect(cq.isEmpty());
+    try std.testing.expectError(error.Closed, cq.wait());
 }

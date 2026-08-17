@@ -36,6 +36,7 @@ pub const TaskLocal = @import("task.zig").TaskLocal;
 const common = @import("common.zig");
 pub const Cancelable = common.Cancelable;
 pub const Timeoutable = common.Timeoutable;
+pub const Closeable = common.Closeable;
 pub const blockInPlace = common.blockInPlace;
 
 pub const time = @import("time.zig"); // TODO: make non-pub
