@@ -11,14 +11,15 @@ const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const select = @import("../select.zig").select;
 const common = @import("../common.zig");
 const Waiter = common.Waiter;
+const Closeable = common.Closeable;
 const NO_WINNER = common.NO_WINNER;
 const Mutex = @import("Mutex.zig");
 
 /// Specifies how a channel should be closed.
 pub const CloseMode = enum {
-    /// Close gracefully - allows receivers to drain buffered values before receiving error.ChannelClosed
+    /// Close gracefully - allows receivers to drain buffered values before receiving error.Closed
     graceful,
-    /// Close immediately - clears all buffered items so receivers get error.ChannelClosed right away
+    /// Close immediately - clears all buffered items so receivers get error.Closed right away
     immediate,
 };
 
@@ -102,7 +103,7 @@ const ChannelImpl = struct {
 
         const is_closed = self.closed;
         self.mutex.unlock();
-        return if (is_closed) error.ChannelClosed else error.ChannelEmpty;
+        return if (is_closed) error.Closed else error.WouldBlock;
     }
 
     fn takeItemAndWakeSender(self: *Self, elem_ptr: [*]u8) void {
@@ -154,7 +155,7 @@ const ChannelImpl = struct {
 
         if (self.closed) {
             self.mutex.unlock();
-            return error.ChannelClosed;
+            return error.Closed;
         }
 
         while (self.receiver_queue.pop()) |node| {
@@ -170,7 +171,7 @@ const ChannelImpl = struct {
 
         if (self.count == self.capacity) {
             self.mutex.unlock();
-            return error.ChannelFull;
+            return error.WouldBlock;
         }
 
         @memcpy(self.elemPtr(self.tail)[0..self.elem_size], elem_ptr[0..self.elem_size]);
@@ -274,12 +275,12 @@ const AsyncSendImpl = struct {
         return !waiter.didWin();
     }
 
-    pub fn getResult(self: *const SendSelf, ctx: *WaitContext) error{ChannelClosed}!void {
+    pub fn getResult(self: *const SendSelf, ctx: *WaitContext) Closeable!void {
         if (ctx.succeeded) {
             return {};
         }
         std.debug.assert(self.channel.closed);
-        return error.ChannelClosed;
+        return error.Closed;
     }
 };
 
@@ -342,7 +343,7 @@ const AsyncReceiveImpl = struct {
         return !waiter.didWin();
     }
 
-    pub fn getResult(self: *const RecvSelf, ctx: *WaitContext) error{ChannelClosed}!void {
+    pub fn getResult(self: *const RecvSelf, ctx: *WaitContext) Closeable!void {
         // Result already set by direct transfer or fast path
         if (ctx.result_set) {
             return;
@@ -358,7 +359,7 @@ const AsyncReceiveImpl = struct {
 
         std.debug.assert(self.channel.closed);
         self.channel.mutex.unlock();
-        return error.ChannelClosed;
+        return error.Closed;
     }
 };
 
@@ -376,7 +377,7 @@ const AsyncReceiveImpl = struct {
 /// proceed.
 ///
 /// Channels can be closed to signal that no more values will be sent. After closing,
-/// receivers can drain any remaining buffered values before receiving `error.ChannelClosed`.
+/// receivers can drain any remaining buffered values before receiving `error.Closed`.
 ///
 /// ## Example
 ///
@@ -391,7 +392,7 @@ const AsyncReceiveImpl = struct {
 ///     while (ch.receive()) |value| {
 ///         std.debug.print("Received: {}\n", .{value});
 ///     } else |err| switch (err) {
-///         error.ChannelClosed => {}, // Normal shutdown
+///         error.Closed => {}, // Normal shutdown
 ///         else => return err,
 ///     }
 /// }
@@ -436,7 +437,7 @@ pub fn Channel(comptime T: type) type {
         /// Suspends the current task if the channel is empty until a value is sent.
         /// Values are received in FIFO order.
         ///
-        /// Returns `error.ChannelClosed` if the channel is closed and empty.
+        /// Returns `error.Closed` if the channel is closed and empty.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn receive(self: *Self) !T {
             var result: T = undefined;
@@ -448,8 +449,8 @@ pub fn Channel(comptime T: type) type {
         ///
         /// Returns immediately with a value if available, otherwise returns an error.
         ///
-        /// Returns `error.ChannelEmpty` if the channel is empty and no sender waiting.
-        /// Returns `error.ChannelClosed` if the channel is closed and empty.
+        /// Returns `error.WouldBlock` if the channel is empty and no sender waiting.
+        /// Returns `error.Closed` if the channel is closed and empty.
         pub fn tryReceive(self: *Self) !T {
             var result: T = undefined;
             try self.impl.tryReceive(std.mem.asBytes(&result).ptr);
@@ -460,7 +461,7 @@ pub fn Channel(comptime T: type) type {
         ///
         /// Suspends the current task if the channel is full until space becomes available.
         ///
-        /// Returns `error.ChannelClosed` if the channel is closed.
+        /// Returns `error.Closed` if the channel is closed.
         /// Returns `error.Canceled` if the task is cancelled while waiting.
         pub fn send(self: *Self, item: T) !void {
             return self.impl.send(std.mem.asBytes(&item).ptr);
@@ -470,21 +471,21 @@ pub fn Channel(comptime T: type) type {
         ///
         /// Returns immediately with success if space is available, otherwise returns an error.
         ///
-        /// Returns `error.ChannelFull` if the channel is full.
-        /// Returns `error.ChannelClosed` if the channel is closed.
+        /// Returns `error.WouldBlock` if the channel is full.
+        /// Returns `error.Closed` if the channel is closed.
         pub fn trySend(self: *Self, item: T) !void {
             return self.impl.trySend(std.mem.asBytes(&item).ptr);
         }
 
         /// Closes the channel.
         ///
-        /// After closing, all send operations will fail with `error.ChannelClosed`.
+        /// After closing, all send operations will fail with `error.Closed`.
         /// Receive operations can still drain any buffered values before returning
-        /// `error.ChannelClosed`.
+        /// `error.Closed`.
         ///
         /// Use `CloseMode.graceful` to allow receivers to drain buffered values.
         /// Use `CloseMode.immediate` to clear all buffered items immediately,
-        /// causing receivers to get `error.ChannelClosed` right away.
+        /// causing receivers to get `error.Closed` right away.
         pub fn close(self: *Self, mode: CloseMode) void {
             self.impl.close(mode);
         }
@@ -544,7 +545,7 @@ pub fn AsyncReceive(comptime T: type) type {
 
         const Self = @This();
 
-        pub const Result = error{ChannelClosed}!T;
+        pub const Result = Closeable!T;
 
         pub const WaitContext = struct {
             impl_ctx: AsyncReceiveImpl.WaitContext = .{ .result_ptr = undefined },
@@ -597,7 +598,7 @@ pub fn AsyncSend(comptime T: type) type {
 
         const Self = @This();
 
-        pub const Result = error{ChannelClosed}!void;
+        pub const Result = Closeable!void;
 
         pub const WaitContext = struct {
             impl_ctx: AsyncSendImpl.WaitContext = .{ .item_ptr = undefined },
@@ -678,7 +679,7 @@ test "Channel: trySend and tryReceive" {
         fn testTry(ch: *Channel(u32)) !void {
             // tryReceive on empty channel should fail
             const empty_err = ch.tryReceive();
-            try std.testing.expectError(error.ChannelEmpty, empty_err);
+            try std.testing.expectError(error.WouldBlock, empty_err);
 
             // trySend should succeed
             try ch.trySend(1);
@@ -686,7 +687,7 @@ test "Channel: trySend and tryReceive" {
 
             // trySend on full channel should fail
             const full_err = ch.trySend(3);
-            try std.testing.expectError(error.ChannelFull, full_err);
+            try std.testing.expectError(error.WouldBlock, full_err);
 
             // tryReceive should succeed
             const val1 = try ch.tryReceive();
@@ -697,7 +698,7 @@ test "Channel: trySend and tryReceive" {
 
             // tryReceive on empty channel should fail again
             const empty_err2 = ch.tryReceive();
-            try std.testing.expectError(error.ChannelEmpty, empty_err2);
+            try std.testing.expectError(error.WouldBlock, empty_err2);
         }
     };
 
@@ -830,7 +831,7 @@ test "Channel: close graceful" {
             try yield(); // Let producer finish
             results[0] = ch.receive() catch null;
             results[1] = ch.receive() catch null;
-            results[2] = ch.receive() catch null; // Should fail with ChannelClosed
+            results[2] = ch.receive() catch null; // Should fail with Closed
         }
     };
 
@@ -897,10 +898,10 @@ test "Channel: send on closed channel" {
             ch.close(.graceful);
 
             const put_err = ch.send(1);
-            try std.testing.expectError(error.ChannelClosed, put_err);
+            try std.testing.expectError(error.Closed, put_err);
 
             const tryput_err = ch.trySend(2);
-            try std.testing.expectError(error.ChannelClosed, tryput_err);
+            try std.testing.expectError(error.Closed, tryput_err);
         }
     };
 
@@ -1055,7 +1056,7 @@ test "Channel: asyncReceive with select - closed channel" {
             const result = try select(.{ .recv = &recv });
             switch (result) {
                 .recv => |val| {
-                    try std.testing.expectError(error.ChannelClosed, val);
+                    try std.testing.expectError(error.Closed, val);
                 },
             }
         }
@@ -1145,7 +1146,7 @@ test "Channel: asyncSend with select - closed channel" {
             const result = try select(.{ .send = &send_op });
             switch (result) {
                 .send => |res| {
-                    try std.testing.expectError(error.ChannelClosed, res);
+                    try std.testing.expectError(error.Closed, res);
                 },
             }
         }
@@ -1302,7 +1303,7 @@ test "Channel: unbuffered - trySend fails without receiver" {
 
     // trySend should fail immediately - no buffer space and no receiver
     const err = channel.trySend(42);
-    try std.testing.expectError(error.ChannelFull, err);
+    try std.testing.expectError(error.WouldBlock, err);
 }
 
 test "Channel: unbuffered - tryReceive fails without sender" {
@@ -1310,7 +1311,7 @@ test "Channel: unbuffered - tryReceive fails without sender" {
 
     // tryReceive should fail immediately - no buffer and no sender
     const err = channel.tryReceive();
-    try std.testing.expectError(error.ChannelEmpty, err);
+    try std.testing.expectError(error.WouldBlock, err);
 }
 
 test "Channel: unbuffered - sender blocks until receiver ready" {
@@ -1443,7 +1444,7 @@ test "Channel: unbuffered - close wakes blocked sender" {
     const TestFn = struct {
         fn sender(ch: *Channel(u32), got_closed: *bool) !void {
             ch.send(42) catch |err| {
-                got_closed.* = (err == error.ChannelClosed);
+                got_closed.* = (err == error.Closed);
                 return;
             };
         }
@@ -1478,7 +1479,7 @@ test "Channel: unbuffered - close wakes blocked receiver" {
     const TestFn = struct {
         fn receiver(ch: *Channel(u32), got_error: *bool) !void {
             _ = ch.receive() catch |err| {
-                got_error.* = (err == error.ChannelClosed);
+                got_error.* = (err == error.Closed);
                 return;
             };
         }
@@ -1548,7 +1549,7 @@ test "Channel: close wakes blocked select receiver" {
             var recv = ch.asyncReceive();
             const result = try select(.{ .recv = &recv });
             switch (result) {
-                .recv => |value| try std.testing.expectError(error.ChannelClosed, value),
+                .recv => |value| try std.testing.expectError(error.Closed, value),
             }
         }
 
@@ -1580,7 +1581,7 @@ test "Channel: close wakes blocked select sender" {
             var send = ch.asyncSend(42);
             const result = try select(.{ .send = &send });
             switch (result) {
-                .send => |send_result| try std.testing.expectError(error.ChannelClosed, send_result),
+                .send => |send_result| try std.testing.expectError(error.Closed, send_result),
             }
         }
 
@@ -1624,7 +1625,7 @@ test "Channel: close classifies select waiters before signaling" {
     try std.testing.expectEqual(0, claimed_receive_winner.load(.acquire));
     try std.testing.expect(!claimed_receive.asyncCancelWait(&claimed_receive_waiter, &claimed_receive_ctx));
     try std.testing.expectEqual(1, Helpers.notifyState(&claimed_receive_parent));
-    try std.testing.expectError(error.ChannelClosed, claimed_receive.getResult(&claimed_receive_ctx));
+    try std.testing.expectError(error.Closed, claimed_receive.getResult(&claimed_receive_ctx));
 
     // Exercise the same committed-signal handshake for a pending send.
     var claimed_send_channel = Channel(u32).init(&.{});
@@ -1639,7 +1640,7 @@ test "Channel: close classifies select waiters before signaling" {
     try std.testing.expectEqual(0, claimed_send_winner.load(.acquire));
     try std.testing.expect(!claimed_send.asyncCancelWait(&claimed_send_waiter, &claimed_send_ctx));
     try std.testing.expectEqual(1, Helpers.notifyState(&claimed_send_parent));
-    try std.testing.expectError(error.ChannelClosed, claimed_send.getResult(&claimed_send_ctx));
+    try std.testing.expectError(error.Closed, claimed_send.getResult(&claimed_send_ctx));
 
     // Simulate another select arm having already won before close removes a
     // pending receive. The losing waiter must be discarded without a signal.
