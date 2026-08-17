@@ -2562,7 +2562,16 @@ test "Runtime.io / Runtime.fromIo round-trip" {
 
     const value = rt.io();
     try std.testing.expect(value.vtable == &vtable);
-    try std.testing.expectEqual(rt, Runtime.fromIo(value));
+    try std.testing.expectEqual(rt, Runtime.fromIo(value).?);
+}
+
+test "Runtime.fromIo answers null for a std.Io from another backend" {
+    // Same contents, different address: identity of the vtable pointer is
+    // what marks a zio-backed `std.Io`, not what the table contains. A `var`
+    // copy guarantees storage distinct from the real vtable's.
+    var foreign_vtable = vtable;
+    const foreign: Io = .{ .userdata = null, .vtable = &foreign_vtable };
+    try std.testing.expectEqual(null, Runtime.fromIo(foreign));
 }
 
 test "io: async/await returns task result" {

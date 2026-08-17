@@ -1230,7 +1230,7 @@ pub const Stream = struct {
         }
 
         pub fn fromStd(stream: std.Io.net.Stream, io: std.Io, buffer: []u8) Reader {
-            _ = Runtime.fromIo(io);
+            std.debug.assert(Runtime.fromIo(io) != null); // adopting the handle needs a zio-backed std.Io
             return init(stdIoHandleToZio(stream.socket.handle), buffer);
         }
 
@@ -1291,7 +1291,7 @@ pub const Stream = struct {
         }
 
         pub fn fromStd(stream: std.Io.net.Stream, io: std.Io, buffer: []u8) Writer {
-            _ = Runtime.fromIo(io);
+            std.debug.assert(Runtime.fromIo(io) != null); // adopting the handle needs a zio-backed std.Io
             return init(stdIoHandleToZio(stream.socket.handle), buffer);
         }
 
