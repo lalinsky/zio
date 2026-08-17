@@ -2574,6 +2574,12 @@ test "Runtime.fromIo answers null for a std.Io from another backend" {
     try std.testing.expectEqual(null, Runtime.fromIo(foreign));
 }
 
+test "Runtime.fromIo answers null for debug_io" {
+    // zio's own vtable, but no runtime behind it: the userdata check is what
+    // stops this from being cast into a *Runtime.
+    try std.testing.expectEqual(null, Runtime.fromIo(debug_io));
+}
+
 test "io: async/await returns task result" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();

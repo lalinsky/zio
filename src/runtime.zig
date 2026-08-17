@@ -1887,7 +1887,9 @@ pub const Runtime = struct {
     /// paths.
     pub fn fromIo(value: std.Io) ?*Runtime {
         const io_impl = @import("io.zig");
-        if (value.vtable != &io_impl.vtable) return null;
+        // The vtable alone is not enough: `debug_io` carries zio's vtable
+        // with no runtime behind it.
+        if (value.vtable != &io_impl.vtable or value.userdata == null) return null;
         return io_impl.toRuntime(value);
     }
 };
