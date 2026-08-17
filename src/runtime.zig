@@ -1879,9 +1879,18 @@ pub const Runtime = struct {
         return @import("io.zig").fromRuntime(self);
     }
 
-    /// Recover the `*Runtime` from a `std.Io` produced by `Runtime.io()`.
-    pub fn fromIo(value: std.Io) *Runtime {
-        return @import("io.zig").toRuntime(value);
+    /// Recover the `*Runtime` from a `std.Io` produced by `Runtime.io()`,
+    /// or null when it is backed by some other implementation. The vtable
+    /// pointer is the discriminator: every zio-backed `std.Io` shares the
+    /// one static vtable, and no other backend can carry its address. This
+    /// is how a library taking `std.Io` detects zio and unlocks zio-native
+    /// paths.
+    pub fn fromIo(value: std.Io) ?*Runtime {
+        const io_impl = @import("io.zig");
+        // The vtable alone is not enough: `debug_io` carries zio's vtable
+        // with no runtime behind it.
+        if (value.vtable != &io_impl.vtable or value.userdata == null) return null;
+        return io_impl.toRuntime(value);
     }
 };
 
