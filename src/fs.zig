@@ -826,41 +826,75 @@ pub const File = struct {
         return .{ .fd = fd };
     }
 
+    // Prep functions: fill an ev op with this file's handle and routing state
+    // without submitting it. The op is inert until handed to the loop
+    // (`waitForIo`, `CompletionQueue.submit`, `ev.Group.add`) and safe to move
+    // around until then. The buffer and its iovec storage must stay alive
+    // until the operation completes. The blocking methods are built on these,
+    // so there is a single construction point per operation.
+
+    /// Fill `op` with a positional read into `buf` at `offset`.
+    pub fn prepRead(self: File, op: *ev.FileRead, buf: ev.ReadBuf, offset: u64) void {
+        op.* = ev.FileRead.init(self.fd, buf, offset);
+    }
+
+    /// Fill `op` with a positional write of `buf` at `offset`.
+    pub fn prepWrite(self: File, op: *ev.FileWrite, buf: ev.WriteBuf, offset: u64) void {
+        op.* = ev.FileWrite.init(self.fd, buf, offset);
+    }
+
+    /// Fill `op` with a streaming read at the current file position. Carries
+    /// this file's `pollable` routing (event loop vs thread pool).
+    pub fn prepReadStreaming(self: File, op: *ev.FileReadStreaming, buf: ev.ReadBuf) void {
+        op.* = ev.FileReadStreaming.init(self.fd, buf);
+        op.pollable = self.pollable;
+    }
+
+    /// Fill `op` with a streaming write at the current file position. Carries
+    /// this file's `pollable` routing (event loop vs thread pool).
+    pub fn prepWriteStreaming(self: File, op: *ev.FileWriteStreaming, buf: ev.WriteBuf) void {
+        op.* = ev.FileWriteStreaming.init(self.fd, buf);
+        op.pollable = self.pollable;
+    }
+
+    /// Fill `op` with a stat of this file.
+    pub fn prepStat(self: File, op: *ev.FileStat) void {
+        op.* = ev.FileStat.init(self.fd, null, .{});
+    }
+
+    /// Fill `op` with a sync of this file per `flags`.
+    pub fn prepSync(self: File, op: *ev.FileSync, flags: os.fs.FileSyncFlags) void {
+        op.* = ev.FileSync.init(self.fd, flags);
+    }
+
     /// Read from file into a single slice.
     pub fn read(self: File, buffer: []u8, offset: u64) ReadError!usize {
         var storage: [1]os.iovec = undefined;
-        var op = ev.FileRead.init(self.fd, .fromSlice(buffer, &storage), offset);
-        try waitForIo(&op.c);
-        return try op.getResult();
+        return self.readBuf(.fromSlice(buffer, &storage), offset);
     }
 
     /// Write to file from a single slice.
     pub fn write(self: File, data: []const u8, offset: u64) WriteError!usize {
         var storage: [1]os.iovec_const = undefined;
-        var op = ev.FileWrite.init(self.fd, .fromSlice(data, &storage), offset);
-        try waitForIo(&op.c);
-        return try op.getResult();
+        return self.writeBuf(.fromSlice(data, &storage), offset);
     }
 
     /// Read from file into multiple slices (vectored read).
     pub fn readVec(self: File, slices: []const []u8, offset: u64) ReadError!usize {
         var storage: [max_vecs]os.iovec = undefined;
-        var op = ev.FileRead.init(self.fd, ev.ReadBuf.fromSlices(slices, &storage), offset);
-        try waitForIo(&op.c);
-        return try op.getResult();
+        return self.readBuf(.fromSlices(slices, &storage), offset);
     }
 
     /// Write to file from multiple slices (vectored write).
     pub fn writeVec(self: File, slices: []const []const u8, offset: u64) WriteError!usize {
         var storage: [max_vecs]os.iovec_const = undefined;
-        var op = ev.FileWrite.init(self.fd, ev.WriteBuf.fromSlices(slices, &storage), offset);
-        try waitForIo(&op.c);
-        return try op.getResult();
+        return self.writeBuf(.fromSlices(slices, &storage), offset);
     }
 
     /// Read from file using ReadBuf (vectored read).
     pub fn readBuf(self: File, buf: ev.ReadBuf, offset: u64) ReadError!usize {
-        var op = ev.FileRead.init(self.fd, buf, offset);
+        var op: ev.FileRead = undefined;
+        self.prepRead(&op, buf, offset);
         try waitForIo(&op.c);
         return try op.getResult();
     }
@@ -870,23 +904,24 @@ pub const File = struct {
 
     /// Read from file at its current position (streaming), no timeout.
     pub fn readStreaming(self: File, buf: ev.ReadBuf) ReadStreamingError!usize {
-        var op = ev.FileReadStreaming.init(self.fd, buf);
-        op.pollable = self.pollable;
+        var op: ev.FileReadStreaming = undefined;
+        self.prepReadStreaming(&op, buf);
         try waitForIo(&op.c);
         return try op.getResult();
     }
 
     /// Read from file at its current position (streaming), with timeout.
     pub fn readStreamingTimeout(self: File, buf: ev.ReadBuf, timeout: Timeout) ReadStreamingTimeoutError!usize {
-        var op = ev.FileReadStreaming.init(self.fd, buf);
-        op.pollable = self.pollable;
+        var op: ev.FileReadStreaming = undefined;
+        self.prepReadStreaming(&op, buf);
         try timedWaitForIo(&op.c, timeout);
         return try op.getResult();
     }
 
     /// Write to file using WriteBuf (vectored write).
     pub fn writeBuf(self: File, buf: ev.WriteBuf, offset: u64) WriteError!usize {
-        var op = ev.FileWrite.init(self.fd, buf, offset);
+        var op: ev.FileWrite = undefined;
+        self.prepWrite(&op, buf, offset);
         try waitForIo(&op.c);
         return try op.getResult();
     }
@@ -896,16 +931,16 @@ pub const File = struct {
 
     /// Write to file at its current position (streaming), no timeout.
     pub fn writeStreaming(self: File, buf: ev.WriteBuf) WriteStreamingError!usize {
-        var op = ev.FileWriteStreaming.init(self.fd, buf);
-        op.pollable = self.pollable;
+        var op: ev.FileWriteStreaming = undefined;
+        self.prepWriteStreaming(&op, buf);
         try waitForIo(&op.c);
         return try op.getResult();
     }
 
     /// Write to file at its current position (streaming), with timeout.
     pub fn writeStreamingTimeout(self: File, buf: ev.WriteBuf, timeout: Timeout) WriteStreamingTimeoutError!usize {
-        var op = ev.FileWriteStreaming.init(self.fd, buf);
-        op.pollable = self.pollable;
+        var op: ev.FileWriteStreaming = undefined;
+        self.prepWriteStreaming(&op, buf);
         try timedWaitForIo(&op.c, timeout);
         return try op.getResult();
     }
@@ -919,7 +954,8 @@ pub const File = struct {
     pub const StatError = os.fs.FileStatError || Cancelable;
 
     pub fn stat(self: File) StatError!os.fs.FileStatInfo {
-        var op = ev.FileStat.init(self.fd, null, .{});
+        var op: ev.FileStat = undefined;
+        self.prepStat(&op);
         try waitForIo(&op.c);
         return try op.getResult();
     }
@@ -927,7 +963,8 @@ pub const File = struct {
     pub const SyncError = os.fs.FileSyncError || Cancelable;
 
     pub fn sync(self: File, flags: os.fs.FileSyncFlags) SyncError!void {
-        var op = ev.FileSync.init(self.fd, flags);
+        var op: ev.FileSync = undefined;
+        self.prepSync(&op, flags);
         try waitForIo(&op.c);
         try op.getResult();
     }
@@ -1384,6 +1421,63 @@ test "File: basic read and write" {
     try std.testing.expectEqualStrings(write_data, buffer[0..bytes_read]);
     read_file.close();
 
+    try dir.deleteFile(file_path);
+}
+
+test "File: prep functions drive concurrent reads through a CompletionQueue" {
+    const CompletionQueue = @import("completion_queue.zig").CompletionQueue;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+    const file_path = "test_file_prep_cq.txt";
+    var file = try dir.createFile(file_path, .{ .read = true });
+    try std.testing.expectEqual(16, try file.write("abcdefghijklmnop", 0));
+
+    var cq = CompletionQueue.init();
+    defer cq.cancelAll(.discard);
+
+    var bufs: [4][4]u8 = undefined;
+    var storage: [4][1]os.iovec = undefined;
+    var ops: [4]ev.FileRead = undefined;
+    for (&ops, &bufs, &storage, 0..) |*op, *buf, *iov, i| {
+        file.prepRead(op, .fromSlice(buf, iov), i * 4);
+        try cq.submit(&op.c);
+    }
+
+    var seen: usize = 0;
+    while (!cq.isEmpty()) : (seen += 1) {
+        const c = try cq.wait();
+        try std.testing.expectEqual(4, try c.cast(ev.FileRead).getResult());
+    }
+    try std.testing.expectEqual(4, seen);
+    try std.testing.expectEqualStrings("abcd", &bufs[0]);
+    try std.testing.expectEqualStrings("efgh", &bufs[1]);
+    try std.testing.expectEqualStrings("ijkl", &bufs[2]);
+    try std.testing.expectEqualStrings("mnop", &bufs[3]);
+
+    file.close();
+    try dir.deleteFile(file_path);
+}
+
+test "File: streaming prep carries the file's pollable routing" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+    const file_path = "test_file_prep_streaming.txt";
+    var file = try dir.createFile(file_path, .{});
+
+    var iov: [1]os.iovec_const = undefined;
+    var op: ev.FileWriteStreaming = undefined;
+    file.prepWriteStreaming(&op, .fromSlice("x", &iov));
+    try std.testing.expectEqual(file.pollable, op.pollable);
+
+    try waitForIo(&op.c);
+    try std.testing.expectEqual(1, try op.getResult());
+
+    file.close();
     try dir.deleteFile(file_path);
 }
 
