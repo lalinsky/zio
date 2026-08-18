@@ -7,8 +7,8 @@ All notable changes to this project will be documented in this file.
 - Sleep, select timeouts, and `AutoCancel` now arm on a dedicated timer executor
   thread, not on the sleeper's home loop. `tick_target_ns` only forces a poll
   once `coro.step()` returns, so a task that never waits used to freeze every
-  timer on that executor; the idle executor sat on a different kqueue and had
-  nothing to fire. The extra thread is not counted in `exact(N)` and is not a
+  timer on that executor; the idle executor sat on a different event loop and
+  had nothing to fire. The extra thread is not counted in `exact(N)` and is not a
   steal victim. A timeout wake runs the waiter there so it is not queued behind
   a hog (including with `enable_task_migration = false`). Builds compiled
   without task-migration support keep the old home-loop path for the wake.
