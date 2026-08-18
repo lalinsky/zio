@@ -1396,6 +1396,8 @@ pub fn now() Timestamp {
 
 /// Sleep for a specified duration.
 pub fn sleep(duration: Duration) Cancelable!void {
+    // Nothing to time: don't arm a loop timer just to yield.
+    if (duration.value == 0) return yield();
     var waiter: Waiter = .init();
     // Nothing ever signals this waiter, so the timeout firing is the sleep
     // finishing.
