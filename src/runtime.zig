@@ -143,6 +143,9 @@ pub const RuntimeOptions = struct {
     /// Total number of executors to run.
     /// When enable_main_executor is true (default), this includes the main executor on the calling thread.
     /// When enable_main_executor is false, all executors run as background worker threads.
+    /// A multi-threaded runtime also starts one extra timer thread, not counted
+    /// here and not a steal victim, so sleeps still fire when every worker is
+    /// inside a task that never returns to the run loop.
     executors: ExecutorCount = .exact(1),
     /// When true (default), the calling thread becomes the main executor (executor 0).
     /// Set to false when creating runtimes in background threads that should not block
@@ -391,6 +394,12 @@ const idle_mask_init: IdleMask = if (zio_options.task_migration) .init(0) else {
 pub const Executor = struct {
     pub const max_executors = std.math.maxInt(ExecutorId) + 1;
 
+    /// Worker executors are counted in `Runtime.executors` and steal from each
+    /// other. The timer executor is an extra OS thread that is not in that
+    /// list: it polls timeouts so they still fire when every worker is inside
+    /// a task that never returns to `Executor.run`.
+    pub const Kind = enum { worker, timer };
+
     const no_steal_hint = std.math.maxInt(u32);
 
     id: ExecutorId,
@@ -494,6 +503,14 @@ pub const Executor = struct {
     // user log callbacks and the wake path's "inside the run loop" test.
     // Owning thread only, so no atomics.
     no_suspend: u32 = 0,
+
+    kind: Kind = .worker,
+
+    /// Set around a timeout callback so `scheduleTask` runs the waiter on this
+    /// thread instead of queueing it on a worker that may be wedged. Must not
+    /// stay set across an ordinary signal: a sleeper running here that wakes
+    /// another task would otherwise pull that waiter onto the timer thread.
+    timer_wake: bool = false,
 
     // Executor dedicated to this thread. Written once on init, never updated.
     pub threadlocal var current_DO_NOT_ACCESS_DIRECTLY: ?*Executor = null;
@@ -809,6 +826,17 @@ pub const Executor = struct {
     /// then idleness is proven and the steal is also what makes the park's
     /// wake protocol sound (see park).
     fn parkAndSearch(self: *Executor, check_ready: bool) !void {
+        // The timer executor is not in idle_mask / executors.items. A steal
+        // here would import a never-yielding task onto the only loop that
+        // still polls timeouts; publishing an idle bit would let claimAndWake
+        // index past executors.items.
+        if (self.kind == .timer) {
+            self.bump("parks_full", 1);
+            try self.loop.poll(.max);
+            self.drainDispatched();
+            return;
+        }
+
         if (comptime !zio_options.task_migration) {
             self.bump("parks_full", 1);
             try self.loop.poll(.max);
@@ -932,7 +960,9 @@ pub const Executor = struct {
             // take only a fair ~1/n_exec slice to avoid monopolizing it. With
             // migration off it is this executor's own private queue and we are
             // its sole drainer, so take as much as fits (refill caps it).
-            const batch = if (self.runtime.options.enable_task_migration)
+            const batch = if (self.kind == .timer)
+                pending
+            else if (self.runtime.options.enable_task_migration)
                 pending / @max(self.runtime.executors.items.len, 1) + 1
             else
                 pending;
@@ -948,6 +978,7 @@ pub const Executor = struct {
     /// before the doze has elapsed, since migrating a task also re-homes its
     /// I/O and the home loop usually hands work back within doze_wait.
     fn stealWork(self: *Executor) bool {
+        if (self.kind == .timer) return false;
         if (!self.runtime.stealingActive()) return false;
         const executors = self.runtime.executors.items;
         if (executors.len <= 1) return false;
@@ -1022,6 +1053,7 @@ pub const Executor = struct {
         // still announce, since the waker may keep the executor busy.
         const was_empty = self.run_queue.push(&task.awaitable.wait_node);
         if (self.draining_wakes) return; // one batched announce after the drain
+        if (self.kind == .timer) return;
         if (!was_empty or self.current_task != null) {
             self.runtime.armSearcher(self.id);
         }
@@ -1056,8 +1088,10 @@ pub const Executor = struct {
         if (count > 0) {
             self.bump("drain_batches", 1);
             self.bump("drain_woken", count);
-            const claims = self.runtime.batchWakeSleepers(self.run_queue.len(), self.id);
-            self.bump("batch_wake_claims", claims);
+            if (self.kind != .timer) {
+                const claims = self.runtime.batchWakeSleepers(self.run_queue.len(), self.id);
+                self.bump("batch_wake_claims", claims);
+            }
         }
     }
 
@@ -1122,6 +1156,21 @@ pub const Executor = struct {
                 // Schedule locally
                 current_exec.scheduleTaskLocal(task);
                 return;
+            }
+            // A timeout that fired on the timer executor must run the waiter
+            // here. The home executor may be inside a task that never returns
+            // to Executor.run, so scheduleTaskRemote would only queue the
+            // sleeper behind a hog. Restricted to `timer_wake` so a signal
+            // from a sleeper that is already running here does not pull
+            // unrelated waiters onto the timer thread. Re-homing the waiter
+            // needs the compile-time parent_context update; without
+            // task-migration the waiter stays pinned and this degrades to
+            // the remote path below.
+            if (comptime zio_options.task_migration) {
+                if (current_exec.kind == .timer and current_exec.timer_wake) {
+                    current_exec.scheduleTaskLocal(task);
+                    return;
+                }
             }
             // Tasks spawned from an executor of this runtime are homed there and
             // take the local branch above; this remote path serves foreign-thread
@@ -1250,6 +1299,23 @@ pub fn getWaitableTaskOrNull() ?*AnyTask {
     const exec = getCurrentExecutorOrNull() orelse return null;
     if (exec.no_suspend != 0) return null;
     return exec.current_task;
+}
+
+/// Mark the current executor so `scheduleTask` runs a timer-expired waiter
+/// on this thread. Pair with `endTimerWake`.
+pub fn beginTimerWake() void {
+    if (getCurrentExecutorOrNull()) |exec| exec.timer_wake = true;
+}
+
+pub fn endTimerWake() void {
+    if (getCurrentExecutorOrNull()) |exec| exec.timer_wake = false;
+}
+
+/// Wake `task` as a timer expiry. See `beginTimerWake`.
+pub fn wakeFromTimer(task: *AnyTask) void {
+    beginTimerWake();
+    defer endTimerWake();
+    task.wake();
 }
 
 /// Enter a no-suspend region on this thread.
@@ -1434,6 +1500,10 @@ pub const Runtime = struct {
     teardown: os.ResetEvent = .init(),
     metrics_monitor: ?std.Thread = null,
     metrics_stop: std.atomic.Value(u32) = .init(0),
+    /// Extra executor thread that owns sleep/select/AutoCancel timers. Not
+    /// counted in `executors` and not a steal victim, so `exact(N)` still
+    /// means N runnable workers. Null in `single_threaded` builds.
+    timer_executor: ?*Executor = null,
     own_self: bool = false,
 
     resolver: ?dns.Resolver = null,
@@ -1498,7 +1568,7 @@ pub const Runtime = struct {
         }
         errdefer if (main_executor_initialized) self.main_executor.deinit();
 
-        try self.workers.ensureTotalCapacity(allocator, num_workers);
+        try self.workers.ensureTotalCapacity(allocator, num_workers + @intFromBool(!builtin.single_threaded));
 
         errdefer self.shutdownWorkers();
 
@@ -1509,7 +1579,7 @@ pub const Runtime = struct {
                 const worker = self.workers.addOneAssumeCapacity();
                 errdefer _ = self.workers.pop();
                 worker.* = .{};
-                worker.thread = try std.Thread.spawn(.{}, runWorker, .{ self, worker, @as(ExecutorId, @intCast(i + worker_id_start)) });
+                worker.thread = try std.Thread.spawn(.{}, runWorker, .{ self, worker, @as(ExecutorId, @intCast(i + worker_id_start)), Executor.Kind.worker });
             }
 
             for (self.workers.items, 0..) |*worker, i| {
@@ -1523,6 +1593,23 @@ pub const Runtime = struct {
             // With no workers there is nobody to steal from or to; leaving this
             // false lets single-executor runtimes skip the steal machinery.
             if (num_workers > 0) self.executors_stealable.store(true, .release);
+
+            // Dedicated timer executor: polls timeouts even when every worker
+            // is inside a task that never returns to Executor.run. Kept out of
+            // executors.items so spawn round-robin and steal never land on it.
+            const timer_worker = self.workers.addOneAssumeCapacity();
+            errdefer _ = self.workers.pop();
+            timer_worker.* = .{};
+            const timer_id: ExecutorId = if (num_executors < Executor.max_executors)
+                @intCast(num_executors)
+            else
+                0;
+            timer_worker.thread = try std.Thread.spawn(.{}, runWorker, .{ self, timer_worker, timer_id, Executor.Kind.timer });
+            timer_worker.ready.wait();
+            if (timer_worker.err) |e| {
+                return e;
+            }
+            self.timer_executor = &timer_worker.executor;
         }
 
         if (options.metrics_log_interval.value > 0) {
@@ -1584,6 +1671,7 @@ pub const Runtime = struct {
         for (self.workers.items) |*worker| {
             worker.thread.join();
         }
+        self.timer_executor = null;
         self.workers.deinit(self.allocator);
     }
 
@@ -1702,12 +1790,19 @@ pub const Runtime = struct {
 
     /// Worker thread entry point. Initializes executor and runs until stopped.
     /// Signals worker.ready after initialization (success or failure).
-    fn runWorker(self: *Runtime, worker: *Worker, id: ExecutorId) void {
+    fn runWorker(self: *Runtime, worker: *Worker, id: ExecutorId, kind: Executor.Kind) void {
         worker.executor.init(self, id) catch |e| {
             worker.err = e;
             worker.ready.set();
             return;
         };
+        worker.executor.kind = kind;
+        // Timer-woken tasks must not spill into the shared global overflow:
+        // workers would steal them back onto a hogged loop. The timer
+        // executor drains this private overflow itself.
+        if (kind == .timer) {
+            worker.executor.run_queue.overflow = &worker.executor.overflow;
+        }
         defer {
             // A cross-thread notifier publishes its wake (Async.pending plus the
             // loop's wake_requested bit) before it performs the waker syscall,
@@ -1838,6 +1933,18 @@ pub const Runtime = struct {
     /// Deprecated: use zio.yield() instead.
     pub fn yield(_: *Runtime) Cancelable!void {
         return mod.yield();
+    }
+
+    /// Arm `timer` on the runtime's timer executor when one exists, otherwise
+    /// on the calling executor. `Loop.setTimer`/`wake` are the thread-safe
+    /// pair (see ev/test/timer.zig); `Loop.add` is not.
+    pub fn armTimer(self: *Runtime, timer: *ev.Timer, timeout: time.Timeout) void {
+        if (self.timer_executor) |te| {
+            te.loop.setTimer(timer, timeout);
+            te.loop.wake();
+            return;
+        }
+        getCurrentExecutor().loopSetTimer(timer, timeout);
     }
 
     /// Sleep for the specified number of milliseconds.
@@ -2451,6 +2558,67 @@ test "runtime: disable main executor" {
     var handle = try runtime.spawn(compute, .{21});
     const result = handle.join();
     try std.testing.expectEqual(42, result);
+}
+
+test "runtime: sleep keeps ticking when every worker is spinning" {
+    // Regression: timedWaitClock used to arm on the sleeper's home loop, so a
+    // pair of never-yielding tasks (one per worker) stopped that loop from
+    // polling and the sleeper froze after the settle window. The timer
+    // executor polls independently and runs the waiter there.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    if (comptime !zio_options.task_migration) return error.SkipZigTest;
+
+    const runtime = try Runtime.init(std.testing.allocator, .{
+        .executors = .exact(2),
+        .enable_main_executor = false,
+        .enable_task_migration = false,
+    });
+    defer runtime.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), runtime.executors.items.len);
+    try std.testing.expect(runtime.timer_executor != null);
+    try std.testing.expectEqual(Executor.Kind.timer, runtime.timer_executor.?.kind);
+
+    const State = struct {
+        stop: std.atomic.Value(bool) = .init(false),
+        ticks: std.atomic.Value(u64) = .init(0),
+
+        fn sleeper(state: *@This()) void {
+            while (true) {
+                sleep(.fromMilliseconds(10)) catch break;
+                if (state.stop.load(.acquire)) break;
+                _ = state.ticks.fetchAdd(1, .monotonic);
+            }
+        }
+
+        fn hog(state: *@This()) void {
+            var n: u64 = 0;
+            while (!state.stop.load(.monotonic)) {
+                n +%= 1;
+                std.mem.doNotOptimizeAway(&n);
+            }
+        }
+    };
+
+    var state: State = .{};
+    var sleeper_h = try runtime.spawn(State.sleeper, .{&state});
+    // Let the sleeper arm its first timer before the hogs take both workers.
+    os.time.sleep(.fromMilliseconds(30));
+
+    var hog1 = try runtime.spawn(State.hog, .{&state});
+    var hog2 = try runtime.spawn(State.hog, .{&state});
+
+    os.time.sleep(.fromMilliseconds(200));
+    state.stop.store(true, .release);
+
+    hog1.join();
+    hog2.join();
+    sleeper_h.join();
+
+    const ticks = state.ticks.load(.acquire);
+    // ~20 ticks in 200ms at 10ms. A starved sleeper only counts the settle
+    // window (~3). Require half the expected rate so a loaded CI still passes.
+    try std.testing.expect(ticks >= 10);
 }
 
 test "runtime: installs a SIGPIPE handler while the disposition is default" {

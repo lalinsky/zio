@@ -12,6 +12,8 @@ const os = @import("os/root.zig");
 const ev = @import("ev/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentExecutor = @import("runtime.zig").getCurrentExecutor;
+const beginTimerWake = @import("runtime.zig").beginTimerWake;
+const endTimerWake = @import("runtime.zig").endTimerWake;
 const loopClearTimer = @import("runtime.zig").loopClearTimer;
 const Waiter = @import("common.zig").Waiter;
 
@@ -562,8 +564,7 @@ pub const Timeout = union(enum) {
         ctx.timer.c.userdata = ctx;
         ctx.timer.c.callback = timerCallback;
 
-        const executor = getCurrentExecutor();
-        executor.loopAdd(&ctx.timer.c);
+        getCurrentExecutor().runtime.armTimer(&ctx.timer, self.*);
         return true;
     }
 
@@ -572,6 +573,8 @@ pub const Timeout = union(enum) {
         // Every dispatch signals: the wait protocol keeps `ctx` alive until the
         // signal arrives whenever `asyncCancelWait` reported the timer as still
         // completing, so a missed signal would park the waiter forever.
+        beginTimerWake();
+        defer endTimerWake();
         ctx.waiter.?.signal();
     }
 

@@ -16,6 +16,7 @@ const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTaskOrNull = @import("runtime.zig").getCurrentTaskOrNull;
 const getWaitableTaskOrNull = @import("runtime.zig").getWaitableTaskOrNull;
 const loopClearTimer = @import("runtime.zig").loopClearTimer;
+const wakeFromTimer = @import("runtime.zig").wakeFromTimer;
 const AnyTask = @import("task.zig").AnyTask;
 const Executor = @import("runtime.zig").Executor;
 const WaitNode = @import("utils/wait_queue.zig").WaitNode;
@@ -250,7 +251,7 @@ pub const Waiter = struct {
         timer.c.userdata = self;
         timer.c.callback = timeoutCallback;
 
-        task.getExecutor().loopSetTimer(&timer, timeout);
+        task.getRuntime().armTimer(&timer, timeout);
         defer {
             // A clear that loses its race leaves the timer completing, and its
             // callback still runs against `timer`, which lives in this frame.
@@ -287,7 +288,7 @@ pub const Waiter = struct {
         // touch `self` or the completion again.
         const task = d.task.?;
         _ = d.notify.state.fetchOr(timeout_flag, .release);
-        task.wake();
+        wakeFromTimer(task);
     }
 
     fn waitFutex(d: *Direct, expected: u32) void {

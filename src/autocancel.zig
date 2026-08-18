@@ -7,6 +7,7 @@ const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTask = @import("runtime.zig").getCurrentTask;
 const yield = @import("runtime.zig").yield;
 const loopClearTimer = @import("runtime.zig").loopClearTimer;
+const wakeFromTimer = @import("runtime.zig").wakeFromTimer;
 const JoinHandle = @import("runtime.zig").JoinHandle;
 const Duration = @import("time.zig").Duration;
 const Timeout = @import("time.zig").Timeout;
@@ -72,7 +73,6 @@ pub const AutoCancel = struct {
         if (timeout == .none) return;
 
         const task = getCurrentTask();
-        const executor = task.getExecutor();
 
         // Set task reference and reset the per-arm flags
         self.task = task;
@@ -84,7 +84,7 @@ pub const AutoCancel = struct {
         self.timer.c.callback = autoCancelCallback;
 
         // Activate the timer
-        executor.loopSetTimer(&self.timer, timeout);
+        task.getRuntime().armTimer(&self.timer, timeout);
     }
 
     /// Check if this auto-cancel triggered the cancellation and consume it.
@@ -194,7 +194,7 @@ fn autoCancelCallback(
     // Wake unconditionally: the owner may be parked in `clear` waiting for the
     // flag even when the cancel did not take. A wake with nothing parked just
     // leaves an awaken token, which the park loops consume harmlessly.
-    if (task) |t| t.wake();
+    if (task) |t| wakeFromTimer(t);
 }
 
 const Cancelable = @import("common.zig").Cancelable;
