@@ -48,6 +48,13 @@
 //!     // Process completion
 //! }
 //! ```
+//!
+//! The queue also implements the future protocol, so the driver can wait for
+//! the next completion alongside other futures:
+//! `select(.{ .io = &cq, .msg = ch.asyncReceive() })`. The winning result is
+//! what `wait` would have returned, with one difference: canceling a select
+//! only stops the waiting, it does not close the queue or cancel the
+//! operations in it.
 
 const std = @import("std");
 
@@ -62,6 +69,7 @@ const getCurrentExecutor = @import("runtime.zig").getCurrentExecutor;
 const Cancelable = common.Cancelable;
 const Timeoutable = common.Timeoutable;
 const Closeable = common.Closeable;
+const Waiter = common.Waiter;
 const Timeout = @import("time.zig").Timeout;
 const Completion = ev.Completion;
 
@@ -69,10 +77,13 @@ pub const CompletionQueue = struct {
     mutex: os.Mutex,
     pending: Queue,
     completed: Queue,
-    /// Futex word the driver waits on. Counts completion arrivals and the
-    /// close, and is never reset: waiters snapshot it before checking the
-    /// queues, so a push landing between the check and the wait flips the
-    /// word and the wait returns immediately.
+    /// Futex word the driver waits on. Counts completion arrivals and a close
+    /// with nothing in flight (a close over in-flight operations stays silent,
+    /// each of them wakes the driver on its own way to `completed`). Never
+    /// reset: waiters snapshot it before checking the queues, so a push
+    /// landing between the check and the wait flips the word and the wait
+    /// returns immediately. The future protocol depends on the strict reading
+    /// of a wake: a completion is takeable, or the queue is drained.
     signal: std.atomic.Value(u32),
     /// No new submissions. Written under `mutex`.
     closed: bool,
@@ -141,11 +152,17 @@ pub const CompletionQueue = struct {
         self.mutex.lock();
         const was_closed = self.closed;
         self.closed = true;
+        const pending_empty = self.pending.isEmpty();
         self.mutex.unlock();
         if (was_closed) return;
 
-        _ = self.signal.fetchAdd(1, .release);
-        Futex.wake(&self.signal.raw, 1);
+        // Wake only when this close is what makes the queue drained: a driver
+        // parked over in-flight operations has nothing new to see, and each of
+        // those operations wakes it through `ownerCallback` later.
+        if (pending_empty) {
+            _ = self.signal.fetchAdd(1, .release);
+            Futex.wake(&self.signal.raw, 1);
+        }
     }
 
     /// Wait for the next completion. Blocks while the queue is open, even if
@@ -256,6 +273,70 @@ pub const CompletionQueue = struct {
             return completionFromGroup(n);
         }
         return null;
+    }
+
+    // Future protocol implementation for use with select() / wait().
+    //
+    // The registered wait completes when a completion is ready to be taken or
+    // the queue is drained; `getResult` then pops one like `next`, or reports
+    // `error.Closed`. The single-driver rule applies: a select over the queue
+    // is the driver's wait. Canceling the select only deregisters; it does not
+    // close the queue or cancel the operations in it the way a canceled
+    // `wait()` does, that cleanup is the caller's to do.
+    //
+    // Registration parks on the same futex word that `ownerCallback` and a
+    // drained `close` wake, so the queue needs no waiter storage.
+
+    pub const Result = Closeable!*Completion;
+
+    pub const WaitContext = Futex.FutexWaiter;
+
+    pub fn getResult(self: *CompletionQueue, ctx: *WaitContext) Closeable!*Completion {
+        _ = ctx;
+        self.mutex.lock();
+        const node = self.completed.pop();
+        const drained = node == null and self.closed and self.pending.isEmpty();
+        self.mutex.unlock();
+
+        if (node) |n| return completionFromGroup(n);
+        // A wake on `signal` means a completion was pushed (and only the
+        // caller, as the driver, takes completions out) or the queue is
+        // drained; a close over in-flight operations stays silent.
+        std.debug.assert(drained);
+        return error.Closed;
+    }
+
+    /// Whether a registered wait would have something to report: a takeable
+    /// completion, or the drained state behind `error.Closed`.
+    fn isReady(self: *CompletionQueue) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return !self.completed.isEmpty() or (self.closed and self.pending.isEmpty());
+    }
+
+    pub fn asyncWait(self: *CompletionQueue, waiter: *Waiter, ctx: *WaitContext) bool {
+        // Fast path: something to report already.
+        if (self.isReady()) return false;
+
+        // Park on the completion futex word.
+        Futex.prepareWait(&self.signal.raw, ctx, waiter);
+
+        // Double-check: a completion or the drained close may have landed (and
+        // issued its wake) between the fast-path check and the registration.
+        if (self.isReady()) {
+            // We removed ourselves before any wake -> report readiness now.
+            if (Futex.cancelWait(ctx)) return false;
+            // A concurrent wake already dequeued us; the signal is in-flight.
+            return true;
+        }
+
+        return true;
+    }
+
+    pub fn asyncCancelWait(self: *CompletionQueue, waiter: *Waiter, ctx: *WaitContext) bool {
+        _ = self;
+        _ = waiter;
+        return Futex.cancelWait(ctx);
     }
 
     /// What `cancelAll` does with the results of the operations it waited for.
@@ -979,4 +1060,222 @@ test "CompletionQueue: canceling the waiting driver closes the queue and keeps r
     try std.testing.expectError(error.Canceled, slow.getResult());
     try std.testing.expect(cq.isEmpty());
     try std.testing.expectError(error.Closed, cq.wait());
+}
+
+test "CompletionQueue: select delivers the next completion" {
+    const select = @import("select.zig").select;
+
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancelAll(.discard);
+
+    var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
+    try cq.submit(&timer.c);
+
+    const Sleeper = struct {
+        fn run(rt_: *Runtime) !void {
+            try rt_.sleep(.fromSeconds(10));
+        }
+    };
+    var slow_task = try rt.spawn(Sleeper.run, .{rt});
+    defer slow_task.cancel();
+
+    const result = try select(.{ .io = &cq, .other = &slow_task });
+    switch (result) {
+        .io => |r| try std.testing.expectEqual(&timer.c, try r),
+        .other => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(cq.isEmpty());
+}
+
+test "CompletionQueue: select fast path on an already finished completion" {
+    const select = @import("select.zig").select;
+
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancelAll(.discard);
+
+    var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
+    try cq.submit(&timer.c);
+
+    // Let the timer land in `completed` before the select looks.
+    var pause = ev.Timer.init(.{ .duration = .fromMilliseconds(50) });
+    try common.waitForIo(&pause.c);
+    try std.testing.expect(cq.hasCompleted());
+
+    const Sleeper = struct {
+        fn run(rt_: *Runtime) !void {
+            try rt_.sleep(.fromSeconds(10));
+        }
+    };
+    var slow_task = try rt.spawn(Sleeper.run, .{rt});
+    defer slow_task.cancel();
+
+    const result = try select(.{ .io = &cq, .other = &slow_task });
+    switch (result) {
+        .io => |r| try std.testing.expectEqual(&timer.c, try r),
+        .other => return error.TestUnexpectedResult,
+    }
+}
+
+test "CompletionQueue: losing a select does not lose the completion" {
+    const select = @import("select.zig").select;
+
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancelAll(.discard);
+
+    var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(60) });
+    try cq.submit(&timer.c);
+
+    const Napper = struct {
+        fn run(rt_: *Runtime) !void {
+            try rt_.sleep(.fromMilliseconds(5));
+        }
+    };
+    var fast_task = try rt.spawn(Napper.run, .{rt});
+    defer fast_task.cancel();
+
+    const result = try select(.{ .io = &cq, .other = &fast_task });
+    switch (result) {
+        .io => return error.TestUnexpectedResult,
+        .other => |r| try r,
+    }
+
+    // The queue was only deregistered from; the operation is still armed and
+    // comes back through the ordinary wait.
+    const c = try cq.timedWait(.fromSeconds(5));
+    try std.testing.expectEqual(&timer.c, c);
+    try std.testing.expect(cq.isEmpty());
+}
+
+test "CompletionQueue: select on a drained queue reports error.Closed" {
+    const select = @import("select.zig").select;
+
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    cq.close();
+
+    const Sleeper = struct {
+        fn run(rt_: *Runtime) !void {
+            try rt_.sleep(.fromSeconds(10));
+        }
+    };
+    var slow_task = try rt.spawn(Sleeper.run, .{rt});
+    defer slow_task.cancel();
+
+    const result = try select(.{ .io = &cq, .other = &slow_task });
+    switch (result) {
+        .io => |r| try std.testing.expectError(error.Closed, r),
+        .other => return error.TestUnexpectedResult,
+    }
+}
+
+test "CompletionQueue: close over an in-flight operation does not wake a parked select" {
+    const select = @import("select.zig").select;
+
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+
+    var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(60) });
+    try cq.submit(&timer.c);
+
+    const Closer = struct {
+        fn run(cq_: *CompletionQueue) !void {
+            var pause = ev.Timer.init(.{ .duration = .fromMilliseconds(15) });
+            try common.waitForIo(&pause.c);
+            cq_.close();
+        }
+    };
+    var closer = try rt.spawn(Closer.run, .{&cq});
+    defer closer.cancel();
+
+    const Sleeper = struct {
+        fn run(rt_: *Runtime) !void {
+            try rt_.sleep(.fromSeconds(10));
+        }
+    };
+    var slow_task = try rt.spawn(Sleeper.run, .{rt});
+    defer slow_task.cancel();
+
+    // The close lands while the select is parked and the timer is in flight.
+    // It must stay silent: the wake that ends the select is the operation
+    // itself, carrying a real completion rather than error.Closed.
+    const first = try select(.{ .io = &cq, .other = &slow_task });
+    switch (first) {
+        .io => |r| try std.testing.expectEqual(&timer.c, try r),
+        .other => return error.TestUnexpectedResult,
+    }
+
+    // Drained now: closed with nothing in flight.
+    const second = try select(.{ .io = &cq, .other = &slow_task });
+    switch (second) {
+        .io => |r| try std.testing.expectError(error.Closed, r),
+        .other => return error.TestUnexpectedResult,
+    }
+    try closer.join();
+}
+
+test "CompletionQueue: canceling a select leaves the queue open" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancelAll(.discard);
+
+    var slow = ev.Timer.init(.{ .duration = .fromSeconds(10) });
+    try cq.submit(&slow.c);
+
+    const Driver = struct {
+        const select = @import("select.zig").select;
+
+        fn run(cq_: *CompletionQueue) !void {
+            const result = try select(.{ .io = cq_ });
+            _ = try result.io;
+        }
+    };
+    var handle = try rt.spawn(Driver.run, .{&cq});
+    defer handle.cancel();
+
+    // Let the driver park in the select, then cancel it.
+    var pause = ev.Timer.init(.{ .duration = .fromMilliseconds(20) });
+    try common.waitForIo(&pause.c);
+    handle.cancel();
+    try std.testing.expectError(error.Canceled, handle.join());
+
+    // The canceled select only deregistered, unlike a canceled `wait()`: the
+    // queue is still open, the operation still in flight, and new submissions
+    // are accepted.
+    try std.testing.expect(cq.hasPending());
+    var other = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
+    try cq.submit(&other.c);
+    const c = try cq.timedWait(.fromSeconds(5));
+    try std.testing.expectEqual(&other.c, c);
+}
+
+test "CompletionQueue: generic wait() on the queue" {
+    const waitFuture = @import("select.zig").wait;
+
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancelAll(.discard);
+
+    var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
+    try cq.submit(&timer.c);
+
+    const result = try waitFuture(&cq);
+    try std.testing.expectEqual(&timer.c, try result.value);
+    try std.testing.expect(cq.isEmpty());
 }
