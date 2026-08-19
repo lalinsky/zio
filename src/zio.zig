@@ -49,6 +49,13 @@ const fs = @import("fs.zig");
 pub const File = fs.File;
 pub const Dir = fs.Dir;
 pub const AtomicFile = fs.AtomicFile;
+pub const TempFile = fs.TempFile;
+pub const TempDir = fs.TempDir;
+pub const openSystemTempDir = fs.openSystemTempDir;
+pub const createTempFile = fs.createTempFile;
+pub const createTempDir = fs.createTempDir;
+pub const max_temp_prefix_len = fs.max_temp_prefix_len;
+pub const max_temp_name_len = fs.max_temp_name_len;
 pub const PipePair = fs.PipePair;
 
 pub const stdin = fs.stdin;
