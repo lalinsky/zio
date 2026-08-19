@@ -1717,24 +1717,64 @@ pub const FileWriter = struct {
     }
 };
 
-const TestFile = struct {
+/// A runtime plus an empty directory to make a mess in: `deinit` deletes it
+/// with everything left in it, so a test needs no cleanup of its own and no
+/// name that is unique across the suite. Also used by the `std.Io` tests in
+/// `io.zig`, through `stdDir`.
+///
+/// The directory is made in the current one rather than in the system
+/// temporary directory, to keep the tests on the filesystem the source tree
+/// lives on: O_DIRECT on a tmpfs, for one, is a different test. The current
+/// directory is pinned by an fd of its own, so a test that moves the working
+/// directory does not move the fixture out from under `deinit`.
+pub const TestDirFixture = struct {
     rt: *Runtime,
+    parent: Dir,
+    temp: TempDir,
     dir: Dir,
+
+    pub fn init() !TestDirFixture {
+        const rt = try Runtime.init(std.testing.allocator, .{});
+        errdefer rt.deinit();
+        const parent = try Dir.cwd().openDir(".", .{});
+        errdefer parent.close();
+        const temp = try parent.createTempDir(.{ .prefix = "zio_test_" });
+        return .{ .rt = rt, .parent = parent, .temp = temp, .dir = temp.dir };
+    }
+
+    pub fn deinit(self: *TestDirFixture) void {
+        self.temp.deinit();
+        self.parent.close();
+        self.rt.deinit();
+    }
+
+    /// The fixture directory as a `std.Io.Dir`, for tests driving the `std.Io`
+    /// interface instead of zio's own.
+    pub fn stdDir(self: *const TestDirFixture) std.Io.Dir {
+        return .{ .handle = self.dir.fd };
+    }
+};
+
+/// A `TestDirFixture` with one open file in it, named `path`.
+const TestFileFixture = struct {
+    fixture: TestDirFixture,
     file: File,
     path: []const u8,
 
-    pub fn create(path: []const u8, flags: os.fs.FileCreateFlags) !TestFile {
-        const rt = try Runtime.init(std.testing.allocator, .{});
-        errdefer rt.deinit();
-        const dir = Dir.cwd();
-        const file = try dir.createFile(path, flags);
-        return .{ .rt = rt, .dir = dir, .file = file, .path = path };
+    pub fn create(flags: os.fs.FileCreateFlags) !TestFileFixture {
+        var fixture = try TestDirFixture.init();
+        errdefer fixture.deinit();
+        const path = "file.txt";
+        return .{
+            .fixture = fixture,
+            .file = try fixture.dir.createFile(path, flags),
+            .path = path,
+        };
     }
 
-    pub fn deinit(self: *TestFile) void {
+    pub fn deinit(self: *TestFileFixture) void {
         self.file.close();
-        self.dir.deleteFile(self.path) catch {};
-        self.rt.deinit();
+        self.fixture.deinit();
     }
 };
 
@@ -1755,10 +1795,10 @@ test {
 }
 
 test "File: basic read and write" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
     const file_path = "test_file_basic.txt";
     var zio_file = try dir.createFile(file_path, .{});
 
@@ -1777,17 +1817,15 @@ test "File: basic read and write" {
     const bytes_read = try read_file.read(&buffer, 0);
     try std.testing.expectEqualStrings(write_data, buffer[0..bytes_read]);
     read_file.close();
-
-    try dir.deleteFile(file_path);
 }
 
 test "File: prep functions drive concurrent reads through a CompletionQueue" {
     const CompletionQueue = @import("completion_queue.zig").CompletionQueue;
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
     const file_path = "test_file_prep_cq.txt";
     var file = try dir.createFile(file_path, .{ .read = true });
     try std.testing.expectEqual(16, try file.write("abcdefghijklmnop", 0));
@@ -1815,14 +1853,13 @@ test "File: prep functions drive concurrent reads through a CompletionQueue" {
     try std.testing.expectEqualStrings("mnop", &bufs[3]);
 
     file.close();
-    try dir.deleteFile(file_path);
 }
 
 test "File: streaming prep carries the file's pollable routing" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
     const file_path = "test_file_prep_streaming.txt";
     var file = try dir.createFile(file_path, .{});
 
@@ -1839,7 +1876,6 @@ test "File: streaming prep carries the file's pollable routing" {
     }
 
     file.close();
-    try dir.deleteFile(file_path);
 }
 
 test "File: streaming changes caller-owned descriptor flags only for epoll" {
@@ -1877,10 +1913,10 @@ test "File: direct I/O round-trip" {
     // portably.
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
     const file_path = "test_file_direct.bin";
 
     var file = dir.createFile(file_path, .{ .read = true, .direct = true }) catch |err| switch (err) {
@@ -1889,7 +1925,6 @@ test "File: direct I/O round-trip" {
         error.Unexpected => return error.SkipZigTest,
         else => return err,
     };
-    defer dir.deleteFile(file_path) catch {};
 
     const block = 4096;
     var write_buf: [block]u8 align(block) = undefined;
@@ -1910,7 +1945,7 @@ test "File: direct I/O round-trip" {
 }
 
 test "File: positional read and write" {
-    var t = try TestFile.create("test_file_positional.txt", .{ .read = true });
+    var t = try TestFileFixture.create(.{ .read = true });
     defer t.deinit();
 
     // Write at different positions
@@ -1931,7 +1966,7 @@ test "File: positional read and write" {
 }
 
 test "File: sync operation" {
-    var t = try TestFile.create("test_file_sync.txt", .{});
+    var t = try TestFileFixture.create(.{});
     defer t.deinit();
 
     // Write some data
@@ -1946,7 +1981,7 @@ test "File: sync operation" {
 }
 
 test "File: size and setSize" {
-    var t = try TestFile.create("test_file_size.txt", .{ .read = true });
+    var t = try TestFileFixture.create(.{ .read = true });
     defer t.deinit();
 
     // Write some data
@@ -1972,7 +2007,7 @@ test "File: size and setSize" {
 test "File: setPermissions" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
-    var t = try TestFile.create("test_file_permissions.txt", .{});
+    var t = try TestFileFixture.create(.{});
     defer t.deinit();
 
     // Set permissions to read-only
@@ -1987,7 +2022,7 @@ test "File: setPermissions" {
 }
 
 test "File: setTimestamps" {
-    var t = try TestFile.create("test_file_timestamps.txt", .{});
+    var t = try TestFileFixture.create(.{});
     defer t.deinit();
 
     const atime: i96 = 1000000000 * std.time.ns_per_s; // 2001-09-09
@@ -2001,7 +2036,7 @@ test "File: setTimestamps" {
 }
 
 test "File: reader and writer interface" {
-    var t = try TestFile.create("test_file_rw_interface.txt", .{});
+    var t = try TestFileFixture.create(.{});
     defer t.deinit();
 
     // Write using writer interface
@@ -2014,7 +2049,7 @@ test "File: reader and writer interface" {
 
     // Reopen for reading
     t.file.close();
-    t.file = try t.dir.openFile(t.path, .{});
+    t.file = try t.fixture.dir.openFile(t.path, .{});
 
     // Read using reader interface
     var read_buffer: [256]u8 = undefined;
@@ -2028,7 +2063,7 @@ test "File: reader and writer interface" {
 }
 
 test "File: stdReader and stdWriter round-trip" {
-    var t = try TestFile.create("test_file_std_rw.txt", .{});
+    var t = try TestFileFixture.create(.{});
     defer t.deinit();
 
     // Write via std.Io.File.Writer (zio file -> std reader/writer).
@@ -2039,7 +2074,7 @@ test "File: stdReader and stdWriter round-trip" {
 
     // Reopen and read back via std.Io.File.Reader.
     t.file.close();
-    t.file = try t.dir.openFile(t.path, .{});
+    t.file = try t.fixture.dir.openFile(t.path, .{});
 
     var read_buffer: [256]u8 = undefined;
     var reader = t.file.stdReader(&read_buffer);
@@ -2051,14 +2086,13 @@ test "File: stdReader and stdWriter round-trip" {
 test "Dir: setPermissions" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
     const dir_path = "test_dir_permissions";
 
     try dir.createDir(dir_path, 0o755);
-    defer dir.deleteDir(dir_path) catch {};
 
     // Open the directory with iterate=true to get a real fd (not O_PATH)
     var test_dir = try dir.openDir(dir_path, .{ .iterate = true });
@@ -2075,16 +2109,15 @@ test "Dir: setPermissions" {
 test "Dir: setFilePermissions" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
     const file_path = "test_dir_set_file_permissions.txt";
 
     // Create a test file
     var file = try dir.createFile(file_path, .{});
     file.close();
-    defer dir.deleteFile(file_path) catch {};
 
     // Set permissions via Dir
     try dir.setFilePermissions(file_path, 0o444, .{});
@@ -2097,16 +2130,15 @@ test "Dir: setFilePermissions" {
 test "Dir: setFileTimestamps" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
     const file_path = "test_dir_set_file_timestamps.txt";
 
     // Create a test file
     var file = try dir.createFile(file_path, .{});
     file.close();
-    defer dir.deleteFile(file_path) catch {};
 
     const atime: i96 = 1000000000 * std.time.ns_per_s; // 2001-09-09
     const mtime: i96 = 1500000000 * std.time.ns_per_s; // 2017-07-14
@@ -2121,21 +2153,19 @@ test "Dir: setFileTimestamps" {
 test "Dir: symLink and readLink" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
     const target_path = "test_symlink_target.txt";
     const link_path = "test_symlink_link";
 
     // Create target file
     var file = try dir.createFile(target_path, .{});
     file.close();
-    defer dir.deleteFile(target_path) catch {};
 
     // Create symlink
     try dir.symLink(target_path, link_path, .{});
-    defer dir.deleteFile(link_path) catch {};
 
     // Read symlink
     var buffer: [256]u8 = undefined;
@@ -2146,10 +2176,10 @@ test "Dir: symLink and readLink" {
 test "Dir: hardLink" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
     const original_path = "test_hardlink_original.txt";
     const link_path = "test_hardlink_link.txt";
 
@@ -2157,11 +2187,9 @@ test "Dir: hardLink" {
     var file = try dir.createFile(original_path, .{ .read = true });
     _ = try file.write("hello", 0);
     file.close();
-    defer dir.deleteFile(original_path) catch {};
 
     // Create hard link
     try dir.hardLink(original_path, dir, link_path, .{});
-    defer dir.deleteFile(link_path) catch {};
 
     // Verify link has same content
     var link_file = try dir.openFile(link_path, .{});
@@ -2173,10 +2201,10 @@ test "Dir: hardLink" {
 }
 
 test "Dir: rename" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
     const old_path = "test_rename_old.txt";
     const new_path = "test_rename_new.txt";
 
@@ -2187,7 +2215,6 @@ test "Dir: rename" {
 
     // Rename file
     try dir.rename(old_path, dir, new_path);
-    defer dir.deleteFile(new_path) catch {};
 
     // Verify old path no longer exists
     _ = dir.openFile(old_path, .{}) catch |err| {
@@ -2198,10 +2225,10 @@ test "Dir: rename" {
 }
 
 test "Dir: renamePreserve" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
     const old_path = "test_rename_preserve_old.txt";
     const new_path = "test_rename_preserve_new.txt";
 
@@ -2210,7 +2237,6 @@ test "Dir: renamePreserve" {
 
     // Rename to a path that doesn't exist yet — should succeed.
     try dir.renamePreserve(old_path, dir, new_path);
-    defer dir.deleteFile(new_path) catch {};
 
     // Old path should be gone.
     try std.testing.expectError(error.FileNotFound, dir.openFile(old_path, .{}));
@@ -2218,18 +2244,16 @@ test "Dir: renamePreserve" {
     // Rename again to an existing destination — should fail.
     var file2 = try dir.createFile(old_path, .{});
     file2.close();
-    defer dir.deleteFile(old_path) catch {};
 
     try std.testing.expectError(error.PathAlreadyExists, dir.renamePreserve(old_path, dir, new_path));
 }
 
 test "Dir: createAtomicFile link" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
     const dest_path = "test_atomic_file_link.txt";
-    defer dir.deleteFile(dest_path) catch {};
 
     var af = try dir.createAtomicFile(dest_path, .{});
     defer af.deinit();
@@ -2245,12 +2269,11 @@ test "Dir: createAtomicFile link" {
 }
 
 test "Dir: createAtomicFile link to existing destination" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
     const dest_path = "test_atomic_file_link_existing.txt";
-    defer dir.deleteFile(dest_path) catch {};
 
     var dest = try dir.createFile(dest_path, .{});
     _ = try dest.write("old", 0);
@@ -2258,7 +2281,6 @@ test "Dir: createAtomicFile link to existing destination" {
 
     var af = try dir.createAtomicFile(dest_path, .{});
     const tmp_sub_path = std.fmt.hex(af.file_basename_hex);
-    defer dir.deleteFile(&tmp_sub_path) catch {};
 
     _ = try af.file.write("new", 0);
     try std.testing.expectError(error.PathAlreadyExists, af.link());
@@ -2275,12 +2297,11 @@ test "Dir: createAtomicFile link to existing destination" {
 }
 
 test "Dir: createAtomicFile replace existing destination" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
     const dest_path = "test_atomic_file_replace.txt";
-    defer dir.deleteFile(dest_path) catch {};
 
     var dest = try dir.createFile(dest_path, .{});
     _ = try dest.write("old", 0);
@@ -2300,13 +2321,12 @@ test "Dir: createAtomicFile replace existing destination" {
 }
 
 test "Dir: createAtomicFile in subdirectory" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
     const sub_dir_path = "test_atomic_file_subdir.tmp";
     try dir.createDir(sub_dir_path, 0o755);
-    defer dir.deleteTree(sub_dir_path) catch {};
 
     var af = try dir.createAtomicFile(sub_dir_path ++ "/dest.txt", .{});
     defer af.deinit();
@@ -2322,15 +2342,14 @@ test "Dir: createAtomicFile in subdirectory" {
 }
 
 test "Dir: createAtomicFile deinit without link removes temporary file" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
     const dest_path = "test_atomic_file_abandoned.txt";
 
     var af = try dir.createAtomicFile(dest_path, .{});
     const tmp_sub_path = std.fmt.hex(af.file_basename_hex);
-    defer dir.deleteFile(&tmp_sub_path) catch {};
 
     _ = try af.file.write("abandoned", 0);
     af.deinit();
@@ -2340,10 +2359,10 @@ test "Dir: createAtomicFile deinit without link removes temporary file" {
 }
 
 test "Dir: createTempFile" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
 
     var name_buffer: [max_temp_name_len]u8 = undefined;
     const name = blk: {
@@ -2366,16 +2385,15 @@ test "Dir: createTempFile" {
 }
 
 test "Dir: createTempFile keep" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
 
     var tf = try dir.createTempFile(.{});
     var name_buffer: [max_temp_name_len]u8 = undefined;
     @memcpy(name_buffer[0..tf.name().len], tf.name());
     const name = name_buffer[0..tf.name().len];
-    defer dir.deleteFile(name) catch {};
 
     tf.keep();
     tf.deinit();
@@ -2384,12 +2402,11 @@ test "Dir: createTempFile keep" {
 }
 
 test "Dir: createTempFile rename" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
     const dest_path = "test_temp_file_renamed.txt";
-    defer dir.deleteFile(dest_path) catch {};
 
     var tf = try dir.createTempFile(.{});
     defer tf.deinit();
@@ -2405,20 +2422,20 @@ test "Dir: createTempFile rename" {
 }
 
 test "Dir: createTempFile with too long prefix" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
     const prefix = "x" ** (max_temp_prefix_len + 1);
     try std.testing.expectError(error.NameTooLong, dir.createTempFile(.{ .prefix = prefix }));
     try std.testing.expectError(error.NameTooLong, dir.createTempDir(.{ .prefix = prefix }));
 }
 
 test "Dir: createTempDir" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
 
     var name_buffer: [max_temp_name_len]u8 = undefined;
     const name = blk: {
@@ -2446,10 +2463,10 @@ test "Dir: createTempDir" {
 }
 
 test "Dir: createTempDir cleanup" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
 
     var td = try dir.createTempDir(.{});
     defer td.deinit();
@@ -2519,16 +2536,15 @@ test "createTempDir in the system temporary directory" {
 }
 
 test "Dir: createTempDir keep" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
 
     var td = try dir.createTempDir(.{});
     var name_buffer: [max_temp_name_len]u8 = undefined;
     @memcpy(name_buffer[0..td.name().len], td.name());
     const name = name_buffer[0..td.name().len];
-    defer dir.deleteTree(name) catch {};
 
     td.keep();
     td.deinit();
@@ -2537,16 +2553,15 @@ test "Dir: createTempDir keep" {
 }
 
 test "Dir: access" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const dir = Dir.cwd();
+    const dir = t.dir;
     const file_path = "test_access.txt";
 
     // Create a test file
     var file = try dir.createFile(file_path, .{});
     file.close();
-    defer dir.deleteFile(file_path) catch {};
 
     // Check read access - should succeed
     try dir.access(file_path, .{ .read = true });
@@ -2565,23 +2580,20 @@ test "Dir: access" {
 test "Dir: resolve_beneath blocks parent escape" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const cwd = Dir.cwd();
+    const cwd = t.dir;
 
     try cwd.createDir("test-resolve-beneath-dir1", 0o755);
-    defer cwd.deleteDir("test-resolve-beneath-dir1") catch {};
 
     const dir1 = try cwd.openDir("test-resolve-beneath-dir1", .{});
     defer dir1.close();
 
     var file1 = try dir1.createFile("file1", .{});
     file1.close();
-    defer dir1.deleteFile("file1") catch {};
 
     try dir1.createDir("dir2", 0o755);
-    defer dir1.deleteDir("dir2") catch {};
 
     const dir2 = try dir1.openDir("dir2", .{});
     defer dir2.close();
@@ -2646,13 +2658,12 @@ test "Dir: canceling a blocking open interrupts the worker" {
 }
 
 test "Dir: iterate" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const cwd = Dir.cwd();
+    const cwd = t.dir;
     const dir_path = "test_dir_iterate";
     try cwd.createDir(dir_path, 0o755);
-    defer cwd.deleteDir(dir_path) catch {};
 
     var dir = try cwd.openDir(dir_path, .{ .iterate = true });
     defer dir.close();
@@ -2660,11 +2671,6 @@ test "Dir: iterate" {
     (try dir.createFile("a.txt", .{})).close();
     (try dir.createFile("b.txt", .{})).close();
     try dir.createDir("sub", 0o755);
-    defer {
-        dir.deleteFile("a.txt") catch {};
-        dir.deleteFile("b.txt") catch {};
-        dir.deleteDir("sub") catch {};
-    }
 
     var found_a = false;
     var found_b = false;
@@ -2685,13 +2691,12 @@ test "Dir: iterate" {
 }
 
 test "Dir: deleteTree" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const cwd = Dir.cwd();
+    const cwd = t.dir;
     const root_path = "test_dir_delete_tree";
     try cwd.createDir(root_path, 0o755);
-    errdefer cwd.deleteTree(root_path) catch {};
 
     // Close all handles into the tree before deleting; Windows cannot delete
     // directories that still have open handles.
@@ -2721,10 +2726,10 @@ test "Dir: deleteTree" {
 }
 
 test "Dir: deleteTree on a file and on a missing path" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const cwd = Dir.cwd();
+    const cwd = t.dir;
     const file_path = "test_delete_tree_file.txt";
     (try cwd.createFile(file_path, .{})).close();
 
@@ -2736,13 +2741,12 @@ test "Dir: deleteTree on a file and on a missing path" {
 }
 
 test "Dir: deleteTree deeply nested tree" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const cwd = Dir.cwd();
+    const cwd = t.dir;
     const root_path = "test_dir_delete_tree_deep";
     try cwd.createDir(root_path, 0o755);
-    errdefer cwd.deleteTree(root_path) catch {};
 
     // Nest beyond deleteTree's internal stack capacity (16) to exercise the
     // min-stack-size fallback.
@@ -2761,13 +2765,12 @@ test "Dir: deleteTree deeply nested tree" {
 }
 
 test "Dir: deleteTreeMinStackSize" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    var t = try TestDirFixture.init();
+    defer t.deinit();
 
-    const cwd = Dir.cwd();
+    const cwd = t.dir;
     const root_path = "test_dir_delete_tree_min_stack";
     try cwd.createDir(root_path, 0o755);
-    errdefer cwd.deleteTree(root_path) catch {};
 
     {
         const root = try cwd.openDir(root_path, .{});

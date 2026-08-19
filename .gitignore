@@ -6,6 +6,7 @@
 /.zig-cache
 /zig-out
 /test-file
+/zio_test_*
 
 # Benchmark build artifacts
 /benchmarks/target/
