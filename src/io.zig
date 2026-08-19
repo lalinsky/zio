@@ -1806,7 +1806,14 @@ fn clockResolutionImpl(_: ?*anyopaque, clock: Io.Clock) Io.Clock.ResolutionError
 }
 
 fn sleepImpl(_: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
-    if (timeout == .none) return;
+    // A zero-length duration has nothing to time: don't arm a loop timer
+    // just to yield. This makes `Io.sleep(io, .{ .duration = .zero })` the
+    // portable way std.Io code spells "yield". `.none` has no time bound at
+    // all, so it falls through to the ordinary path below and blocks forever
+    // (until canceled), same as every other Timeout consumer.
+    if (timeout == .duration and timeout.duration.raw.nanoseconds <= 0) {
+        return runtime_mod.yield();
+    }
     var waiter: Waiter = .init();
     // Nothing ever signals this waiter, so the timeout firing is the sleep
     // finishing.
