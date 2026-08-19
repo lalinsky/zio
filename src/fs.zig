@@ -8,6 +8,9 @@ const builtin = @import("builtin");
 const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
+const beginShield = @import("runtime.zig").beginShield;
+const endShield = @import("runtime.zig").endShield;
+const log = @import("common.zig").log;
 const Cancelable = @import("common.zig").Cancelable;
 const Timeoutable = @import("common.zig").Timeoutable;
 const waitForIo = @import("common.zig").waitForIo;
@@ -69,9 +72,44 @@ pub fn createFile(path: []const u8, flags: os.fs.FileCreateFlags) Dir.CreateFile
     return cwd.createFile(path, flags);
 }
 
-pub fn createFileAtomic(dest_path: []const u8, options: Dir.CreateFileAtomicOptions) Dir.CreateFileAtomicError!AtomicFile {
+pub fn createAtomicFile(dest_path: []const u8, options: Dir.CreateAtomicFileOptions) Dir.CreateAtomicFileError!AtomicFile {
     const cwd = Dir.cwd();
-    return cwd.createFileAtomic(dest_path, options);
+    return cwd.createAtomicFile(dest_path, options);
+}
+
+/// Open the directory the system sets aside for temporary files: `TMPDIR`,
+/// `TMP` or `TEMP` if set, `/tmp` otherwise. On Windows, `TMP`, `TEMP` or
+/// `USERPROFILE`, falling back to the Windows temporary directory, which is
+/// what `GetTempPath` looks at as well.
+///
+/// The environment is read straight from libc's `environ` (the process
+/// environment block on Windows) rather than from a `std.process.Environ`
+/// threaded down from `main`, so this also works when zio is embedded in a
+/// runtime that has no Zig entry point.
+///
+/// Use this to keep the directory open across several temporary entries;
+/// `createTempFile`/`createTempDir` open it once per call.
+pub fn openSystemTempDir() Dir.OpenDirError!Dir {
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    return Dir.cwd().openDir(systemTempPath(&buffer), .{});
+}
+
+/// Create a temporary file in the system temporary directory, which is opened
+/// and closed along with it. Use `Dir.createTempFile` to place it in a
+/// directory you already have open.
+pub fn createTempFile(options: Dir.CreateTempFileOptions) (Dir.CreateTempFileError || Dir.OpenDirError)!TempFile {
+    const dir = try openSystemTempDir();
+    errdefer dir.close();
+    return tempFileInit(dir, true, options);
+}
+
+/// Create a temporary directory in the system temporary directory, which is
+/// opened and closed along with it. Use `Dir.createTempDir` to place it in a
+/// directory you already have open.
+pub fn createTempDir(options: Dir.CreateTempDirOptions) Dir.CreateTempDirError!TempDir {
+    const dir = try openSystemTempDir();
+    errdefer dir.close();
+    return tempDirInit(dir, true, options);
 }
 
 pub const PipePair = struct {
@@ -182,14 +220,14 @@ pub const Dir = struct {
         return .{ .fd = result.fd, .pollable = result.pollable };
     }
 
-    pub const CreateFileAtomicOptions = struct {
+    pub const CreateAtomicFileOptions = struct {
         /// Permission bits for the created file.
         mode: os.fs.mode_t = 0o664,
         /// Open the temporary file for reading as well as writing.
         read: bool = false,
     };
 
-    pub const CreateFileAtomicError = CreateFileError || OpenDirError;
+    pub const CreateAtomicFileError = CreateFileError || OpenDirError;
 
     /// Create a randomly named temporary file that can later be atomically
     /// moved to `dest_path` with `AtomicFile.link` or `AtomicFile.replace`.
@@ -200,13 +238,59 @@ pub const Dir = struct {
     /// `dest_path` must remain valid until `link`/`replace`. Always call
     /// `AtomicFile.deinit` to release resources, even after a successful
     /// `link`/`replace`.
-    pub fn createFileAtomic(self: Dir, dest_path: []const u8, options: CreateFileAtomicOptions) CreateFileAtomicError!AtomicFile {
+    pub fn createAtomicFile(self: Dir, dest_path: []const u8, options: CreateAtomicFileOptions) CreateAtomicFileError!AtomicFile {
         if (std.Io.Dir.path.dirname(dest_path)) |dirname| {
             const parent = try self.openDir(dirname, .{});
             errdefer parent.close();
             return atomicFileInit(std.Io.Dir.path.basename(dest_path), parent, true, options);
         }
         return atomicFileInit(dest_path, self, false, options);
+    }
+
+    pub const CreateTempFileOptions = struct {
+        /// Permission bits for the created file.
+        mode: os.fs.mode_t = 0o600,
+        /// Open the file for reading as well as writing.
+        read: bool = true,
+        /// Prepended to the random part of the name, so stray temporary files
+        /// can be traced back to whoever made them. At most
+        /// `max_temp_prefix_len` bytes long.
+        prefix: []const u8 = "",
+    };
+
+    pub const CreateTempFileError = CreateFileError;
+
+    /// Create a randomly named file in this directory, to be removed again by
+    /// `TempFile.deinit`. The name is drawn from the executor's CSPRNG and the
+    /// file is created exclusively, so concurrent creators never collide.
+    ///
+    /// The returned `TempFile` borrows this directory, which must stay open
+    /// until `deinit`.
+    pub fn createTempFile(self: Dir, options: CreateTempFileOptions) CreateTempFileError!TempFile {
+        return tempFileInit(self, false, options);
+    }
+
+    pub const CreateTempDirOptions = struct {
+        /// Permission bits for the created directory. Private by default: a
+        /// temporary directory is usually made in a world-writable place.
+        mode: os.fs.mode_t = 0o700,
+        /// Prepended to the random part of the name, so stray temporary
+        /// directories can be traced back to whoever made them. At most
+        /// `max_temp_prefix_len` bytes long.
+        prefix: []const u8 = "",
+    };
+
+    pub const CreateTempDirError = CreateDirError || OpenDirError;
+
+    /// Create a randomly named directory in this directory, to be deleted with
+    /// everything in it by `TempDir.deinit`. The name is drawn from the
+    /// executor's CSPRNG and the directory is created exclusively, so
+    /// concurrent creators never collide.
+    ///
+    /// The returned `TempDir` borrows this directory, which must stay open
+    /// until `deinit`.
+    pub fn createTempDir(self: Dir, options: CreateTempDirOptions) CreateTempDirError!TempDir {
+        return tempDirInit(self, false, options);
     }
 
     pub const DeleteDirError = os.fs.DirDeleteDirError || Cancelable;
@@ -706,7 +790,7 @@ pub const Dir = struct {
 /// A file that is atomically materialized at its destination path when `link`
 /// or `replace` is called. The data is first written to a randomly named
 /// temporary file in the destination's directory, then moved into place with
-/// an atomic rename. Created by `Dir.createFileAtomic`.
+/// an atomic rename. Created by `Dir.createAtomicFile`.
 ///
 /// Always call `deinit` to release resources, even after a successful `link`
 /// or `replace`; if the file was not moved into place, it is deleted.
@@ -729,10 +813,7 @@ pub const AtomicFile = struct {
         }
         if (self.file_exists) {
             const tmp_sub_path = std.fmt.hex(self.file_basename_hex);
-            // Cleanup must run even when the task is being canceled, like close().
-            var op = ev.DirDeleteFile.init(self.dir.fd, &tmp_sub_path);
-            waitForIoUncancelable(&op.c);
-            op.getResult() catch {};
+            removeTempFile(self.dir, &tmp_sub_path);
             self.file_exists = false;
         }
         if (self.close_dir_on_deinit) {
@@ -771,12 +852,262 @@ pub const AtomicFile = struct {
     }
 };
 
-fn atomicFileInit(dest_sub_path: []const u8, dir: Dir, close_dir_on_deinit: bool, options: Dir.CreateFileAtomicOptions) Dir.CreateFileAtomicError!AtomicFile {
+fn atomicFileInit(dest_sub_path: []const u8, dir: Dir, close_dir_on_deinit: bool, options: Dir.CreateAtomicFileOptions) Dir.CreateAtomicFileError!AtomicFile {
+    const file, const suffix = try createRandomFile(dir, "", .{
+        .mode = options.mode,
+        .read = options.read,
+    });
+    return .{
+        .file = file,
+        .file_basename_hex = suffix,
+        .file_open = true,
+        .file_exists = true,
+        .dir = dir,
+        .close_dir_on_deinit = close_dir_on_deinit,
+        .dest_sub_path = dest_sub_path,
+    };
+}
+
+/// A file with a randomly generated name, removed again by `deinit`. Created
+/// by `Dir.createTempFile`.
+///
+/// Unlike `AtomicFile`, no destination is fixed up front: use it as scratch
+/// space and drop it, or move it somewhere with `rename`/`renamePreserve`.
+pub const TempFile = struct {
+    /// The open temporary file.
+    file: File,
+    /// The directory holding the file. Unless it was opened by
+    /// `createTempFile`, it is borrowed and must stay open until `deinit`.
+    dir: Dir,
+    name_buffer: [max_temp_name_len]u8,
+    name_len: u8,
+    file_open: bool,
+    file_exists: bool,
+    close_dir_on_deinit: bool,
+
+    /// The generated basename, relative to `dir`. Points into the `TempFile`,
+    /// so it stays valid only until the struct is moved or deinitialized.
+    pub fn name(self: *const TempFile) []const u8 {
+        return self.name_buffer[0..self.name_len];
+    }
+
+    /// Close the file and remove it. Always call this, even after a
+    /// `rename`/`renamePreserve` or a `keep`.
+    pub fn deinit(self: *TempFile) void {
+        if (self.file_open) {
+            self.file.close();
+            self.file_open = false;
+        }
+        if (self.file_exists) {
+            removeTempFile(self.dir, self.name());
+            self.file_exists = false;
+        }
+        if (self.close_dir_on_deinit) {
+            self.dir.close();
+            self.close_dir_on_deinit = false;
+        }
+        self.* = undefined;
+    }
+
+    /// Leave the file in place: `deinit` still closes it, but no longer
+    /// removes it.
+    pub fn keep(self: *TempFile) void {
+        self.file_exists = false;
+    }
+
+    pub const RenameError = Dir.RenameError;
+
+    /// Move the file to `dest_path` in `dest_dir`, replacing anything already
+    /// there. The file is closed first, and `deinit` no longer removes it.
+    pub fn rename(self: *TempFile, dest_dir: Dir, dest_path: []const u8) RenameError!void {
+        if (self.file_open) {
+            self.file.close();
+            self.file_open = false;
+        }
+        try self.dir.rename(self.name(), dest_dir, dest_path);
+        self.file_exists = false;
+    }
+
+    pub const RenamePreserveError = Dir.RenamePreserveError;
+
+    /// Move the file to `dest_path` in `dest_dir`, failing with
+    /// `error.PathAlreadyExists` if something is already there. The file is
+    /// closed first, and `deinit` no longer removes it.
+    pub fn renamePreserve(self: *TempFile, dest_dir: Dir, dest_path: []const u8) RenamePreserveError!void {
+        if (self.file_open) {
+            self.file.close();
+            self.file_open = false;
+        }
+        try self.dir.renamePreserve(self.name(), dest_dir, dest_path);
+        self.file_exists = false;
+    }
+};
+
+/// A directory with a randomly generated name, deleted with everything in it
+/// by `deinit`. Created by `Dir.createTempDir`.
+pub const TempDir = struct {
+    /// The open temporary directory, opened for iteration.
+    dir: Dir,
+    /// The directory holding it. Unless it was opened by `createTempDir`, it
+    /// is borrowed and must stay open until `deinit`.
+    parent: Dir,
+    name_buffer: [max_temp_name_len]u8,
+    name_len: u8,
+    dir_open: bool,
+    exists: bool,
+    close_parent_on_deinit: bool,
+
+    /// The generated basename, relative to `parent`. Points into the
+    /// `TempDir`, so it stays valid only until the struct is moved or
+    /// deinitialized.
+    pub fn name(self: *const TempDir) []const u8 {
+        return self.name_buffer[0..self.name_len];
+    }
+
+    /// Close the directory and delete it with everything in it. Use `cleanup`
+    /// instead to handle a failed deletion; this must still be called
+    /// afterwards, and after a `keep`.
+    pub fn deinit(self: *TempDir) void {
+        self.cleanup() catch |err| {
+            log.warn("failed to remove temporary directory {s}: {}", .{ self.name(), err });
+        };
+        if (self.close_parent_on_deinit) {
+            self.parent.close();
+            self.close_parent_on_deinit = false;
+        }
+        self.* = undefined;
+    }
+
+    pub const CleanupError = Dir.DeleteTreeError;
+
+    /// Close the directory and delete it with everything in it, reporting a
+    /// failed deletion. The tree walk runs shielded from cancellation, so a
+    /// canceled task still cleans up after itself.
+    ///
+    /// On failure the `TempDir` is left armed, so a later `cleanup`/`deinit`
+    /// tries again.
+    pub fn cleanup(self: *TempDir) CleanupError!void {
+        // Windows cannot delete a directory that still has open handles.
+        if (self.dir_open) {
+            self.dir.close();
+            self.dir_open = false;
+        }
+        if (self.exists) {
+            try removeTempTree(self.parent, self.name());
+            self.exists = false;
+        }
+    }
+
+    /// Leave the directory in place: `deinit` still closes it, but no longer
+    /// deletes it.
+    pub fn keep(self: *TempDir) void {
+        self.exists = false;
+    }
+};
+
+fn tempFileInit(dir: Dir, close_dir_on_deinit: bool, options: Dir.CreateTempFileOptions) Dir.CreateTempFileError!TempFile {
+    if (options.prefix.len > max_temp_prefix_len) return error.NameTooLong;
+
+    const file, const suffix = try createRandomFile(dir, options.prefix, .{
+        .mode = options.mode,
+        .read = options.read,
+    });
+    var temp_file: TempFile = .{
+        .file = file,
+        .dir = dir,
+        .name_buffer = undefined,
+        .name_len = undefined,
+        .file_open = true,
+        .file_exists = true,
+        .close_dir_on_deinit = close_dir_on_deinit,
+    };
+    temp_file.name_len = @intCast(formatTempName(&temp_file.name_buffer, options.prefix, suffix).len);
+    return temp_file;
+}
+
+fn tempDirInit(parent: Dir, close_parent_on_deinit: bool, options: Dir.CreateTempDirOptions) Dir.CreateTempDirError!TempDir {
+    if (options.prefix.len > max_temp_prefix_len) return error.NameTooLong;
+
+    const suffix = try createRandomDir(parent, options.prefix, options.mode);
+    var temp_dir: TempDir = .{
+        .dir = undefined,
+        .parent = parent,
+        .name_buffer = undefined,
+        .name_len = undefined,
+        .dir_open = false,
+        .exists = true,
+        .close_parent_on_deinit = close_parent_on_deinit,
+    };
+    temp_dir.name_len = @intCast(formatTempName(&temp_dir.name_buffer, options.prefix, suffix).len);
+
+    errdefer {
+        // Nothing has been put in the directory yet, so a failed removal costs
+        // no more than an empty directory left behind.
+        removeTempTree(parent, temp_dir.name()) catch |err| {
+            log.warn("failed to remove temporary directory {s}: {}", .{ temp_dir.name(), err });
+        };
+    }
+    temp_dir.dir = try parent.openDir(temp_dir.name(), .{ .iterate = true });
+    temp_dir.dir_open = true;
+    return temp_dir;
+}
+
+/// The path behind `openSystemTempDir`, written into `buffer` when it comes
+/// from the environment.
+fn systemTempPath(buffer: *[std.Io.Dir.max_path_bytes]u8) []const u8 {
+    if (builtin.os.tag == .windows) {
+        const environ: std.process.Environ = .{ .block = .global };
+        inline for (.{ "TMP", "TEMP", "USERPROFILE" }) |key| {
+            if (environ.getWindows(comptime std.unicode.wtf8ToWtf16LeStringLiteral(key))) |value| {
+                if (value.len != 0 and std.unicode.calcWtf8Len(value) <= buffer.len) {
+                    return buffer[0..std.unicode.wtf16LeToWtf8(buffer, value)];
+                }
+            }
+        }
+        return "C:\\Windows\\Temp";
+    }
+    if (builtin.link_libc) {
+        inline for (.{ "TMPDIR", "TMP", "TEMP" }) |key| {
+            if (std.c.getenv(key)) |value| {
+                const path = std.mem.span(value);
+                if (path.len != 0 and path.len <= buffer.len) {
+                    @memcpy(buffer[0..path.len], path);
+                    return buffer[0..path.len];
+                }
+            }
+        }
+    }
+    return "/tmp";
+}
+
+/// Longest `prefix` accepted by `Dir.createTempFile` and `Dir.createTempDir`.
+pub const max_temp_prefix_len = 32;
+
+/// Size of a buffer that fits any name generated for a `TempFile`/`TempDir`:
+/// a prefix plus the 16 hex digits of a random `u64`.
+pub const max_temp_name_len = max_temp_prefix_len + 16;
+
+fn formatTempName(buffer: *[max_temp_name_len]u8, prefix: []const u8, suffix: u64) []const u8 {
+    const hex = std.fmt.hex(suffix);
+    @memcpy(buffer[0..prefix.len], prefix);
+    @memcpy(buffer[prefix.len..][0..hex.len], &hex);
+    return buffer[0 .. prefix.len + hex.len];
+}
+
+const RandomFileOptions = struct {
+    mode: os.fs.mode_t,
+    read: bool,
+};
+
+/// Create a file under a randomly generated name in `dir`, retrying until the
+/// name is one nothing else holds. Returns the file and the random suffix that
+/// names it.
+fn createRandomFile(dir: Dir, prefix: []const u8, options: RandomFileOptions) Dir.CreateFileError!struct { File, u64 } {
+    var name_buffer: [max_temp_name_len]u8 = undefined;
     while (true) {
-        var random_integer: u64 = undefined;
-        random(std.mem.asBytes(&random_integer));
-        const tmp_sub_path = std.fmt.hex(random_integer);
-        const file = dir.createFile(&tmp_sub_path, .{
+        var suffix: u64 = undefined;
+        random(std.mem.asBytes(&suffix));
+        const file = dir.createFile(formatTempName(&name_buffer, prefix, suffix), .{
             .read = options.read,
             .exclusive = true,
             .mode = options.mode,
@@ -784,16 +1115,42 @@ fn atomicFileInit(dest_sub_path: []const u8, dir: Dir, close_dir_on_deinit: bool
             error.PathAlreadyExists => continue,
             else => |e| return e,
         };
-        return .{
-            .file = file,
-            .file_basename_hex = random_integer,
-            .file_open = true,
-            .file_exists = true,
-            .dir = dir,
-            .close_dir_on_deinit = close_dir_on_deinit,
-            .dest_sub_path = dest_sub_path,
-        };
+        return .{ file, suffix };
     }
+}
+
+/// Create a directory under a randomly generated name in `dir`, retrying until
+/// the name is one nothing else holds. Returns the random suffix that names it.
+fn createRandomDir(dir: Dir, prefix: []const u8, mode: os.fs.mode_t) Dir.CreateDirError!u64 {
+    var name_buffer: [max_temp_name_len]u8 = undefined;
+    while (true) {
+        var suffix: u64 = undefined;
+        random(std.mem.asBytes(&suffix));
+        dir.createDir(formatTempName(&name_buffer, prefix, suffix), mode) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => |e| return e,
+        };
+        return suffix;
+    }
+}
+
+/// Remove a temporary file, ignoring a failure to do so. Cleanup must run even
+/// when the task is being canceled, like close().
+fn removeTempFile(dir: Dir, sub_path: []const u8) void {
+    var op = ev.DirDeleteFile.init(dir.fd, sub_path);
+    waitForIoUncancelable(&op.c);
+    op.getResult() catch |err| {
+        log.warn("failed to remove temporary file {s}: {}", .{ sub_path, err });
+    };
+}
+
+/// Delete a temporary directory and everything in it. Unlike a single unlink,
+/// this walks the tree with many cancelable operations, so it runs under a
+/// cancellation shield to keep a canceled task from abandoning it half done.
+fn removeTempTree(parent: Dir, sub_path: []const u8) Dir.DeleteTreeError!void {
+    beginShield();
+    defer endShield();
+    return parent.deleteTree(sub_path);
 }
 
 /// Whether the Reader/Writer issues positional (offset-based) or streaming
@@ -1866,7 +2223,7 @@ test "Dir: renamePreserve" {
     try std.testing.expectError(error.PathAlreadyExists, dir.renamePreserve(old_path, dir, new_path));
 }
 
-test "Dir: createFileAtomic link" {
+test "Dir: createAtomicFile link" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
@@ -1874,7 +2231,7 @@ test "Dir: createFileAtomic link" {
     const dest_path = "test_atomic_file_link.txt";
     defer dir.deleteFile(dest_path) catch {};
 
-    var af = try dir.createFileAtomic(dest_path, .{});
+    var af = try dir.createAtomicFile(dest_path, .{});
     defer af.deinit();
 
     _ = try af.file.write("atomic", 0);
@@ -1887,7 +2244,7 @@ test "Dir: createFileAtomic link" {
     try std.testing.expectEqualStrings("atomic", buffer[0..n]);
 }
 
-test "Dir: createFileAtomic link to existing destination" {
+test "Dir: createAtomicFile link to existing destination" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
@@ -1899,7 +2256,7 @@ test "Dir: createFileAtomic link to existing destination" {
     _ = try dest.write("old", 0);
     dest.close();
 
-    var af = try dir.createFileAtomic(dest_path, .{});
+    var af = try dir.createAtomicFile(dest_path, .{});
     const tmp_sub_path = std.fmt.hex(af.file_basename_hex);
     defer dir.deleteFile(&tmp_sub_path) catch {};
 
@@ -1917,7 +2274,7 @@ test "Dir: createFileAtomic link to existing destination" {
     try std.testing.expectEqualStrings("old", buffer[0..n]);
 }
 
-test "Dir: createFileAtomic replace existing destination" {
+test "Dir: createAtomicFile replace existing destination" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
@@ -1929,7 +2286,7 @@ test "Dir: createFileAtomic replace existing destination" {
     _ = try dest.write("old", 0);
     dest.close();
 
-    var af = try dir.createFileAtomic(dest_path, .{});
+    var af = try dir.createAtomicFile(dest_path, .{});
     defer af.deinit();
 
     _ = try af.file.write("new", 0);
@@ -1942,7 +2299,7 @@ test "Dir: createFileAtomic replace existing destination" {
     try std.testing.expectEqualStrings("new", buffer[0..n]);
 }
 
-test "Dir: createFileAtomic in subdirectory" {
+test "Dir: createAtomicFile in subdirectory" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
@@ -1951,7 +2308,7 @@ test "Dir: createFileAtomic in subdirectory" {
     try dir.createDir(sub_dir_path, 0o755);
     defer dir.deleteTree(sub_dir_path) catch {};
 
-    var af = try dir.createFileAtomic(sub_dir_path ++ "/dest.txt", .{});
+    var af = try dir.createAtomicFile(sub_dir_path ++ "/dest.txt", .{});
     defer af.deinit();
 
     _ = try af.file.write("atomic", 0);
@@ -1964,14 +2321,14 @@ test "Dir: createFileAtomic in subdirectory" {
     try std.testing.expectEqualStrings("atomic", buffer[0..n]);
 }
 
-test "Dir: createFileAtomic deinit without link removes temporary file" {
+test "Dir: createAtomicFile deinit without link removes temporary file" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
     const dir = Dir.cwd();
     const dest_path = "test_atomic_file_abandoned.txt";
 
-    var af = try dir.createFileAtomic(dest_path, .{});
+    var af = try dir.createAtomicFile(dest_path, .{});
     const tmp_sub_path = std.fmt.hex(af.file_basename_hex);
     defer dir.deleteFile(&tmp_sub_path) catch {};
 
@@ -1980,6 +2337,203 @@ test "Dir: createFileAtomic deinit without link removes temporary file" {
 
     try std.testing.expectError(error.FileNotFound, dir.access(&tmp_sub_path, .{}));
     try std.testing.expectError(error.FileNotFound, dir.access(dest_path, .{}));
+}
+
+test "Dir: createTempFile" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+
+    var name_buffer: [max_temp_name_len]u8 = undefined;
+    const name = blk: {
+        var tf = try dir.createTempFile(.{ .prefix = "test_temp_file_" });
+        defer tf.deinit();
+
+        try std.testing.expect(std.mem.startsWith(u8, tf.name(), "test_temp_file_"));
+        try std.testing.expectEqual(15 + 16, tf.name().len);
+
+        _ = try tf.file.write("scratch", 0);
+        var buffer: [16]u8 = undefined;
+        const n = try tf.file.read(&buffer, 0);
+        try std.testing.expectEqualStrings("scratch", buffer[0..n]);
+
+        @memcpy(name_buffer[0..tf.name().len], tf.name());
+        break :blk name_buffer[0..tf.name().len];
+    };
+
+    try std.testing.expectError(error.FileNotFound, dir.access(name, .{}));
+}
+
+test "Dir: createTempFile keep" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+
+    var tf = try dir.createTempFile(.{});
+    var name_buffer: [max_temp_name_len]u8 = undefined;
+    @memcpy(name_buffer[0..tf.name().len], tf.name());
+    const name = name_buffer[0..tf.name().len];
+    defer dir.deleteFile(name) catch {};
+
+    tf.keep();
+    tf.deinit();
+
+    try dir.access(name, .{});
+}
+
+test "Dir: createTempFile rename" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+    const dest_path = "test_temp_file_renamed.txt";
+    defer dir.deleteFile(dest_path) catch {};
+
+    var tf = try dir.createTempFile(.{});
+    defer tf.deinit();
+
+    _ = try tf.file.write("renamed", 0);
+    try tf.rename(dir, dest_path);
+
+    var file = try dir.openFile(dest_path, .{ .mode = .read_only });
+    defer file.close();
+    var buffer: [16]u8 = undefined;
+    const n = try file.read(&buffer, 0);
+    try std.testing.expectEqualStrings("renamed", buffer[0..n]);
+}
+
+test "Dir: createTempFile with too long prefix" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+    const prefix = "x" ** (max_temp_prefix_len + 1);
+    try std.testing.expectError(error.NameTooLong, dir.createTempFile(.{ .prefix = prefix }));
+    try std.testing.expectError(error.NameTooLong, dir.createTempDir(.{ .prefix = prefix }));
+}
+
+test "Dir: createTempDir" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+
+    var name_buffer: [max_temp_name_len]u8 = undefined;
+    const name = blk: {
+        var td = try dir.createTempDir(.{ .prefix = "test_temp_dir_" });
+        defer td.deinit();
+
+        try std.testing.expect(std.mem.startsWith(u8, td.name(), "test_temp_dir_"));
+
+        // The tree is deleted with everything in it, and the directory is open
+        // for iteration.
+        (try td.dir.createFile("file.txt", .{})).close();
+        try td.dir.createDir("sub", 0o700);
+        (try td.dir.createFile("sub/nested.txt", .{})).close();
+
+        var count: usize = 0;
+        var it = td.dir.iterate();
+        while (try it.next()) |_| count += 1;
+        try std.testing.expectEqual(2, count);
+
+        @memcpy(name_buffer[0..td.name().len], td.name());
+        break :blk name_buffer[0..td.name().len];
+    };
+
+    try std.testing.expectError(error.FileNotFound, dir.access(name, .{}));
+}
+
+test "Dir: createTempDir cleanup" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+
+    var td = try dir.createTempDir(.{});
+    defer td.deinit();
+
+    try td.cleanup();
+    // Deleting an already deleted tree is not an error, and the second cleanup
+    // is a no-op because the first one disarmed it.
+    try td.cleanup();
+    try std.testing.expectError(error.FileNotFound, dir.access(td.name(), .{}));
+}
+
+test "openSystemTempDir" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    // Keeping the directory open costs one handle for any number of entries.
+    const dir = try openSystemTempDir();
+    defer dir.close();
+
+    var td = try dir.createTempDir(.{ .prefix = "zio_test_" });
+    defer td.deinit();
+    var tf = try dir.createTempFile(.{ .prefix = "zio_test_" });
+    defer tf.deinit();
+
+    try dir.access(td.name(), .{});
+    try dir.access(tf.name(), .{});
+}
+
+test "createTempFile in the system temporary directory" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var name_buffer: [max_temp_name_len]u8 = undefined;
+    const name = blk: {
+        var tf = try createTempFile(.{ .prefix = "zio_test_" });
+        defer tf.deinit();
+
+        _ = try tf.file.write("scratch", 0);
+
+        @memcpy(name_buffer[0..tf.name().len], tf.name());
+        break :blk name_buffer[0..tf.name().len];
+    };
+
+    const temp_dir = try openSystemTempDir();
+    defer temp_dir.close();
+    try std.testing.expectError(error.FileNotFound, temp_dir.access(name, .{}));
+}
+
+test "createTempDir in the system temporary directory" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var name_buffer: [max_temp_name_len]u8 = undefined;
+    const name = blk: {
+        var td = try createTempDir(.{ .prefix = "zio_test_" });
+        defer td.deinit();
+
+        (try td.dir.createFile("file.txt", .{})).close();
+
+        @memcpy(name_buffer[0..td.name().len], td.name());
+        break :blk name_buffer[0..td.name().len];
+    };
+
+    const temp_dir = try openSystemTempDir();
+    defer temp_dir.close();
+    try std.testing.expectError(error.FileNotFound, temp_dir.access(name, .{}));
+}
+
+test "Dir: createTempDir keep" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const dir = Dir.cwd();
+
+    var td = try dir.createTempDir(.{});
+    var name_buffer: [max_temp_name_len]u8 = undefined;
+    @memcpy(name_buffer[0..td.name().len], td.name());
+    const name = name_buffer[0..td.name().len];
+    defer dir.deleteTree(name) catch {};
+
+    td.keep();
+    td.deinit();
+
+    try dir.access(name, .{});
 }
 
 test "Dir: access" {
