@@ -220,8 +220,8 @@ pub const ThreadPool = struct {
             reservation_needs_spawn = self.idle_threads.load(.monotonic) < self.reserved_pending;
         }
 
-        self.queue_not_empty.signal();
         self.queue_mutex.unlock();
+        self.queue_not_empty.signal();
 
         if (reservation_needs_spawn) {
             // Forced: a reserved job may need capacity beyond max_threads. On

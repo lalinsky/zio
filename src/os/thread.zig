@@ -856,7 +856,13 @@ const ConditionWindows = struct {
 /// - wait() captures the current sequence, unlocks the mutex, then blocks
 ///   on the futex until the sequence changes
 const ConditionFutex = struct {
-    seq: std.atomic.Value(u32) = .init(0),
+    state: std.atomic.Value(State) = .init(.{}),
+    epoch: std.atomic.Value(u32) = .init(0),
+
+    const State = packed struct(u32) {
+        waiters: u16 = 0,
+        signals: u16 = 0,
+    };
 
     pub fn init() ConditionFutex {
         return .{};
@@ -867,11 +873,26 @@ const ConditionFutex = struct {
     }
 
     pub fn wait(self: *ConditionFutex, mutex: *Mutex) void {
-        const seq = self.seq.load(.monotonic);
+        var epoch = self.epoch.load(.acquire);
+
+        _ = self.state.fetchAdd(.{ .waiters = 1, .signals = 0 }, .monotonic);
+
         mutex.unlock();
         defer mutex.lock();
 
-        Futex.wait(&self.seq, seq);
+        while (true) {
+            Futex.wait(&self.epoch, epoch);
+
+            epoch = self.epoch.load(.acquire);
+
+            var prev = self.state.load(.monotonic);
+            while (prev.signals > 0) {
+                prev = self.state.cmpxchgWeak(prev, .{
+                    .waiters = prev.waiters - 1,
+                    .signals = prev.signals - 1,
+                }, .acquire, .monotonic) orelse return;
+            }
+        }
     }
 
     pub fn timedWait(self: *ConditionFutex, mutex: *Mutex, timeout: Timeout) error{Timeout}!void {
@@ -879,24 +900,79 @@ const ConditionFutex = struct {
             return self.wait(mutex);
         }
 
-        const seq = self.seq.load(.monotonic);
+        const deadline = timeout.toDeadline();
+
+        var epoch = self.epoch.load(.acquire);
+
+        _ = self.state.fetchAdd(.{ .waiters = 1, .signals = 0 }, .monotonic);
+
         mutex.unlock();
         defer mutex.lock();
 
-        const remaining = timeout.durationFromNow();
-        if (remaining.value <= 0) return error.Timeout;
+        while (true) {
+            const remaining = deadline.durationFromNow();
+            if (remaining.value <= 0) {
+                self.deregister();
+                return error.Timeout;
+            }
 
-        try Futex.timedWait(&self.seq, seq, remaining);
+            Futex.timedWait(&self.epoch, epoch, remaining) catch {};
+
+            epoch = self.epoch.load(.acquire);
+
+            var prev = self.state.load(.monotonic);
+            while (prev.signals > 0) {
+                prev = self.state.cmpxchgWeak(prev, .{
+                    .waiters = prev.waiters - 1,
+                    .signals = prev.signals - 1,
+                }, .acquire, .monotonic) orelse return;
+            }
+        }
     }
 
     pub fn signal(self: *ConditionFutex) void {
-        _ = self.seq.fetchAdd(1, .monotonic);
-        Futex.wake(&self.seq, .one);
+        var prev = self.state.load(.monotonic);
+        while (prev.waiters > prev.signals) {
+            prev = self.state.cmpxchgWeak(prev, .{
+                .waiters = prev.waiters,
+                .signals = prev.signals + 1,
+            }, .release, .monotonic) orelse {
+                _ = self.epoch.fetchAdd(1, .release);
+                Futex.wake(&self.epoch, .one);
+                return;
+            };
+        }
     }
 
     pub fn broadcast(self: *ConditionFutex) void {
-        _ = self.seq.fetchAdd(1, .monotonic);
-        Futex.wake(&self.seq, .all);
+        var prev = self.state.load(.monotonic);
+        while (prev.waiters > prev.signals) {
+            prev = self.state.cmpxchgWeak(prev, .{
+                .waiters = prev.waiters,
+                .signals = prev.waiters,
+            }, .release, .monotonic) orelse {
+                _ = self.epoch.fetchAdd(1, .release);
+                Futex.wake(&self.epoch, .all);
+                return;
+            };
+        }
+    }
+
+    fn deregister(self: *ConditionFutex) void {
+        var prev = self.state.load(.monotonic);
+        while (true) {
+            const new_signals = @min(prev.signals, prev.waiters - 1);
+            prev = self.state.cmpxchgWeak(prev, .{
+                .waiters = prev.waiters - 1,
+                .signals = new_signals,
+            }, .monotonic, .monotonic) orelse {
+                if (prev.signals > 0 and prev.signals < prev.waiters) {
+                    _ = self.epoch.fetchAdd(1, .release);
+                    Futex.wake(&self.epoch, .one);
+                }
+                return;
+            };
+        }
     }
 };
 
