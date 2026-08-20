@@ -146,7 +146,7 @@ pub const Group = struct {
         const ReturnType = @typeInfo(@TypeOf(func)).@"fn".return_type.?;
         const Context = struct { group: *Group, args: Args };
         const Wrapper = struct {
-            fn start(ctx: *const anyopaque, _: *anyopaque) void {
+            fn start(ctx: *const anyopaque) void {
                 const context: *const Context = @ptrCast(@alignCast(ctx));
                 const group = context.group;
                 if (@typeInfo(ReturnType) == .error_union) {
@@ -285,15 +285,15 @@ pub fn groupSpawnTask(
 }
 
 /// Spawn a blocking task in the group with raw context bytes and start function.
-/// Used by Group.spawnBlocking.
+/// Used by Group.spawnBlocking and std.Io vtable implementations.
 pub fn groupSpawnBlockingTask(
     group: *Group,
     rt: *Runtime,
     context: []const u8,
     context_alignment: std.mem.Alignment,
-    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    start: *const fn (context: *const anyopaque) void,
 ) !void {
-    _ = try spawnBlockingTask(rt, 0, .@"1", context, context_alignment, .{ .regular = start }, group);
+    _ = try spawnBlockingTask(rt, 0, .@"1", context, context_alignment, .{ .group = start }, group);
 }
 
 /// Register an awaitable with a group.
