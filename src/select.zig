@@ -250,6 +250,9 @@ test "SelectResult: result types" {
 /// }
 /// ```
 pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
+    // Wide selects (many branches, each with WaitContext plumbing) exceed
+    // the default comptime branch quota.
+    @setEvalBranchQuota(100_000);
     const S = @TypeOf(futures);
     const U = SelectResult(S);
     const fields = @typeInfo(S).@"struct".fields;
