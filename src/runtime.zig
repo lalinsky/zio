@@ -35,6 +35,7 @@ const Group = @import("group.zig").Group;
 const dns = @import("dns/root.zig");
 
 const select = @import("select.zig");
+const common = @import("common.zig");
 const Waiter = @import("common.zig").Waiter;
 const random_mod = @import("random.zig");
 
@@ -220,13 +221,14 @@ pub fn JoinHandle(comptime T: type) type {
         }
 
         /// Registers a waiter to be notified when the task completes.
-        /// This is part of the Future protocol for select().
-        /// Returns false if the task is already complete (no wait needed), true if added to queue.
-        pub fn asyncWait(self: Self, waiter: *Waiter) bool {
+        /// This is part of the Future protocol for select(); see
+        /// `common.AsyncWaitState` for the claim-before-ready contract.
+        pub fn asyncWait(self: Self, waiter: *Waiter) common.AsyncWaitState {
             if (self.awaitable) |awaitable| {
                 return awaitable.asyncWait(waiter);
             }
-            return false; // Already complete
+            // Already complete: level state; still win the select first.
+            return if (waiter.tryClaim()) .ready else .lost;
         }
 
         /// Cancels a pending wait operation by removing the waiter.

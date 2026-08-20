@@ -38,6 +38,25 @@ pub const Closeable = error{
 };
 
 /// Sentinel value indicating no winner has been selected yet in select operations
+/// Outcome of a future's `asyncWait` under the select protocol.
+///
+/// The conservation rule this encodes: a future must WIN the select (claim
+/// the shared winner slot via `waiter.tryClaim`) BEFORE any consuming fast
+/// path. A fast path that consumed first and reported ready later let a
+/// blind winner store clobber a concurrent claim of an earlier-registered
+/// branch, and the claimed item died on the select's dead stack frame.
+///
+/// - `.ready`: the operation completed on the fast path AND this waiter won
+///   the select. `getResult` is valid now. Nothing was registered.
+/// - `.queued`: the waiter is registered and will be woken exactly once via
+///   `waiter.wake()`. `asyncCancelWait` must be called if the caller stops
+///   waiting.
+/// - `.lost`: another branch of the same select already won, so this future
+///   consumed NOTHING and registered NOTHING. Only select waiters can lose;
+///   a direct waiter's claim always succeeds, so direct callers treat this
+///   as unreachable.
+pub const AsyncWaitState = enum { ready, queued, lost };
+
 pub const NO_WINNER = std.math.maxInt(usize);
 
 /// Stack-allocated waiter for async operations.

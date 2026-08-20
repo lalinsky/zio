@@ -66,8 +66,11 @@ const ChannelImpl = struct {
         var ctx: AsyncReceiveImpl.WaitContext = .{ .result_ptr = undefined };
         var waiter = Waiter.init();
 
-        if (!recv.asyncWait(&waiter, &ctx, elem_ptr)) {
-            return recv.getResult(&ctx);
+        switch (recv.asyncWait(&waiter, &ctx, elem_ptr)) {
+            .ready => return recv.getResult(&ctx),
+            // A direct waiter's claim always succeeds.
+            .lost => unreachable,
+            .queued => {},
         }
 
         waiter.wait(1, .allow_cancel) catch |err| {
@@ -134,8 +137,11 @@ const ChannelImpl = struct {
         var ctx: AsyncSendImpl.WaitContext = .{ .item_ptr = undefined };
         var waiter = Waiter.init();
 
-        if (!send_op.asyncWait(&waiter, &ctx, elem_ptr)) {
-            return send_op.getResult(&ctx);
+        switch (send_op.asyncWait(&waiter, &ctx, elem_ptr)) {
+            .ready => return send_op.getResult(&ctx),
+            // A direct waiter's claim always succeeds.
+            .lost => unreachable,
+            .queued => {},
         }
 
         waiter.wait(1, .allow_cancel) catch |err| {
@@ -225,41 +231,58 @@ const AsyncSendImpl = struct {
         succeeded: bool = false,
     };
 
-    pub fn asyncWait(self: *const SendSelf, waiter: *Waiter, ctx: *WaitContext, item_ptr: [*]const u8) bool {
+    pub fn asyncWait(self: *const SendSelf, waiter: *Waiter, ctx: *WaitContext, item_ptr: [*]const u8) common.AsyncWaitState {
         ctx.item_ptr = item_ptr;
 
         self.channel.mutex.lockUncancelable();
 
         if (self.channel.closed) {
+            // Nothing consumed; win the select before reporting ready.
             self.channel.mutex.unlock();
-            return false;
+            return if (waiter.tryClaim()) .ready else .lost;
         }
 
-        while (self.channel.receiver_queue.pop()) |node| {
-            if (Waiter.fromNode(node).tryClaim()) {
-                const recv_ctx: *AsyncReceiveImpl.WaitContext = @ptrFromInt(node.userdata);
-                @memcpy(recv_ctx.result_ptr[0..self.channel.elem_size], ctx.item_ptr[0..self.channel.elem_size]);
-                recv_ctx.result_set = true;
+        if (!self.channel.receiver_queue.isEmpty() or
+            self.channel.count < self.channel.capacity)
+        {
+            // The send can complete now. Win the select FIRST: committing
+            // the transfer on a branch that then lost dropped the item on
+            // the dead select frame (the fast-path clobber).
+            if (!waiter.tryClaim()) {
+                self.channel.mutex.unlock();
+                return .lost;
+            }
+            while (self.channel.receiver_queue.pop()) |node| {
+                if (Waiter.fromNode(node).tryClaim()) {
+                    const recv_ctx: *AsyncReceiveImpl.WaitContext = @ptrFromInt(node.userdata);
+                    @memcpy(recv_ctx.result_ptr[0..self.channel.elem_size], ctx.item_ptr[0..self.channel.elem_size]);
+                    recv_ctx.result_set = true;
+                    ctx.succeeded = true;
+                    self.channel.mutex.unlock();
+                    Waiter.fromNode(node).signal();
+                    return .ready;
+                }
+            }
+            if (self.channel.count < self.channel.capacity) {
+                @memcpy(self.channel.elemPtr(self.channel.tail)[0..self.channel.elem_size], ctx.item_ptr[0..self.channel.elem_size]);
+                self.channel.tail = (self.channel.tail + 1) % self.channel.capacity;
+                self.channel.count += 1;
                 ctx.succeeded = true;
                 self.channel.mutex.unlock();
-                Waiter.fromNode(node).signal();
-                return false;
+                return .ready;
             }
-        }
-
-        if (self.channel.count < self.channel.capacity) {
-            @memcpy(self.channel.elemPtr(self.channel.tail)[0..self.channel.elem_size], ctx.item_ptr[0..self.channel.elem_size]);
-            self.channel.tail = (self.channel.tail + 1) % self.channel.capacity;
-            self.channel.count += 1;
-            ctx.succeeded = true;
-            self.channel.mutex.unlock();
-            return false;
+            // Won the select, but every parked receiver was a select loser
+            // and there is no buffer space. Only an unbuffered select-vs-
+            // select rendezvous can reach this; the fork does not support
+            // that composition, and silently losing the win would strand
+            // the select.
+            @panic("channel select-send won with no committable receiver (unbuffered select-vs-select rendezvous is unsupported)");
         }
 
         waiter.node.userdata = @intFromPtr(ctx);
         self.channel.sender_queue.push(&waiter.node);
         self.channel.mutex.unlock();
-        return true;
+        return .queued;
     }
 
     pub fn asyncCancelWait(self: *const SendSelf, waiter: *Waiter, ctx: *WaitContext) bool {
@@ -295,39 +318,61 @@ const AsyncReceiveImpl = struct {
         result_set: bool = false,
     };
 
-    pub fn asyncWait(self: *const RecvSelf, waiter: *Waiter, ctx: *WaitContext, result_ptr: [*]u8) bool {
+    pub fn asyncWait(self: *const RecvSelf, waiter: *Waiter, ctx: *WaitContext, result_ptr: [*]u8) common.AsyncWaitState {
         ctx.result_ptr = result_ptr;
         ctx.result_set = false;
 
         self.channel.mutex.lockUncancelable();
 
         if (self.channel.count > 0) {
+            // Win the select BEFORE consuming: an item taken by a branch
+            // that then lost died on the dead select frame (the fast-path
+            // clobber that leaked starh2's write-ack accounting).
+            if (!waiter.tryClaim()) {
+                self.channel.mutex.unlock();
+                return .lost;
+            }
             self.channel.takeItemAndWakeSender(ctx.result_ptr);
             ctx.result_set = true;
-            return false;
+            return .ready;
         }
 
-        while (self.channel.sender_queue.pop()) |node| {
-            if (Waiter.fromNode(node).tryClaim()) {
-                const send_ctx: *AsyncSendImpl.WaitContext = @ptrFromInt(node.userdata);
-                @memcpy(ctx.result_ptr[0..self.channel.elem_size], send_ctx.item_ptr[0..self.channel.elem_size]);
-                send_ctx.succeeded = true;
-                ctx.result_set = true;
+        if (!self.channel.sender_queue.isEmpty()) {
+            if (!waiter.tryClaim()) {
                 self.channel.mutex.unlock();
-                Waiter.fromNode(node).signal();
-                return false;
+                return .lost;
             }
+            while (self.channel.sender_queue.pop()) |node| {
+                if (Waiter.fromNode(node).tryClaim()) {
+                    const send_ctx: *AsyncSendImpl.WaitContext = @ptrFromInt(node.userdata);
+                    @memcpy(ctx.result_ptr[0..self.channel.elem_size], send_ctx.item_ptr[0..self.channel.elem_size]);
+                    send_ctx.succeeded = true;
+                    ctx.result_set = true;
+                    self.channel.mutex.unlock();
+                    Waiter.fromNode(node).signal();
+                    return .ready;
+                }
+            }
+            if (self.channel.closed) {
+                self.channel.mutex.unlock();
+                return .ready;
+            }
+            // Won the select, but every parked sender was a select loser
+            // and the buffer is empty. Only an unbuffered select-vs-select
+            // rendezvous can reach this; the fork does not support that
+            // composition.
+            @panic("channel select-receive won with no committable sender (unbuffered select-vs-select rendezvous is unsupported)");
         }
 
         if (self.channel.closed) {
             self.channel.mutex.unlock();
-            return false;
+            return if (waiter.tryClaim()) .ready else .lost;
         }
 
         waiter.node.userdata = @intFromPtr(ctx);
         self.channel.receiver_queue.push(&waiter.node);
         self.channel.mutex.unlock();
-        return true;
+        return .queued;
     }
 
     pub fn asyncCancelWait(self: *const RecvSelf, waiter: *Waiter, ctx: *WaitContext) bool {
@@ -559,8 +604,8 @@ pub fn AsyncReceive(comptime T: type) type {
         }
 
         /// Register for notification when receive can complete.
-        /// Returns false if operation completed immediately (fast path).
-        pub fn asyncWait(self: *const Self, waiter: *Waiter, ctx: *WaitContext) bool {
+        /// See `common.AsyncWaitState` for the claim-before-ready contract.
+        pub fn asyncWait(self: *const Self, waiter: *Waiter, ctx: *WaitContext) common.AsyncWaitState {
             return self.impl.asyncWait(waiter, &ctx.impl_ctx, std.mem.asBytes(&ctx.result).ptr);
         }
 
@@ -612,8 +657,8 @@ pub fn AsyncSend(comptime T: type) type {
         }
 
         /// Register for notification when send can complete.
-        /// Returns false if operation completed immediately (fast path).
-        pub fn asyncWait(self: *const Self, waiter: *Waiter, ctx: *WaitContext) bool {
+        /// See `common.AsyncWaitState` for the claim-before-ready contract.
+        pub fn asyncWait(self: *const Self, waiter: *Waiter, ctx: *WaitContext) common.AsyncWaitState {
             return self.impl.asyncWait(waiter, &ctx.impl_ctx, std.mem.asBytes(&self.item).ptr);
         }
 
@@ -1620,7 +1665,7 @@ test "Channel: close classifies select waiters before signaling" {
     var claimed_receive_winner: std.atomic.Value(usize) = .init(NO_WINNER);
     var claimed_receive_waiter = Waiter.initSelect(&claimed_receive_parent, &claimed_receive_winner, 0);
 
-    try std.testing.expect(claimed_receive.asyncWait(&claimed_receive_waiter, &claimed_receive_ctx));
+    try std.testing.expectEqual(.queued, claimed_receive.asyncWait(&claimed_receive_waiter, &claimed_receive_ctx));
     claimed_receive_channel.close(.graceful);
     try std.testing.expectEqual(0, claimed_receive_winner.load(.acquire));
     try std.testing.expect(!claimed_receive.asyncCancelWait(&claimed_receive_waiter, &claimed_receive_ctx));
@@ -1635,7 +1680,7 @@ test "Channel: close classifies select waiters before signaling" {
     var claimed_send_winner: std.atomic.Value(usize) = .init(NO_WINNER);
     var claimed_send_waiter = Waiter.initSelect(&claimed_send_parent, &claimed_send_winner, 0);
 
-    try std.testing.expect(claimed_send.asyncWait(&claimed_send_waiter, &claimed_send_ctx));
+    try std.testing.expectEqual(.queued, claimed_send.asyncWait(&claimed_send_waiter, &claimed_send_ctx));
     claimed_send_channel.close(.graceful);
     try std.testing.expectEqual(0, claimed_send_winner.load(.acquire));
     try std.testing.expect(!claimed_send.asyncCancelWait(&claimed_send_waiter, &claimed_send_ctx));
@@ -1651,7 +1696,7 @@ test "Channel: close classifies select waiters before signaling" {
     var receive_winner: std.atomic.Value(usize) = .init(1);
     var receive_waiter = Waiter.initSelect(&receive_parent, &receive_winner, 0);
 
-    try std.testing.expect(receive.asyncWait(&receive_waiter, &receive_ctx));
+    try std.testing.expectEqual(.queued, receive.asyncWait(&receive_waiter, &receive_ctx));
     receive_channel.close(.graceful);
     try std.testing.expect(receive.asyncCancelWait(&receive_waiter, &receive_ctx));
     try std.testing.expectEqual(0, Helpers.notifyState(&receive_parent));
@@ -1664,7 +1709,7 @@ test "Channel: close classifies select waiters before signaling" {
     var send_winner: std.atomic.Value(usize) = .init(1);
     var send_waiter = Waiter.initSelect(&send_parent, &send_winner, 0);
 
-    try std.testing.expect(send.asyncWait(&send_waiter, &send_ctx));
+    try std.testing.expectEqual(.queued, send.asyncWait(&send_waiter, &send_ctx));
     send_channel.close(.graceful);
     try std.testing.expect(send.asyncCancelWait(&send_waiter, &send_ctx));
     try std.testing.expectEqual(0, Helpers.notifyState(&send_parent));

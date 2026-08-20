@@ -13,7 +13,8 @@ const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("utils/wait_queue.zig").WaitNode;
 const AutoCancel = @import("autocancel.zig").AutoCancel;
 const w = @import("os/windows.zig");
-const Waiter = @import("common.zig").Waiter;
+const common = @import("common.zig");
+const Waiter = common.Waiter;
 
 pub const SignalKind = switch (builtin.os.tag) {
     .windows => enum(u8) {
@@ -351,17 +352,23 @@ pub const Signal = struct {
     }
 
     /// Registers a waiter to be notified when the signal is received.
-    /// This is part of the Future protocol for select().
-    /// Returns false if the signal was already received (no wait needed), true if added to wait queue.
-    pub fn asyncWait(self: *Signal, waiter: *Waiter) bool {
-        // Fast path: signal already received
-        if (self.entry.counter.swap(0, .acquire) > 0) {
-            return false;
+    /// This is part of the Future protocol for select(); see
+    /// `common.AsyncWaitState` for the claim-before-ready contract.
+    pub fn asyncWait(self: *Signal, waiter: *Waiter) common.AsyncWaitState {
+        // Fast path: signal pending. Win the select BEFORE the consuming
+        // swap; a swap on a losing branch would eat the signal count.
+        if (self.entry.counter.load(.acquire) > 0) {
+            if (!waiter.tryClaim()) return .lost;
+            // A raced swap-to-zero still reports ready: the count was
+            // observed positive, and signal delivery tolerates spurious
+            // wakeups by POSIX convention.
+            _ = self.entry.counter.swap(0, .acquire);
+            return .ready;
         }
 
         // Add to wait queue
         self.entry.waiters.push(&waiter.node);
-        return true;
+        return .queued;
     }
 
     /// Cancels a pending wait operation by removing the waiter.

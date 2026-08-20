@@ -314,9 +314,11 @@ pub const CompletionQueue = struct {
         return !self.completed.isEmpty() or (self.closed and self.pending.isEmpty());
     }
 
-    pub fn asyncWait(self: *CompletionQueue, waiter: *Waiter, ctx: *WaitContext) bool {
-        // Fast path: something to report already.
-        if (self.isReady()) return false;
+    pub fn asyncWait(self: *CompletionQueue, waiter: *Waiter, ctx: *WaitContext) common.AsyncWaitState {
+        // The ready path consumes nothing (`getResult`/`next` pop), but the
+        // select must still be won before reporting ready: a branch that
+        // registered earlier may already hold a committed result.
+        if (self.isReady()) return if (waiter.tryClaim()) .ready else .lost;
 
         // Park on the completion futex word.
         Futex.prepareWait(&self.signal.raw, ctx, waiter);
@@ -324,13 +326,14 @@ pub const CompletionQueue = struct {
         // Double-check: a completion or the drained close may have landed (and
         // issued its wake) between the fast-path check and the registration.
         if (self.isReady()) {
-            // We removed ourselves before any wake -> report readiness now.
-            if (Futex.cancelWait(ctx)) return false;
+            // We removed ourselves before any wake -> report readiness now,
+            // after winning the select.
+            if (Futex.cancelWait(ctx)) return if (waiter.tryClaim()) .ready else .lost;
             // A concurrent wake already dequeued us; the signal is in-flight.
-            return true;
+            return .queued;
         }
 
-        return true;
+        return .queued;
     }
 
     pub fn asyncCancelWait(self: *CompletionQueue, waiter: *Waiter, ctx: *WaitContext) bool {

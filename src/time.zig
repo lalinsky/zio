@@ -13,6 +13,7 @@ const ev = @import("ev/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentExecutor = @import("runtime.zig").getCurrentExecutor;
 const loopClearTimer = @import("runtime.zig").loopClearTimer;
+const common = @import("common.zig");
 const Waiter = @import("common.zig").Waiter;
 
 // Time configuration - adjust these for different platforms
@@ -551,10 +552,10 @@ pub const Timeout = union(enum) {
         waiter: ?*Waiter = null,
     };
 
-    pub fn asyncWait(self: *const Timeout, waiter: *Waiter, ctx: *WaitContext) bool {
+    pub fn asyncWait(self: *const Timeout, waiter: *Waiter, ctx: *WaitContext) common.AsyncWaitState {
         // Timeout.none means wait forever - never completes
         if (self.* == .none) {
-            return true;
+            return .queued;
         }
 
         ctx.timer = ev.Timer.init(self.*);
@@ -564,7 +565,7 @@ pub const Timeout = union(enum) {
 
         const executor = getCurrentExecutor();
         executor.loopAdd(&ctx.timer.c);
-        return true;
+        return .queued;
     }
 
     fn timerCallback(_: *ev.Loop, c: *ev.Completion) void {

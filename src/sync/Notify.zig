@@ -185,10 +185,10 @@ pub fn getResult(self: *const Notify) void {
 
 /// Registers a waiter to be notified when signal() or broadcast() is called.
 /// This is part of the Future protocol for select().
-/// Always returns true since Notify has no persistent state (never pre-completed).
-pub fn asyncWait(self: *Notify, waiter: *Waiter) bool {
+/// Always queues since Notify has no persistent state (never pre-completed).
+pub fn asyncWait(self: *Notify, waiter: *Waiter) @import("../common.zig").AsyncWaitState {
     self.wait_queue.push(&waiter.node);
-    return true;
+    return .queued;
 }
 
 /// Cancels a pending wait operation by removing the waiter.

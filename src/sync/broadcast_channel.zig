@@ -9,6 +9,7 @@ const SimpleQueue = @import("../utils/simple_queue.zig").SimpleQueue;
 const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const Barrier = @import("Barrier.zig");
 const select = @import("../select.zig").select;
+const common = @import("../common.zig");
 const Waiter = @import("../common.zig").Waiter;
 const Closeable = @import("../common.zig").Closeable;
 const Mutex = @import("Mutex.zig");
@@ -167,7 +168,7 @@ const AsyncReceiveImpl = struct {
         result: ?(Closeable || error{Lagged})!void = null,
     };
 
-    pub fn asyncWait(self: *const RecvSelf, waiter: *Waiter, ctx: *WaitContext, result_ptr: [*]u8) bool {
+    pub fn asyncWait(self: *const RecvSelf, waiter: *Waiter, ctx: *WaitContext, result_ptr: [*]u8) common.AsyncWaitState {
         ctx.result_ptr = result_ptr;
         ctx.result = null;
 
@@ -177,33 +178,47 @@ const AsyncReceiveImpl = struct {
 
         // Check if lagged
         if (unread > self.channel.capacity) {
+            // Win the select before mutating consumer state.
+            if (!waiter.tryClaim()) {
+                self.channel.mutex.unlock();
+                return .lost;
+            }
             self.consumer.read_pos = self.channel.write_pos -% self.channel.capacity;
             ctx.result = error.Lagged;
             self.channel.mutex.unlock();
-            return false; // Complete immediately with error
+            return .ready; // Complete immediately with error
         }
 
         // Fast path: message available
         if (unread > 0) {
+            // Win the select BEFORE consuming (claim-before-ready).
+            if (!waiter.tryClaim()) {
+                self.channel.mutex.unlock();
+                return .lost;
+            }
             const src = self.channel.elemPtr(self.consumer.read_pos % self.channel.capacity);
             @memcpy(ctx.result_ptr[0..self.channel.elem_size], src[0..self.channel.elem_size]);
             self.consumer.read_pos +%= 1;
             ctx.result = {};
             self.channel.mutex.unlock();
-            return false; // Complete immediately
+            return .ready; // Complete immediately
         }
 
         // Fast path: channel closed
         if (self.channel.closed) {
+            if (!waiter.tryClaim()) {
+                self.channel.mutex.unlock();
+                return .lost;
+            }
             ctx.result = error.Closed;
             self.channel.mutex.unlock();
-            return false; // Complete immediately with error
+            return .ready; // Complete immediately with error
         }
 
         // Slow path: enqueue and wait
         self.channel.wait_queue.push(&waiter.node);
         self.channel.mutex.unlock();
-        return true;
+        return .queued;
     }
 
     pub fn asyncCancelWait(self: *const RecvSelf, waiter: *Waiter, ctx: *WaitContext) bool {
@@ -438,7 +453,7 @@ pub fn AsyncReceive(comptime T: type) type {
 
         /// Register for notification when receive can complete.
         /// Returns false if operation completed immediately (fast path).
-        pub fn asyncWait(self: *const Self, waiter: *Waiter, ctx: *WaitContext) bool {
+        pub fn asyncWait(self: *const Self, waiter: *Waiter, ctx: *WaitContext) common.AsyncWaitState {
             return self.impl.asyncWait(waiter, &ctx.impl_ctx, std.mem.asBytes(&ctx.result).ptr);
         }
 

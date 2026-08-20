@@ -178,6 +178,9 @@ pub const TaskLocalNode = struct {
     next: ?*TaskLocalNode = null,
 };
 
+/// t-866 wake-ledger global sequence. See `AnyTask.diag_mark`.
+pub var diag_stamp_counter: std.atomic.Value(u64) = .init(0);
+
 pub const AnyTask = struct {
     awaitable: Awaitable,
     coro: Coroutine,
@@ -194,6 +197,15 @@ pub const AnyTask = struct {
     /// Head of this task's intrusive task-local binding chain (see `TaskLocal`).
     /// Only ever accessed by the task itself, so it needs no synchronization.
     tls_head: ?*TaskLocalNode = null,
+
+    /// t-866 wake-ledger diagnostic. Packs (global sequence << 8) | branch,
+    /// stamped at every scheduling hop this task passes through, so a probe
+    /// outside the runtime can name the LAST hop of a task that never ran
+    /// again. Branches: 1 awaken-token, 2 main-wake, 3 timer-local,
+    /// 4 migrate-local, 5 same-executor local, 6 remote, 7 parked,
+    /// 8 prewoken-requeue, 9 popped-to-run, 10 waiter-signal,
+    /// 11 futex-wake-dequeue.
+    diag_mark: std.atomic.Value(u64) = .init(0),
 
     /// Task state and park token, packed into a single byte for atomic operations.
     ///
@@ -468,6 +480,12 @@ pub const AnyTask = struct {
     /// Wake this task (mark it as ready and schedule for execution).
     pub fn wake(self: *AnyTask) void {
         Executor.scheduleTask(self);
+    }
+
+    /// t-866 wake-ledger stamp. See `diag_mark`.
+    pub fn diagStamp(self: *AnyTask, branch: u8) void {
+        const seq = diag_stamp_counter.fetchAdd(1, .monotonic) + 1;
+        self.diag_mark.store((seq << 8) | branch, .release);
     }
 
     /// Return the coroutine's stack to the pool and retire its TSan fiber.

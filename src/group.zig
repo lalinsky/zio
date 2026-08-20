@@ -4,6 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const log = @import("common.zig").log;
+const common = @import("common.zig");
 const Waiter = @import("common.zig").Waiter;
 const meta = @import("meta.zig");
 const Runtime = @import("runtime.zig").Runtime;
@@ -245,11 +246,14 @@ pub const Group = struct {
         _ = ctx;
     }
 
-    pub fn asyncWait(self: *Group, waiter: *Waiter, ctx: *WaitContext) bool {
+    pub fn asyncWait(self: *Group, waiter: *Waiter, ctx: *WaitContext) common.AsyncWaitState {
         const state_ptr = self.getState();
 
         // Fast path: no pending tasks means the group is already "complete".
-        if (@atomicLoad(u32, state_ptr, .acquire) & counter_mask == 0) return false;
+        // Level state, nothing consumed; still win the select first.
+        if (@atomicLoad(u32, state_ptr, .acquire) & counter_mask == 0) {
+            return if (waiter.tryClaim()) .ready else .lost;
+        }
 
         // Park on the completion futex address.
         Futex.prepareWait(state_ptr, ctx, waiter);
@@ -258,12 +262,14 @@ pub const Group = struct {
         // between the fast-path check and our registration above.
         if (@atomicLoad(u32, state_ptr, .acquire) & counter_mask == 0) {
             // We removed ourselves before any wake -> already complete.
-            if (Futex.cancelWait(ctx)) return false;
+            if (Futex.cancelWait(ctx)) {
+                return if (waiter.tryClaim()) .ready else .lost;
+            }
             // A concurrent completion already dequeued us; the wake is in-flight.
-            return true;
+            return .queued;
         }
 
-        return true;
+        return .queued;
     }
 
     pub fn asyncCancelWait(self: *Group, waiter: *Waiter, ctx: *WaitContext) bool {

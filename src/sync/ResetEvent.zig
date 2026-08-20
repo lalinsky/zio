@@ -54,7 +54,8 @@ const Timeoutable = @import("../common.zig").Timeoutable;
 const Timeout = @import("../time.zig").Timeout;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
-const Waiter = @import("../common.zig").Waiter;
+const common = @import("../common.zig");
+const Waiter = common.Waiter;
 
 /// Wait queue with flag indicating whether event is set.
 wait_queue: WaitQueue(WaitNode) = .empty,
@@ -204,11 +205,14 @@ pub fn getResult(self: *const ResetEvent) void {
 }
 
 /// Registers a waiter to be notified when the event is set.
-/// This is part of the Future protocol for select().
-/// Returns false if the event is already set (no wait needed), true if added to queue.
-pub fn asyncWait(self: *ResetEvent, waiter: *Waiter) bool {
+/// This is part of the Future protocol for select(); see
+/// `common.AsyncWaitState` for the claim-before-ready contract.
+pub fn asyncWait(self: *ResetEvent, waiter: *Waiter) common.AsyncWaitState {
     // Try to push to queue - only succeeds if event is not set (flag not set)
-    return self.wait_queue.pushUnlessFlag(&waiter.node);
+    if (self.wait_queue.pushUnlessFlag(&waiter.node)) return .queued;
+    // Already set: level state, nothing to consume, but the select must
+    // still be won before reporting ready.
+    return if (waiter.tryClaim()) .ready else .lost;
 }
 
 /// Cancels a pending wait operation by removing the waiter.
