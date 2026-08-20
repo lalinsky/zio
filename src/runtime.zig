@@ -1386,6 +1386,8 @@ pub fn endShield() void {
 pub fn checkCancel() Cancelable!void {
     if (getCurrentTaskOrNull()) |task| {
         try task.checkCancel();
+    } else {
+        try os.syscall_cancel.checkCanceled();
     }
 }
 
