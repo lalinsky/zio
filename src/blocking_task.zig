@@ -182,6 +182,10 @@ fn registerBlockingTask(rt: *Runtime, task: *AnyBlockingTask) error{RuntimeShutd
 /// Spawn a blocking task with raw context bytes and start function.
 /// Used by Runtime.spawnBlocking and Group.spawnBlocking.
 /// Thread-safe: can be called from any thread.
+pub const SpawnOptions = struct {
+    reserve_thread: bool = false,
+};
+
 pub fn spawnBlockingTask(
     rt: *Runtime,
     result_len: usize,
@@ -190,6 +194,7 @@ pub fn spawnBlockingTask(
     context_alignment: std.mem.Alignment,
     start: Closure.Start,
     group: ?*Group,
+    options: SpawnOptions,
 ) !*AnyBlockingTask {
     const task = try AnyBlockingTask.create(
         rt,
@@ -200,6 +205,8 @@ pub fn spawnBlockingTask(
         start,
     );
     errdefer task.destroy();
+
+    task.work.reserve_thread = options.reserve_thread;
 
     // +1 ref before the task is reachable by anyone else, to prevent a race
     // where it completes before the caller can take ownership. See spawnTask

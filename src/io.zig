@@ -322,7 +322,7 @@ fn concurrentImpl(
     const awaitable = switch (mode) {
         .regular => &(spawnTask(rt, result_len, result_alignment, context, context_alignment, .{ .regular = start }, null) catch
             return error.ConcurrencyUnavailable).awaitable,
-        .blocking => &(spawnBlockingTask(rt, result_len, result_alignment, context, context_alignment, .{ .regular = start }, null) catch
+        .blocking => &(spawnBlockingTask(rt, result_len, result_alignment, context, context_alignment, .{ .regular = start }, null, .{ .reserve_thread = true }) catch
             return error.ConcurrencyUnavailable).awaitable,
     };
     return @ptrCast(awaitable);
@@ -367,7 +367,7 @@ fn groupAsyncImpl(
         .regular => groupSpawnTask(g, rt, context, context_alignment, start) catch {
             start(context.ptr);
         },
-        .blocking => groupSpawnBlockingTask(g, rt, context, context_alignment, start) catch {
+        .blocking => groupSpawnBlockingTask(g, rt, context, context_alignment, start, .{ .reserve_thread = true }) catch {
             start(context.ptr);
             return;
         },
@@ -387,7 +387,7 @@ fn groupConcurrentImpl(
     switch (mode) {
         .regular => groupSpawnTask(g, rt, context, context_alignment, start) catch
             return error.ConcurrencyUnavailable,
-        .blocking => groupSpawnBlockingTask(g, rt, context, context_alignment, start) catch
+        .blocking => groupSpawnBlockingTask(g, rt, context, context_alignment, start, .{ .reserve_thread = true }) catch
             return error.ConcurrencyUnavailable,
     }
 }
