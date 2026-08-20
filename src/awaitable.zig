@@ -101,6 +101,20 @@ pub const Awaitable = struct {
         };
     }
 
+    /// Get the raw result bytes from this awaitable.
+    pub fn getResultSlice(self: *Awaitable) []u8 {
+        return switch (self.kind) {
+            .task => {
+                const task = AnyTask.fromAwaitable(self);
+                return task.closure.getResultSlice(AnyTask, task);
+            },
+            .blocking_task => {
+                const task = AnyBlockingTask.fromAwaitable(self);
+                return task.closure.getResultSlice(AnyBlockingTask, task);
+            },
+        };
+    }
+
     /// Release the awaitable, decrementing the reference count and destroying it if necessary.
     pub fn release(self: *Awaitable) void {
         if (self.ref_count.decr()) self.destroy();

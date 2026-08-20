@@ -22,8 +22,8 @@ const beginShield = runtime_mod.beginShield;
 const endShield = runtime_mod.endShield;
 const checkCancel = runtime_mod.checkCancel;
 
-const AnyTask = @import("task.zig").AnyTask;
 const spawnTask = @import("task.zig").spawnTask;
+const spawnBlockingTask = @import("blocking_task.zig").spawnBlockingTask;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const Group = @import("group.zig").Group;
 const groupSpawnTask = @import("group.zig").groupSpawnTask;
@@ -114,21 +114,38 @@ fn positionalUnsupported(file: Io.File) bool {
     return flagsReadPollable(&file.flags) == null;
 }
 
-/// Construct a `std.Io` instance backed by `rt`.
-pub fn fromRuntime(rt: *Runtime) Io {
+pub const Mode = enum { evented, threaded };
+
+/// Tag bit stored in the low bit of `userdata` to select the dispatch mode.
+/// Safe because `Runtime` is pointer-aligned (>= 4 bytes).
+const mode_tag: usize = 1;
+
+fn encodeUserdata(rt: *Runtime, mode: Mode) ?*anyopaque {
+    return @ptrFromInt(@intFromPtr(rt) | switch (mode) {
+        .evented => @as(usize, 0),
+        .threaded => mode_tag,
+    });
+}
+
+fn decodeUserdata(userdata: ?*anyopaque) struct { *Runtime, Mode } {
+    const addr = @intFromPtr(userdata);
+    const rt: *Runtime = @ptrFromInt(addr & ~mode_tag);
+    const mode: Mode = if (addr & mode_tag != 0) .threaded else .evented;
+    return .{ rt, mode };
+}
+
+pub fn fromRuntime(rt: *Runtime, mode: Mode) Io {
     return .{
-        .userdata = @ptrCast(rt),
+        .userdata = encodeUserdata(rt, mode),
         .vtable = &vtable,
     };
 }
 
 /// Recover the underlying runtime from a `std.Io` produced by `fromRuntime`.
-///
-/// Asserts that the vtable matches; passing a `std.Io` from another backend
-/// is a programming error.
 pub fn toRuntime(io: Io) *Runtime {
     std.debug.assert(io.vtable == &vtable);
-    return @ptrCast(@alignCast(io.userdata));
+    const rt, _ = decodeUserdata(io.userdata);
+    return rt;
 }
 
 pub const vtable: Io.VTable = .{
@@ -299,11 +316,15 @@ fn concurrentImpl(
     context_alignment: Alignment,
     start: *const fn (context: *const anyopaque, result: *anyopaque) void,
 ) Io.ConcurrentError!*Io.AnyFuture {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    const task = spawnTask(rt, result_len, result_alignment, context, context_alignment, .{ .regular = start }, null) catch {
-        return error.ConcurrencyUnavailable;
+    if (userdata == null) return error.ConcurrencyUnavailable;
+    const rt, const mode = decodeUserdata(userdata);
+    const awaitable = switch (mode) {
+        .evented => &(spawnTask(rt, result_len, result_alignment, context, context_alignment, .{ .regular = start }, null) catch
+            return error.ConcurrencyUnavailable).awaitable,
+        .threaded => &(spawnBlockingTask(rt, result_len, result_alignment, context, context_alignment, .{ .regular = start }, null) catch
+            return error.ConcurrencyUnavailable).awaitable,
     };
-    return @ptrCast(&task.awaitable);
+    return @ptrCast(awaitable);
 }
 
 fn awaitOrCancel(any_future: *Io.AnyFuture, result: []u8, should_cancel: bool) void {
@@ -315,9 +336,7 @@ fn awaitOrCancel(any_future: *Io.AnyFuture, result: []u8, should_cancel: bool) v
 
     _ = select.waitUntilComplete(awaitable);
 
-    const task = AnyTask.fromAwaitable(awaitable);
-    const task_result = task.closure.getResultSlice(AnyTask, task);
-    @memcpy(result, task_result);
+    @memcpy(result, awaitable.getResultSlice());
 
     awaitable.release();
 }
@@ -337,11 +356,21 @@ fn groupAsyncImpl(
     context_alignment: Alignment,
     start: *const fn (context: *const anyopaque) void,
 ) void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    groupSpawnTask(Group.fromStd(group), rt, context, context_alignment, start) catch {
-        // Couldn't schedule - run synchronously, matching std.Io.Threaded fallback.
+    if (userdata == null) {
         start(context.ptr);
-    };
+        return;
+    }
+    const rt, const mode = decodeUserdata(userdata);
+    const g = Group.fromStd(group);
+    switch (mode) {
+        .evented => groupSpawnTask(g, rt, context, context_alignment, start) catch {
+            start(context.ptr);
+        },
+        .threaded => _ = spawnBlockingTask(rt, 0, .@"1", context, context_alignment, .{ .group = start }, g) catch {
+            start(context.ptr);
+            return;
+        },
+    }
 }
 
 fn groupConcurrentImpl(
@@ -351,10 +380,15 @@ fn groupConcurrentImpl(
     context_alignment: Alignment,
     start: *const fn (context: *const anyopaque) void,
 ) Io.ConcurrentError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    groupSpawnTask(Group.fromStd(group), rt, context, context_alignment, start) catch {
-        return error.ConcurrencyUnavailable;
-    };
+    if (userdata == null) return error.ConcurrencyUnavailable;
+    const rt, const mode = decodeUserdata(userdata);
+    const g = Group.fromStd(group);
+    switch (mode) {
+        .evented => groupSpawnTask(g, rt, context, context_alignment, start) catch
+            return error.ConcurrencyUnavailable,
+        .threaded => _ = spawnBlockingTask(rt, 0, .@"1", context, context_alignment, .{ .group = start }, g) catch
+            return error.ConcurrencyUnavailable,
+    }
 }
 
 fn groupAwaitImpl(_: ?*anyopaque, group: *Io.Group, _: *anyopaque) Io.Cancelable!void {
@@ -2513,7 +2547,7 @@ fn netLookupImpl(
     options: Io.net.HostName.LookupOptions,
 ) Io.net.HostName.LookupError!void {
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    const io = fromRuntime(rt);
+    const io = fromRuntime(rt, .evented);
     defer resolved.close(io);
 
     // Sized for the largest answer the resolver can return: both families
@@ -4427,4 +4461,50 @@ test "io: concurrent cross-executor cancel of N blocked recvmsg fibers is UAF-fr
     group.await(io) catch {};
 
     try std.testing.expectEqual(N, ctx.canceled.load(.acquire));
+}
+
+test "io: blockingIo concurrent dispatches to thread pool" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
+    const bio = rt.blockingIo();
+
+    const S = struct {
+        fn work() i32 {
+            return 42;
+        }
+    };
+
+    var fut = try Io.concurrent(bio, S.work, .{});
+    try std.testing.expectEqual(42, fut.await(bio));
+}
+
+test "io: blockingIo group concurrent dispatches to thread pool" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
+    const bio = rt.blockingIo();
+
+    var done = std.atomic.Value(bool).init(false);
+
+    const S = struct {
+        fn work(flag: *std.atomic.Value(bool)) void {
+            flag.store(true, .release);
+        }
+    };
+
+    var group: Io.Group = .init;
+    try group.concurrent(bio, S.work, .{&done});
+    group.await(bio) catch {};
+
+    try std.testing.expect(done.load(.acquire));
+}
+
+test "io: fromIo round-trips through blockingIo" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
+
+    const bio = rt.blockingIo();
+    try std.testing.expectEqual(rt, Runtime.fromIo(bio).?);
+
+    const aio = rt.io();
+    try std.testing.expectEqual(rt, Runtime.fromIo(aio).?);
 }
