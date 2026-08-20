@@ -27,6 +27,7 @@ const spawnBlockingTask = @import("blocking_task.zig").spawnBlockingTask;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const Group = @import("group.zig").Group;
 const groupSpawnTask = @import("group.zig").groupSpawnTask;
+const groupSpawnBlockingTask = @import("group.zig").groupSpawnBlockingTask;
 const select = @import("select.zig");
 const Futex = @import("sync/Futex.zig");
 const Mutex = @import("sync/Mutex.zig");
@@ -366,7 +367,7 @@ fn groupAsyncImpl(
         .evented => groupSpawnTask(g, rt, context, context_alignment, start) catch {
             start(context.ptr);
         },
-        .threaded => _ = spawnBlockingTask(rt, 0, .@"1", context, context_alignment, .{ .group = start }, g) catch {
+        .threaded => groupSpawnBlockingTask(g, rt, context, context_alignment, start) catch {
             start(context.ptr);
             return;
         },
@@ -386,7 +387,7 @@ fn groupConcurrentImpl(
     switch (mode) {
         .evented => groupSpawnTask(g, rt, context, context_alignment, start) catch
             return error.ConcurrencyUnavailable,
-        .threaded => _ = spawnBlockingTask(rt, 0, .@"1", context, context_alignment, .{ .group = start }, g) catch
+        .threaded => groupSpawnBlockingTask(g, rt, context, context_alignment, start) catch
             return error.ConcurrencyUnavailable,
     }
 }
