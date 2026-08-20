@@ -268,8 +268,13 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     // Only incremented when asyncWait returns true (future is pending).
     var registered_count: usize = 0;
 
+    // The cancel path runs its own epilogue (it must resolve every branch
+    // BEFORE deciding whether a claim won); this flag keeps the defer from
+    // double-canceling and double-counting signals after it has.
+    var cleanup_done = false;
+
     // Clean up waiters on all exit paths
-    defer {
+    defer if (!cleanup_done) {
         const winner_index = winner.load(.acquire);
 
         // Count expected signals: all registered futures will signal unless we cancel them.
@@ -293,7 +298,7 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
 
         // Wait for all expected signals (winner + in-flight non-winners)
         waiter.wait(expected, .no_cancel);
-    }
+    };
 
     // Add waiters to all waiting lists - fast path: return immediately if already complete
     inline for (fields, 0..) |field, i| {
@@ -316,7 +321,48 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     }
 
     // Wait for one to complete (Waiter.wait handles spurious wakeups)
-    try waiter.wait(1, .allow_cancel);
+    waiter.wait(1, .allow_cancel) catch |err| {
+        // Canceled while parked. A queuing future may have COMMITTED an item
+        // to this select already, or may still commit one while the cancel
+        // loop below runs (asyncCancelWait returning false is that commitment,
+        // per the protocol contract above). Dropping a committed item would
+        // un-send it — Channel.receive keeps the same promise by returning
+        // the item instead of error.Canceled, and select must too. So: cancel
+        // every branch, absorb every in-flight signal, and only then decide.
+        // The task's cancellation stays pending and re-fires at the next
+        // cancelable operation.
+        var expected: u32 = 0;
+        inline for (fields, 0..) |field, i| {
+            if (i < registered_count) {
+                var future = @field(futures, field.name);
+                const was_removed = if (comptime hasWaitContext(field.type))
+                    future.asyncCancelWait(&waiters[i], &@field(contexts, field.name))
+                else
+                    future.asyncCancelWait(&waiters[i]);
+                if (!was_removed) {
+                    expected += 1;
+                }
+            }
+        }
+        // Absorbing the winner's signal is also what orders its result copy
+        // before the read below.
+        waiter.wait(expected, .no_cancel);
+        cleanup_done = true;
+
+        const canceled_winner = winner.load(.acquire);
+        if (canceled_winner == NO_WINNER) return err;
+        inline for (fields, 0..) |field, i| {
+            if (i == canceled_winner) {
+                const future = @field(futures, field.name);
+                const result = if (comptime hasWaitContext(field.type))
+                    future.getResult(&@field(contexts, field.name))
+                else
+                    future.getResult();
+                return @unionInit(U, field.name, result);
+            }
+        }
+        unreachable;
+    };
 
     // O(1) winner lookup
     const winner_index = winner.load(.acquire);
@@ -652,6 +698,76 @@ test "select: with cancellation" {
     // Should return error.Canceled
     const result = select_handle.join();
     try std.testing.expectError(error.Canceled, result);
+}
+
+test "select: canceled select delivers a claimed channel item" {
+    // Conservation law: an item sent while the selecting task is being
+    // canceled is EITHER still in the channel OR returned by the select.
+    // Before the cancel-path epilogue, the claim's copy died on the dead
+    // select frame and the item vanished (starh2 t-882: a dropped write
+    // ack leaked its accounting on every teardown race).
+    const Channel = @import("sync/channel.zig").Channel;
+    const ResetEvent = @import("sync/ResetEvent.zig");
+
+    const Shared = struct {
+        ch: *Channel(u64),
+        never: *ResetEvent,
+        received: std.atomic.Value(u64) = .init(0),
+        parked: std.atomic.Value(bool) = .init(false),
+
+        fn waiterTask(sh: *@This()) !void {
+            sh.parked.store(true, .release);
+            const result = select(.{
+                .item = sh.ch.asyncReceive(),
+                .never = sh.never,
+            }) catch return;
+            switch (result) {
+                .item => |r| {
+                    const v = r catch return;
+                    sh.received.store(v, .release);
+                },
+                .never => unreachable,
+            }
+        }
+
+        fn senderTask(sh: *@This()) !void {
+            sh.ch.trySend(1) catch {};
+        }
+    };
+
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const Body = struct {
+        fn run(rt: *Runtime) !void {
+            var buf: [4]u64 = undefined;
+            var iter: usize = 0;
+            while (iter < 2000) : (iter += 1) {
+                var ch = Channel(u64).init(&buf);
+                var never = ResetEvent.init;
+                var sh: Shared = .{ .ch = &ch, .never = &never };
+
+                var w = try rt.spawn(Shared.waiterTask, .{&sh});
+                while (!sh.parked.load(.acquire)) try yield();
+                try yield();
+
+                var snd = try rt.spawn(Shared.senderTask, .{&sh});
+                w.cancel();
+                w.join() catch {};
+                snd.join() catch {};
+
+                const in_channel: u64 = ch.tryReceive() catch 0;
+                const got = sh.received.load(.acquire);
+                if (in_channel == 0 and got == 0) {
+                    std.debug.print("item dropped at iteration {d}\n", .{iter});
+                    return error.ItemDropped;
+                }
+            }
+        }
+    };
+
+    var handle = try runtime.spawn(Body.run, .{runtime});
+    try handle.join();
 }
 
 test "select: with error unions - success case" {
