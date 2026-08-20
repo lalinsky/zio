@@ -1694,6 +1694,7 @@ pub const Runtime = struct {
             .fromByteUnits(@alignOf(Args)),
             .{ .regular = &Wrapper.start },
             null,
+            .{},
         );
 
         return JoinHandle(Result){
@@ -1878,19 +1879,22 @@ pub const Runtime = struct {
 
     /// Construct a `std.Io` instance backed by this runtime.
     pub fn io(self: *Runtime) std.Io {
-        return @import("io.zig").fromRuntime(self);
+        return @import("io.zig").fromRuntime(self, .regular);
     }
 
-    /// Recover the `*Runtime` from a `std.Io` produced by `Runtime.io()`,
-    /// or null when it is backed by some other implementation. The vtable
-    /// pointer is the discriminator: every zio-backed `std.Io` shares the
-    /// one static vtable, and no other backend can carry its address. This
-    /// is how a library taking `std.Io` detects zio and unlocks zio-native
-    /// paths.
+    /// Construct a `std.Io` whose `concurrent`/`async` dispatch to
+    /// `spawnBlocking` instead of coroutine tasks. The returned handle
+    /// shares the same vtable and runtime; only the scheduling path for
+    /// new work differs.
+    pub fn blockingIo(self: *Runtime) std.Io {
+        return @import("io.zig").fromRuntime(self, .blocking);
+    }
+
+    /// Recover the `*Runtime` from a `std.Io` produced by `Runtime.io()`
+    /// or `Runtime.blockingIo()`, or null when it is backed by some other
+    /// implementation.
     pub fn fromIo(value: std.Io) ?*Runtime {
         const io_impl = @import("io.zig");
-        // The vtable alone is not enough: `debug_io` carries zio's vtable
-        // with no runtime behind it.
         if (value.vtable != &io_impl.vtable or value.userdata == null) return null;
         return io_impl.toRuntime(value);
     }
