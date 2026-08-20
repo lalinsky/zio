@@ -5,6 +5,7 @@ const windows = @import("windows.zig");
 
 const unexpectedError = @import("base.zig").unexpectedError;
 const thread = @import("thread.zig");
+const syscall_cancel = @import("syscall_cancel.zig");
 
 const log = @import("../common.zig").log;
 
@@ -1665,6 +1666,68 @@ fn errnoToGetAddrInfoError(err: anytype) GetAddrInfoError {
             };
         },
     }
+}
+
+// libc gives us if_nametoindex but not its inverse, so declare if_indextoname
+// ourselves. The name buffer it writes into must hold at least IF_NAMESIZE bytes.
+pub const IF_NAMESIZE = std.c.IFNAMESIZE;
+extern "c" fn if_indextoname(ifindex: c_uint, ifname: [*]u8) ?[*:0]u8;
+
+pub const InterfaceNameToIndexError = error{
+    InterfaceNotFound,
+    Canceled,
+    Unexpected,
+};
+
+/// Resolve a network interface name to its index. Wraps if_nametoindex(3).
+pub fn interfaceNameToIndex(name: [*:0]const u8) InterfaceNameToIndexError!u32 {
+    // A quick libc call, not a blocking syscall SIGURG could interrupt, so the
+    // most we can do for cancellation is honor a request that already arrived.
+    try syscall_cancel.checkCanceled();
+    const index = std.c.if_nametoindex(name);
+    // if_nametoindex returns 0 for an unknown interface; errno is not reliably
+    // set across platforms, so a zero result is all we have to go on.
+    if (index == 0) return error.InterfaceNotFound;
+    return @intCast(index);
+}
+
+pub const InterfaceIndexToNameError = error{
+    InterfaceNotFound,
+    Canceled,
+    Unexpected,
+};
+
+/// Look up a network interface name by index, writing it into `buffer` (which
+/// must be at least `IF_NAMESIZE` bytes) and returning its length. Wraps
+/// if_indextoname(3).
+pub fn interfaceIndexToName(index: u32, buffer: []u8) InterfaceIndexToNameError!usize {
+    std.debug.assert(buffer.len >= IF_NAMESIZE);
+    try syscall_cancel.checkCanceled();
+    if (if_indextoname(@intCast(index), buffer.ptr) == null) return error.InterfaceNotFound;
+    return std.mem.sliceTo(buffer[0..IF_NAMESIZE], 0).len;
+}
+
+test "interface index/name round-trip for loopback" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    // The loopback interface exists on every system we run these tests on, but
+    // its name varies (Linux "lo", the BSDs "lo0"), so resolve by index instead
+    // of assuming a name: index 1 is the loopback on all of them.
+    var buf: [IF_NAMESIZE]u8 = undefined;
+    const name_len = interfaceIndexToName(1, &buf) catch |err| switch (err) {
+        error.InterfaceNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    const name = buf[0..name_len :0];
+
+    const index = try interfaceNameToIndex(name);
+    try std.testing.expectEqual(1, index);
+}
+
+test "interfaceNameToIndex on unknown interface returns InterfaceNotFound" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    try std.testing.expectError(error.InterfaceNotFound, interfaceNameToIndex("zzznope0"));
 }
 
 test "getaddrinfo - resolve example.com" {
