@@ -1878,7 +1878,7 @@ pub const Runtime = struct {
 
     /// Construct a `std.Io` instance backed by this runtime.
     pub fn io(self: *Runtime) std.Io {
-        return @import("io.zig").fromRuntime(self, .evented);
+        return @import("io.zig").fromRuntime(self, .regular);
     }
 
     /// Construct a `std.Io` whose `concurrent`/`async` dispatch to
@@ -1886,7 +1886,7 @@ pub const Runtime = struct {
     /// shares the same vtable and runtime; only the scheduling path for
     /// new work differs.
     pub fn blockingIo(self: *Runtime) std.Io {
-        return @import("io.zig").fromRuntime(self, .threaded);
+        return @import("io.zig").fromRuntime(self, .blocking);
     }
 
     /// Recover the `*Runtime` from a `std.Io` produced by `Runtime.io()`

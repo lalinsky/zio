@@ -115,7 +115,7 @@ fn positionalUnsupported(file: Io.File) bool {
     return flagsReadPollable(&file.flags) == null;
 }
 
-pub const Mode = enum { evented, threaded };
+pub const Mode = enum { regular, blocking };
 
 /// Tag bit stored in the low bit of `userdata` to select the dispatch mode.
 /// Safe because `Runtime` is pointer-aligned (>= 4 bytes).
@@ -123,15 +123,15 @@ const mode_tag: usize = 1;
 
 fn encodeUserdata(rt: *Runtime, mode: Mode) ?*anyopaque {
     return @ptrFromInt(@intFromPtr(rt) | switch (mode) {
-        .evented => @as(usize, 0),
-        .threaded => mode_tag,
+        .regular => @as(usize, 0),
+        .blocking => mode_tag,
     });
 }
 
 fn decodeUserdata(userdata: ?*anyopaque) struct { *Runtime, Mode } {
     const addr = @intFromPtr(userdata);
     const rt: *Runtime = @ptrFromInt(addr & ~mode_tag);
-    const mode: Mode = if (addr & mode_tag != 0) .threaded else .evented;
+    const mode: Mode = if (addr & mode_tag != 0) .blocking else .regular;
     return .{ rt, mode };
 }
 
@@ -320,9 +320,9 @@ fn concurrentImpl(
     if (userdata == null) return error.ConcurrencyUnavailable;
     const rt, const mode = decodeUserdata(userdata);
     const awaitable = switch (mode) {
-        .evented => &(spawnTask(rt, result_len, result_alignment, context, context_alignment, .{ .regular = start }, null) catch
+        .regular => &(spawnTask(rt, result_len, result_alignment, context, context_alignment, .{ .regular = start }, null) catch
             return error.ConcurrencyUnavailable).awaitable,
-        .threaded => &(spawnBlockingTask(rt, result_len, result_alignment, context, context_alignment, .{ .regular = start }, null) catch
+        .blocking => &(spawnBlockingTask(rt, result_len, result_alignment, context, context_alignment, .{ .regular = start }, null) catch
             return error.ConcurrencyUnavailable).awaitable,
     };
     return @ptrCast(awaitable);
@@ -364,10 +364,10 @@ fn groupAsyncImpl(
     const rt, const mode = decodeUserdata(userdata);
     const g = Group.fromStd(group);
     switch (mode) {
-        .evented => groupSpawnTask(g, rt, context, context_alignment, start) catch {
+        .regular => groupSpawnTask(g, rt, context, context_alignment, start) catch {
             start(context.ptr);
         },
-        .threaded => groupSpawnBlockingTask(g, rt, context, context_alignment, start) catch {
+        .blocking => groupSpawnBlockingTask(g, rt, context, context_alignment, start) catch {
             start(context.ptr);
             return;
         },
@@ -385,9 +385,9 @@ fn groupConcurrentImpl(
     const rt, const mode = decodeUserdata(userdata);
     const g = Group.fromStd(group);
     switch (mode) {
-        .evented => groupSpawnTask(g, rt, context, context_alignment, start) catch
+        .regular => groupSpawnTask(g, rt, context, context_alignment, start) catch
             return error.ConcurrencyUnavailable,
-        .threaded => groupSpawnBlockingTask(g, rt, context, context_alignment, start) catch
+        .blocking => groupSpawnBlockingTask(g, rt, context, context_alignment, start) catch
             return error.ConcurrencyUnavailable,
     }
 }
@@ -2548,7 +2548,7 @@ fn netLookupImpl(
     options: Io.net.HostName.LookupOptions,
 ) Io.net.HostName.LookupError!void {
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    const io = fromRuntime(rt, .evented);
+    const io = fromRuntime(rt, .regular);
     defer resolved.close(io);
 
     // Sized for the largest answer the resolver can return: both families
