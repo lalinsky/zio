@@ -8,6 +8,7 @@ const builtin = @import("builtin");
 const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
+const getCurrentTask = @import("runtime.zig").getCurrentTask;
 const beginShield = @import("runtime.zig").beginShield;
 const endShield = @import("runtime.zig").endShield;
 const log = @import("common.zig").log;
@@ -293,7 +294,8 @@ pub const Dir = struct {
         return tempDirInit(self, false, options);
     }
 
-    pub const DeleteDirError = os.fs.DirDeleteDirError || Cancelable;
+    pub const DeleteDirError = DeleteDirUncancelableError || Cancelable;
+    pub const DeleteDirUncancelableError = os.fs.DirDeleteDirError;
 
     pub fn deleteDir(self: Dir, path: []const u8) DeleteDirError!void {
         var op = ev.DirDeleteDir.init(self.fd, path);
@@ -301,12 +303,41 @@ pub const Dir = struct {
         try op.getResult();
     }
 
-    pub const DeleteFileError = os.fs.DirDeleteFileError || Cancelable;
+    /// Like `deleteDir`, but runs to completion even when the task is being
+    /// canceled, so it can be used in `deinit` and `defer` cleanup. Cleanup
+    /// that a cancellation could skip leaves the directory behind for good,
+    /// with nothing left to retry it.
+    pub fn deleteDirUncancelable(self: Dir, path: []const u8) DeleteDirUncancelableError!void {
+        var op = ev.DirDeleteDir.init(self.fd, path);
+        waitForIoUncancelable(&op.c);
+        op.getResult() catch |err| switch (err) {
+            // The operation is never handed a cancellation to report.
+            error.Canceled => unreachable,
+            else => |e| return e,
+        };
+    }
+
+    pub const DeleteFileError = DeleteFileUncancelableError || Cancelable;
+    pub const DeleteFileUncancelableError = os.fs.DirDeleteFileError;
 
     pub fn deleteFile(self: Dir, path: []const u8) DeleteFileError!void {
         var op = ev.DirDeleteFile.init(self.fd, path);
         try waitForIo(&op.c);
         try op.getResult();
+    }
+
+    /// Like `deleteFile`, but runs to completion even when the task is being
+    /// canceled, so it can be used in `deinit` and `defer` cleanup. Cleanup
+    /// that a cancellation could skip leaves the file behind for good, with
+    /// nothing left to retry it.
+    pub fn deleteFileUncancelable(self: Dir, path: []const u8) DeleteFileUncancelableError!void {
+        var op = ev.DirDeleteFile.init(self.fd, path);
+        waitForIoUncancelable(&op.c);
+        op.getResult() catch |err| switch (err) {
+            // The operation is never handed a cancellation to report.
+            error.Canceled => unreachable,
+            else => |e| return e,
+        };
     }
 
     pub const RenameError = os.fs.DirRenameError || Cancelable;
@@ -485,7 +516,9 @@ pub const Dir = struct {
         }
     };
 
-    pub const DeleteTreeError = error{
+    pub const DeleteTreeError = DeleteTreeUncancelableError || Cancelable;
+
+    pub const DeleteTreeUncancelableError = error{
         AccessDenied,
         PermissionDenied,
         FileBusy,
@@ -503,7 +536,7 @@ pub const Dir = struct {
         NetworkNotFound,
         Unsupported,
         Unexpected,
-    } || Cancelable;
+    };
 
     /// Whether `path` describes a symlink, file, or directory, this function
     /// removes it. If it cannot be removed because it is a non-empty directory,
@@ -654,6 +687,21 @@ pub const Dir = struct {
                 continue :process_stack;
             }
         }
+    }
+
+    /// Like `deleteTree`, but runs to completion even when the task is being
+    /// canceled, so it can be used in `deinit` and `defer` cleanup. Unlike a
+    /// single unlink this walks the tree with many operations, so it runs under
+    /// a cancellation shield to keep a canceled task from abandoning it half
+    /// done, with a partial tree left behind and nothing left to retry it.
+    pub fn deleteTreeUncancelable(self: Dir, path: []const u8) DeleteTreeUncancelableError!void {
+        beginShield();
+        defer endShield();
+        self.deleteTree(path) catch |err| switch (err) {
+            // The shield keeps every operation in the walk from being canceled.
+            error.Canceled => unreachable,
+            else => |e| return e,
+        };
     }
 
     /// Like `deleteTree`, but keeps only one directory iterator open at a time,
@@ -978,7 +1026,7 @@ pub const TempDir = struct {
         self.* = undefined;
     }
 
-    pub const CleanupError = Dir.DeleteTreeError;
+    pub const CleanupError = Dir.DeleteTreeUncancelableError;
 
     /// Close the directory and delete it with everything in it, reporting a
     /// failed deletion. The tree walk runs shielded from cancellation, so a
@@ -993,7 +1041,7 @@ pub const TempDir = struct {
             self.dir_open = false;
         }
         if (self.exists) {
-            try removeTempTree(self.parent, self.name());
+            try self.parent.deleteTreeUncancelable(self.name());
             self.exists = false;
         }
     }
@@ -1043,7 +1091,7 @@ fn tempDirInit(parent: Dir, close_parent_on_deinit: bool, options: Dir.CreateTem
     errdefer {
         // Nothing has been put in the directory yet, so a failed removal costs
         // no more than an empty directory left behind.
-        removeTempTree(parent, temp_dir.name()) catch |err| {
+        parent.deleteTreeUncancelable(temp_dir.name()) catch |err| {
             log.warn("failed to remove temporary directory {s}: {}", .{ temp_dir.name(), err });
         };
     }
@@ -1137,20 +1185,9 @@ fn createRandomDir(dir: Dir, prefix: []const u8, mode: os.fs.mode_t) Dir.CreateD
 /// Remove a temporary file, ignoring a failure to do so. Cleanup must run even
 /// when the task is being canceled, like close().
 fn removeTempFile(dir: Dir, sub_path: []const u8) void {
-    var op = ev.DirDeleteFile.init(dir.fd, sub_path);
-    waitForIoUncancelable(&op.c);
-    op.getResult() catch |err| {
+    dir.deleteFileUncancelable(sub_path) catch |err| {
         log.warn("failed to remove temporary file {s}: {}", .{ sub_path, err });
     };
-}
-
-/// Delete a temporary directory and everything in it. Unlike a single unlink,
-/// this walks the tree with many cancelable operations, so it runs under a
-/// cancellation shield to keep a canceled task from abandoning it half done.
-fn removeTempTree(parent: Dir, sub_path: []const u8) Dir.DeleteTreeError!void {
-    beginShield();
-    defer endShield();
-    return parent.deleteTree(sub_path);
 }
 
 /// Whether the Reader/Writer issues positional (offset-based) or streaming
@@ -2738,6 +2775,42 @@ test "Dir: deleteTree on a file and on a missing path" {
 
     // Deleting something that does not exist succeeds.
     try cwd.deleteTree("test_delete_tree_does_not_exist");
+}
+
+test "Dir: the uncancelable deletes run with a cancellation pending" {
+    var t = try TestDirFixture.init();
+    defer t.deinit();
+
+    const dir = t.dir;
+    (try dir.createFile("file.txt", .{})).close();
+    try dir.createDir("tree", 0o755);
+    (try dir.createFile("tree/inside.txt", .{})).close();
+
+    const Worker = struct {
+        fn call(d: Dir, result: *(anyerror!void)) void {
+            // Cancel ourselves and leave it undelivered: this is the state a
+            // `deinit` runs in on the way out of a canceled task.
+            getCurrentTask().cancel();
+            result.* = cleanup(d);
+        }
+
+        fn cleanup(d: Dir) anyerror!void {
+            try d.deleteFileUncancelable("file.txt");
+            try d.deleteTreeUncancelable("tree");
+            // Neither swallowed the cancellation: it is still there for the
+            // next cancellation point, which is where the caller wants it.
+            var pause = ev.Timer.init(.{ .duration = .fromSeconds(60) });
+            try std.testing.expectError(error.Canceled, waitForIo(&pause.c));
+        }
+    };
+
+    var result: anyerror!void = {};
+    var handle = try t.rt.spawn(Worker.call, .{ dir, &result });
+    handle.join();
+    try result;
+
+    try std.testing.expectError(error.FileNotFound, dir.access("file.txt", .{}));
+    try std.testing.expectError(error.FileNotFound, dir.access("tree", .{}));
 }
 
 test "Dir: deleteTree deeply nested tree" {
