@@ -385,14 +385,15 @@ pub const AnyTask = struct {
 
     /// Re-arm cancellation after it was acknowledged.
     /// This increments pending_errors so the next cancellation point returns error.Canceled.
-    /// Asserts that user_canceled is already set.
+    /// Asserts that the task is under a cancellation, either user-requested or from a
+    /// live auto-cancel, so that a re-arm is always putting back a delivered error.
     pub fn recancel(self: *AnyTask) void {
         var current = self.canceled_status.load(.acquire);
         while (true) {
             var status: CanceledStatus = @bitCast(current);
 
             // Must have been canceled already
-            std.debug.assert(status.user_canceled);
+            std.debug.assert(status.user_canceled or status.auto_canceled > 0);
 
             // Increment pending_errors
             status.pending_errors += 1;

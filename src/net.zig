@@ -3202,7 +3202,7 @@ test "a canceled task does not start another operation" {
             // write. The write must report it rather than run.
             runtime_mod.sleep(.fromMilliseconds(60_000)) catch |err| {
                 std.debug.assert(err == error.Canceled);
-                runtime_mod.getCurrentTask().recancel();
+                runtime_mod.recancel();
                 outcome.after_recancel = if (stream.writeAll("x", .none)) |_| null else |e| e;
             };
         }
