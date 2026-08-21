@@ -1190,17 +1190,6 @@ fn removeTempFile(dir: Dir, sub_path: []const u8) void {
     };
 }
 
-/// Whether the Reader/Writer issues positional (offset-based) or streaming
-/// (current-position) I/O ops. Independent of `File.pollable`, which decides
-/// event-loop vs thread-pool routing: a console, for example, is `.streaming`
-/// yet not loop-drivable.
-pub const Mode = enum {
-    /// Use positional I/O (pread/pwrite) with explicit offset.
-    positional,
-    /// Use streaming I/O (read/write) at the current file position.
-    streaming,
-};
-
 pub const File = struct {
     fd: Handle,
     /// Whether `fd` is pollable (non-seekable) and can be driven by the event
@@ -1215,6 +1204,20 @@ pub const File = struct {
 
     pub const ReadError = os.fs.FileReadError || Cancelable;
     pub const WriteError = os.fs.FileWriteError || Cancelable;
+
+    /// Whether the Reader/Writer issues positional (offset-based) or streaming
+    /// (current-position) I/O ops. Independent of `File.pollable`, which decides
+    /// event-loop vs thread-pool routing: a console, for example, is `.streaming`
+    /// yet not loop-drivable.
+    pub const Mode = enum {
+        /// Use positional I/O (pread/pwrite) with explicit offset.
+        positional,
+        /// Use streaming I/O (read/write) at the current file position.
+        streaming,
+    };
+
+    pub const Reader = FileReader;
+    pub const Writer = FileWriter;
 
     pub fn fromFd(fd: Handle) File {
         return .{ .fd = fd };
@@ -1403,17 +1406,17 @@ pub const File = struct {
         try op.getResult();
     }
 
-    pub fn reader(self: File, buffer: []u8) FileReader {
-        return FileReader.init(self, buffer);
+    pub fn reader(self: File, buffer: []u8) Reader {
+        return Reader.init(self, buffer);
     }
 
-    pub fn writer(self: File, buffer: []u8) FileWriter {
-        return FileWriter.init(self, buffer);
+    pub fn writer(self: File, buffer: []u8) Writer {
+        return Writer.init(self, buffer);
     }
 
     /// Wrap this file as a `std.Io.File.Reader`, for std.Io APIs that require
     /// that exact type (e.g. `std.Io.Writer.sendFileAll`). Unlike `reader`,
-    /// which returns zio's own `FileReader`, this returns std's reader bound to
+    /// which returns zio's own `File.Reader`, this returns std's reader bound to
     /// zio's `std.Io`. I/O through it still goes through zio's runtime: it
     /// suspends on the current task's loop when called from a zio task, and runs
     /// synchronously otherwise.
@@ -1430,7 +1433,7 @@ pub const File = struct {
 /// Pick the Reader/Writer mode for a file: an explicit `preferred_mode` wins,
 /// otherwise infer from `pollable` (non-seekable -> streaming, seekable or
 /// unknown -> positional).
-pub fn resolveMode(file: File) Mode {
+pub fn resolveMode(file: File) File.Mode {
     if (file.preferred_mode) |m| return m;
     return if (file.pollable) |p|
         if (p) .streaming else .positional
@@ -1445,14 +1448,14 @@ pub const FileReader = struct {
     pub const Error = os.fs.FileReadError || Cancelable || Timeoutable;
 
     file: File,
-    mode: Mode,
+    mode: File.Mode,
     position: u64 = 0,
     timeout: Timeout = .none,
     err: ?Error = null,
     interface: std.Io.Reader,
 
     pub fn init(file: File, buffer: []u8) FileReader {
-        const mode: Mode = resolveMode(file);
+        const mode: File.Mode = resolveMode(file);
         return .{
             .file = file,
             .mode = mode,
@@ -1629,14 +1632,14 @@ pub const FileWriter = struct {
     pub const Error = os.fs.FileWriteError || Cancelable || Timeoutable;
 
     file: File,
-    mode: Mode,
+    mode: File.Mode,
     position: u64 = 0,
     timeout: Timeout = .none,
     err: ?Error = null,
     interface: std.Io.Writer,
 
     pub fn init(file: File, buffer: []u8) FileWriter {
-        const mode: Mode = resolveMode(file);
+        const mode: File.Mode = resolveMode(file);
         return .{
             .file = file,
             .mode = mode,
