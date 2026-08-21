@@ -1381,6 +1381,19 @@ pub fn endShield() void {
     }
 }
 
+/// Re-arm a cancellation that a previous cancellation point already reported, so
+/// that the next one returns error.Canceled again. Use it when a canceled
+/// operation still has a result to hand back before the cancellation is acted on.
+///
+/// Asserts the task is under a cancellation (an explicit cancel or a live
+/// auto-cancel). If not in a task context, this is a no-op: a blocking task's
+/// cancellation is never consumed, so there is nothing to put back.
+pub fn recancel() void {
+    if (getCurrentTaskOrNull()) |task| {
+        task.recancel();
+    }
+}
+
 /// Check if the current task has been cancelled and return an error if so.
 /// If not in a task context, this is a no-op.
 pub fn checkCancel() Cancelable!void {
@@ -2138,6 +2151,34 @@ test "runtime: shielded sleep is not cancelable" {
 
     // Ensure the sleep completed (took at least 50ms)
     try std.testing.expect(timer.read().toMilliseconds() >= 40);
+}
+
+test "runtime: recancel re-arms a delivered cancellation" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const recancelingTask = struct {
+        fn call() !void {
+            sleep(.fromMilliseconds(60_000)) catch |err| {
+                std.debug.assert(err == error.Canceled);
+                // The cancellation was consumed by the sleep; putting it back
+                // means the next cancellation point has to report it again.
+                recancel();
+                try checkCancel();
+                return error.TestUnexpectedResult;
+            };
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    var handle = try runtime.spawn(recancelingTask, .{});
+    defer handle.cancel();
+
+    // Let the task reach the sleep before canceling it.
+    try runtime.sleep(.fromMilliseconds(10));
+    handle.cancel();
+
+    try std.testing.expectError(error.Canceled, handle.join());
 }
 
 test "runtime: yield from main allows tasks to run" {

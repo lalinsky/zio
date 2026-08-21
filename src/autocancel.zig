@@ -5,6 +5,8 @@ const std = @import("std");
 const ev = @import("ev/root.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTask = @import("runtime.zig").getCurrentTask;
+const recancel = @import("runtime.zig").recancel;
+const checkCancel = @import("runtime.zig").checkCancel;
 const yield = @import("runtime.zig").yield;
 const loopClearTimer = @import("runtime.zig").loopClearTimer;
 const JoinHandle = @import("runtime.zig").JoinHandle;
@@ -549,6 +551,28 @@ test "withTimeout: user cancel wins over the timeout" {
     try rt.sleep(.fromMilliseconds(5));
     handle.cancel();
     try handle.join();
+}
+
+test "withTimeout: recancel re-arms a cancellation the timeout delivered" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Work = struct {
+        fn run(runtime: *Runtime) !void {
+            runtime.sleep(.fromMilliseconds(60_000)) catch |err| {
+                std.debug.assert(err == error.Canceled);
+                // An auto-cancel is a cancellation like any other here: it can
+                // be put back and delivered again, and withTimeout still gets
+                // to attribute it and report error.Timeout.
+                recancel();
+                try checkCancel();
+                return error.TestUnexpectedResult;
+            };
+            return error.TestUnexpectedResult;
+        }
+    };
+
+    try std.testing.expectError(error.Timeout, withTimeout(.fromMilliseconds(10), Work.run, .{rt}));
 }
 
 test "withTimeout: nested, inner deadline fires first" {
