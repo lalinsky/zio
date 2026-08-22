@@ -2,13 +2,6 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
-
-- Removed the `zio.Notify` synchronization primitive (the internal `os.thread.Notify`
-  is unrelated and unchanged). It is edge-triggered with no persistent state, so it
-  cannot express committable readiness for `select()`; dropped ahead of the select
-  protocol rework.
-
 ## [0.17.0] - 2026-08-05
 
 - Work-stealing is fully wired up now. Idle executors publish an `idle_mask` and coordinate
