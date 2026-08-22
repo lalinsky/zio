@@ -68,7 +68,6 @@ pub const net = @import("net.zig");
 pub const Mutex = @import("sync/Mutex.zig");
 pub const Condition = @import("sync/Condition.zig");
 pub const ResetEvent = @import("sync/ResetEvent.zig");
-pub const Notify = @import("sync/Notify.zig");
 pub const RwLock = @import("sync/RwLock.zig");
 pub const Semaphore = @import("sync/Semaphore.zig");
 pub const Barrier = @import("sync/Barrier.zig");

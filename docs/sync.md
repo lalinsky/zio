@@ -9,4 +9,3 @@ TODO
 - [`Condition`](/zio/apidocs/#zio.Condition)
 - [`Semaphore`](/zio/apidocs/#zio.Semaphore)
 - [`Barrier`](/zio/apidocs/#zio.Barrier)
-- [`Notify`](/zio/apidocs/#zio.Notify)
