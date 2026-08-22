@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-- Removed the `Notify` synchronization primitive. It is edge-triggered with no
+- Removed the `zio.Notify` synchronization primitive (the internal `os.thread.Notify` is unrelated and unchanged). It is edge-triggered with no
   persistent state, so it cannot express committable readiness for `select()`;
   dropped ahead of the select protocol rework.
 
