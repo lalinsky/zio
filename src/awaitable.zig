@@ -7,6 +7,9 @@ const builtin = @import("builtin");
 const RefCounter = @import("utils/ref_counter.zig").RefCounter;
 const WaitNode = @import("utils/wait_queue.zig").WaitNode;
 const Waiter = @import("common.zig").Waiter;
+const Prepare = @import("select.zig").Prepare;
+const CommitResult = @import("select.zig").CommitResult;
+const Rollback = @import("select.zig").Rollback;
 const GroupNode = @import("group.zig").GroupNode;
 const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 
@@ -37,9 +40,6 @@ pub const Awaitable = struct {
     // Group membership - group_node.group is null if standalone
     group_node: GroupNode = .{},
 
-    // Future protocol - type-erased result type
-    pub const Result = void;
-
     /// Request cancellation of this awaitable.
     /// Dispatches to the sub-type's cancel method.
     pub fn cancel(self: *Awaitable) void {
@@ -49,24 +49,30 @@ pub const Awaitable = struct {
         }
     }
 
-    /// Registers a waiter to be notified when the awaitable completes.
-    /// This is part of the Future protocol for select().
-    /// Returns false if the awaitable is already complete (no wait needed), true if added to queue.
-    pub fn asyncWait(self: *Awaitable, waiter: *Waiter) bool {
-        // Fast path: check if already complete
-        if (self.waiting_list.isFlagSet()) {
-            return false;
-        }
-        // Try to push to queue - only succeeds if awaitable is not complete (flag not set)
-        return self.waiting_list.pushUnlessFlag(&waiter.node);
-    }
+    // AsyncWait protocol (see select.zig). Completion is the sticky queue
+    // flag; markComplete() dequeues and notifies every registration while
+    // setting it.
+    pub const AsyncWait = struct {
+        pub const Result = void;
+        pub const Context = struct {};
 
-    /// Cancels a pending wait operation by removing the waiter.
-    /// This is part of the Future protocol for select().
-    /// Returns true if removed, false if already removed by completion (wake in-flight).
-    pub fn asyncCancelWait(self: *Awaitable, waiter: *Waiter) bool {
-        return self.waiting_list.remove(&waiter.node);
-    }
+        pub fn prepare(self: *Awaitable, waiter: *Waiter, ctx: *Context) Prepare {
+            _ = ctx;
+            if (!self.waiting_list.pushUnlessFlag(&waiter.node)) return .ready;
+            return .pending;
+        }
+
+        pub fn commit(self: *Awaitable, ctx: *Context) CommitResult(void) {
+            _ = ctx;
+            std.debug.assert(self.waiting_list.isFlagSet());
+            return .{ .done = {} };
+        }
+
+        pub fn rollback(self: *Awaitable, waiter: *Waiter, ctx: *Context) Rollback {
+            _ = ctx;
+            return if (self.waiting_list.remove(&waiter.node)) .removed else .signal_in_flight;
+        }
+    };
 
     /// Mark this awaitable as complete and wake all waiters (both coroutines and threads).
     /// Waiting tasks may belong to different executors, so always uses `.maybe_remote` mode.
@@ -79,12 +85,6 @@ pub const Awaitable = struct {
             Waiter.fromNode(result.node).signal();
             if (result.is_last) break;
         }
-    }
-
-    /// Get the result (void for type-erased awaitable)
-    /// Part of the Future protocol for use with select()
-    pub fn getResult(self: *Awaitable) void {
-        _ = self;
     }
 
     /// Check if the awaitable has completed and a result is available.

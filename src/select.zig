@@ -7,75 +7,177 @@ const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTask = @import("runtime.zig").getCurrentTask;
 const getCurrentTaskOrNull = @import("runtime.zig").getCurrentTaskOrNull;
 const yield = @import("runtime.zig").yield;
+const random = @import("random.zig").random;
 const common = @import("common.zig");
 const Cancelable = common.Cancelable;
 const Waiter = common.Waiter;
 const NO_WINNER = common.NO_WINNER;
 const AnyTask = @import("task.zig").AnyTask;
-const Awaitable = @import("awaitable.zig").Awaitable;
 const meta = @import("meta.zig");
 
-// Future protocol - Any type implementing these methods can be used with select():
+// AsyncWait protocol - a type can be used with select() and wait() iff it
+// declares a nested `AsyncWait` namespace:
 //
-//   const Result = T
-//     The type of value this future produces when complete.
+//   pub const AsyncWait = struct {
+//       /// What a committed wait on this source yields.
+//       pub const Result = T;
 //
-//   const WaitContext = void | SomeStruct
-//     Optional per-wait mutable state. Use void if the future needs no per-wait state.
-//     If non-void, this struct will be allocated on the caller's stack and passed to
-//     asyncWait/asyncCancelWait. Useful for storing completions, results, or other
-//     data that varies per wait operation.
+//       /// Per-operation state, allocated in the waiting frame and always
+//       /// passed to prepare/commit/rollback. Use `struct {}` when empty.
+//       pub const Context = ...;
 //
-//   fn asyncWait(self: *Self, waiter: *Waiter) bool           // if WaitContext == void
-//   fn asyncWait(self: *Self, waiter: *Waiter, ctx: *WaitContext) bool  // if WaitContext != void
-//     Register for notification when this future completes.
+//       /// True if peers may decide a select containing this arm from the
+//       /// outside, through `claimArm`. Channel rendezvous arms set this:
+//       /// a peer can complete a queued send or receive directly. A select
+//       /// containing a claimable arm compiles in the winner-word fence; one
+//       /// without never consults the winner word.
+//       pub const claimable = false;   // optional, defaults to false
 //
-//     If WaitContext != void, the ctx parameter points to caller-allocated per-wait state
-//     that persists for the duration of this wait operation.
+//       pub fn prepare(self: *Source, waiter: *Waiter, ctx: *Context) Prepare
+//       pub fn commit(self: *Source, ctx: *Context) CommitResult(Result)
+//       pub fn rollback(self: *Source, waiter: *Waiter, ctx: *Context) Rollback
+//   };
 //
-//     Returns:
-//       - false: Operation already complete (fast path). Result is available via getResult().
-//                The waiter was NOT added to any queue.
-//       - true: Operation pending (slow path). The waiter was added to an internal wait
-//               queue and will be woken via waiter.wake() when the operation completes.
+// prepare - register as a candidate, unless already complete. The check and
+// the registration are fused under the source's lock: `.ready` means the
+// operation can complete right now and nothing was registered; `.pending`
+// means the waiter is queued and a notification follows if the source becomes
+// ready or closes. Called only on unregistered arms; never consumes.
 //
-//     Guarantees:
-//       - If returns false, getResult() can be called immediately
-//       - If returns true, waiter.wake() will be called exactly once when complete
-//       - Thread-safe: can be called from any thread
-//       - The ctx pointer (if present) remains valid until asyncCancelWait() or waiter.wake()
+// commit - the consume, under the source's lock: take the item, swap the
+// counter, pop the completion. Called on an arm that prepared `.ready`, on an
+// arm whose notification the caller consumed, or on an arm decided externally
+// (a claimed send arm reports the outcome its claimer left in ctx). Returns
+// `.retry` if readiness has decayed (another consumer got there first); the
+// caller re-prepares. A retry ends this attempt and leaves no reservation.
+// Never touches the registration; a notified arm has none, and a `.ready`
+// arm never had one.
 //
-//   fn asyncCancelWait(self: *Self, waiter: *Waiter) bool     // if WaitContext == void
-//   fn asyncCancelWait(self: *Self, waiter: *Waiter, ctx: *WaitContext) bool  // if WaitContext != void
-//     Cancel a pending wait operation by removing the waiter from internal queues.
+// rollback - abandon a losing pending or notified attempt, under the source's
+// lock. `.removed`: the registration was removed cleanly and no notification
+// will come. `.signal_in_flight`: a notifier already consumed the
+// registration, and exactly one signal is landed or in flight. Rollback must
+// also release any readiness offer/reservation and hand it to another waiter.
+// It is called for notified losers even though their registration is gone.
 //
-//     Must be called if asyncWait() returned true and the caller no longer wants to wait
-//     (e.g., select() chose a different future).
+// Notification discipline: a source dequeues a registration exactly once,
+// and, per dequeue, sets the waiter's notified flag and signals exactly once
+// (`Waiter.signal` does both). A notification carries no decision, it only
+// means "this arm's registration was consumed, re-run prepare/commit on it".
+// The select loop owns all remaining bookkeeping: which arms are registered,
+// which notifications it has consumed, and how many signals to absorb before
+// returning.
 //
-//     Returns:
-//       - true: Successfully removed from queue. The future will not wake this waiter.
-//       - false: Already removed by completion. The future has committed to waking this
-//                waiter (wake is in-flight or already happened).
+// The one externally decided case is a claimable arm: a rendezvous peer wins
+// the select's winner word through `claimArm` under the channel lock, records
+// the outcome in the arm's ctx, and then notifies. Every other notifier leaves
+// the outcome at the source.
 //
-//     For queuing operations (Channel), when returning false the implementation
-//     must transfer the wakeup to another waiter to avoid losing the signal/item.
-//
-//     Guarantees:
-//       - Thread-safe: can be called from any thread
-//       - Safe to call even if asyncWait() returned false (returns false, no-op)
-//
-//   fn getResult(self: *const Self) Result                                        // if WaitContext == void
-//   fn getResult(self: *const Self, ctx: *WaitContext) Result                      // if WaitContext != void
-//     Retrieve the result of the completed operation.
-//
-//     Must only be called after asyncWait() returns false or after waiter.wake() is called.
-//
-//     Returns: The result value. For operations that can fail, Result may be an error union
-//              (e.g., error{Closed}!T).
-//
-//     Guarantees:
-//       - All side effects from the operation that produced the result are visible
-//       - Thread-safe: can be called from any thread after completion
+// Lifetime: sources must outlive the select()/wait() call using them.
+// Completion paths that can free the source after waking its waiters
+// (ResetEvent.set and friends) must not touch the source after signaling the
+// last waiter; the waiting side may touch the source until its wait returns.
+
+/// Result of `AsyncWait.prepare`.
+pub const Prepare = enum {
+    /// The operation can complete right now; nothing was registered.
+    ready,
+    /// The waiter was registered; a notification follows when the source
+    /// becomes ready or closes.
+    pending,
+};
+
+/// Result of the consuming phase. A tagged union keeps protocol retry
+/// separate from operation results that may themselves contain optional or
+/// error-union values (including an application-level `error.Retry`).
+pub fn CommitResult(comptime Result: type) type {
+    return union(enum) {
+        retry,
+        done: Result,
+    };
+}
+
+test "CommitResult keeps protocol retry separate from user results" {
+    const ErrorResult = CommitResult(error{Retry}!u8);
+    const application_retry: ErrorResult = .{ .done = error.Retry };
+    switch (application_retry) {
+        .done => |result| try std.testing.expectError(error.Retry, result),
+        .retry => return error.TestUnexpectedResult,
+    }
+
+    const OptionalResult = CommitResult(?u8);
+    const application_null: OptionalResult = .{ .done = null };
+    switch (application_null) {
+        .done => |result| try std.testing.expectEqual(null, result),
+        .retry => return error.TestUnexpectedResult,
+    }
+}
+
+/// Result of abandoning an active wait attempt.
+pub const Rollback = enum {
+    /// The registration was removed, or had never been queued. No signal is
+    /// owed for this attempt.
+    removed,
+    /// A notifier consumed the registration. Exactly one signal is already
+    /// landed or will land, and must be absorbed before the waiter can die.
+    signal_in_flight,
+};
+
+// Winner-word states. NO_WINNER (common.zig) means undecided and an arm index
+// means decided; the values and transitions are owned here. The sentinels:
+// COMMITTING is held by the select's own sweep while an arm's commit may
+// consume, CANCELED is set by the cancel path and means the select will never
+// commit.
+const COMMITTING = std.math.maxInt(usize) - 1;
+const CANCELED = std.math.maxInt(usize) - 2;
+
+pub const ClaimResult = enum {
+    /// The claim landed (direct waiters are always won). The claimer must
+    /// complete the committed side effect under the source lock, record the
+    /// outcome in the arm's ctx, dequeue the registration and notify.
+    won,
+    /// The select's own sweep holds the fence right now. The claimer must
+    /// nudge: dequeue the registration under the source lock and notify, so
+    /// the select re-runs prepare/commit on the arm.
+    busy,
+    /// The select is already decided (another arm won, or it canceled). Skip
+    /// the registration in place; the select's cleanup removes it.
+    lost,
+};
+
+/// Decide a select from the outside. This is the single external entry point
+/// into select arbitration, used only for parked channel rendezvous arms. Must
+/// be called under the same source lock that guards the arm's registration and
+/// rollback.
+pub fn claimArm(waiter: *Waiter) ClaimResult {
+    switch (waiter.mode) {
+        .direct => return .won,
+        .select => |*s| {
+            const cur = s.winner.cmpxchgStrong(NO_WINNER, s.index, .acq_rel, .acquire) orelse return .won;
+            return if (cur == COMMITTING) .busy else .lost;
+        },
+    }
+}
+
+/// Non-committal read of an arm's arbitration state, for a source deciding
+/// whether a parked registration is worth reporting as ready. Racy by nature:
+/// the consuming path re-checks through `claimArm`. `.won` means open.
+pub fn peekArm(waiter: *Waiter) ClaimResult {
+    switch (waiter.mode) {
+        .direct => return .won,
+        .select => |*s| {
+            const cur = s.winner.load(.acquire);
+            if (cur == NO_WINNER) return .won;
+            return if (cur == COMMITTING) .busy else .lost;
+        },
+    }
+}
+
+/// Consume a select arm's notification. Owned by the select loop; a consumed
+/// notification means the arm is unregistered and must be re-prepared.
+fn consumeNotified(waiter: *Waiter) bool {
+    return waiter.mode.select.notified.swap(false, .acq_rel);
+}
 
 /// Extract the Future type from a pointer or value type
 fn FutureType(comptime T: type) type {
@@ -91,10 +193,30 @@ fn isPointerFuture(comptime T: type) bool {
     return @typeInfo(T) == .pointer;
 }
 
+fn AsyncWaitOf(comptime future_type: type) type {
+    return FutureType(future_type).AsyncWait;
+}
+
 /// Extract the Result type from a future (pointer or value)
 fn FutureResult(comptime future_type: type) type {
-    const Future = FutureType(future_type);
-    return Future.Result;
+    return AsyncWaitOf(future_type).Result;
+}
+
+/// Extract the Context type from a future (pointer or value)
+fn FutureContext(comptime future_type: type) type {
+    return AsyncWaitOf(future_type).Context;
+}
+
+fn isClaimable(comptime future_type: type) bool {
+    const AW = AsyncWaitOf(future_type);
+    return @hasDecl(AW, "claimable") and AW.claimable;
+}
+
+fn anyClaimable(comptime futures_type: type) bool {
+    for (@typeInfo(futures_type).@"struct".fields) |field| {
+        if (isClaimable(field.type)) return true;
+    }
+    return false;
 }
 
 /// Check for self-wait deadlock if the future has a toAwaitable() method
@@ -109,54 +231,53 @@ fn checkSelfWait(task: *AnyTask, future: anytype) void {
     }
 }
 
-/// Extract the WaitContext type from a future pointer type
-fn FutureWaitContext(comptime future_type: type) type {
-    const Future = FutureType(future_type);
-    if (@hasDecl(Future, "WaitContext")) {
-        return Future.WaitContext;
-    }
-    return void;
-}
-
-/// Check if a future has a non-void WaitContext
-fn hasWaitContext(comptime future_type: type) bool {
-    return FutureWaitContext(future_type) != void;
-}
-
-/// Build a struct type containing WaitContext fields for each future that needs one
+/// Build a struct type containing one Context field per future.
 fn WaitContextsType(comptime futures_type: type) type {
     const fields = @typeInfo(futures_type).@"struct".fields;
 
-    // Count how many fields have non-void WaitContext
-    comptime var count: usize = 0;
-    inline for (fields) |field| {
-        if (FutureWaitContext(field.type) != void) {
-            count += 1;
-        }
-    }
-
-    // Handle the zero-field case
-    if (count == 0) {
-        return @Struct(.auto, null, &.{}, &.{}, &.{});
-    }
-
-    // Build arrays of field names, types, and attributes
-    var field_names: [count][:0]const u8 = undefined;
-    var field_types: [count]type = undefined;
-    var field_attrs: [count]std.builtin.Type.StructField.Attributes = undefined;
+    var field_names: [fields.len][:0]const u8 = undefined;
+    var field_types: [fields.len]type = undefined;
+    var field_attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
 
     comptime var i: usize = 0;
     inline for (fields) |field| {
-        const WaitCtx = FutureWaitContext(field.type);
-        if (WaitCtx != void) {
-            const default_value: WaitCtx = .{};
-            field_names[i] = field.name;
-            field_types[i] = WaitCtx;
-            field_attrs[i] = .{
-                .default_value_ptr = @ptrCast(&default_value),
-            };
-            i += 1;
-        }
+        const Context = FutureContext(field.type);
+        const default_value: Context = .{};
+        field_names[i] = field.name;
+        field_types[i] = Context;
+        field_attrs[i] = .{ .default_value_ptr = @ptrCast(&default_value) };
+        i += 1;
+    }
+
+    return @Struct(.auto, null, &field_names, &field_types, &field_attrs);
+}
+
+fn ResultSlot(comptime Result: type) type {
+    return struct { value: Result };
+}
+
+/// Build a struct type with an optional result wrapper per arm, all defaulting
+/// to null. The wrapper keeps "no committed result" distinct from a legitimate
+/// optional Result whose value is null. Results are stored here at commit time,
+/// because signals may still be in flight when an arm commits and the frame
+/// must not return until they are absorbed.
+fn ResultsType(comptime futures_type: type) type {
+    const fields = @typeInfo(futures_type).@"struct".fields;
+
+    var field_names: [fields.len][:0]const u8 = undefined;
+    var field_types: [fields.len]type = undefined;
+    var field_attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
+
+    comptime var i: usize = 0;
+    inline for (fields) |field| {
+        const R = ?ResultSlot(FutureResult(field.type));
+        const default_value: R = null;
+        field_names[i] = field.name;
+        field_types[i] = R;
+        field_attrs[i] = .{
+            .default_value_ptr = @ptrCast(&default_value),
+        };
+        i += 1;
     }
 
     return @Struct(.auto, null, &field_names, &field_types, &field_attrs);
@@ -190,9 +311,8 @@ pub fn SelectResult(comptime S: type) type {
     var field_attrs: [struct_fields.len]std.builtin.Type.UnionField.Attributes = undefined;
 
     for (struct_fields, 0..) |struct_field, i| {
-        const Future = FutureType(struct_field.type);
         field_names[i] = struct_field.name;
-        field_types[i] = Future.Result;
+        field_types[i] = FutureResult(struct_field.type);
         field_attrs[i] = .{};
     }
 
@@ -201,10 +321,16 @@ pub fn SelectResult(comptime S: type) type {
 
 test "SelectResult: result types" {
     const Future1 = struct {
-        const Result = void;
+        pub const AsyncWait = struct {
+            pub const Result = void;
+            pub const Context = struct {};
+        };
     };
     const Future2 = struct {
-        const Result = u32;
+        pub const AsyncWait = struct {
+            pub const Result = u32;
+            pub const Context = struct {};
+        };
     };
 
     const Select = SelectResult(struct {
@@ -216,16 +342,40 @@ test "SelectResult: result types" {
     _ = Select{ .future2 = 32 };
 }
 
+/// Reshuffle the sweep order (Fisher-Yates over per-round random bytes).
+fn shuffle(order: []usize) void {
+    if (order.len < 2) return;
+    std.debug.assert(order.len <= 64);
+    var bytes: [64]u8 = undefined;
+    random(bytes[0..order.len]);
+    var i: usize = order.len - 1;
+    while (i > 0) : (i -= 1) {
+        const j: usize = bytes[i] % @as(u8, @intCast(i + 1));
+        std.mem.swap(usize, &order[i], &order[j]);
+    }
+}
+
+const ArmPhase = enum { inactive, pending, ready };
+
+/// Loop-owned state for one prepare/commit attempt. A ready arm with
+/// `signal_expected` came from a notification; its losing rollback may report
+/// `.signal_in_flight`, but that signal is already included in the select's
+/// expected-signal count.
+const ArmState = struct {
+    phase: ArmPhase = .inactive,
+    signal_expected: bool = false,
+};
+
 /// Wait for multiple futures simultaneously and return whichever completes first.
 ///
 /// `futures` is a struct with each field being either:
 /// - A pointer to a future (e.g., `*JoinHandle(T)`) for futures that mutate self
-/// - A value future (e.g., `channel.asyncReceive()`) for futures using WaitContext
+/// - A value future (e.g., `channel.asyncReceive()`) for futures using a Context
 ///
-/// Returns a tagged union with the same field names, containing the result of whichever completed first.
-///
-/// When multiple handles complete at the same time, fields are checked in declaration order
-/// and the first ready handle is returned.
+/// Returns a tagged union with the same field names, containing the result of
+/// whichever completed first. When several arms are ready in the same round, a
+/// random one wins. A select may contain at most 64 arms; larger selects panic
+/// in every build mode.
 ///
 /// Example:
 /// ```
@@ -241,6 +391,9 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     const S = @TypeOf(futures);
     const U = SelectResult(S);
     const fields = @typeInfo(S).@"struct".fields;
+    const has_claimable = comptime anyClaimable(S);
+
+    if (fields.len > 64) @panic("select: too many arms (max 64)");
 
     // Self-wait detection: check all futures for self-wait
     const task = getCurrentTask();
@@ -248,150 +401,147 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
         checkSelfWait(task, @field(futures, field.name));
     }
 
-    // Winner tracking: NO_WINNER means no winner yet
+    // Winner word: consulted only when a claimable arm exists; everything else
+    // is decided by the sweep alone.
     var winner: std.atomic.Value(usize) = .init(NO_WINNER);
 
-    // Parent waiter that select waiters will signal when they win
-    var waiter = Waiter.init();
+    // Parent waiter that arm notifications land on
+    var parent = Waiter.init();
 
-    // Allocate WaitContext struct on stack for futures that need per-wait state
+    // Allocate Context struct on stack for futures that need per-wait state
     const ContextsType = WaitContextsType(S);
     var contexts: ContextsType = .{};
 
-    // Create waiter structures on the stack
+    var results: ResultsType(S) = .{};
+
     var waiters: [fields.len]Waiter = undefined;
     inline for (&waiters, 0..) |*w, i| {
-        w.* = Waiter.initSelect(&waiter, &winner, i);
+        w.* = Waiter.initSelect(&parent, &winner, i);
     }
 
-    // Track how many futures we've registered with (for cleanup).
-    // Only incremented when asyncWait returns true (future is pending).
-    var registered_count: usize = 0;
+    var states: [fields.len]ArmState = @splat(.{});
+    var order: [fields.len]usize = undefined;
+    inline for (&order, 0..) |*slot, i| slot.* = i;
 
-    // Clean up waiters on all exit paths
-    defer {
-        const winner_index = winner.load(.acquire);
+    // Signals accounted for so far: one per consumed notification. Each round
+    // parks until one more lands.
+    var signals_expected: u32 = 0;
+    var deliver_recancel = false;
 
-        // Count expected signals: all registered futures will signal unless we cancel them.
-        // Successfully canceled futures (asyncCancelWait returns true) won't signal.
-        var expected: u32 = @intCast(registered_count);
+    const winner_index: usize = main: while (true) {
+        shuffle(&order);
+        sweep: for (order) |arm| {
+            inline for (fields, 0..) |field, i| {
+                if (arm == i) {
+                    if (states[i].phase == .pending) {
+                        // Registered arms are dormant until notified; a
+                        // consumed notification means the registration is
+                        // gone and the arm must re-run prepare/commit.
+                        if (!consumeNotified(&waiters[i])) continue :sweep;
+                        signals_expected += 1;
+                        states[i] = .{ .phase = .ready, .signal_expected = true };
+                    }
+                    var future = @field(futures, field.name);
+                    const fp = if (comptime isPointerFuture(field.type)) future else &future;
+                    while (true) {
+                        if (states[i].phase == .inactive) {
+                            const prep = AsyncWaitOf(field.type).prepare(fp, &waiters[i], &@field(contexts, field.name));
+                            if (prep == .pending) {
+                                states[i] = .{ .phase = .pending };
+                                continue :sweep;
+                            }
+                            states[i] = .{ .phase = .ready };
+                        }
+                        // Ready: commit, holding the fence so no peer can
+                        // decide a claimable arm while this one consumes.
+                        if (has_claimable) {
+                            if (winner.cmpxchgStrong(NO_WINNER, COMMITTING, .acq_rel, .acquire)) |decided| {
+                                std.debug.assert(decided < fields.len);
+                                break :main decided;
+                            }
+                        }
+                        const committed = AsyncWaitOf(field.type).commit(fp, &@field(contexts, field.name));
+                        switch (committed) {
+                            .done => |value| {
+                                states[i] = .{};
+                                if (has_claimable) winner.store(i, .release);
+                                @field(results, field.name) = .{ .value = value };
+                                break :main i;
+                            },
+                            .retry => {
+                                states[i] = .{};
+                                if (has_claimable) winner.store(NO_WINNER, .release);
+                            },
+                        }
+                        // Readiness decayed; the attempt ended without a side
+                        // effect or reservation. Prepare again.
+                    }
+                }
+            }
+        }
+
+        parent.wait(signals_expected + 1, .allow_cancel) catch {
+            if (has_claimable) {
+                // A claim that landed before this transition decided the
+                // select: its arm consumed on our behalf, so the result must
+                // be delivered, with the cancellation re-armed to fire at the
+                // next cancelable operation.
+                if (winner.cmpxchgStrong(NO_WINNER, CANCELED, .acq_rel, .acquire)) |decided| {
+                    std.debug.assert(decided < fields.len);
+                    deliver_recancel = true;
+                    break :main decided;
+                }
+            }
+            break :main NO_WINNER;
+        };
+    };
+
+    // An externally decided arm carries its outcome in ctx; commit reports it.
+    if (winner_index != NO_WINNER) {
         inline for (fields, 0..) |field, i| {
-            // Only cancel if we registered and didn't win
-            if (i < registered_count and winner_index != i) {
+            if (winner_index == i and @field(results, field.name) == null) {
                 var future = @field(futures, field.name);
-                const was_removed = if (comptime hasWaitContext(field.type))
-                    future.asyncCancelWait(&waiters[i], &@field(contexts, field.name))
-                else
-                    future.asyncCancelWait(&waiters[i]);
+                const fp = if (comptime isPointerFuture(field.type)) future else &future;
+                const committed = AsyncWaitOf(field.type).commit(fp, &@field(contexts, field.name));
+                @field(results, field.name) = switch (committed) {
+                    .done => |value| .{ .value = value },
+                    .retry => unreachable,
+                };
 
-                if (was_removed) {
-                    // Successfully removed from queue - won't signal
-                    expected -= 1;
-                }
+                // An external claim consumes a queued registration and owes
+                // exactly one signal. It may not have reached `notified` yet,
+                // so account it from the claim rather than the flag.
+                if (!states[i].signal_expected) signals_expected += 1;
+                states[i] = .{};
             }
         }
-
-        // Wait for all expected signals (winner + in-flight non-winners)
-        waiter.wait(expected, .no_cancel);
     }
 
-    // Add waiters to all waiting lists - fast path: return immediately if already complete
+    // Deregister every pending arm and absorb every signal: one per consumed
+    // notification, plus one per registration a notifier already consumed
+    // (rollback false), whose signal may still be in flight.
     inline for (fields, 0..) |field, i| {
-        const future = @field(futures, field.name);
-        const waiting = if (comptime hasWaitContext(field.type))
-            future.asyncWait(&waiters[i], &@field(contexts, field.name))
-        else
-            future.asyncWait(&waiters[i]);
-
-        if (!waiting) {
-            winner.store(i, .release);
-            const result = if (comptime hasWaitContext(field.type))
-                future.getResult(&@field(contexts, field.name))
-            else
-                future.getResult();
-            return @unionInit(U, field.name, result);
+        const needs_rollback = states[i].phase == .pending or
+            (states[i].phase == .ready and states[i].signal_expected);
+        if (needs_rollback) {
+            var future = @field(futures, field.name);
+            const fp = if (comptime isPointerFuture(field.type)) future else &future;
+            const rolled_back = AsyncWaitOf(field.type).rollback(fp, &waiters[i], &@field(contexts, field.name));
+            if (rolled_back == .signal_in_flight and !states[i].signal_expected) signals_expected += 1;
         }
-
-        registered_count += 1;
+        states[i] = .{};
     }
+    parent.wait(signals_expected, .no_cancel);
 
-    // Wait for one to complete (Waiter.wait handles spurious wakeups)
-    try waiter.wait(1, .allow_cancel);
+    if (winner_index == NO_WINNER) return error.Canceled;
+    if (deliver_recancel) task.recancel();
 
-    // O(1) winner lookup
-    const winner_index = winner.load(.acquire);
-
-    // Return result from winner
     inline for (fields, 0..) |field, i| {
-        if (i == winner_index) {
-            const future = @field(futures, field.name);
-            const result = if (comptime hasWaitContext(field.type))
-                future.getResult(&@field(contexts, field.name))
-            else
-                future.getResult();
-            return @unionInit(U, field.name, result);
+        if (winner_index == i) {
+            return @unionInit(U, field.name, @field(results, field.name).?.value);
         }
     }
-
-    // Should never reach here - we were woken up, so something must be signaled
     unreachable;
-}
-
-/// Select on a runtime slice of type-erased Awaitables.
-/// Returns the index of the first awaitable to complete.
-/// Used by std.Io.selectImpl.
-pub fn selectAwaitables(awaitables: []const *Awaitable) Cancelable!usize {
-    const max_awaitables = 64;
-    if (awaitables.len > max_awaitables) {
-        @panic("selectAwaitables: too many awaitables (max 64)");
-    }
-
-    var winner: std.atomic.Value(usize) = .init(NO_WINNER);
-    var waiter = Waiter.init();
-    var waiters: [max_awaitables]Waiter = undefined;
-
-    for (waiters[0..awaitables.len], 0..) |*w, i| {
-        w.* = Waiter.initSelect(&waiter, &winner, i);
-    }
-
-    // Only incremented when asyncWait returns true (future is pending).
-    var registered_count: usize = 0;
-
-    defer {
-        const winner_index = winner.load(.acquire);
-
-        // Count expected signals: all registered futures will signal unless we cancel them.
-        // Successfully canceled futures (asyncCancelWait returns true) won't signal.
-        var expected: u32 = @intCast(registered_count);
-        for (awaitables[0..registered_count], waiters[0..registered_count], 0..) |awaitable, *w, i| {
-            if (winner_index != i) {
-                const was_removed = awaitable.asyncCancelWait(w);
-                if (was_removed) {
-                    // Successfully removed from queue - won't signal
-                    expected -= 1;
-                }
-            }
-        }
-
-        // Wait for all expected signals (winner + in-flight non-winners)
-        waiter.wait(expected, .no_cancel);
-    }
-
-    for (awaitables, waiters[0..awaitables.len]) |awaitable, *w| {
-        const waiting = awaitable.asyncWait(w);
-
-        if (!waiting) {
-            winner.store(w.mode.select.index, .release);
-            return w.mode.select.index;
-        }
-
-        registered_count += 1;
-    }
-
-    // Wait for one to complete (Waiter.wait handles spurious wakeups)
-    try waiter.wait(1, .allow_cancel);
-
-    return winner.load(.acquire);
 }
 
 /// Internal wait implementation with configurable cancellation behavior.
@@ -401,55 +551,96 @@ fn waitInternal(future: anytype, comptime flags: WaitFlags) Cancelable!WaitResul
         checkSelfWait(task, future);
     }
 
-    var waiter = Waiter.init();
-
-    // Allocate WaitContext if needed
-    const WaitCtx = FutureWaitContext(@TypeOf(future));
-    var context: WaitCtx = if (WaitCtx == void) {} else .{};
-    const has_context = comptime (WaitCtx != void);
-
-    // Fast path: check if already complete
+    const FT = @TypeOf(future);
+    const AW = AsyncWaitOf(FT);
     var fut = future;
-    const added = if (has_context)
-        fut.asyncWait(&waiter, &context)
-    else
-        fut.asyncWait(&waiter);
+    const fp = if (comptime isPointerFuture(FT)) fut else &fut;
 
-    if (!added) {
-        const result = if (has_context) fut.getResult(&context) else fut.getResult();
-        return .{ .value = result };
-    }
+    var waiter = Waiter.init();
+    var context: FutureContext(FT) = .{};
 
-    // Clean up waiter on exit
-    defer {
-        const was_removed = if (has_context)
-            fut.asyncCancelWait(&waiter, &context)
-        else
-            fut.asyncCancelWait(&waiter);
+    // For a direct waiter every signal reports a consumed registration, so
+    // the landed count doubles as the notification flag.
+    var registered = false;
+    var signals_landed: u32 = 0;
 
-        if (!was_removed) {
-            // Wake is in-flight, wait for it to complete (1 signal expected)
-            waiter.wait(1, .no_cancel);
+    const result: AW.Result = main: while (true) {
+        if (!registered) {
+            const prep = AW.prepare(fp, &waiter, &context);
+            if (prep == .pending) {
+                registered = true;
+                continue;
+            }
+            switch (AW.commit(fp, &context)) {
+                .done => |value| break :main value,
+                .retry => continue,
+            }
         }
-    }
 
-    if (flags.on_cancel == .cancel_and_continue) {
-        // Wait with cancellation enabled first
-        waiter.wait(1, .allow_cancel) catch |err| switch (err) {
+        waiter.wait(signals_landed + 1, .allow_cancel) catch |err| switch (err) {
             error.Canceled => {
-                // On cancellation, cancel child and wait for completion
-                fut.cancel();
-                waiter.wait(1, .no_cancel);
-                const result = if (has_context) fut.getResult(&context) else fut.getResult();
-                return .{ .value = result };
+                if (flags.on_cancel == .cancel_and_continue) {
+                    // On cancellation, cancel the future and keep waiting for
+                    // its completion.
+                    fp.cancel();
+                    while (true) {
+                        if (!registered) {
+                            const prep = AW.prepare(fp, &waiter, &context);
+                            if (prep == .pending) {
+                                registered = true;
+                                continue;
+                            }
+                            switch (AW.commit(fp, &context)) {
+                                .done => |value| break :main value,
+                                .retry => continue,
+                            }
+                        }
+                        waiter.wait(signals_landed + 1, .no_cancel);
+                        signals_landed = waiter.landedSignals();
+                        registered = false;
+                        switch (AW.commit(fp, &context)) {
+                            .done => |value| break :main value,
+                            .retry => {},
+                        }
+                    }
+                }
+
+                var signals_to_wait_for = signals_landed;
+                var notification_pending = false;
+                if (registered) {
+                    const rolled_back = AW.rollback(fp, &waiter, &context);
+                    if (rolled_back == .signal_in_flight) {
+                        signals_to_wait_for += 1;
+                        notification_pending = true;
+                    }
+                    registered = false;
+                }
+                waiter.wait(signals_to_wait_for, .no_cancel);
+                if (notification_pending) {
+                    // A signal to a direct waiter reports a completed
+                    // operation: deliver its result rather than dropping it,
+                    // and re-arm the cancellation for the next cancelable
+                    // operation.
+                    switch (AW.commit(fp, &context)) {
+                        .done => |value| {
+                            if (waiter.mode.direct.task) |t| t.recancel();
+                            return .{ .value = value };
+                        },
+                        .retry => {},
+                    }
+                }
+                return err;
             },
         };
-    } else {
-        // Propagate cancellation to caller (Waiter.wait handles spurious wakeups)
-        try waiter.wait(1, .allow_cancel);
-    }
+        signals_landed = waiter.landedSignals();
+        registered = false;
+        switch (AW.commit(fp, &context)) {
+            .done => |value| break :main value,
+            .retry => {},
+        }
+        // Readiness decayed; prepare again.
+    };
 
-    const result = if (has_context) fut.getResult(&context) else fut.getResult();
     return .{ .value = result };
 }
 
@@ -484,7 +675,6 @@ pub fn waitUntilComplete(future: anytype) FutureResult(@TypeOf(future)) {
     const result = waitInternal(future, .{ .on_cancel = .cancel_and_continue }) catch unreachable;
     return result.value;
 }
-
 test "select: basic - first completes" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
@@ -550,6 +740,103 @@ test "select: already complete - fast path" {
         .immediate => |val| try std.testing.expectEqual(123, val),
         .slow => return error.TestUnexpectedResult,
     }
+}
+
+test "select: sixteen arms fit the comptime quota" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const Ready = struct {
+        value: u8,
+        const Source = @This();
+
+        pub const AsyncWait = struct {
+            pub const Result = u8;
+            pub const Context = struct {};
+
+            pub fn prepare(self: *const Source, waiter: *Waiter, ctx: *Context) Prepare {
+                _ = self;
+                _ = waiter;
+                _ = ctx;
+                return .ready;
+            }
+
+            pub fn commit(self: *const Source, ctx: *Context) CommitResult(Result) {
+                _ = ctx;
+                return .{ .done = self.value };
+            }
+
+            pub fn rollback(self: *const Source, waiter: *Waiter, ctx: *Context) Rollback {
+                _ = self;
+                _ = waiter;
+                _ = ctx;
+                return .removed;
+            }
+        };
+    };
+
+    const result = try select(.{
+        .arm00 = Ready{ .value = 0 },
+        .arm01 = Ready{ .value = 1 },
+        .arm02 = Ready{ .value = 2 },
+        .arm03 = Ready{ .value = 3 },
+        .arm04 = Ready{ .value = 4 },
+        .arm05 = Ready{ .value = 5 },
+        .arm06 = Ready{ .value = 6 },
+        .arm07 = Ready{ .value = 7 },
+        .arm08 = Ready{ .value = 8 },
+        .arm09 = Ready{ .value = 9 },
+        .arm10 = Ready{ .value = 10 },
+        .arm11 = Ready{ .value = 11 },
+        .arm12 = Ready{ .value = 12 },
+        .arm13 = Ready{ .value = 13 },
+        .arm14 = Ready{ .value = 14 },
+        .arm15 = Ready{ .value = 15 },
+    });
+    const chosen = switch (result) {
+        inline else => |value| value,
+    };
+    try std.testing.expect(chosen < 16);
+}
+
+test "select: null is a committed optional result" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const NullReady = struct {
+        commits: *usize,
+        const Source = @This();
+
+        pub const AsyncWait = struct {
+            pub const Result = ?u8;
+            pub const Context = struct {};
+
+            pub fn prepare(self: *const Source, waiter: *Waiter, ctx: *Context) Prepare {
+                _ = self;
+                _ = waiter;
+                _ = ctx;
+                return .ready;
+            }
+
+            pub fn commit(self: *const Source, ctx: *Context) CommitResult(Result) {
+                _ = ctx;
+                self.commits.* += 1;
+                return .{ .done = null };
+            }
+
+            pub fn rollback(self: *const Source, waiter: *Waiter, ctx: *Context) Rollback {
+                _ = self;
+                _ = waiter;
+                _ = ctx;
+                return .removed;
+            }
+        };
+    };
+
+    var commits: usize = 0;
+    const result = try select(.{ .optional = NullReady{ .commits = &commits } });
+    try std.testing.expectEqual(null, result.optional);
+    try std.testing.expectEqual(1, commits);
 }
 
 test "select: heterogeneous types" {
@@ -927,5 +1214,5 @@ test "select: wait on JoinHandle from spawned task" {
     }
 
     // Both should be valid results, though timing determines which completes first
-    try std.testing.expect(std.meta.activeTag(result) == .first or std.meta.activeTag(result) == .second);
+    try std.testing.expectEqual(true, std.meta.activeTag(result) == .first or std.meta.activeTag(result) == .second);
 }

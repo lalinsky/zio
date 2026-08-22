@@ -18,6 +18,9 @@ const spawnTask = @import("task.zig").spawnTask;
 const spawnBlockingTask_mod = @import("blocking_task.zig");
 const spawnBlockingTask = spawnBlockingTask_mod.spawnBlockingTask;
 const Futex = @import("sync/Futex.zig");
+const Prepare = @import("select.zig").Prepare;
+const CommitResult = @import("select.zig").CommitResult;
+const Rollback = @import("select.zig").Rollback;
 
 pub const Group = struct {
     inner: std.Io.Group = .init,
@@ -226,7 +229,7 @@ pub const Group = struct {
         group.getTasks().clearFlag();
     }
 
-    // Future protocol implementation for use with select() / wait().
+    // AsyncWait protocol (see select.zig).
     //
     // Waits until the group naturally drains to zero pending tasks. Unlike
     // `wait()`, this does NOT close the group and does not participate in
@@ -235,42 +238,41 @@ pub const Group = struct {
     //
     // Registration parks on the same futex address that `unregisterGroupTask`
     // wakes when the counter hits zero, so no per-group waiter storage is needed.
+    pub const AsyncWait = struct {
+        pub const Result = void;
+        pub const Context = Futex.FutexWaiter;
 
-    pub const Result = void;
+        pub fn prepare(self: *Group, waiter: *Waiter, ctx: *Context) Prepare {
+            const state_ptr = self.getState();
 
-    pub const WaitContext = Futex.FutexWaiter;
+            if (@atomicLoad(u32, state_ptr, .acquire) & counter_mask == 0) return .ready;
 
-    pub fn getResult(self: *Group, ctx: *WaitContext) void {
-        _ = self;
-        _ = ctx;
-    }
+            Futex.prepareWait(state_ptr, ctx, waiter);
 
-    pub fn asyncWait(self: *Group, waiter: *Waiter, ctx: *WaitContext) bool {
-        const state_ptr = self.getState();
-
-        // Fast path: no pending tasks means the group is already "complete".
-        if (@atomicLoad(u32, state_ptr, .acquire) & counter_mask == 0) return false;
-
-        // Park on the completion futex address.
-        Futex.prepareWait(state_ptr, ctx, waiter);
-
-        // Double-check: the last task may have completed (and issued its wake)
-        // between the fast-path check and our registration above.
-        if (@atomicLoad(u32, state_ptr, .acquire) & counter_mask == 0) {
-            // We removed ourselves before any wake -> already complete.
-            if (Futex.cancelWait(ctx)) return false;
-            // A concurrent completion already dequeued us; the wake is in-flight.
-            return true;
+            // Double-check: the last task may have completed (and issued its
+            // wake) between the check above and the registration.
+            if (@atomicLoad(u32, state_ptr, .acquire) & counter_mask == 0) {
+                if (Futex.cancelWait(ctx)) return .ready;
+                // A concurrent completion already dequeued us; its
+                // notification is in flight and re-runs this arm.
+            }
+            return .pending;
         }
 
-        return true;
-    }
+        pub fn commit(self: *Group, ctx: *Context) CommitResult(void) {
+            _ = ctx;
+            // The drained state a wake reported may since have been undone by
+            // a respawn; report the decay and let the caller re-prepare.
+            if (@atomicLoad(u32, self.getState(), .acquire) & counter_mask == 0) return .{ .done = {} };
+            return .retry;
+        }
 
-    pub fn asyncCancelWait(self: *Group, waiter: *Waiter, ctx: *WaitContext) bool {
-        _ = self;
-        _ = waiter;
-        return Futex.cancelWait(ctx);
-    }
+        pub fn rollback(self: *Group, waiter: *Waiter, ctx: *Context) Rollback {
+            _ = self;
+            _ = waiter;
+            return if (Futex.cancelWait(ctx)) .removed else .signal_in_flight;
+        }
+    };
 };
 
 /// Spawn a task in the group with raw context bytes and start function.

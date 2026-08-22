@@ -14,6 +14,9 @@ const WaitNode = @import("utils/wait_queue.zig").WaitNode;
 const AutoCancel = @import("autocancel.zig").AutoCancel;
 const w = @import("os/windows.zig");
 const Waiter = @import("common.zig").Waiter;
+const Prepare = @import("select.zig").Prepare;
+const CommitResult = @import("select.zig").CommitResult;
+const Rollback = @import("select.zig").Rollback;
 
 pub const SignalKind = switch (builtin.os.tag) {
     .windows => enum(u8) {
@@ -350,34 +353,42 @@ pub const Signal = struct {
         _ = self.entry.counter.swap(0, .acquire);
     }
 
-    /// Registers a waiter to be notified when the signal is received.
-    /// This is part of the Future protocol for select().
-    /// Returns false if the signal was already received (no wait needed), true if added to wait queue.
-    pub fn asyncWait(self: *Signal, waiter: *Waiter) bool {
-        // Fast path: signal already received
-        if (self.entry.counter.swap(0, .acquire) > 0) {
-            return false;
+    // AsyncWait protocol (see select.zig). A delivery bumps the counter and
+    // then dequeues and notifies every registration. The counter swap is the
+    // consuming commit; when several waiters race for one delivery, the
+    // losers re-prepare.
+    pub const AsyncWait = struct {
+        pub const Result = void;
+        pub const Context = struct {};
+
+        pub fn prepare(self: *Signal, waiter: *Waiter, ctx: *Context) Prepare {
+            _ = ctx;
+            if (self.entry.counter.load(.acquire) > 0) return .ready;
+
+            self.entry.waiters.push(&waiter.node);
+
+            // Double-check: a delivery may have swept the queue between the
+            // check above and the push.
+            if (self.entry.counter.load(.acquire) > 0) {
+                if (self.entry.waiters.remove(&waiter.node)) return .ready;
+                // The delivery dequeued us; its notification is in flight and
+                // re-runs this arm.
+            }
+            return .pending;
         }
 
-        // Add to wait queue
-        self.entry.waiters.push(&waiter.node);
-        return true;
-    }
+        pub fn commit(self: *Signal, ctx: *Context) CommitResult(void) {
+            _ = ctx;
+            if (self.entry.counter.swap(0, .acquire) > 0) return .{ .done = {} };
+            // Another waiter consumed the delivery; re-prepare.
+            return .retry;
+        }
 
-    /// Cancels a pending wait operation by removing the waiter.
-    /// This is part of the Future protocol for select().
-    /// Returns true if removed, false if already removed by completion (wake in-flight).
-    pub fn asyncCancelWait(self: *Signal, waiter: *Waiter) bool {
-        // Simply remove from queue - no need to wake another waiter since signals broadcast to all
-        return self.entry.waiters.remove(&waiter.node);
-    }
-
-    /// Gets the result value.
-    /// This is part of the Future protocol for select().
-    pub fn getResult(self: *Signal) void {
-        // Consume the counter to ensure signal is acknowledged
-        _ = self.entry.counter.swap(0, .acquire);
-    }
+        pub fn rollback(self: *Signal, waiter: *Waiter, ctx: *Context) Rollback {
+            _ = ctx;
+            return if (self.entry.waiters.remove(&waiter.node)) .removed else .signal_in_flight;
+        }
+    };
 };
 
 test "Signal: basic signal handling" {

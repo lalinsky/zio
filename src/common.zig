@@ -37,7 +37,9 @@ pub const Closeable = error{
     Closed,
 };
 
-/// Sentinel value indicating no winner has been selected yet in select operations
+/// Sentinel value indicating no winner has been selected yet in select operations.
+/// The winner word itself is owned and interpreted by select.zig; this constant
+/// lives here only because `Waiter.initSelect` callers initialize the word.
 pub const NO_WINNER = std.math.maxInt(usize);
 
 /// Stack-allocated waiter for async operations.
@@ -49,7 +51,7 @@ pub const NO_WINNER = std.math.maxInt(usize);
 /// Usage:
 /// ```zig
 /// var waiter = Waiter.init();
-/// future.asyncWait(&waiter);
+/// queue.push(&waiter.node);
 /// try waiter.wait(1, .allow_cancel);
 /// ```
 ///
@@ -102,10 +104,17 @@ pub const Waiter = struct {
     };
 
     /// Select waiter for multi-future select().
+    /// The winner word and `index` are passive identity here: their values and
+    /// transitions are owned entirely by select.zig.
     pub const Select = struct {
         parent: *Waiter,
         winner: *std.atomic.Value(usize),
         index: usize,
+        /// Set by `signal` before the parent is woken; consumed by the owning
+        /// select loop to identify which arms were notified. A notifier
+        /// dequeues the registration, so a consumed notification also means
+        /// "this arm is no longer registered".
+        notified: std.atomic.Value(bool) = .init(false),
 
         pub fn init(parent: *Waiter, winner: *std.atomic.Value(usize), index: usize) Select {
             return .{
@@ -137,7 +146,11 @@ pub const Waiter = struct {
 
     /// Signal this waiter.
     /// For direct: increments signal count and wakes the task.
-    /// For select: tries to claim winner slot, then signals the parent.
+    /// For select: marks the arm notified and signals the parent waiter. No
+    /// winner decision is made here; the select re-runs its prepare/commit
+    /// sweep over the notified arms, and the one externally decided case (a
+    /// claimed channel send arm) goes through select.zig's claim entry point
+    /// before signaling.
     pub fn signal(self: *Waiter) void {
         switch (self.mode) {
             .direct => |*d| {
@@ -149,35 +162,15 @@ pub const Waiter = struct {
                 }
             },
             .select => |*s| {
-                // Try to claim winner slot with our index (may already be claimed)
-                _ = s.winner.cmpxchgStrong(NO_WINNER, s.index, .acq_rel, .acquire);
-                // Always signal parent - needed for both winner notification and
-                // cleanup synchronization (waiting for in-flight wakes to complete)
+                s.notified.store(true, .release);
                 s.parent.signal();
             },
         }
     }
 
-    /// Try to claim this waiter as a winner in select().
-    /// Returns true if claimed (or if direct waiter), false if another waiter already won.
-    ///
-    /// Queue consumers that discard losing select waiters must remove and claim
-    /// under the same lock used by cancellation. A successful claim commits the
-    /// caller to exactly one later signal; a failed claim must not be signaled.
-    pub fn tryClaim(self: *Waiter) bool {
-        return switch (self.mode) {
-            .direct => true,
-            .select => |*s| s.winner.cmpxchgStrong(NO_WINNER, s.index, .acq_rel, .acquire) == null,
-        };
-    }
-
-    /// Check if this waiter won its select (was claimed).
-    /// Returns true if won (or if direct waiter).
-    pub fn didWin(self: *const Waiter) bool {
-        return switch (self.mode) {
-            .direct => true,
-            .select => |s| s.winner.load(.acquire) == s.index,
-        };
+    /// Number of signals that have landed on this direct waiter so far.
+    pub fn landedSignals(self: *const Waiter) u32 {
+        return signalCount(self.mode.direct.notify.state.load(.acquire));
     }
 
     /// Top bit of a direct waiter's notify state, set when its timeout timer

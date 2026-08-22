@@ -104,34 +104,31 @@ pub fn Future(comptime T: type) type {
             return select.wait(self);
         }
 
-        // Future protocol implementation for use with select()
-        pub const Result = T;
+        // AsyncWait protocol (see select.zig). Completion is the sticky queue
+        // flag, set after the value lands; set() dequeues and notifies every
+        // registration while setting it.
+        pub const AsyncWait = struct {
+            pub const Result = T;
+            pub const Context = struct {};
 
-        /// Gets the result value.
-        /// This is part of the Future protocol for select().
-        /// Asserts that the future has been set.
-        pub fn getResult(self: *Self) T {
-            return self.value.get().?;
-        }
-
-        /// Registers a waiter to be notified when the future is set.
-        /// This is part of the Future protocol for select().
-        /// Returns false if the future is already set (no wait needed), true if added to queue.
-        pub fn asyncWait(self: *Self, waiter: *Waiter) bool {
-            // Fast path: check if already set
-            if (self.value.isSet()) {
-                return false;
+            pub fn prepare(self: *Self, waiter: *Waiter, ctx: *Context) select.Prepare {
+                _ = ctx;
+                if (!self.wait_queue.pushUnlessFlag(&waiter.node)) return .ready;
+                return .pending;
             }
-            // Try to push to queue - only succeeds if future is not done (flag not set)
-            return self.wait_queue.pushUnlessFlag(&waiter.node);
-        }
 
-        /// Cancels a pending wait operation by removing the waiter.
-        /// This is part of the Future protocol for select().
-        /// Returns true if removed, false if already removed by completion (wake in-flight).
-        pub fn asyncCancelWait(self: *Self, waiter: *Waiter) bool {
-            return self.wait_queue.remove(&waiter.node);
-        }
+            pub fn commit(self: *Self, ctx: *Context) select.CommitResult(T) {
+                _ = ctx;
+                std.debug.assert(self.wait_queue.isFlagSet());
+                const value: T = self.value.get().?;
+                return .{ .done = value };
+            }
+
+            pub fn rollback(self: *Self, waiter: *Waiter, ctx: *Context) select.Rollback {
+                _ = ctx;
+                return if (self.wait_queue.remove(&waiter.node)) .removed else .signal_in_flight;
+            }
+        };
     };
 }
 

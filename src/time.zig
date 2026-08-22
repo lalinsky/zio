@@ -14,6 +14,9 @@ const Runtime = @import("runtime.zig").Runtime;
 const getCurrentExecutor = @import("runtime.zig").getCurrentExecutor;
 const loopClearTimer = @import("runtime.zig").loopClearTimer;
 const Waiter = @import("common.zig").Waiter;
+const Prepare = @import("select.zig").Prepare;
+const CommitResult = @import("select.zig").CommitResult;
+const Rollback = @import("select.zig").Rollback;
 
 // Time configuration - adjust these for different platforms
 const TimePrecision = enum { nanoseconds, microseconds, milliseconds };
@@ -542,54 +545,68 @@ pub const Timeout = union(enum) {
         }
     }
 
-    // Future protocol implementation for use with select()
+    // AsyncWait protocol (see select.zig). The timer is armed by prepare; the
+    // callback latches `fired` before notifying, and the latch is the
+    // resident state commit reads. The timer never dequeues a wait node, so
+    // rollback runs the clearTimer handshake instead of a queue removal.
 
-    pub const Result = void;
+    pub const AsyncWait = struct {
+        pub const Result = void;
 
-    pub const WaitContext = struct {
-        timer: ev.Timer = ev.Timer.init(.{ .duration = .zero }),
-        waiter: ?*Waiter = null,
-    };
+        pub const Context = struct {
+            timer: ev.Timer = ev.Timer.init(.{ .duration = .zero }),
+            waiter: ?*Waiter = null,
+            fired: std.atomic.Value(bool) = .init(false),
+            armed: bool = false,
+        };
 
-    pub fn asyncWait(self: *const Timeout, waiter: *Waiter, ctx: *WaitContext) bool {
-        // Timeout.none means wait forever - never completes
-        if (self.* == .none) {
-            return true;
+        pub fn prepare(self: *const Timeout, waiter: *Waiter, ctx: *Context) Prepare {
+            // Timeout.none means wait forever - never completes, never arms.
+            if (self.* == .none) return .pending;
+
+            if (ctx.armed) {
+                // Re-prepared after a notification that lost the round.
+                return if (ctx.fired.load(.acquire)) .ready else .pending;
+            }
+
+            ctx.timer = ev.Timer.init(self.*);
+            ctx.waiter = waiter;
+            ctx.timer.c.userdata = ctx;
+            ctx.timer.c.callback = timerCallback;
+
+            const executor = getCurrentExecutor();
+            executor.loopAdd(&ctx.timer.c);
+            ctx.armed = true;
+            return .pending;
         }
 
-        ctx.timer = ev.Timer.init(self.*);
-        ctx.waiter = waiter;
-        ctx.timer.c.userdata = ctx;
-        ctx.timer.c.callback = timerCallback;
+        fn timerCallback(_: *ev.Loop, c: *ev.Completion) void {
+            const ctx: *Context = @ptrCast(@alignCast(c.userdata.?));
+            // Read the waiter before signaling: the caller keeps `ctx` alive
+            // until it has absorbed the signal rollback reported, and nothing
+            // here may touch `ctx` after the signal lands.
+            const waiter = ctx.waiter.?;
+            ctx.fired.store(true, .release);
+            waiter.signal();
+        }
 
-        const executor = getCurrentExecutor();
-        executor.loopAdd(&ctx.timer.c);
-        return true;
-    }
+        pub fn commit(self: *const Timeout, ctx: *Context) CommitResult(void) {
+            _ = self;
+            if (ctx.fired.load(.acquire)) return .{ .done = {} };
+            return .retry;
+        }
 
-    fn timerCallback(_: *ev.Loop, c: *ev.Completion) void {
-        const ctx: *WaitContext = @ptrCast(@alignCast(c.userdata.?));
-        // Every dispatch signals: the wait protocol keeps `ctx` alive until the
-        // signal arrives whenever `asyncCancelWait` reported the timer as still
-        // completing, so a missed signal would park the waiter forever.
-        ctx.waiter.?.signal();
-    }
-
-    pub fn asyncCancelWait(self: *const Timeout, waiter: *Waiter, ctx: *WaitContext) bool {
-        _ = self;
-        _ = waiter;
-        // `.none` never arms a timer, so there is nothing to remove.
-        const loop = ctx.timer.c.getLoop() orelse return true;
-        // Disarmed: no callback, no signal. Otherwise the timer is completing
-        // and its callback still signals `ctx.waiter`, so report the wake as
-        // in flight and let the caller wait for it.
-        return loopClearTimer(loop, &ctx.timer);
-    }
-
-    pub fn getResult(self: *const Timeout, ctx: *WaitContext) void {
-        _ = self;
-        _ = ctx;
-    }
+        pub fn rollback(self: *const Timeout, waiter: *Waiter, ctx: *Context) Rollback {
+            _ = self;
+            _ = waiter;
+            if (!ctx.armed) return .removed;
+            ctx.armed = false;
+            const loop = ctx.timer.c.getLoop() orelse return .removed;
+            // Disarmed: no callback, no signal. Otherwise the timer completed
+            // or is completing and its callback signals exactly once.
+            return if (loopClearTimer(loop, &ctx.timer)) .removed else .signal_in_flight;
+        }
+    };
 };
 
 /// A monotonic, high performance stopwatch for measuring elapsed time.

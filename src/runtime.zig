@@ -219,25 +219,36 @@ pub fn JoinHandle(comptime T: type) type {
             return self.result;
         }
 
-        /// Registers a waiter to be notified when the task completes.
-        /// This is part of the Future protocol for select().
-        /// Returns false if the task is already complete (no wait needed), true if added to queue.
-        pub fn asyncWait(self: Self, waiter: *Waiter) bool {
-            if (self.awaitable) |awaitable| {
-                return awaitable.asyncWait(waiter);
-            }
-            return false; // Already complete
-        }
+        // AsyncWait protocol (see select.zig), delegating to the task's
+        // awaitable. A null awaitable means the result is already cached.
+        pub const AsyncWait = struct {
+            pub const Result = T;
+            pub const Context = struct {};
 
-        /// Cancels a pending wait operation by removing the waiter.
-        /// This is part of the Future protocol for select().
-        /// Returns true if removed, false if already removed by completion (wake in-flight).
-        pub fn asyncCancelWait(self: Self, waiter: *Waiter) bool {
-            if (self.awaitable) |awaitable| {
-                return awaitable.asyncCancelWait(waiter);
+            pub fn prepare(self: *Self, waiter: *Waiter, ctx: *@This().Context) select.Prepare {
+                _ = ctx;
+                const awaitable = self.awaitable orelse return .ready;
+                var awaitable_ctx: Awaitable.AsyncWait.Context = .{};
+                return Awaitable.AsyncWait.prepare(awaitable, waiter, &awaitable_ctx);
             }
-            return true; // No awaitable means already completed, no wake in-flight
-        }
+
+            pub fn commit(self: *Self, ctx: *@This().Context) select.CommitResult(T) {
+                _ = ctx;
+                const awaitable = self.awaitable orelse return .{ .done = self.result };
+                var awaitable_ctx: Awaitable.AsyncWait.Context = .{};
+                switch (Awaitable.AsyncWait.commit(awaitable, &awaitable_ctx)) {
+                    .retry => return .retry,
+                    .done => return .{ .done = awaitable.getTypedResult(T) },
+                }
+            }
+
+            pub fn rollback(self: *Self, waiter: *Waiter, ctx: *@This().Context) select.Rollback {
+                _ = ctx;
+                const awaitable = self.awaitable orelse return .removed;
+                var awaitable_ctx: Awaitable.AsyncWait.Context = .{};
+                return Awaitable.AsyncWait.rollback(awaitable, waiter, &awaitable_ctx);
+            }
+        };
 
         /// Request cancellation and wait for the task to complete.
         ///

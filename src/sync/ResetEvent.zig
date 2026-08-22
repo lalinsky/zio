@@ -55,6 +55,9 @@ const Timeout = @import("../time.zig").Timeout;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const Waiter = @import("../common.zig").Waiter;
+const Prepare = @import("../select.zig").Prepare;
+const CommitResult = @import("../select.zig").CommitResult;
+const Rollback = @import("../select.zig").Rollback;
 
 /// Wait queue with flag indicating whether event is set.
 wait_queue: WaitQueue(WaitNode) = .empty,
@@ -187,36 +190,36 @@ pub fn timedWait(self: *ResetEvent, timeout: Timeout) (Timeoutable || Cancelable
     _ = self.wait_queue.isFlagSet();
 }
 
-// Future protocol implementation for use with select()
-pub const Result = void;
-
 /// Returns true if the event is set (has a result).
-/// This is part of the Future protocol for select().
 pub fn hasResult(self: *const ResetEvent) bool {
     return self.isSet();
 }
 
-/// Gets the result (void) of the event.
-/// This is part of the Future protocol for select().
-pub fn getResult(self: *const ResetEvent) void {
-    _ = self;
-    return;
-}
+// AsyncWait protocol (see select.zig). Completion is the sticky queue flag;
+// set() dequeues and notifies every registration while setting it.
+pub const AsyncWait = struct {
+    pub const Result = void;
+    pub const Context = struct {};
 
-/// Registers a waiter to be notified when the event is set.
-/// This is part of the Future protocol for select().
-/// Returns false if the event is already set (no wait needed), true if added to queue.
-pub fn asyncWait(self: *ResetEvent, waiter: *Waiter) bool {
-    // Try to push to queue - only succeeds if event is not set (flag not set)
-    return self.wait_queue.pushUnlessFlag(&waiter.node);
-}
+    pub fn prepare(self: *ResetEvent, waiter: *Waiter, ctx: *Context) Prepare {
+        _ = ctx;
+        if (!self.wait_queue.pushUnlessFlag(&waiter.node)) return .ready;
+        return .pending;
+    }
 
-/// Cancels a pending wait operation by removing the waiter.
-/// This is part of the Future protocol for select().
-/// Returns true if removed, false if already removed by completion (wake in-flight).
-pub fn asyncCancelWait(self: *ResetEvent, waiter: *Waiter) bool {
-    return self.wait_queue.remove(&waiter.node);
-}
+    pub fn commit(self: *ResetEvent, ctx: *Context) CommitResult(void) {
+        _ = ctx;
+        // `set` may be followed by `reset` after it has dequeued us but before
+        // this arm commits. Readiness is therefore allowed to decay.
+        if (self.wait_queue.isFlagSet()) return .{ .done = {} };
+        return .retry;
+    }
+
+    pub fn rollback(self: *ResetEvent, waiter: *Waiter, ctx: *Context) Rollback {
+        _ = ctx;
+        return if (self.wait_queue.remove(&waiter.node)) .removed else .signal_in_flight;
+    }
+};
 
 test "ResetEvent basic set/reset/isSet" {
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });

@@ -9,6 +9,9 @@ const SimpleQueue = @import("../utils/simple_queue.zig").SimpleQueue;
 const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const Barrier = @import("Barrier.zig");
 const select = @import("../select.zig").select;
+const Prepare = @import("../select.zig").Prepare;
+const CommitResult = @import("../select.zig").CommitResult;
+const Rollback = @import("../select.zig").Rollback;
 const Waiter = @import("../common.zig").Waiter;
 const Closeable = @import("../common.zig").Closeable;
 const Mutex = @import("Mutex.zig");
@@ -164,90 +167,54 @@ const AsyncReceiveImpl = struct {
 
     pub const WaitContext = struct {
         result_ptr: [*]u8 = undefined,
-        result: ?(Closeable || error{Lagged})!void = null,
     };
 
-    pub fn asyncWait(self: *const RecvSelf, waiter: *Waiter, ctx: *WaitContext, result_ptr: [*]u8) bool {
-        ctx.result_ptr = result_ptr;
-        ctx.result = null;
-
-        self.channel.mutex.lockUncancelable();
-
-        const unread = self.channel.write_pos -% self.consumer.read_pos;
-
-        // Check if lagged
-        if (unread > self.channel.capacity) {
-            self.consumer.read_pos = self.channel.write_pos -% self.channel.capacity;
-            ctx.result = error.Lagged;
-            self.channel.mutex.unlock();
-            return false; // Complete immediately with error
-        }
-
-        // Fast path: message available
-        if (unread > 0) {
-            const src = self.channel.elemPtr(self.consumer.read_pos % self.channel.capacity);
-            @memcpy(ctx.result_ptr[0..self.channel.elem_size], src[0..self.channel.elem_size]);
-            self.consumer.read_pos +%= 1;
-            ctx.result = {};
-            self.channel.mutex.unlock();
-            return false; // Complete immediately
-        }
-
-        // Fast path: channel closed
-        if (self.channel.closed) {
-            ctx.result = error.Closed;
-            self.channel.mutex.unlock();
-            return false; // Complete immediately with error
-        }
-
-        // Slow path: enqueue and wait
-        self.channel.wait_queue.push(&waiter.node);
-        self.channel.mutex.unlock();
-        return true;
-    }
-
-    pub fn asyncCancelWait(self: *const RecvSelf, waiter: *Waiter, ctx: *WaitContext) bool {
+    // AsyncWait protocol core (see select.zig): the send/close sweeps dequeue
+    // and notify every registration. Nothing is ever committed into the
+    // waiting frame from outside; commit consumes by advancing the consumer's
+    // own read position.
+    pub fn prepare(self: *const RecvSelf, waiter: *Waiter, ctx: *WaitContext) Prepare {
         _ = ctx;
         self.channel.mutex.lockUncancelable();
-        const was_in_queue = self.channel.wait_queue.remove(&waiter.node);
-        self.channel.mutex.unlock();
-        return was_in_queue;
+        defer self.channel.mutex.unlock();
+
+        const unread = self.channel.write_pos -% self.consumer.read_pos;
+        if (unread > 0 or self.channel.closed) return .ready;
+
+        self.channel.wait_queue.push(&waiter.node);
+        return .pending;
     }
 
-    pub fn getResult(self: *const RecvSelf, ctx: *WaitContext) (Closeable || error{Lagged})!void {
-        // Fast path: result already set by asyncWait
-        if (ctx.result) |r| {
-            return r;
-        }
-
-        // Slow path: woken from wait, read from buffer now
+    pub fn commit(self: *const RecvSelf, ctx: *WaitContext) CommitResult((Closeable || error{Lagged})!void) {
         self.channel.mutex.lockUncancelable();
+        defer self.channel.mutex.unlock();
 
         const unread = self.channel.write_pos -% self.consumer.read_pos;
 
-        // Check if lagged
         if (unread > self.channel.capacity) {
             self.consumer.read_pos = self.channel.write_pos -% self.channel.capacity;
-            self.channel.mutex.unlock();
-            return error.Lagged;
+            return .{ .done = error.Lagged };
         }
 
-        // Message available
         if (unread > 0) {
             const src = self.channel.elemPtr(self.consumer.read_pos % self.channel.capacity);
             @memcpy(ctx.result_ptr[0..self.channel.elem_size], src[0..self.channel.elem_size]);
             self.consumer.read_pos +%= 1;
-            self.channel.mutex.unlock();
-            return;
+            return .{ .done = {} };
         }
 
-        // Channel closed
         if (self.channel.closed) {
-            self.channel.mutex.unlock();
-            return error.Closed;
+            return .{ .done = error.Closed };
         }
 
-        unreachable;
+        return .retry;
+    }
+
+    pub fn rollback(self: *const RecvSelf, waiter: *Waiter, ctx: *WaitContext) Rollback {
+        _ = ctx;
+        self.channel.mutex.lockUncancelable();
+        defer self.channel.mutex.unlock();
+        return if (self.channel.wait_queue.remove(&waiter.node)) .removed else .signal_in_flight;
     }
 };
 
@@ -420,13 +387,6 @@ pub fn AsyncReceive(comptime T: type) type {
 
         const Self = @This();
 
-        pub const Result = error{ Closed, Lagged }!T;
-
-        pub const WaitContext = struct {
-            impl_ctx: AsyncReceiveImpl.WaitContext = .{},
-            result: T = undefined,
-        };
-
         fn init(channel: *BroadcastChannelImpl, consumer: *BroadcastChannelConsumer) Self {
             return .{
                 .impl = .{
@@ -436,24 +396,31 @@ pub fn AsyncReceive(comptime T: type) type {
             };
         }
 
-        /// Register for notification when receive can complete.
-        /// Returns false if operation completed immediately (fast path).
-        pub fn asyncWait(self: *const Self, waiter: *Waiter, ctx: *WaitContext) bool {
-            return self.impl.asyncWait(waiter, &ctx.impl_ctx, std.mem.asBytes(&ctx.result).ptr);
-        }
+        // AsyncWait protocol (see select.zig), delegating to the type-erased impl.
+        pub const AsyncWait = struct {
+            pub const Result = error{ Closed, Lagged }!T;
 
-        /// Cancel a pending wait operation.
-        /// Returns true if removed, false if already removed by completion (wake in-flight).
-        pub fn asyncCancelWait(self: *const Self, waiter: *Waiter, ctx: *WaitContext) bool {
-            return self.impl.asyncCancelWait(waiter, &ctx.impl_ctx);
-        }
+            pub const Context = struct {
+                impl_ctx: AsyncReceiveImpl.WaitContext = .{},
+                result: T = undefined,
+            };
 
-        /// Get the result of the receive operation.
-        /// Must only be called after asyncWait() returns false or the wait_node is woken.
-        pub fn getResult(self: *const Self, ctx: *WaitContext) Result {
-            try self.impl.getResult(&ctx.impl_ctx);
-            return ctx.result;
-        }
+            pub fn prepare(self: *const Self, waiter: *Waiter, ctx: *Context) Prepare {
+                ctx.impl_ctx.result_ptr = std.mem.asBytes(&ctx.result).ptr;
+                return self.impl.prepare(waiter, &ctx.impl_ctx);
+            }
+
+            pub fn commit(self: *const Self, ctx: *Context) CommitResult(Result) {
+                return switch (self.impl.commit(&ctx.impl_ctx)) {
+                    .retry => .retry,
+                    .done => |r| if (r) |_| .{ .done = ctx.result } else |err| .{ .done = err },
+                };
+            }
+
+            pub fn rollback(self: *const Self, waiter: *Waiter, ctx: *Context) Rollback {
+                return self.impl.rollback(waiter, &ctx.impl_ctx);
+            }
+        };
     };
 }
 
