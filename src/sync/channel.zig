@@ -15,6 +15,7 @@ const claimArm = @import("../select.zig").claimArm;
 const peekArm = @import("../select.zig").peekArm;
 const common = @import("../common.zig");
 const Waiter = common.Waiter;
+const NO_WINNER = common.NO_WINNER;
 const Cancelable = common.Cancelable;
 const Closeable = common.Closeable;
 const Mutex = @import("Mutex.zig");
@@ -28,12 +29,12 @@ pub const CloseMode = enum {
     immediate,
 };
 
-/// Type-erased channel implementation. Preparation only observes readiness or
-/// queues a waiter; all transfers happen under the mutex in commit. Each new
-/// buffered item or slot is reserved for at most one queued waiter. A losing
-/// notified arm hands that reservation to the next waiter in rollback.
-/// Rendezvous readiness remains optimistic: commit claims the parked peer's
-/// select before copying its resident value.
+/// Type-erased channel implementation. All transfers happen under the mutex in
+/// commit. Each buffered item or slot is reserved for at most one waiter, and
+/// rollback hands a losing reservation to exactly one successor. Rendezvous
+/// channels similarly keep at most one dequeued candidate holding a baton: if
+/// its peer is busy, the current operation parks before that baton is passed;
+/// commit consumes it and rollback passes it to one compatible waiter.
 const ChannelImpl = struct {
     buffer: [*]u8,
     elem_size: usize,
@@ -47,6 +48,7 @@ const ChannelImpl = struct {
     mutex: Mutex = .init,
     receiver_queue: SimpleQueue(WaitNode) = .empty,
     sender_queue: SimpleQueue(WaitNode) = .empty,
+    rendezvous_baton: bool = false,
 
     closed: bool = false,
 
@@ -78,6 +80,12 @@ const ChannelImpl = struct {
     fn sendCtx(node: *WaitNode) *AsyncSendImpl.Context {
         return @ptrFromInt(node.userdata);
     }
+
+    const Peer = union(enum) {
+        won: *WaitNode,
+        busy: *WaitNode,
+        none,
+    };
 
     /// Two arms of one select cannot rendezvous with each other: only one arm
     /// may be returned, so matching them would perform a transfer without a
@@ -132,10 +140,11 @@ const ChannelImpl = struct {
         return node;
     }
 
-    /// Under the mutex, find a peer whose select can be decided. A peer whose
-    /// select is currently committing another arm is dequeued and nudged; an
-    /// already-decided peer stays queued for its owner's rollback.
-    fn claimPeer(queue: *SimpleQueue(WaitNode), requester: ?*Waiter) ?*WaitNode {
+    /// Find an immediately claimable peer, remembering the oldest busy peer
+    /// only if no later waiter can complete now. Lost registrations remain for
+    /// their owner's rollback.
+    fn choosePeer(queue: *SimpleQueue(WaitNode), requester: ?*Waiter) Peer {
+        var first_busy: ?*WaitNode = null;
         var node = queue.head;
         while (node) |n| {
             const next = n.next;
@@ -149,23 +158,22 @@ const ChannelImpl = struct {
                 .won => {
                     const removed = queue.remove(n);
                     std.debug.assert(removed);
-                    return n;
+                    return .{ .won = n };
                 },
-                .busy => {
-                    const removed = queue.remove(n);
-                    std.debug.assert(removed);
-                    Waiter.fromNode(n).signal();
+                .busy => if (first_busy == null) {
+                    first_busy = n;
                 },
                 .lost => {},
             }
             node = next;
         }
-        return null;
+        return if (first_busy) |busy| .{ .busy = busy } else .none;
     }
 
-    /// Non-consuming readiness probe for a rendezvous peer. Busy peers are
-    /// nudged so they re-offer after their current select commit settles.
-    fn peerAvailable(queue: *SimpleQueue(WaitNode), requester: *Waiter) bool {
+    /// Non-consuming readiness probe. A busy peer is returned to the caller,
+    /// which can park itself and transfer the rendezvous baton atomically.
+    fn probePeer(queue: *SimpleQueue(WaitNode), requester: *Waiter) Peer {
+        var first_busy: ?*WaitNode = null;
         var node = queue.head;
         while (node) |n| {
             const next = n.next;
@@ -174,17 +182,70 @@ const ChannelImpl = struct {
                 continue;
             }
             switch (peekArm(Waiter.fromNode(n))) {
-                .won => return true,
-                .busy => {
-                    const removed = queue.remove(n);
-                    std.debug.assert(removed);
-                    Waiter.fromNode(n).signal();
+                .won => return .{ .won = n },
+                .busy => if (first_busy == null) {
+                    first_busy = n;
                 },
                 .lost => {},
             }
             node = next;
         }
-        return false;
+        return if (first_busy) |busy| .{ .busy = busy } else .none;
+    }
+
+    fn giveReceiverBaton(self: *Self, node: *WaitNode) *Waiter {
+        std.debug.assert(self.capacity == 0);
+        std.debug.assert(!self.rendezvous_baton);
+        const removed = self.receiver_queue.remove(node);
+        std.debug.assert(removed);
+        const ctx = recvCtx(node);
+        std.debug.assert(!ctx.has_rendezvous_baton);
+        ctx.has_rendezvous_baton = true;
+        self.rendezvous_baton = true;
+        return Waiter.fromNode(node);
+    }
+
+    fn giveSenderBaton(self: *Self, node: *WaitNode) *Waiter {
+        std.debug.assert(self.capacity == 0);
+        std.debug.assert(!self.rendezvous_baton);
+        const removed = self.sender_queue.remove(node);
+        std.debug.assert(removed);
+        const ctx = sendCtx(node);
+        std.debug.assert(!ctx.has_rendezvous_baton);
+        ctx.has_rendezvous_baton = true;
+        self.rendezvous_baton = true;
+        return Waiter.fromNode(node);
+    }
+
+    fn clearReceiverBaton(self: *Self, ctx: *AsyncReceiveImpl.Context) void {
+        std.debug.assert(self.rendezvous_baton);
+        std.debug.assert(ctx.has_rendezvous_baton);
+        ctx.has_rendezvous_baton = false;
+        self.rendezvous_baton = false;
+    }
+
+    fn clearSenderBaton(self: *Self, ctx: *AsyncSendImpl.Context) void {
+        std.debug.assert(self.rendezvous_baton);
+        std.debug.assert(ctx.has_rendezvous_baton);
+        ctx.has_rendezvous_baton = false;
+        self.rendezvous_baton = false;
+    }
+
+    /// If durable offers exist on both sides and nobody is already driving
+    /// them, dequeue exactly one receiver to try the next rendezvous.
+    fn scheduleRendezvous(self: *Self) ?*Waiter {
+        if (self.capacity != 0 or self.closed or self.rendezvous_baton) return null;
+
+        var receiver = self.receiver_queue.head;
+        while (receiver) |r| : (receiver = r.next) {
+            var sender = self.sender_queue.head;
+            while (sender) |s| : (sender = s.next) {
+                if (!sameSelect(Waiter.fromNode(r), Waiter.fromNode(s))) {
+                    return self.giveReceiverBaton(r);
+                }
+            }
+        }
+        return null;
     }
 
     fn receive(self: *Self, elem_ptr: [*]u8) !void {
@@ -211,9 +272,13 @@ const ChannelImpl = struct {
                     registered = true;
                     continue;
                 }
-                switch (impl.commit(ctx)) {
+                switch (impl.commit(waiter, ctx)) {
                     .done => |result| return result,
-                    .retry => continue,
+                    .pending => |pending| {
+                        registered = true;
+                        if (pending.notify) |notified| notified.signal();
+                        continue;
+                    },
                 }
             }
 
@@ -221,29 +286,40 @@ const ChannelImpl = struct {
                 var expected = absorbed;
                 const rollback_result = impl.rollback(waiter, ctx);
                 if (rollback_result == .signal_in_flight) expected += 1;
-                waiter.wait(expected, .no_cancel);
-                if (rollback_result == .signal_in_flight) {
-                    switch (impl.commit(ctx)) {
+                var notification_pending = rollback_result == .signal_in_flight;
+                while (notification_pending) {
+                    waiter.wait(expected, .no_cancel);
+                    switch (impl.commit(waiter, ctx)) {
                         .done => |result| {
                             if (waiter.mode.direct.task) |task| task.recancel();
                             return result;
                         },
-                        .retry => {},
+                        .pending => |pending| {
+                            if (pending.notify) |notified| notified.signal();
+                            const next_rollback = impl.rollback(waiter, ctx);
+                            if (next_rollback == .signal_in_flight) {
+                                expected += 1;
+                            } else {
+                                notification_pending = false;
+                            }
+                        },
                     }
                 }
                 return err;
             };
             absorbed = waiter.landedSignals();
             registered = false;
-            switch (impl.commit(ctx)) {
+            switch (impl.commit(waiter, ctx)) {
                 .done => |result| return result,
-                .retry => {},
+                .pending => |pending| {
+                    registered = true;
+                    if (pending.notify) |notified| notified.signal();
+                },
             }
         }
     }
 
     fn tryReceive(self: *Self, elem_ptr: [*]u8) !void {
-        var peer: ?*WaitNode = null;
         var to_signal: ?*WaitNode = null;
 
         self.mutex.lockUncancelable();
@@ -265,14 +341,18 @@ const ChannelImpl = struct {
             return;
         }
 
-        peer = claimPeer(&self.sender_queue, null);
-        if (peer) |node| {
-            const ctx = sendCtx(node);
-            @memcpy(elem_ptr[0..self.elem_size], ctx.item_ptr[0..self.elem_size]);
-            ctx.succeeded = true;
-            self.mutex.unlock();
-            Waiter.fromNode(node).signal();
-            return;
+        if (!self.rendezvous_baton) {
+            switch (choosePeer(&self.sender_queue, null)) {
+                .won => |node| {
+                    const ctx = sendCtx(node);
+                    @memcpy(elem_ptr[0..self.elem_size], ctx.item_ptr[0..self.elem_size]);
+                    ctx.succeeded = true;
+                    self.mutex.unlock();
+                    Waiter.fromNode(node).signal();
+                    return;
+                },
+                .busy, .none => {},
+            }
         }
         const closed = self.closed;
         self.mutex.unlock();
@@ -299,15 +379,21 @@ const ChannelImpl = struct {
             return;
         }
 
-        const peer = claimPeer(&self.receiver_queue, null) orelse {
-            self.mutex.unlock();
-            return error.WouldBlock;
-        };
-        const ctx = recvCtx(peer);
-        @memcpy(ctx.result_ptr[0..self.elem_size], elem_ptr[0..self.elem_size]);
-        ctx.result_set = true;
+        if (!self.rendezvous_baton) {
+            switch (choosePeer(&self.receiver_queue, null)) {
+                .won => |peer| {
+                    const ctx = recvCtx(peer);
+                    @memcpy(ctx.result_ptr[0..self.elem_size], elem_ptr[0..self.elem_size]);
+                    ctx.result_set = true;
+                    self.mutex.unlock();
+                    Waiter.fromNode(peer).signal();
+                    return;
+                },
+                .busy, .none => {},
+            }
+        }
         self.mutex.unlock();
-        Waiter.fromNode(peer).signal();
+        return error.WouldBlock;
     }
 
     fn close(self: *Self, mode: CloseMode) void {
@@ -341,41 +427,60 @@ const AsyncSendImpl = struct {
 
     pub const Context = struct {
         item_ptr: [*]const u8,
-        waiter: ?*Waiter = null,
         slot_reserved: bool = false,
         reservation_rolled_back: bool = false,
         succeeded: bool = false,
+        has_rendezvous_baton: bool = false,
     };
 
     pub fn prepare(self: *const SendSelf, waiter: *Waiter, ctx: *Context) Prepare {
         const ch = self.channel;
         ch.mutex.lockUncancelable();
-        defer ch.mutex.unlock();
-        ctx.waiter = waiter;
-        if (ctx.succeeded or ctx.slot_reserved or ch.closed) return .ready;
-        if (ch.capacity > 0) {
-            if (ch.capacity - ch.count > ch.reserved_slots) return .ready;
-        } else if (ChannelImpl.peerAvailable(&ch.receiver_queue, waiter)) {
+        waiter.node.userdata = @intFromPtr(ctx);
+        if (ctx.succeeded or ctx.slot_reserved or ch.closed) {
+            ch.mutex.unlock();
             return .ready;
         }
-        waiter.node.userdata = @intFromPtr(ctx);
+        if (ch.capacity > 0) {
+            if (ch.capacity - ch.count > ch.reserved_slots) {
+                ch.mutex.unlock();
+                return .ready;
+            }
+        } else if (!ch.rendezvous_baton) {
+            switch (ChannelImpl.probePeer(&ch.receiver_queue, waiter)) {
+                .won => {
+                    ch.mutex.unlock();
+                    return .ready;
+                },
+                .busy => |node| {
+                    ch.sender_queue.push(&waiter.node);
+                    const notify = ch.giveReceiverBaton(node);
+                    ch.mutex.unlock();
+                    notify.signal();
+                    return .pending;
+                },
+                .none => {},
+            }
+        }
         ch.sender_queue.push(&waiter.node);
+        ch.mutex.unlock();
         return .pending;
     }
 
-    pub fn commit(self: *const SendSelf, ctx: *Context) CommitResult(Closeable!void) {
+    pub fn commit(self: *const SendSelf, waiter: *Waiter, ctx: *Context) CommitResult(Closeable!void) {
         const ch = self.channel;
         var to_signal: ?*WaitNode = null;
-        var peer: ?*WaitNode = null;
+        var next_candidate: ?*Waiter = null;
 
         ch.mutex.lockUncancelable();
+        waiter.node.userdata = @intFromPtr(ctx);
+        if (ctx.has_rendezvous_baton) ch.clearSenderBaton(ctx);
         if (ctx.succeeded) {
             ch.mutex.unlock();
             return .{ .done = {} };
         }
         if (ctx.reservation_rolled_back) {
-            ch.mutex.unlock();
-            return .retry;
+            ctx.reservation_rolled_back = false;
         }
         if (ch.closed) {
             ctx.slot_reserved = false;
@@ -391,8 +496,9 @@ const AsyncSendImpl = struct {
                 ctx.slot_reserved = false;
             } else {
                 if (ch.capacity - ch.count <= ch.reserved_slots) {
+                    ch.sender_queue.push(&waiter.node);
                     ch.mutex.unlock();
-                    return .retry;
+                    return .{ .pending = .{} };
                 }
             }
             ch.appendItem(ctx.item_ptr);
@@ -402,26 +508,51 @@ const AsyncSendImpl = struct {
             return .{ .done = {} };
         }
 
-        peer = ChannelImpl.claimPeer(&ch.receiver_queue, ctx.waiter);
-        const node = peer orelse {
-            ch.mutex.unlock();
-            return .retry;
-        };
-        const rctx = ChannelImpl.recvCtx(node);
-        @memcpy(rctx.result_ptr[0..ch.elem_size], ctx.item_ptr[0..ch.elem_size]);
-        rctx.result_set = true;
+        if (!ch.rendezvous_baton) {
+            switch (ChannelImpl.choosePeer(&ch.receiver_queue, waiter)) {
+                .won => |node| {
+                    const rctx = ChannelImpl.recvCtx(node);
+                    @memcpy(rctx.result_ptr[0..ch.elem_size], ctx.item_ptr[0..ch.elem_size]);
+                    rctx.result_set = true;
+                    next_candidate = ch.scheduleRendezvous();
+                    ch.mutex.unlock();
+                    Waiter.fromNode(node).signal();
+                    if (next_candidate) |next| next.signal();
+                    return .{ .done = {} };
+                },
+                .busy => |node| {
+                    ch.sender_queue.push(&waiter.node);
+                    const notify = ch.giveReceiverBaton(node);
+                    ch.mutex.unlock();
+                    return .{ .pending = .{ .notify = notify } };
+                },
+                .none => {},
+            }
+        }
+
+        ch.sender_queue.push(&waiter.node);
         ch.mutex.unlock();
-        Waiter.fromNode(node).signal();
-        return .{ .done = {} };
+        return .{ .pending = .{} };
     }
 
     pub fn rollback(self: *const SendSelf, waiter: *Waiter, ctx: *Context) Rollback {
         const ch = self.channel;
         var to_signal: ?*WaitNode = null;
+        var next_candidate: ?*Waiter = null;
         ch.mutex.lockUncancelable();
         if (ch.sender_queue.remove(&waiter.node)) {
+            next_candidate = ch.scheduleRendezvous();
             ch.mutex.unlock();
+            if (next_candidate) |next| next.signal();
             return .removed;
+        }
+
+        if (ctx.has_rendezvous_baton) {
+            ch.clearSenderBaton(ctx);
+            next_candidate = ch.scheduleRendezvous();
+            ch.mutex.unlock();
+            if (next_candidate) |next| next.signal();
+            return .signal_in_flight;
         }
 
         if (ctx.slot_reserved) {
@@ -454,40 +585,63 @@ const AsyncReceiveImpl = struct {
 
     pub const Context = struct {
         result_ptr: [*]u8,
-        waiter: ?*Waiter = null,
         item_reserved: bool = false,
         reservation_rolled_back: bool = false,
         result_set: bool = false,
+        has_rendezvous_baton: bool = false,
     };
 
     pub fn prepare(self: *const RecvSelf, waiter: *Waiter, ctx: *Context) Prepare {
         const ch = self.channel;
         ch.mutex.lockUncancelable();
-        defer ch.mutex.unlock();
-        ctx.waiter = waiter;
-        if (ctx.result_set or ctx.item_reserved) return .ready;
-        if (ch.capacity > 0) {
-            if (ch.count > ch.reserved_items or (ch.closed and ch.count == 0)) return .ready;
-        } else {
-            if (ChannelImpl.peerAvailable(&ch.sender_queue, waiter) or ch.closed) return .ready;
-        }
         waiter.node.userdata = @intFromPtr(ctx);
+        if (ctx.result_set or ctx.item_reserved) {
+            ch.mutex.unlock();
+            return .ready;
+        }
+        if (ch.capacity > 0) {
+            if (ch.count > ch.reserved_items or (ch.closed and ch.count == 0)) {
+                ch.mutex.unlock();
+                return .ready;
+            }
+        } else if (ch.closed) {
+            ch.mutex.unlock();
+            return .ready;
+        } else if (!ch.rendezvous_baton) {
+            switch (ChannelImpl.probePeer(&ch.sender_queue, waiter)) {
+                .won => {
+                    ch.mutex.unlock();
+                    return .ready;
+                },
+                .busy => |node| {
+                    ch.receiver_queue.push(&waiter.node);
+                    const notify = ch.giveSenderBaton(node);
+                    ch.mutex.unlock();
+                    notify.signal();
+                    return .pending;
+                },
+                .none => {},
+            }
+        }
         ch.receiver_queue.push(&waiter.node);
+        ch.mutex.unlock();
         return .pending;
     }
 
-    pub fn commit(self: *const RecvSelf, ctx: *Context) CommitResult(Closeable!void) {
+    pub fn commit(self: *const RecvSelf, waiter: *Waiter, ctx: *Context) CommitResult(Closeable!void) {
         const ch = self.channel;
         var to_signal: ?*WaitNode = null;
+        var next_candidate: ?*Waiter = null;
 
         ch.mutex.lockUncancelable();
+        waiter.node.userdata = @intFromPtr(ctx);
+        if (ctx.has_rendezvous_baton) ch.clearReceiverBaton(ctx);
         if (ctx.result_set) {
             ch.mutex.unlock();
             return .{ .done = {} };
         }
         if (ctx.reservation_rolled_back) {
-            ch.mutex.unlock();
-            return .retry;
+            ctx.reservation_rolled_back = false;
         }
         if (ch.capacity > 0) {
             var can_take = false;
@@ -512,13 +666,26 @@ const AsyncReceiveImpl = struct {
                 if (to_signal) |node| Waiter.fromNode(node).signal();
                 return .{ .done = {} };
             }
-        } else if (ChannelImpl.claimPeer(&ch.sender_queue, ctx.waiter)) |node| {
-            const sctx = ChannelImpl.sendCtx(node);
-            @memcpy(ctx.result_ptr[0..ch.elem_size], sctx.item_ptr[0..ch.elem_size]);
-            sctx.succeeded = true;
-            ch.mutex.unlock();
-            Waiter.fromNode(node).signal();
-            return .{ .done = {} };
+        } else if (!ch.rendezvous_baton) {
+            switch (ChannelImpl.choosePeer(&ch.sender_queue, waiter)) {
+                .won => |node| {
+                    const sctx = ChannelImpl.sendCtx(node);
+                    @memcpy(ctx.result_ptr[0..ch.elem_size], sctx.item_ptr[0..ch.elem_size]);
+                    sctx.succeeded = true;
+                    next_candidate = ch.scheduleRendezvous();
+                    ch.mutex.unlock();
+                    Waiter.fromNode(node).signal();
+                    if (next_candidate) |next| next.signal();
+                    return .{ .done = {} };
+                },
+                .busy => |node| {
+                    ch.receiver_queue.push(&waiter.node);
+                    const notify = ch.giveSenderBaton(node);
+                    ch.mutex.unlock();
+                    return .{ .pending = .{ .notify = notify } };
+                },
+                .none => {},
+            }
         }
         if (ch.closed) {
             to_signal = ch.receiver_queue.pop();
@@ -526,17 +693,29 @@ const AsyncReceiveImpl = struct {
             if (to_signal) |node| Waiter.fromNode(node).signal();
             return .{ .done = error.Closed };
         }
+        ch.receiver_queue.push(&waiter.node);
         ch.mutex.unlock();
-        return .retry;
+        return .{ .pending = .{} };
     }
 
     pub fn rollback(self: *const RecvSelf, waiter: *Waiter, ctx: *Context) Rollback {
         const ch = self.channel;
         var to_signal: ?*WaitNode = null;
+        var next_candidate: ?*Waiter = null;
         ch.mutex.lockUncancelable();
         if (ch.receiver_queue.remove(&waiter.node)) {
+            next_candidate = ch.scheduleRendezvous();
             ch.mutex.unlock();
+            if (next_candidate) |next| next.signal();
             return .removed;
+        }
+
+        if (ctx.has_rendezvous_baton) {
+            ch.clearReceiverBaton(ctx);
+            next_candidate = ch.scheduleRendezvous();
+            ch.mutex.unlock();
+            if (next_candidate) |next| next.signal();
+            return .signal_in_flight;
         }
 
         if (ctx.item_reserved) {
@@ -763,10 +942,10 @@ pub fn AsyncReceive(comptime T: type) type {
                 return self.impl.prepare(waiter, &ctx.impl_ctx);
             }
 
-            pub fn commit(self: *const Self, ctx: *Context) CommitResult(Result) {
+            pub fn commit(self: *const Self, waiter: *Waiter, ctx: *Context) CommitResult(Result) {
                 ctx.impl_ctx.result_ptr = std.mem.asBytes(&ctx.result).ptr;
-                return switch (self.impl.commit(&ctx.impl_ctx)) {
-                    .retry => .retry,
+                return switch (self.impl.commit(waiter, &ctx.impl_ctx)) {
+                    .pending => |pending| .{ .pending = pending },
                     .done => |result| if (result) |_| .{ .done = ctx.result } else |err| .{ .done = err },
                 };
             }
@@ -819,8 +998,8 @@ pub fn AsyncSend(comptime T: type) type {
                 return self.impl.prepare(waiter, &ctx.impl_ctx);
             }
 
-            pub fn commit(self: *const Self, ctx: *Context) CommitResult(Result) {
-                return self.impl.commit(&ctx.impl_ctx);
+            pub fn commit(self: *const Self, waiter: *Waiter, ctx: *Context) CommitResult(Result) {
+                return self.impl.commit(waiter, &ctx.impl_ctx);
             }
 
             pub fn rollback(self: *const Self, waiter: *Waiter, ctx: *Context) Rollback {
@@ -1813,9 +1992,9 @@ test "Channel: close dequeues registrations before signaling" {
 
     try std.testing.expect(channel.impl.receiver_queue.isEmpty());
     try std.testing.expectEqual(Rollback.signal_in_flight, AsyncReceive(u32).AsyncWait.rollback(&receive, &receive_waiter, &receive_ctx));
-    switch (AsyncReceive(u32).AsyncWait.commit(&receive, &receive_ctx)) {
+    switch (AsyncReceive(u32).AsyncWait.commit(&receive, &receive_waiter, &receive_ctx)) {
         .done => |result| try std.testing.expectError(error.Closed, result),
-        .retry => return error.TestUnexpectedResult,
+        .pending => return error.TestUnexpectedResult,
     }
 }
 
@@ -1846,13 +2025,9 @@ test "Channel: losing buffered receiver hands its item reservation to one waiter
     try std.testing.expect(second_ctx.impl_ctx.item_reserved);
     try std.testing.expectEqual(1, channel.impl.reserved_items);
 
-    switch (AsyncReceive(u32).AsyncWait.commit(&first, &first_ctx)) {
-        .retry => {},
-        .done => return error.TestUnexpectedResult,
-    }
-    switch (AsyncReceive(u32).AsyncWait.commit(&second, &second_ctx)) {
+    switch (AsyncReceive(u32).AsyncWait.commit(&second, &second_waiter, &second_ctx)) {
         .done => |result| try std.testing.expectEqual(7, try result),
-        .retry => return error.TestUnexpectedResult,
+        .pending => return error.TestUnexpectedResult,
     }
     try std.testing.expectEqual(0, channel.impl.reserved_items);
     try std.testing.expect(channel.impl.receiver_queue.isEmpty());
@@ -1887,13 +2062,9 @@ test "Channel: losing buffered sender hands its slot reservation to one waiter" 
     try std.testing.expect(second_ctx.impl_ctx.slot_reserved);
     try std.testing.expectEqual(1, channel.impl.reserved_slots);
 
-    switch (AsyncSend(u32).AsyncWait.commit(&first, &first_ctx)) {
-        .retry => {},
-        .done => return error.TestUnexpectedResult,
-    }
-    switch (AsyncSend(u32).AsyncWait.commit(&second, &second_ctx)) {
+    switch (AsyncSend(u32).AsyncWait.commit(&second, &second_waiter, &second_ctx)) {
         .done => |result| try result,
-        .retry => return error.TestUnexpectedResult,
+        .pending => return error.TestUnexpectedResult,
     }
     try std.testing.expectEqual(0, channel.impl.reserved_slots);
     try std.testing.expectEqual(3, try channel.tryReceive());
@@ -1921,9 +2092,9 @@ test "Channel: close notification is handed off instead of broadcast" {
 
     try std.testing.expectEqual(Rollback.signal_in_flight, AsyncReceive(u32).AsyncWait.rollback(&first, &first_waiter, &first_ctx));
     second_waiter.wait(1, .no_cancel);
-    switch (AsyncReceive(u32).AsyncWait.commit(&second, &second_ctx)) {
+    switch (AsyncReceive(u32).AsyncWait.commit(&second, &second_waiter, &second_ctx)) {
         .done => |result| try std.testing.expectError(error.Closed, result),
-        .retry => return error.TestUnexpectedResult,
+        .pending => return error.TestUnexpectedResult,
     }
     try std.testing.expect(channel.impl.receiver_queue.isEmpty());
 }
@@ -1945,15 +2116,15 @@ test "Channel: graceful close drains a reserved item before handing off close" {
 
     channel.close(.graceful);
     try std.testing.expect(!channel.impl.receiver_queue.isEmpty());
-    switch (AsyncReceive(u32).AsyncWait.commit(&first, &first_ctx)) {
+    switch (AsyncReceive(u32).AsyncWait.commit(&first, &first_waiter, &first_ctx)) {
         .done => |result| try std.testing.expectEqual(7, try result),
-        .retry => return error.TestUnexpectedResult,
+        .pending => return error.TestUnexpectedResult,
     }
 
     second_waiter.wait(1, .no_cancel);
-    switch (AsyncReceive(u32).AsyncWait.commit(&second, &second_ctx)) {
+    switch (AsyncReceive(u32).AsyncWait.commit(&second, &second_waiter, &second_ctx)) {
         .done => |result| try std.testing.expectError(error.Closed, result),
-        .retry => return error.TestUnexpectedResult,
+        .pending => return error.TestUnexpectedResult,
     }
     try std.testing.expect(channel.impl.receiver_queue.isEmpty());
     try std.testing.expectEqual(0, channel.impl.reserved_items);
@@ -2075,9 +2246,6 @@ test "Channel: unbuffered select send rendezvous with select receive" {
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
-    var channel = Channel(u64).init(&.{});
-    var never = ResetEvent.init;
-
     const Tasks = struct {
         fn send(ch: *Channel(u64), other: *ResetEvent) !void {
             var operation = ch.asyncSend(42);
@@ -2098,12 +2266,144 @@ test "Channel: unbuffered select send rendezvous with select receive" {
         }
     };
 
-    var sender = try runtime.spawn(Tasks.send, .{ &channel, &never });
-    var receiver = try runtime.spawn(Tasks.receive, .{ &channel, &never });
-    try std.testing.expectEqual(42, try receiver.join());
-    try sender.join();
+    for (0..200) |_| {
+        var channel = Channel(u64).init(&.{});
+        var never = ResetEvent.init;
+        var sender = try runtime.spawn(Tasks.send, .{ &channel, &never });
+        var receiver = try runtime.spawn(Tasks.receive, .{ &channel, &never });
+        try std.testing.expectEqual(42, try receiver.join());
+        try sender.join();
+        try std.testing.expect(!channel.impl.rendezvous_baton);
+        try std.testing.expect(channel.impl.sender_queue.isEmpty());
+        try std.testing.expect(channel.impl.receiver_queue.isEmpty());
+    }
+}
+
+test "Channel: busy rendezvous parks before its deferred notification" {
+    const committing = std.math.maxInt(usize) - 1;
+
+    var channel = Channel(u64).init(&.{});
+    var receive = channel.asyncReceive();
+    var receive_ctx: AsyncReceive(u64).AsyncWait.Context = .{};
+    var receive_parent = Waiter.init();
+    var receive_winner: std.atomic.Value(usize) = .init(NO_WINNER);
+    var receive_waiter = Waiter.initSelect(&receive_parent, &receive_winner, 0);
+
+    try std.testing.expectEqual(Prepare.pending, AsyncReceive(u64).AsyncWait.prepare(&receive, &receive_waiter, &receive_ctx));
+
+    // The sender's prepare observed an open receiver, but the receiver's
+    // select began committing another arm before the sender reached commit.
+    var send = channel.asyncSend(42);
+    var send_ctx: AsyncSend(u64).AsyncWait.Context = .{};
+    var send_parent = Waiter.init();
+    var send_winner: std.atomic.Value(usize) = .init(NO_WINNER);
+    var send_waiter = Waiter.initSelect(&send_parent, &send_winner, 0);
+    try std.testing.expectEqual(Prepare.ready, AsyncSend(u64).AsyncWait.prepare(&send, &send_waiter, &send_ctx));
+
+    receive_winner.store(committing, .release);
+    send_winner.store(committing, .release);
+    const notify = switch (AsyncSend(u64).AsyncWait.commit(&send, &send_waiter, &send_ctx)) {
+        .pending => |pending| pending.notify orelse return error.TestUnexpectedResult,
+        .done => return error.TestUnexpectedResult,
+    };
+
+    // Commit only installed the sender and returned the baton notification;
+    // it did not reach into the select's COMMITTING state.
+    try std.testing.expectEqual(committing, send_winner.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 0), receive_parent.landedSignals());
+    try std.testing.expect(channel.impl.rendezvous_baton);
+
+    // This is the select driver's pending publication order.
+    send_winner.store(NO_WINNER, .release);
+    notify.signal();
+    receive_parent.wait(1, .no_cancel);
+
+    switch (AsyncReceive(u64).AsyncWait.commit(&receive, &receive_waiter, &receive_ctx)) {
+        .done => |result| try std.testing.expectEqual(42, try result),
+        .pending => return error.TestUnexpectedResult,
+    }
+    receive_winner.store(0, .release);
+
+    send_parent.wait(1, .no_cancel);
+    try std.testing.expectEqual(@as(usize, 0), send_winner.load(.acquire));
+    switch (AsyncSend(u64).AsyncWait.commit(&send, &send_waiter, &send_ctx)) {
+        .done => |result| try result,
+        .pending => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(!channel.impl.rendezvous_baton);
     try std.testing.expect(channel.impl.sender_queue.isEmpty());
     try std.testing.expect(channel.impl.receiver_queue.isEmpty());
+}
+
+test "Channel: losing busy receiver passes one rendezvous baton" {
+    const committing = std.math.maxInt(usize) - 1;
+
+    var channel = Channel(u64).init(&.{});
+    var first = channel.asyncReceive();
+    var second = channel.asyncReceive();
+    var first_ctx: AsyncReceive(u64).AsyncWait.Context = .{};
+    var second_ctx: AsyncReceive(u64).AsyncWait.Context = .{};
+    var first_parent = Waiter.init();
+    var second_parent = Waiter.init();
+    var first_winner: std.atomic.Value(usize) = .init(NO_WINNER);
+    var second_winner: std.atomic.Value(usize) = .init(NO_WINNER);
+    var first_waiter = Waiter.initSelect(&first_parent, &first_winner, 0);
+    var second_waiter = Waiter.initSelect(&second_parent, &second_winner, 0);
+
+    try std.testing.expectEqual(Prepare.pending, AsyncReceive(u64).AsyncWait.prepare(&first, &first_waiter, &first_ctx));
+    try std.testing.expectEqual(Prepare.pending, AsyncReceive(u64).AsyncWait.prepare(&second, &second_waiter, &second_ctx));
+    first_winner.store(committing, .release);
+    second_winner.store(committing, .release);
+
+    var send = channel.asyncSend(7);
+    var send_ctx: AsyncSend(u64).AsyncWait.Context = .{};
+    var send_waiter = Waiter.init();
+    try std.testing.expectEqual(Prepare.pending, AsyncSend(u64).AsyncWait.prepare(&send, &send_waiter, &send_ctx));
+    first_parent.wait(1, .no_cancel);
+    try std.testing.expectEqual(@as(u32, 0), second_parent.landedSignals());
+
+    // The first receiver chose another arm. Its rollback passes the durable
+    // sender offer to exactly one receiver.
+    first_winner.store(1, .release);
+    try std.testing.expectEqual(Rollback.signal_in_flight, AsyncReceive(u64).AsyncWait.rollback(&first, &first_waiter, &first_ctx));
+    second_parent.wait(1, .no_cancel);
+    try std.testing.expectEqual(@as(u32, 1), first_parent.landedSignals());
+    try std.testing.expectEqual(@as(u32, 1), second_parent.landedSignals());
+
+    second_winner.store(committing, .release);
+    switch (AsyncReceive(u64).AsyncWait.commit(&second, &second_waiter, &second_ctx)) {
+        .done => |result| try std.testing.expectEqual(7, try result),
+        .pending => return error.TestUnexpectedResult,
+    }
+    send_waiter.wait(1, .no_cancel);
+    switch (AsyncSend(u64).AsyncWait.commit(&send, &send_waiter, &send_ctx)) {
+        .done => |result| try result,
+        .pending => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expect(!channel.impl.rendezvous_baton);
+    try std.testing.expect(channel.impl.sender_queue.isEmpty());
+    try std.testing.expect(channel.impl.receiver_queue.isEmpty());
+}
+
+test "Channel: trySend does not nudge a busy rendezvous receiver" {
+    const committing = std.math.maxInt(usize) - 1;
+
+    var channel = Channel(u64).init(&.{});
+    var receive = channel.asyncReceive();
+    var receive_ctx: AsyncReceive(u64).AsyncWait.Context = .{};
+    var parent = Waiter.init();
+    var winner: std.atomic.Value(usize) = .init(NO_WINNER);
+    var waiter = Waiter.initSelect(&parent, &winner, 0);
+    try std.testing.expectEqual(Prepare.pending, AsyncReceive(u64).AsyncWait.prepare(&receive, &waiter, &receive_ctx));
+
+    winner.store(committing, .release);
+    try std.testing.expectError(error.WouldBlock, channel.trySend(1));
+    try std.testing.expectEqual(@as(u32, 0), parent.landedSignals());
+    try std.testing.expect(!channel.impl.rendezvous_baton);
+    try std.testing.expect(!channel.impl.receiver_queue.isEmpty());
+
+    try std.testing.expectEqual(Rollback.removed, AsyncReceive(u64).AsyncWait.rollback(&receive, &waiter, &receive_ctx));
 }
 
 test "Channel: cancel removes a parked select send" {

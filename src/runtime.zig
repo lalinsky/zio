@@ -230,10 +230,10 @@ pub fn JoinHandle(comptime T: type) type {
                 return Awaitable.AsyncWait.prepare(awaitable, waiter, ctx);
             }
 
-            pub fn commit(self: *Self, ctx: *@This().Context) select.CommitResult(T) {
+            pub fn commit(self: *Self, waiter: *Waiter, ctx: *@This().Context) select.CommitResult(T) {
                 const awaitable = self.awaitable orelse return .{ .done = self.result };
-                switch (Awaitable.AsyncWait.commit(awaitable, ctx)) {
-                    .retry => return .retry,
+                switch (Awaitable.AsyncWait.commit(awaitable, waiter, ctx)) {
+                    .pending => |pending| return .{ .pending = pending },
                     .done => return .{ .done = awaitable.getTypedResult(T) },
                 }
             }

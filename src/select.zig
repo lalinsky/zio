@@ -34,7 +34,7 @@ const meta = @import("meta.zig");
 //       pub const claimable = false;   // optional, defaults to false
 //
 //       pub fn prepare(self: *Source, waiter: *Waiter, ctx: *Context) Prepare
-//       pub fn commit(self: *Source, ctx: *Context) CommitResult(Result)
+//       pub fn commit(self: *Source, waiter: *Waiter, ctx: *Context) CommitResult(Result)
 //       pub fn rollback(self: *Source, waiter: *Waiter, ctx: *Context) Rollback
 //   };
 //
@@ -47,11 +47,12 @@ const meta = @import("meta.zig");
 // commit - the consume, under the source's lock: take the item, swap the
 // counter, pop the completion. Called on an arm that prepared `.ready`, on an
 // arm whose notification the caller consumed, or on an arm decided externally
-// (a claimed send arm reports the outcome its claimer left in ctx). Returns
-// `.retry` if readiness has decayed (another consumer got there first); the
-// caller re-prepares. A retry ends this attempt and leaves no reservation.
-// Never touches the registration; a notified arm has none, and a `.ready`
-// arm never had one.
+// (a claimed send arm reports the outcome its claimer left in ctx). If
+// readiness decayed, commit installs a new registration and returns `.pending`.
+// A pending result may carry one deferred notification; the driver first
+// publishes the arm as pending and releases the COMMITTING fence, then signals
+// that waiter. This ordering is used by rendezvous channels to park one side
+// before nudging a busy select peer.
 //
 // rollback - abandon a losing pending or notified attempt, under the source's
 // lock. `.removed`: the registration was removed cleanly and no notification
@@ -63,7 +64,7 @@ const meta = @import("meta.zig");
 // Notification discipline: a source dequeues a registration exactly once,
 // and, per dequeue, sets the waiter's notified flag and signals exactly once
 // (`Waiter.signal` does both). A notification carries no decision, it only
-// means "this arm's registration was consumed, re-run prepare/commit on it".
+// means "this arm's registration was consumed; try commit again".
 // The select loop owns all remaining bookkeeping: which arms are registered,
 // which notifications it has consumed, and how many signals to absorb before
 // returning.
@@ -87,29 +88,36 @@ pub const Prepare = enum {
     pending,
 };
 
-/// Result of the consuming phase. A tagged union keeps protocol retry
+pub const Pending = struct {
+    /// A registration consumed while this operation parked. The driver sends
+    /// this notification only after publishing its own pending state and
+    /// releasing the select commit fence.
+    notify: ?*Waiter = null,
+};
+
+/// Result of the consuming phase. A tagged union keeps protocol pending
 /// separate from operation results that may themselves contain optional or
 /// error-union values (including an application-level `error.Retry`).
 pub fn CommitResult(comptime Result: type) type {
     return union(enum) {
-        retry,
+        pending: Pending,
         done: Result,
     };
 }
 
-test "CommitResult keeps protocol retry separate from user results" {
+test "CommitResult keeps protocol pending separate from user results" {
     const ErrorResult = CommitResult(error{Retry}!u8);
     const application_retry: ErrorResult = .{ .done = error.Retry };
     switch (application_retry) {
         .done => |result| try std.testing.expectError(error.Retry, result),
-        .retry => return error.TestUnexpectedResult,
+        .pending => return error.TestUnexpectedResult,
     }
 
     const OptionalResult = CommitResult(?u8);
     const application_null: OptionalResult = .{ .done = null };
     switch (application_null) {
         .done => |result| try std.testing.expectEqual(null, result),
-        .retry => return error.TestUnexpectedResult,
+        .pending => return error.TestUnexpectedResult,
     }
 }
 
@@ -137,8 +145,9 @@ pub const ClaimResult = enum {
     /// outcome in the arm's ctx, dequeue the registration and notify.
     won,
     /// The select's own sweep holds the fence right now. The claimer must
-    /// nudge: dequeue the registration under the source lock and notify, so
-    /// the select re-runs prepare/commit on the arm.
+    /// not consume. A blocking rendezvous may park itself, dequeue this
+    /// registration, and return a deferred notification so the select tries
+    /// commit on the arm after the requester is externally claimable.
     busy,
     /// The select is already decided (another arm won, or it canceled). Skip
     /// the registration in place; the select's cleanup removes it.
@@ -174,7 +183,7 @@ pub fn peekArm(waiter: *Waiter) ClaimResult {
 }
 
 /// Consume a select arm's notification. Owned by the select loop; a consumed
-/// notification means the arm is unregistered and must be re-prepared.
+/// notification means the arm is unregistered and ready for commit.
 fn consumeNotified(waiter: *Waiter) bool {
     return waiter.mode.select.notified.swap(false, .acq_rel);
 }
@@ -460,7 +469,7 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
                                 break :main decided;
                             }
                         }
-                        const committed = AsyncWaitOf(field.type).commit(fp, &@field(contexts, field.name));
+                        const committed = AsyncWaitOf(field.type).commit(fp, &waiters[i], &@field(contexts, field.name));
                         switch (committed) {
                             .done => |value| {
                                 states[i] = .{};
@@ -468,13 +477,13 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
                                 @field(results, field.name) = .{ .value = value };
                                 break :main i;
                             },
-                            .retry => {
-                                states[i] = .{};
+                            .pending => |pending| {
+                                states[i] = .{ .phase = .pending };
                                 if (has_claimable) winner.store(NO_WINNER, .release);
+                                if (pending.notify) |notified| notified.signal();
+                                continue :sweep;
                             },
                         }
-                        // Readiness decayed; the attempt ended without a side
-                        // effect or reservation. Prepare again.
                     }
                 }
             }
@@ -502,10 +511,10 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
             if (winner_index == i and @field(results, field.name) == null) {
                 var future = @field(futures, field.name);
                 const fp = if (comptime isPointerFuture(field.type)) future else &future;
-                const committed = AsyncWaitOf(field.type).commit(fp, &@field(contexts, field.name));
+                const committed = AsyncWaitOf(field.type).commit(fp, &waiters[i], &@field(contexts, field.name));
                 @field(results, field.name) = switch (committed) {
                     .done => |value| .{ .value = value },
-                    .retry => unreachable,
+                    .pending => unreachable,
                 };
 
                 // An external claim consumes a queued registration and owes
@@ -571,9 +580,13 @@ fn waitInternal(future: anytype, comptime flags: WaitFlags) Cancelable!WaitResul
                 registered = true;
                 continue;
             }
-            switch (AW.commit(fp, &context)) {
+            switch (AW.commit(fp, &waiter, &context)) {
                 .done => |value| break :main value,
-                .retry => continue,
+                .pending => |pending| {
+                    registered = true;
+                    if (pending.notify) |notified| notified.signal();
+                    continue;
+                },
             }
         }
 
@@ -590,17 +603,24 @@ fn waitInternal(future: anytype, comptime flags: WaitFlags) Cancelable!WaitResul
                                 registered = true;
                                 continue;
                             }
-                            switch (AW.commit(fp, &context)) {
+                            switch (AW.commit(fp, &waiter, &context)) {
                                 .done => |value| break :main value,
-                                .retry => continue,
+                                .pending => |pending| {
+                                    registered = true;
+                                    if (pending.notify) |notified| notified.signal();
+                                    continue;
+                                },
                             }
                         }
                         waiter.wait(signals_landed + 1, .no_cancel);
                         signals_landed = waiter.landedSignals();
                         registered = false;
-                        switch (AW.commit(fp, &context)) {
+                        switch (AW.commit(fp, &waiter, &context)) {
                             .done => |value| break :main value,
-                            .retry => {},
+                            .pending => |pending| {
+                                registered = true;
+                                if (pending.notify) |notified| notified.signal();
+                            },
                         }
                     }
                 }
@@ -615,18 +635,26 @@ fn waitInternal(future: anytype, comptime flags: WaitFlags) Cancelable!WaitResul
                     }
                     registered = false;
                 }
-                waiter.wait(signals_to_wait_for, .no_cancel);
-                if (notification_pending) {
+                while (notification_pending) {
+                    waiter.wait(signals_to_wait_for, .no_cancel);
                     // A signal to a direct waiter reports a completed
                     // operation: deliver its result rather than dropping it,
                     // and re-arm the cancellation for the next cancelable
                     // operation.
-                    switch (AW.commit(fp, &context)) {
+                    switch (AW.commit(fp, &waiter, &context)) {
                         .done => |value| {
                             if (waiter.mode.direct.task) |t| t.recancel();
                             return .{ .value = value };
                         },
-                        .retry => {},
+                        .pending => |pending| {
+                            if (pending.notify) |notified| notified.signal();
+                            const rolled_back = AW.rollback(fp, &waiter, &context);
+                            if (rolled_back == .signal_in_flight) {
+                                signals_to_wait_for += 1;
+                            } else {
+                                notification_pending = false;
+                            }
+                        },
                     }
                 }
                 return err;
@@ -634,11 +662,13 @@ fn waitInternal(future: anytype, comptime flags: WaitFlags) Cancelable!WaitResul
         };
         signals_landed = waiter.landedSignals();
         registered = false;
-        switch (AW.commit(fp, &context)) {
+        switch (AW.commit(fp, &waiter, &context)) {
             .done => |value| break :main value,
-            .retry => {},
+            .pending => |pending| {
+                registered = true;
+                if (pending.notify) |notified| notified.signal();
+            },
         }
-        // Readiness decayed; prepare again.
     };
 
     return .{ .value = result };
@@ -761,7 +791,8 @@ test "select: sixteen arms fit the comptime quota" {
                 return .ready;
             }
 
-            pub fn commit(self: *const Source, ctx: *Context) CommitResult(Result) {
+            pub fn commit(self: *const Source, waiter: *Waiter, ctx: *Context) CommitResult(Result) {
+                _ = waiter;
                 _ = ctx;
                 return .{ .done = self.value };
             }
@@ -820,7 +851,8 @@ test "select: null is a committed optional result" {
                 return .ready;
             }
 
-            pub fn commit(self: *const Source, ctx: *Context) CommitResult(Result) {
+            pub fn commit(self: *const Source, waiter: *Waiter, ctx: *Context) CommitResult(Result) {
+                _ = waiter;
                 _ = ctx;
                 self.commits.* += 1;
                 return .{ .done = null };

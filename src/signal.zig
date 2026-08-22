@@ -352,8 +352,8 @@ pub const Signal = struct {
 
     // AsyncWait protocol (see select.zig). A delivery bumps the counter and
     // then dequeues and notifies every registration. The counter swap is the
-    // consuming commit; when several waiters race for one delivery, the
-    // losers re-prepare.
+    // consuming commit; when several waiters race for one delivery, losing
+    // commits install their next registration before returning pending.
     pub const AsyncWait = struct {
         pub const Result = void;
         pub const Context = struct {};
@@ -374,11 +374,11 @@ pub const Signal = struct {
             return .pending;
         }
 
-        pub fn commit(self: *Signal, ctx: *Context) CommitResult(void) {
-            _ = ctx;
-            if (self.entry.counter.swap(0, .acquire) > 0) return .{ .done = {} };
-            // Another waiter consumed the delivery; re-prepare.
-            return .retry;
+        pub fn commit(self: *Signal, waiter: *Waiter, ctx: *Context) CommitResult(void) {
+            while (true) {
+                if (self.entry.counter.swap(0, .acquire) > 0) return .{ .done = {} };
+                if (prepare(self, waiter, ctx) == .pending) return .{ .pending = .{} };
+            }
         }
 
         pub fn rollback(self: *Signal, waiter: *Waiter, ctx: *Context) Rollback {

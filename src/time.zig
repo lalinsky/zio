@@ -590,10 +590,11 @@ pub const Timeout = union(enum) {
             waiter.signal();
         }
 
-        pub fn commit(self: *const Timeout, ctx: *Context) CommitResult(void) {
-            _ = self;
+        pub fn commit(self: *const Timeout, waiter: *Waiter, ctx: *Context) CommitResult(void) {
             if (ctx.fired.load(.acquire)) return .{ .done = {} };
-            return .retry;
+            const prepared = prepare(self, waiter, ctx);
+            std.debug.assert(prepared == .pending);
+            return .{ .pending = .{} };
         }
 
         pub fn rollback(self: *const Timeout, waiter: *Waiter, ctx: *Context) Rollback {

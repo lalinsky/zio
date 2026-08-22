@@ -259,12 +259,11 @@ pub const Group = struct {
             return .pending;
         }
 
-        pub fn commit(self: *Group, ctx: *Context) CommitResult(void) {
-            _ = ctx;
-            // The drained state a wake reported may since have been undone by
-            // a respawn; report the decay and let the caller re-prepare.
-            if (@atomicLoad(u32, self.getState(), .acquire) & counter_mask == 0) return .{ .done = {} };
-            return .retry;
+        pub fn commit(self: *Group, waiter: *Waiter, ctx: *Context) CommitResult(void) {
+            while (true) {
+                if (@atomicLoad(u32, self.getState(), .acquire) & counter_mask == 0) return .{ .done = {} };
+                if (prepare(self, waiter, ctx) == .pending) return .{ .pending = .{} };
+            }
         }
 
         pub fn rollback(self: *Group, waiter: *Waiter, ctx: *Context) Rollback {

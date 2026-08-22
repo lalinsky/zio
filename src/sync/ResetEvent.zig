@@ -207,12 +207,11 @@ pub const AsyncWait = struct {
         return .pending;
     }
 
-    pub fn commit(self: *ResetEvent, ctx: *Context) CommitResult(void) {
-        _ = ctx;
-        // `set` may be followed by `reset` after it has dequeued us but before
-        // this arm commits. Readiness is therefore allowed to decay.
-        if (self.wait_queue.isFlagSet()) return .{ .done = {} };
-        return .retry;
+    pub fn commit(self: *ResetEvent, waiter: *Waiter, ctx: *Context) CommitResult(void) {
+        while (true) {
+            if (self.wait_queue.isFlagSet()) return .{ .done = {} };
+            if (prepare(self, waiter, ctx) == .pending) return .{ .pending = .{} };
+        }
     }
 
     pub fn rollback(self: *ResetEvent, waiter: *Waiter, ctx: *Context) Rollback {

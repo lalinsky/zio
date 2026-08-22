@@ -62,7 +62,8 @@ pub const Awaitable = struct {
             return .pending;
         }
 
-        pub fn commit(self: *Awaitable, ctx: *Context) CommitResult(void) {
+        pub fn commit(self: *Awaitable, waiter: *Waiter, ctx: *Context) CommitResult(void) {
+            _ = waiter;
             _ = ctx;
             std.debug.assert(self.waiting_list.isFlagSet());
             return .{ .done = {} };

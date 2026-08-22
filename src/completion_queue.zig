@@ -295,8 +295,8 @@ pub const CompletionQueue = struct {
     // Registration is the `wait_waiter` slot under the queue mutex, so the
     // check and the registration are fused: there is no lost-wakeup window
     // and no stale-wake state. A notification whose completion the driver
-    // already consumed through `next` just makes commit find nothing, and the
-    // arm re-prepares.
+    // already consumed through `next` just makes commit find nothing and
+    // atomically install the next registration.
     pub const AsyncWait = struct {
         pub const Result = Closeable!*Completion;
         pub const Context = struct {};
@@ -311,16 +311,20 @@ pub const CompletionQueue = struct {
             return .pending;
         }
 
-        pub fn commit(self: *CompletionQueue, ctx: *Context) CommitResult(Result) {
+        pub fn commit(self: *CompletionQueue, waiter: *Waiter, ctx: *Context) CommitResult(Result) {
             _ = ctx;
             self.mutex.lock();
             const node = self.completed.pop();
             const drained = node == null and self.closed and self.pending.isEmpty();
+            if (node == null and !drained) {
+                std.debug.assert(self.wait_waiter == null);
+                self.wait_waiter = waiter;
+            }
             self.mutex.unlock();
 
             if (node) |n| return .{ .done = completionFromGroup(n) };
             if (drained) return .{ .done = error.Closed };
-            return .retry;
+            return .{ .pending = .{} };
         }
 
         pub fn rollback(self: *CompletionQueue, waiter: *Waiter, ctx: *Context) Rollback {
@@ -1130,7 +1134,7 @@ test "CompletionQueue: select fast path on an already finished completion" {
     }
 }
 
-test "CompletionQueue: a consumed notification retries instead of becoming a stale win" {
+test "CompletionQueue: a consumed notification parks instead of becoming a stale win" {
     var cq = CompletionQueue.init();
     var waiter = Waiter.init();
     var context: CompletionQueue.AsyncWait.Context = .{};
@@ -1148,13 +1152,12 @@ test "CompletionQueue: a consumed notification retries instead of becoming a sta
     waiter.wait(1, .no_cancel);
 
     try std.testing.expectEqual(&timer.c, cq.next().?);
-    switch (CompletionQueue.AsyncWait.commit(&cq, &context)) {
-        .retry => {},
+    switch (CompletionQueue.AsyncWait.commit(&cq, &waiter, &context)) {
+        .pending => {},
         .done => return error.TestUnexpectedResult,
     }
 
-    // Retry is a complete attempt: the arm can register again normally.
-    try std.testing.expectEqual(Prepare.pending, CompletionQueue.AsyncWait.prepare(&cq, &waiter, &context));
+    // Commit atomically installed the next registration.
     try std.testing.expectEqual(Rollback.removed, CompletionQueue.AsyncWait.rollback(&cq, &waiter, &context));
 }
 

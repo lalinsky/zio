@@ -147,8 +147,8 @@ pub const Waiter = struct {
     /// Signal this waiter.
     /// For direct: increments signal count and wakes the task.
     /// For select: marks the arm notified and signals the parent waiter. No
-    /// winner decision is made here; the select re-runs its prepare/commit
-    /// sweep over the notified arms, and the one externally decided case (a
+    /// winner decision is made here; the select tries commit on notified arms,
+    /// and the one externally decided case (a
     /// claimed channel send arm) goes through select.zig's claim entry point
     /// before signaling.
     pub fn signal(self: *Waiter) void {

@@ -117,7 +117,8 @@ pub fn Future(comptime T: type) type {
                 return .pending;
             }
 
-            pub fn commit(self: *Self, ctx: *Context) select.CommitResult(T) {
+            pub fn commit(self: *Self, waiter: *Waiter, ctx: *Context) select.CommitResult(T) {
+                _ = waiter;
                 _ = ctx;
                 std.debug.assert(self.wait_queue.isFlagSet());
                 const value: T = self.value.get().?;

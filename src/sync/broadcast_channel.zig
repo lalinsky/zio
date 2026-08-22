@@ -185,7 +185,7 @@ const AsyncReceiveImpl = struct {
         return .pending;
     }
 
-    pub fn commit(self: *const RecvSelf, ctx: *WaitContext) CommitResult((Closeable || error{Lagged})!void) {
+    pub fn commit(self: *const RecvSelf, waiter: *Waiter, ctx: *WaitContext) CommitResult((Closeable || error{Lagged})!void) {
         self.channel.mutex.lockUncancelable();
         defer self.channel.mutex.unlock();
 
@@ -207,7 +207,8 @@ const AsyncReceiveImpl = struct {
             return .{ .done = error.Closed };
         }
 
-        return .retry;
+        self.channel.wait_queue.push(&waiter.node);
+        return .{ .pending = .{} };
     }
 
     pub fn rollback(self: *const RecvSelf, waiter: *Waiter, ctx: *WaitContext) Rollback {
@@ -410,9 +411,9 @@ pub fn AsyncReceive(comptime T: type) type {
                 return self.impl.prepare(waiter, &ctx.impl_ctx);
             }
 
-            pub fn commit(self: *const Self, ctx: *Context) CommitResult(Result) {
-                return switch (self.impl.commit(&ctx.impl_ctx)) {
-                    .retry => .retry,
+            pub fn commit(self: *const Self, waiter: *Waiter, ctx: *Context) CommitResult(Result) {
+                return switch (self.impl.commit(waiter, &ctx.impl_ctx)) {
+                    .pending => |pending| .{ .pending = pending },
                     .done => |r| if (r) |_| .{ .done = ctx.result } else |err| .{ .done = err },
                 };
             }
