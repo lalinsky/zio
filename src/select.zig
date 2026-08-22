@@ -57,7 +57,7 @@ const meta = @import("meta.zig");
 //       - false: Already removed by completion. The future has committed to waking this
 //                waiter (wake is in-flight or already happened).
 //
-//     For queuing operations (Channel, Notify), when returning false the implementation
+//     For queuing operations (Channel), when returning false the implementation
 //     must transfer the wakeup to another waiter to avoid losing the signal/item.
 //
 //     Guarantees:
