@@ -374,8 +374,8 @@ const ArmState = struct {
 ///
 /// Returns a tagged union with the same field names, containing the result of
 /// whichever completed first. When several arms are ready in the same round, a
-/// random one wins. A select may contain at most 64 arms; larger selects panic
-/// in every build mode.
+/// random one wins. A select may contain at most 64 arms; larger selects fail
+/// at compile time.
 ///
 /// Example:
 /// ```
@@ -393,7 +393,7 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     const fields = @typeInfo(S).@"struct".fields;
     const has_claimable = comptime anyClaimable(S);
 
-    if (fields.len > 64) @panic("select: too many arms (max 64)");
+    if (fields.len > 64) @compileError("select: too many arms (max 64)");
 
     // Self-wait detection: check all futures for self-wait
     const task = getCurrentTask();
@@ -793,10 +793,12 @@ test "select: sixteen arms fit the comptime quota" {
         .arm14 = Ready{ .value = 14 },
         .arm15 = Ready{ .value = 15 },
     });
-    const chosen = switch (result) {
-        inline else => |value| value,
-    };
-    try std.testing.expect(chosen < 16);
+    switch (result) {
+        inline else => |value, tag| {
+            const expected = comptime std.fmt.parseInt(u8, @tagName(tag)["arm".len..], 10) catch unreachable;
+            try std.testing.expectEqual(expected, value);
+        },
+    }
 }
 
 test "select: null is a committed optional result" {

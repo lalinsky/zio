@@ -247,9 +247,6 @@ pub const Signal = struct {
     kind: SignalKind,
     entry: *HandlerEntry,
 
-    // Future protocol - allows Signal to be used with select()
-    pub const Result = void;
-
     /// Initializes a new signal watcher for the specified signal kind.
     /// Multiple watchers can be registered for the same signal type.
     ///

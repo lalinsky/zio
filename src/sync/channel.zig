@@ -250,8 +250,9 @@ const ChannelImpl = struct {
         if (self.capacity > 0) {
             if (self.count <= self.reserved_items) {
                 const closed = self.closed;
+                const drained = self.count == 0;
                 self.mutex.unlock();
-                return if (closed and self.count == 0) error.Closed else error.WouldBlock;
+                return if (closed and drained) error.Closed else error.WouldBlock;
             }
             self.takeItem(elem_ptr);
             if (self.closed) {

@@ -223,30 +223,24 @@ pub fn JoinHandle(comptime T: type) type {
         // awaitable. A null awaitable means the result is already cached.
         pub const AsyncWait = struct {
             pub const Result = T;
-            pub const Context = struct {};
+            pub const Context = Awaitable.AsyncWait.Context;
 
             pub fn prepare(self: *Self, waiter: *Waiter, ctx: *@This().Context) select.Prepare {
-                _ = ctx;
                 const awaitable = self.awaitable orelse return .ready;
-                var awaitable_ctx: Awaitable.AsyncWait.Context = .{};
-                return Awaitable.AsyncWait.prepare(awaitable, waiter, &awaitable_ctx);
+                return Awaitable.AsyncWait.prepare(awaitable, waiter, ctx);
             }
 
             pub fn commit(self: *Self, ctx: *@This().Context) select.CommitResult(T) {
-                _ = ctx;
                 const awaitable = self.awaitable orelse return .{ .done = self.result };
-                var awaitable_ctx: Awaitable.AsyncWait.Context = .{};
-                switch (Awaitable.AsyncWait.commit(awaitable, &awaitable_ctx)) {
+                switch (Awaitable.AsyncWait.commit(awaitable, ctx)) {
                     .retry => return .retry,
                     .done => return .{ .done = awaitable.getTypedResult(T) },
                 }
             }
 
             pub fn rollback(self: *Self, waiter: *Waiter, ctx: *@This().Context) select.Rollback {
-                _ = ctx;
                 const awaitable = self.awaitable orelse return .removed;
-                var awaitable_ctx: Awaitable.AsyncWait.Context = .{};
-                return Awaitable.AsyncWait.rollback(awaitable, waiter, &awaitable_ctx);
+                return Awaitable.AsyncWait.rollback(awaitable, waiter, ctx);
             }
         };
 
