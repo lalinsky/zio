@@ -1826,7 +1826,8 @@ test "Channel: close classifies select waiters before signaling" {
     var claimed_receive_parent = Waiter.init();
     var claimed_receive_winner: std.atomic.Value(usize) = .init(NO_WINNER);
     var claimed_receive_gen: std.atomic.Value(u32) = .init(0);
-    var claimed_receive_waiter = Waiter.initSelect(&claimed_receive_parent, &claimed_receive_winner, &claimed_receive_gen, 0);
+    var claimed_receive_pending: std.atomic.Value(usize) = .init(NO_WINNER);
+    var claimed_receive_waiter = Waiter.initSelect(&claimed_receive_parent, &claimed_receive_winner, &claimed_receive_gen, &claimed_receive_pending, 0);
 
     try std.testing.expectEqual(.queued, claimed_receive.asyncWait(&claimed_receive_waiter, &claimed_receive_ctx));
     claimed_receive_channel.close(.graceful);
@@ -1842,7 +1843,8 @@ test "Channel: close classifies select waiters before signaling" {
     var claimed_send_parent = Waiter.init();
     var claimed_send_winner: std.atomic.Value(usize) = .init(NO_WINNER);
     var claimed_send_gen: std.atomic.Value(u32) = .init(0);
-    var claimed_send_waiter = Waiter.initSelect(&claimed_send_parent, &claimed_send_winner, &claimed_send_gen, 0);
+    var claimed_send_pending: std.atomic.Value(usize) = .init(NO_WINNER);
+    var claimed_send_waiter = Waiter.initSelect(&claimed_send_parent, &claimed_send_winner, &claimed_send_gen, &claimed_send_pending, 0);
 
     try std.testing.expectEqual(.queued, claimed_send.asyncWait(&claimed_send_waiter, &claimed_send_ctx));
     claimed_send_channel.close(.graceful);
@@ -1859,7 +1861,8 @@ test "Channel: close classifies select waiters before signaling" {
     var receive_parent = Waiter.init();
     var receive_winner: std.atomic.Value(usize) = .init(1);
     var receive_gen: std.atomic.Value(u32) = .init(0);
-    var receive_waiter = Waiter.initSelect(&receive_parent, &receive_winner, &receive_gen, 0);
+    var receive_pending: std.atomic.Value(usize) = .init(NO_WINNER);
+    var receive_waiter = Waiter.initSelect(&receive_parent, &receive_winner, &receive_gen, &receive_pending, 0);
 
     // Another arm already won: registration is refused outright.
     try std.testing.expectEqual(.decided, receive.asyncWait(&receive_waiter, &receive_ctx));
@@ -1874,7 +1877,8 @@ test "Channel: close classifies select waiters before signaling" {
     var send_parent = Waiter.init();
     var send_winner: std.atomic.Value(usize) = .init(1);
     var send_gen: std.atomic.Value(u32) = .init(0);
-    var send_waiter = Waiter.initSelect(&send_parent, &send_winner, &send_gen, 0);
+    var send_pending: std.atomic.Value(usize) = .init(NO_WINNER);
+    var send_waiter = Waiter.initSelect(&send_parent, &send_winner, &send_gen, &send_pending, 0);
 
     // Another arm already won: registration is refused outright.
     try std.testing.expectEqual(.decided, send.asyncWait(&send_waiter, &send_ctx));
@@ -2190,7 +2194,8 @@ test "Channel: a send behind a fenced receiver does not overtake the buffer" {
     var parent = Waiter.init();
     var winner: std.atomic.Value(usize) = .init(NO_WINNER);
     var gen: std.atomic.Value(u32) = .init(0);
-    var waiter = Waiter.initSelect(&parent, &winner, &gen, 0);
+    var pending: std.atomic.Value(usize) = .init(NO_WINNER);
+    var waiter = Waiter.initSelect(&parent, &winner, &gen, &pending, 0);
 
     try std.testing.expectEqual(.queued, recv.asyncWait(&waiter, &ctx));
 

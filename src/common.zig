@@ -79,7 +79,9 @@ pub const ClaimResult = enum {
     /// won nor lost; the caller must not consume anything on behalf of this
     /// waiter. Queue-based callers leave the node in place (the owner
     /// re-polls after releasing the fence); pop-based callers treat this
-    /// like `.lost` but still send their signal.
+    /// like `.lost` but still send their signal, which records the arm so
+    /// the owner can promote it even if the source stops reporting itself
+    /// ready (see `Select.pending`).
     busy,
     /// Another arm already won. Nothing may be consumed for this waiter.
     lost,
@@ -155,13 +157,28 @@ pub const Waiter = struct {
         /// pairing that a peer skipped because the winner word held
         /// `COMMITTING`. Lives in the select frame next to the winner word.
         gen: *std.atomic.Value(u32),
+        /// Holds the arm of a notification whose winner CAS bounced off the
+        /// commit fence. Such a notification consumed nothing, but its
+        /// identity would otherwise be lost, and re-polling only recovers it
+        /// for sources whose readiness is still standing afterwards (a
+        /// drained Group can take new tasks, a set ResetEvent can be reset).
+        /// The owning select promotes this into `winner` once the fence is
+        /// down; see `promotePending`.
+        pending: *std.atomic.Value(usize),
         index: usize,
 
-        pub fn init(parent: *Waiter, winner: *std.atomic.Value(usize), gen: *std.atomic.Value(u32), index: usize) Select {
+        pub fn init(
+            parent: *Waiter,
+            winner: *std.atomic.Value(usize),
+            gen: *std.atomic.Value(u32),
+            pending: *std.atomic.Value(usize),
+            index: usize,
+        ) Select {
             return .{
                 .parent = parent,
                 .winner = winner,
                 .gen = gen,
+                .pending = pending,
                 .index = index,
             };
         }
@@ -175,9 +192,15 @@ pub const Waiter = struct {
     }
 
     /// Initialize a select waiter for multi-future select().
-    pub fn initSelect(parent: *Waiter, winner: *std.atomic.Value(usize), gen: *std.atomic.Value(u32), index: usize) Waiter {
+    pub fn initSelect(
+        parent: *Waiter,
+        winner: *std.atomic.Value(usize),
+        gen: *std.atomic.Value(u32),
+        pending: *std.atomic.Value(usize),
+        index: usize,
+    ) Waiter {
         return .{
-            .mode = .{ .select = Select.init(parent, winner, gen, index) },
+            .mode = .{ .select = Select.init(parent, winner, gen, pending, index) },
         };
     }
 
@@ -212,12 +235,21 @@ pub const Waiter = struct {
             .select => |*s| {
                 // Try to claim winner slot with our index. The CAS fails both
                 // when another arm already won and when the select's own sweep
-                // holds the COMMITTING fence; either way this arm did not win.
-                _ = s.winner.cmpxchgStrong(NO_WINNER, s.index, .acq_rel, .acquire);
+                // holds the COMMITTING fence.
+                if (s.winner.cmpxchgStrong(NO_WINNER, s.index, .acq_rel, .acquire)) |prev| {
+                    // Losing to the fence is not losing: nothing was consumed
+                    // for this arm and nobody else took the select, so record
+                    // the arm for the owner to promote once the fence is down.
+                    // Only the first bounce of a fence window is kept; the
+                    // others would have lost the winner word anyway. Published
+                    // before the signal below, so a woken owner that sees the
+                    // wake also sees the record.
+                    if (prev == COMMITTING) {
+                        _ = s.pending.cmpxchgStrong(NO_WINNER, s.index, .acq_rel, .acquire);
+                    }
+                }
                 // Always signal parent - needed for both winner notification and
                 // cleanup synchronization (waiting for in-flight wakes to complete).
-                // A signal that claimed nothing still wakes the select, which
-                // re-polls its arms and finds the standing readiness.
                 s.parent.signal();
             },
         }
@@ -299,6 +331,23 @@ pub const Waiter = struct {
                 s.winner.store(NO_WINNER, .seq_cst);
             },
         }
+    }
+
+    /// Promote a notification that bounced off the commit fence into the
+    /// winner word. Returns true if it won, in which case the arm's result is
+    /// delivered without re-polling its source: the notification is proof the
+    /// arm completed, whereas the source may no longer report itself ready.
+    ///
+    /// Called by the owning select after every point where the fence may have
+    /// just been released, and again after each wake, which is what closes the
+    /// window where a bounce lands just as the fence goes down.
+    pub fn promotePending(
+        winner: *std.atomic.Value(usize),
+        pending: *std.atomic.Value(usize),
+    ) bool {
+        const arm = pending.load(.acquire);
+        if (arm == NO_WINNER) return false;
+        return winner.cmpxchgStrong(NO_WINNER, arm, .acq_rel, .acquire) == null;
     }
 
     /// Top bit of a direct waiter's notify state, set when its timeout timer

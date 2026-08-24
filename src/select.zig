@@ -62,6 +62,12 @@ const meta = @import("meta.zig");
 //       - May be called again while a previous registration is still queued
 //         or was popped without a claim (select() re-polls after a fence
 //         window); the implementation must not double-register.
+//       - A re-poll need not rediscover readiness that a signal already
+//         reported: a notification whose claim bounced off the commit fence
+//         records its arm, and select() promotes that record. So a source
+//         whose readiness can lapse (a drained Group taking new tasks, a set
+//         ResetEvent being reset) may report itself unready here without
+//         losing the event.
 //       - Thread-safe with respect to the source; only the owning select's
 //         sweep calls asyncWait for a given waiter.
 //       - The ctx pointer (if present) remains valid until asyncCancelWait()
@@ -280,6 +286,10 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     // fence, so the arms are worth re-polling.
     var gen: std.atomic.Value(u32) = .init(0);
 
+    // Set by a notification whose winner CAS bounced off the commit fence, so
+    // its arm survives a re-poll that no longer finds the source ready.
+    var pending_winner: std.atomic.Value(usize) = .init(NO_WINNER);
+
     // Parent waiter that select waiters will signal when they win
     var waiter = Waiter.init();
 
@@ -290,7 +300,7 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     // Create waiter structures on the stack
     var waiters: [fields.len]Waiter = undefined;
     inline for (&waiters, 0..) |*w, i| {
-        w.* = Waiter.initSelect(&waiter, &winner, &gen, i);
+        w.* = Waiter.initSelect(&waiter, &winner, &gen, &pending_winner, i);
     }
 
     var registered = [_]bool{false} ** fields.len;
@@ -301,6 +311,10 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     // The winning arm claimed itself in our own sweep, so no claim signal
     // exists for it.
     var self_claimed = false;
+    // The winner came from a fence bounce we promoted. Its signal accounting
+    // is left to its own source in the settle loop below, because a re-poll
+    // may already have counted that signal via .requeued.
+    var promoted = false;
     var decided = false;
 
     // Registration sweep. On a first call .requeued means .queued and
@@ -370,6 +384,12 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
         var consumed_wakes: u32 = 0;
         var gen_seen: u32 = 0;
         park: while (true) {
+            // The sweep, or the re-poll below, may have just released the
+            // fence a notification bounced off. Promote before parking.
+            if (Waiter.promotePending(&winner, &pending_winner)) {
+                promoted = true;
+                break :park;
+            }
             const g = gen.load(.seq_cst);
             if (g != gen_seen) {
                 // Someone interacted with an arm while the sweep or an
@@ -385,6 +405,12 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
                 break :park;
             };
             if (winner.load(.acquire) != NO_WINNER) break :park;
+            // A bounce that landed just as the fence went down would have
+            // missed the promotion above; this is the wake it sent.
+            if (Waiter.promotePending(&winner, &pending_winner)) {
+                promoted = true;
+                break :park;
+            }
             // A signal landed without a claim: the claimer saw our commit
             // fence. The readiness it reported is standing; re-poll finds it.
             consumed_wakes += 1;
@@ -397,9 +423,15 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     // winner decision comes after it (#700: a claimed result is delivered,
     // never dropped, even on the cancellation path).
     const hint = winner.load(.acquire);
+    // A promoted winner goes through the cancel loop like a loser, because
+    // only its source can say whether its bounced signal is still owed: a
+    // re-poll may have already re-registered the arm and counted that signal
+    // as .requeued, in which case asyncCancelWait removes the new
+    // registration and reports nothing owed.
+    const settled = if (promoted) NO_WINNER else hint;
     var expected: u32 = prior_signals;
     inline for (fields, 0..) |field, i| {
-        if (registered[i] and i != hint) {
+        if (registered[i] and i != settled) {
             const was_removed = if (comptime hasWaitContext(field.type))
                 @field(futures, field.name).asyncCancelWait(&waiters[i], &@field(contexts, field.name))
             else
@@ -408,8 +440,8 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
         }
     }
     // An external winner's claim carries one signal; a self-claimed win sends
-    // none.
-    if (hint != NO_WINNER and !self_claimed) expected += 1;
+    // none, and a promoted one was just accounted for above.
+    if (hint != NO_WINNER and !self_claimed and !promoted) expected += 1;
     waiter.wait(expected, .no_cancel);
 
     const winner_index = winner.load(.acquire);
@@ -452,11 +484,14 @@ pub fn selectAwaitables(awaitables: []const *Awaitable) Cancelable!usize {
 
     var winner: std.atomic.Value(usize) = .init(NO_WINNER);
     var gen: std.atomic.Value(u32) = .init(0);
+    // Never written here: this select takes no commit fence (no channel
+    // arms), so no notification can bounce. Present only to build the arms.
+    var pending_winner: std.atomic.Value(usize) = .init(NO_WINNER);
     var waiter = Waiter.init();
     var waiters: [max_awaitables]Waiter = undefined;
 
     for (waiters[0..awaitables.len], 0..) |*w, i| {
-        w.* = Waiter.initSelect(&waiter, &winner, &gen, i);
+        w.* = Waiter.initSelect(&waiter, &winner, &gen, &pending_winner, i);
     }
 
     var registered = [_]bool{false} ** max_awaitables;
@@ -1057,4 +1092,74 @@ test "select: wait on JoinHandle from spawned task" {
 
     // Both should be valid results, though timing determines which completes first
     try std.testing.expect(std.meta.activeTag(result) == .first or std.meta.activeTag(result) == .second);
+}
+
+test "select: promotes a notification that bounced off the commit fence" {
+    // End-to-end cover for the promotion path in select() itself: a synthetic
+    // arm reproduces a channel rendezvous commit window (take the fence, do
+    // work, abort) and, from inside it, fires a second arm whose readiness
+    // then lapses. Only the recorded arm can deliver that event; a re-poll
+    // cannot, because the event was reset.
+    //
+    // The synthetic arm becomes ready on its second poll, so a regression in
+    // the promotion or settle wiring shows up as the wrong arm winning rather
+    // than as a hang.
+    const ResetEvent = @import("sync/ResetEvent.zig");
+
+    const FenceArm = struct {
+        event: *ResetEvent,
+
+        pub const Result = void;
+        pub const WaitContext = struct { fenced: bool = false };
+
+        pub fn asyncWait(self: *@This(), waiter: *Waiter, ctx: *WaitContext) common.AsyncWaitState {
+            if (ctx.fenced) {
+                // Second poll: only reached if the recorded arm was dropped.
+                return switch (waiter.tryClaim()) {
+                    .won => .ready,
+                    .busy => unreachable,
+                    .lost => .decided,
+                };
+            }
+            ctx.fenced = true;
+            if (!waiter.beginCommit()) return .decided;
+            // The event's signal lands while the fence is up, so its winner
+            // CAS bounces; the reset then removes every trace of it except
+            // the record the bounce left behind.
+            self.event.set();
+            self.event.reset();
+            waiter.abortCommit();
+            return .queued;
+        }
+
+        pub fn asyncCancelWait(self: *@This(), waiter: *Waiter, ctx: *WaitContext) bool {
+            _ = self;
+            _ = waiter;
+            _ = ctx;
+            return true; // never registered on a queue, so nothing is owed
+        }
+
+        pub fn getResult(self: *const @This(), ctx: *WaitContext) void {
+            _ = self;
+            _ = ctx;
+        }
+    };
+
+    const Body = struct {
+        fn run() !void {
+            var event = ResetEvent.init;
+            var fence_arm = FenceArm{ .event = &event };
+
+            const result = try select(.{ .event = &event, .fence = &fence_arm });
+            try std.testing.expectEqual(
+                std.meta.Tag(@TypeOf(result)).event,
+                std.meta.activeTag(result),
+            );
+        }
+    };
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(1) });
+    defer runtime.deinit();
+    var handle = try runtime.spawn(Body.run, .{});
+    try handle.join();
 }

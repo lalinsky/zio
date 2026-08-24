@@ -636,3 +636,43 @@ test "Signal: select with signal and task" {
 
     try std.testing.expectEqual(.signal, winner);
 }
+
+test "Signal: a delivery that races the commit fence is not lost" {
+    // The handler pops every waiter and signals it. When the select's sweep
+    // holds the commit fence for another arm, that signal cannot claim the
+    // winner word, and a re-poll afterwards need not recover it: a second
+    // waiter can consume the shared counter first. The bounced arm must be
+    // recorded instead, matching Signal.wait(), which returns on the signal
+    // without requiring the counter.
+    const NO_WINNER = common.NO_WINNER;
+
+    var sig = try Signal.init(.interrupt);
+    defer sig.deinit();
+
+    var parent = Waiter.init();
+    var winner: std.atomic.Value(usize) = .init(NO_WINNER);
+    var gen: std.atomic.Value(u32) = .init(0);
+    var pending: std.atomic.Value(usize) = .init(NO_WINNER);
+    var waiter = Waiter.initSelect(&parent, &winner, &gen, &pending, 2);
+
+    try std.testing.expectEqual(.requeued, sig.asyncWait(&waiter));
+
+    // Owner's sweep is committing a different arm when the signal arrives.
+    winner.store(common.COMMITTING, .seq_cst);
+    _ = sig.entry.counter.fetchAdd(1, .release);
+    while (sig.entry.waiters.pop()) |node| Waiter.fromNode(node).signal();
+
+    // A peer waiter drains the counter before we get to look again.
+    winner.store(NO_WINNER, .seq_cst);
+    _ = sig.entry.counter.swap(0, .acquire);
+
+    // Re-polling cannot see it: the counter is gone.
+    try std.testing.expectEqual(.requeued, sig.asyncWait(&waiter));
+
+    // The arm's identity survived, so the select still reports it.
+    try std.testing.expectEqual(2, pending.load(.acquire));
+    try std.testing.expect(Waiter.promotePending(&winner, &pending));
+    try std.testing.expectEqual(2, winner.load(.acquire));
+
+    _ = sig.asyncCancelWait(&waiter);
+}

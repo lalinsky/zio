@@ -480,3 +480,42 @@ test "ResetEvent: async task signals foreign thread" {
     try std.testing.expect(thread_done.load(.acquire));
     try std.testing.expect(reset_event.isSet());
 }
+
+test "ResetEvent: a set that races the commit fence is not lost" {
+    // The select's sweep holds the commit fence for another arm when set()
+    // pops this arm and signals it. That signal cannot claim the winner word,
+    // and a re-poll afterwards cannot recover it either, because reset() has
+    // since cleared the flag. The bounced arm must be recorded instead.
+    const NO_WINNER = common.NO_WINNER;
+
+    var event = ResetEvent.init;
+
+    var parent = Waiter.init();
+    var winner: std.atomic.Value(usize) = .init(NO_WINNER);
+    var gen: std.atomic.Value(u32) = .init(0);
+    var pending: std.atomic.Value(usize) = .init(NO_WINNER);
+    var waiter = Waiter.initSelect(&parent, &winner, &gen, &pending, 3);
+
+    // .requeued on a first call: a flag-queue source cannot tell a first
+    // registration from one whose predecessor was popped and signaled, so the
+    // select resolves it (see the protocol comment in select.zig).
+    try std.testing.expectEqual(.requeued, event.asyncWait(&waiter));
+
+    // Owner's sweep is committing a different arm.
+    winner.store(common.COMMITTING, .seq_cst);
+    event.set();
+
+    // set() popped every waiter, so reset() is legal here.
+    winner.store(NO_WINNER, .seq_cst);
+    event.reset();
+
+    // Re-polling cannot see it: the flag is clear again. (.requeued, not
+    // .queued: the source knows its earlier registration was signaled, which
+    // is what keeps the settle accounting balanced.)
+    try std.testing.expectEqual(.requeued, event.asyncWait(&waiter));
+
+    // The arm's identity survived, so the select still reports it.
+    try std.testing.expectEqual(3, pending.load(.acquire));
+    try std.testing.expect(Waiter.promotePending(&winner, &pending));
+    try std.testing.expectEqual(3, winner.load(.acquire));
+}
