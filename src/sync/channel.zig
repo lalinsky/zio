@@ -122,15 +122,46 @@ const ChannelImpl = struct {
 
     /// Receives a value from the channel, blocking if empty.
     fn receive(self: *Self, elem_ptr: [*]u8) !void {
-        const recv = AsyncReceiveImpl{ .channel = self };
-        var ctx: AsyncReceiveImpl.WaitContext = .{ .result_ptr = undefined };
-        var waiter = Waiter.init();
+        // Direct (non-select) fast path. A plain receiver has no sibling arms
+        // and cannot lose a race to itself, so it needs none of the claim /
+        // commit-fence machinery the select sweep drives: it consumes under a
+        // single lock exactly as tryReceive does. Only when nothing is
+        // available does it park a direct waiter, which the select machinery
+        // still drives from the peer (sender) side.
+        self.mutex.lockUncancelable();
 
-        switch (recv.asyncWait(&waiter, &ctx, elem_ptr)) {
-            .ready, .ready_signaled => return recv.getResult(&ctx),
-            .queued, .requeued => {},
-            .decided => unreachable, // direct waiters cannot lose a claim
+        if (self.count > 0) {
+            self.takeItem(elem_ptr);
+            const admitted = self.admitSender();
+            self.mutex.unlock();
+            if (admitted) |node| Waiter.fromNode(node).signal();
+            return;
         }
+
+        // Closed before the sender scan: a sender still queued after close was
+        // fence-skipped by close() and must re-poll into error.Closed, never
+        // have its send completed here (same rule as admitSender/tryReceive).
+        if (self.closed) {
+            self.mutex.unlock();
+            return error.Closed;
+        }
+
+        if (self.claimWaiter(&self.sender_queue)) |node| {
+            const send_ctx: *AsyncSendImpl.WaitContext = @ptrFromInt(node.userdata);
+            @memcpy(elem_ptr[0..self.elem_size], send_ctx.item_ptr[0..self.elem_size]);
+            send_ctx.succeeded = true;
+            self.mutex.unlock();
+            Waiter.fromNode(node).signal();
+            return;
+        }
+
+        // Nothing available: park a direct waiter and wait.
+        const recv = AsyncReceiveImpl{ .channel = self };
+        var ctx: AsyncReceiveImpl.WaitContext = .{ .result_ptr = elem_ptr, .result_set = false };
+        var waiter = Waiter.init();
+        waiter.node.userdata = @intFromPtr(&ctx);
+        self.receiver_queue.push(&waiter.node);
+        self.mutex.unlock();
 
         waiter.wait(1, .allow_cancel) catch |err| {
             const was_removed = recv.asyncCancelWait(&waiter, &ctx);
@@ -179,15 +210,40 @@ const ChannelImpl = struct {
     }
 
     fn send(self: *Self, elem_ptr: [*]const u8) !void {
-        const send_op = AsyncSendImpl{ .channel = self };
-        var ctx: AsyncSendImpl.WaitContext = .{ .item_ptr = undefined };
-        var waiter = Waiter.init();
+        // Direct (non-select) fast path; see receive() for the rationale. This
+        // is trySend's fused check-and-consume, falling back to parking a
+        // direct waiter when the channel is full and no receiver is waiting.
+        self.mutex.lockUncancelable();
 
-        switch (send_op.asyncWait(&waiter, &ctx, elem_ptr)) {
-            .ready, .ready_signaled => return send_op.getResult(&ctx),
-            .queued, .requeued => {},
-            .decided => unreachable, // direct waiters cannot lose a claim
+        if (self.closed) {
+            self.mutex.unlock();
+            return error.Closed;
         }
+
+        if (self.claimWaiter(&self.receiver_queue)) |node| {
+            const recv_ctx: *AsyncReceiveImpl.WaitContext = @ptrFromInt(node.userdata);
+            @memcpy(recv_ctx.result_ptr[0..self.elem_size], elem_ptr[0..self.elem_size]);
+            recv_ctx.result_set = true;
+            self.mutex.unlock();
+            Waiter.fromNode(node).signal();
+            return;
+        }
+
+        if (self.count < self.capacity) {
+            @memcpy(self.elemPtr(self.tail)[0..self.elem_size], elem_ptr[0..self.elem_size]);
+            self.tail = (self.tail + 1) % self.capacity;
+            self.count += 1;
+            self.mutex.unlock();
+            return;
+        }
+
+        // Full and no waiting receiver: park a direct sender and wait.
+        const send_op = AsyncSendImpl{ .channel = self };
+        var ctx: AsyncSendImpl.WaitContext = .{ .item_ptr = elem_ptr };
+        var waiter = Waiter.init();
+        waiter.node.userdata = @intFromPtr(&ctx);
+        self.sender_queue.push(&waiter.node);
+        self.mutex.unlock();
 
         waiter.wait(1, .allow_cancel) catch |err| {
             const was_removed = send_op.asyncCancelWait(&waiter, &ctx);
