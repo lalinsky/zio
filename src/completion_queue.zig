@@ -52,9 +52,15 @@
 //! The queue also implements the future protocol, so the driver can wait for
 //! the next completion alongside other futures:
 //! `select(.{ .io = &cq, .msg = ch.asyncReceive() })`. The winning result is
-//! what `wait` would have returned, with one difference: canceling a select
+//! what `wait` would have returned, with two differences. Canceling a select
 //! only stops the waiting, it does not close the queue or cancel the
-//! operations in it.
+//! operations in it. And under select, `error.Closed` is NOT proof of the
+//! terminal state: a stale wake can win the queue arm while the queue is
+//! open, or while a close still has operations in flight whose completions
+//! arrive later. A select driver therefore checks `isDrained()` after
+//! `error.Closed` and keeps driving while it is `false`; only
+//! `isDrained() == true` is the drained state the blocking `wait` loop above
+//! breaks on.
 
 const std = @import("std");
 
@@ -594,6 +600,32 @@ test "CompletionQueue: wait on a closed empty queue returns error.Closed" {
     // Idempotent.
     cq.close();
     try std.testing.expectError(error.Closed, cq.wait());
+}
+
+test "CompletionQueue: isDrained classifies the three error.Closed cases" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+
+    // Open and empty: a stale-wake `error.Closed` from `getResult` must read
+    // as NOT drained, so a select driver re-polls instead of stopping.
+    try std.testing.expect(!cq.isDrained());
+
+    // Closed with an operation still in flight: still not drained. The
+    // completion arrives later via `ownerCallback`; a driver that stopped
+    // here would leak it.
+    var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
+    try cq.submit(&timer.c);
+    cq.close();
+    try std.testing.expect(!cq.isDrained());
+
+    // Drain the in-flight completion, then the queue is drained: closed,
+    // nothing pending, nothing left to take.
+    const c = try cq.wait();
+    try std.testing.expectEqual(&timer.c, c);
+    try std.testing.expectError(error.Closed, cq.wait());
+    try std.testing.expect(cq.isDrained());
 }
 
 test "CompletionQueue: single timer" {
