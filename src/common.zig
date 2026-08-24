@@ -186,6 +186,16 @@ pub const Waiter = struct {
         return @fieldParentPtr("node", node);
     }
 
+    /// A direct waiter's asyncWait is called exactly once and never re-polled
+    /// (unlike a select's sweep), so it can never have a prior registration to
+    /// unhook. Sources use this to skip that check for direct waiters.
+    pub inline fn isDirect(self: *const Waiter) bool {
+        return switch (self.mode) {
+            .direct => true,
+            .select => false,
+        };
+    }
+
     /// Signal this waiter.
     /// For direct: increments signal count and wakes the task.
     /// For select: tries to claim winner slot, then signals the parent.
@@ -512,7 +522,7 @@ pub fn waitOnFlagQueue(queue: *WaitQueue(WaitNode), waiter: *Waiter) AsyncWaitSt
         // side's pop still signals it or asyncCancelWait still removes it
         // cleanly - both keep the caller's signal accounting balanced.
         return switch (waiter.tryClaim()) {
-            .won => if (queue.remove(&waiter.node)) .ready else .ready_signaled,
+            .won => if (waiter.isDirect() or queue.remove(&waiter.node)) .ready else .ready_signaled,
             // Only the owning sweep calls asyncWait, and it never holds its
             // own commit fence here.
             .busy => unreachable,
@@ -522,7 +532,7 @@ pub fn waitOnFlagQueue(queue: *WaitQueue(WaitNode), waiter: *Waiter) AsyncWaitSt
     // Not ready: (re-)register. Unhook any previous registration first so a
     // re-poll never double-registers. A registration that is already gone
     // was popped and signaled by the completing side.
-    const had_registration = queue.remove(&waiter.node);
+    const had_registration = !waiter.isDirect() and queue.remove(&waiter.node);
     if (queue.pushUnlessFlag(&waiter.node)) {
         return if (had_registration) .queued else .requeued;
     }

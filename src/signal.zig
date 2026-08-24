@@ -357,8 +357,9 @@ pub const Signal = struct {
     pub fn asyncWait(self: *Signal, waiter: *Waiter) common.AsyncWaitState {
         // Unhook any previous registration so a re-poll never
         // double-registers; one that is already gone was popped and signaled
-        // by the handler without a claim.
-        const had_registration = self.entry.waiters.remove(&waiter.node);
+        // by the handler without a claim. A direct waiter is never
+        // re-polled, so it never has a registration to unhook.
+        const had_registration = !waiter.isDirect() and self.entry.waiters.remove(&waiter.node);
 
         const n = self.entry.counter.swap(0, .acquire);
         if (n > 0) {

@@ -281,8 +281,9 @@ const AsyncSendImpl = struct {
         // channel registration is only ever consumed together with a claim,
         // so an unclaimed select's registration is always still queued and no
         // signal can exist for it. Whether the claim already happened is
-        // settled below by tryClaim/beginCommit.
-        _ = ch.sender_queue.remove(&waiter.node);
+        // settled below by tryClaim/beginCommit. A direct waiter is never
+        // re-polled, so it never has a registration to unhook.
+        if (!waiter.isDirect()) _ = ch.sender_queue.remove(&waiter.node);
 
         // Commits that involve no peer (closed, plain buffer append with no
         // parked receiver) only need to win our own winner word; once it is
@@ -394,8 +395,9 @@ const AsyncReceiveImpl = struct {
 
         // See AsyncSendImpl.asyncWait for the claim/fence discipline,
         // including why ctx must not be touched before our claim or fence is
-        // secured.
-        _ = ch.receiver_queue.remove(&waiter.node);
+        // secured. A direct waiter is never re-polled, so it never has a
+        // registration to unhook.
+        if (!waiter.isDirect()) _ = ch.receiver_queue.remove(&waiter.node);
 
         // Taking from the buffer or reporting closed involves no peer in our
         // own decision, so winning the winner word is enough. (admitSender
