@@ -1,7 +1,12 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const time = @import("../../time.zig");
 const Loop = @import("../loop.zig").Loop;
 const Timer = @import("../completion.zig").Timer;
+const FileReadStreaming = @import("../completion.zig").FileReadStreaming;
+const ReadBuf = @import("../buf.zig").ReadBuf;
+const fs = @import("../../os/fs.zig");
+const posix = @import("../../os/posix.zig");
 
 test "setTimer and clearTimer basic" {
     var loop: Loop = undefined;
@@ -293,4 +298,68 @@ test "clearTimer racing a firing timer (cross-thread)" {
             while (!fired.load(.acquire)) std.Thread.yield() catch {};
         }
     }
+}
+
+test "duration timer armed after a long idle poll is not backdated" {
+    // Regression: `Loop.add` arms `.duration` timers via `armTimer`, which
+    // computed the deadline from the scan-cached `now`. The cache refreshes
+    // in `checkTimers` at the top of `poll`, and again after the backend
+    // poll only when it TIMED OUT. So when the backend poll slept a long
+    // time and woke on I/O, everything that ran before the next `poll` —
+    // completion callbacks, and the runtime's task batch — saw a cache
+    // stale by the whole sleep. A duration timer armed there was backdated:
+    // a 500ms timer armed after a ~1.2s sleep had a deadline already in the
+    // past and fired on the next scan instead of 500ms later.
+    //
+    // The wake must be an I/O completion delivered by the poll that slept
+    // (an async notify wakes one poll and completes on the next, whose
+    // `checkTimers` freshens the cache first — that shape cannot reproduce
+    // the bug). A pipe read mirrors the runtime: socket-completion wake,
+    // then task code arms a select timeout.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const os_time = @import("../../os/time.zig");
+
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    const pipefd = try posix.pipe(.{ .nonblocking = true, .cloexec = true });
+    defer _ = fs.close(pipefd[0]) catch {};
+    defer _ = fs.close(pipefd[1]) catch {};
+
+    var read_data: [8]u8 = undefined;
+    var read_iovecs: [1]fs.iovec = undefined;
+    const read_buf = ReadBuf.fromSlice(&read_data, &read_iovecs);
+    var stream_read: FileReadStreaming = .init(pipefd[0], read_buf);
+    stream_read.pollable = true;
+    loop.add(&stream_read.c);
+
+    const thread = try std.Thread.spawn(.{}, struct {
+        fn write(fd: posix.fd_t) void {
+            os_time.sleep(.fromMilliseconds(1200));
+            // A 1-byte pipe write cannot block; write directly via libc.
+            _ = std.c.write(fd, "x", 1);
+        }
+    }.write, .{pipefd[1]});
+    defer thread.join();
+
+    // The poll sleeps ~1.2s and wakes on the pipe-read completion.
+    while (stream_read.c.loadState().phase != .dead) {
+        try loop.poll(.max);
+    }
+    _ = try stream_read.getResult();
+
+    // Arm after the poll returned, exactly where the runtime runs task code.
+    var timer: Timer = .init(.{ .duration = .fromMilliseconds(500) });
+    const armed_at = os_time.now(.monotonic);
+    loop.add(&timer.c);
+    try loop.run();
+    const fired_at = os_time.now(.monotonic);
+    const elapsed_ms = @divTrunc(fired_at.toNanoseconds() - armed_at.toNanoseconds(), 1_000_000);
+
+    try std.testing.expectEqual(.dead, timer.c.loadState().phase);
+    // Backdated: fires in ~0ms. Correct: no earlier than the duration.
+    try std.testing.expect(elapsed_ms >= 450);
+    try std.testing.expect(elapsed_ms <= 1500);
+    std.log.info("post-idle arm: expected=500ms, actual={d}ms", .{elapsed_ms});
 }

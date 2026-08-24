@@ -974,13 +974,6 @@ pub const Loop = struct {
         var wall_deadline: [wall_clock_count]?u64 = .{ null, null, null };
         var wall_remaining: [wall_clock_count]Duration = .{ .zero, .zero, .zero };
 
-        // Advance the scan once and refresh the awake snapshot; this also
-        // invalidates the lazily-cached boot/real values for this scan.
-        // `now`/`tick` are only ever touched by the owning executor thread
-        // (`updateNow` is called here and in `setTimer`, both owner-thread; the
-        // cross-thread `clearTimer` never reads them), so no timer lock is needed.
-        self.state.updateNow();
-
         // Each wall-clock domain has its own heap, compared against `now` in
         // that clock. The earliest remaining across all domains becomes the
         // poll timeout; `poll` caps it at `max_wait`, which bounds how
@@ -1422,7 +1415,20 @@ pub const Loop = struct {
         // This avoids syscall overhead for pure CPU-bound workloads.
         const should_poll = wait or self.backend.hasInflight();
         const wake_flags = self.state.wake_requested.swap(0, .acq_rel);
-        const timed_out = if (should_poll) try self.backend.poll(&self.state, if (wake_flags != 0) .zero else timeout) else false;
+        const backend_timeout: Duration = if (wake_flags != 0) .zero else timeout;
+        const timed_out = if (should_poll) try self.backend.poll(&self.state, backend_timeout) else false;
+
+        // The single refresh point of the awake snapshot (plus `setTimer`).
+        // Refreshing here rather than at the top of `checkTimers` puts the
+        // fresh value where it is consumed: everything that runs before the
+        // next poll — completion callbacks below, and the caller's task batch
+        // after this returns — computes `.duration` timer deadlines from this
+        // snapshot via `armTimer`. Before this, a poll that slept woke with a
+        // snapshot stale by the whole sleep (up to `max_wait`), and a timeout
+        // armed in that batch was already expired. Unconditional, so a
+        // CPU-bound caller polling with `.zero` refreshes each pass too; the
+        // cost is the same one clock read per poll that `checkTimers` paid.
+        self.state.updateNow();
 
         // Process async handles if the async bit was set
         if (wake_flags & LoopState.wake_async != 0) {
