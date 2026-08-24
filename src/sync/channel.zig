@@ -91,7 +91,12 @@ const ChannelImpl = struct {
 
     /// After freeing a buffer slot, move a parked sender's item into it.
     /// Returns the sender's node for the caller to signal after unlocking.
+    ///
+    /// Never admits after close: a sender still queued then was skipped by
+    /// close() while fenced, and must re-poll into error.Closed rather than
+    /// have its send succeed on a closed channel.
     fn admitSender(self: *Self) ?*WaitNode {
+        if (self.closed) return null;
         const node = self.claimWaiter(&self.sender_queue) orelse return null;
         const send_ctx: *AsyncSendImpl.WaitContext = @ptrFromInt(node.userdata);
         @memcpy(self.elemPtr(self.tail)[0..self.elem_size], send_ctx.item_ptr[0..self.elem_size]);

@@ -418,9 +418,15 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
         return error.Canceled;
     }
 
-    // Return result from winner. On the canceled path the task's cancellation
-    // request stays pending and re-fires at the next cancelable operation,
-    // the same semantics Channel.receive has.
+    // On the canceled path the cancelable wait above consumed the
+    // cancellation request; the claimed result still gets delivered, so put
+    // the request back for the next cancelable operation. A null task
+    // binding means the wait blocked the thread and consumed nothing.
+    if (canceled) {
+        if (waiter.mode.direct.task) |t| t.recancel();
+    }
+
+    // Return result from winner.
     inline for (fields, 0..) |field, i| {
         if (i == winner_index) {
             const result = if (comptime hasWaitContext(field.type))
@@ -499,6 +505,13 @@ pub fn selectAwaitables(awaitables: []const *Awaitable) Cancelable!usize {
     if (winner_index == NO_WINNER) {
         std.debug.assert(canceled);
         return error.Canceled;
+    }
+    // The cancelable wait consumed the cancellation request but a claimed
+    // winner is still being reported; re-arm it for the next cancelable
+    // operation. A null task binding means the wait blocked the thread and
+    // consumed nothing.
+    if (canceled) {
+        if (waiter.mode.direct.task) |t| t.recancel();
     }
     return winner_index;
 }

@@ -242,6 +242,11 @@ pub const Group = struct {
     pub const WaitContext = struct {
         fw: Futex.FutexWaiter = .{},
         registered: bool = false,
+        /// A wake was dispatched for a dequeued registration but never
+        /// reported to the caller (the arm's claim lost before it could be):
+        /// asyncCancelWait must keep reporting it as an in-flight signal so
+        /// the caller's cleanup outwaits it.
+        pending_signal: bool = false,
     };
 
     pub fn getResult(self: *Group, ctx: *WaitContext) void {
@@ -254,14 +259,19 @@ pub const Group = struct {
 
         // Unhook any previous registration so a re-poll never
         // double-registers; one that is already gone was dequeued and
-        // signaled by a completion without a claim.
-        const had_signal = ctx.registered and !Futex.cancelWait(&ctx.fw);
+        // signaled by a completion without a claim. The signal stays owed
+        // (pending_signal) until a return value reports it to the caller.
+        const had_signal = ctx.pending_signal or (ctx.registered and !Futex.cancelWait(&ctx.fw));
         ctx.registered = false;
+        ctx.pending_signal = had_signal;
 
         // Fast path: no pending tasks means the group is already "complete".
         if (@atomicLoad(u32, state_ptr, .acquire) & counter_mask == 0) {
             return switch (waiter.tryClaim()) {
-                .won => if (had_signal) .ready_signaled else .ready,
+                .won => blk: {
+                    ctx.pending_signal = false;
+                    break :blk if (had_signal) .ready_signaled else .ready;
+                },
                 .busy => unreachable,
                 .lost => .decided,
             };
@@ -278,7 +288,10 @@ pub const Group = struct {
             if (Futex.cancelWait(&ctx.fw)) {
                 ctx.registered = false;
                 return switch (waiter.tryClaim()) {
-                    .won => if (had_signal) .ready_signaled else .ready,
+                    .won => blk: {
+                        ctx.pending_signal = false;
+                        break :blk if (had_signal) .ready_signaled else .ready;
+                    },
                     .busy => unreachable,
                     .lost => .decided,
                 };
@@ -287,12 +300,14 @@ pub const Group = struct {
             // claim attempt) is in-flight.
         }
 
+        ctx.pending_signal = false;
         return if (had_signal) .requeued else .queued;
     }
 
     pub fn asyncCancelWait(self: *Group, waiter: *Waiter, ctx: *WaitContext) bool {
         _ = self;
         _ = waiter;
+        if (ctx.pending_signal) return false;
         if (!ctx.registered) return true;
         return Futex.cancelWait(&ctx.fw);
     }

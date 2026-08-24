@@ -506,20 +506,39 @@ pub const Waiter = struct {
 /// completion pops every waiter and signals it. Idempotent under re-poll,
 /// and claims the select before reporting ready.
 pub fn waitOnFlagQueue(queue: *WaitQueue(WaitNode), waiter: *Waiter) AsyncWaitState {
-    // Unhook any previous registration first so a re-poll never
-    // double-registers. A registration that is already gone was popped and
-    // signaled by the completing side.
+    if (queue.isFlagSet()) {
+        // Ready. Claim before touching the registration: a lost claim must
+        // leave the node exactly where it is, so either the completing
+        // side's pop still signals it or asyncCancelWait still removes it
+        // cleanly - both keep the caller's signal accounting balanced.
+        return switch (waiter.tryClaim()) {
+            .won => if (queue.remove(&waiter.node)) .ready else .ready_signaled,
+            // Only the owning sweep calls asyncWait, and it never holds its
+            // own commit fence here.
+            .busy => unreachable,
+            .lost => .decided,
+        };
+    }
+    // Not ready: (re-)register. Unhook any previous registration first so a
+    // re-poll never double-registers. A registration that is already gone
+    // was popped and signaled by the completing side.
     const had_registration = queue.remove(&waiter.node);
     if (queue.pushUnlessFlag(&waiter.node)) {
         return if (had_registration) .queued else .requeued;
     }
-    return switch (waiter.tryClaim()) {
-        .won => if (had_registration) .ready else .ready_signaled,
-        // Only the owning sweep calls asyncWait, and it never holds its own
-        // commit fence here.
+    // Completion landed between the check and the push, leaving the node in
+    // hand where no pop can reach it.
+    switch (waiter.tryClaim()) {
+        .won => return if (had_registration) .ready else .ready_signaled,
         .busy => unreachable,
-        .lost => .decided,
-    };
+        .lost => {
+            // A cleanly unhooked registration owes a signal the completing
+            // side can no longer send (the caller's cleanup will see the
+            // node gone and expect one); send it ourselves.
+            if (had_registration) waiter.signal();
+            return .decided;
+        },
+    }
 }
 
 /// Runs an I/O operation to completion.
