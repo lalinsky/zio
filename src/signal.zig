@@ -6,8 +6,9 @@ const builtin = @import("builtin");
 const posix = @import("os/posix.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const Group = @import("group.zig").Group;
-const Cancelable = @import("common.zig").Cancelable;
-const Timeoutable = @import("common.zig").Timeoutable;
+const common = @import("common.zig");
+const Cancelable = common.Cancelable;
+const Timeoutable = common.Timeoutable;
 const Timeout = @import("time.zig").Timeout;
 const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("utils/wait_queue.zig").WaitNode;
@@ -350,18 +351,36 @@ pub const Signal = struct {
         _ = self.entry.counter.swap(0, .acquire);
     }
 
-    /// Registers a waiter to be notified when the signal is received.
+    /// Registers a waiter to be notified when the signal is received, or
+    /// claims the select if one already was.
     /// This is part of the Future protocol for select().
-    /// Returns false if the signal was already received (no wait needed), true if added to wait queue.
-    pub fn asyncWait(self: *Signal, waiter: *Waiter) bool {
-        // Fast path: signal already received
-        if (self.entry.counter.swap(0, .acquire) > 0) {
-            return false;
+    pub fn asyncWait(self: *Signal, waiter: *Waiter) common.AsyncWaitState {
+        // Unhook any previous registration so a re-poll never
+        // double-registers; one that is already gone was popped and signaled
+        // by the handler without a claim.
+        const had_registration = self.entry.waiters.remove(&waiter.node);
+
+        const n = self.entry.counter.swap(0, .acquire);
+        if (n > 0) {
+            switch (waiter.tryClaim()) {
+                .won => return if (had_registration) .ready else .ready_signaled,
+                .busy => unreachable,
+                .lost => {
+                    // A lost arm may not consume: the count is additive, so
+                    // put it back and re-broadcast to waiters that may have
+                    // gone back to sleep while we held it.
+                    _ = self.entry.counter.fetchAdd(n, .release);
+                    while (self.entry.waiters.pop()) |wait_node| {
+                        Waiter.fromNode(wait_node).signal();
+                    }
+                    return .decided;
+                },
+            }
         }
 
         // Add to wait queue
         self.entry.waiters.push(&waiter.node);
-        return true;
+        return if (had_registration) .queued else .requeued;
     }
 
     /// Cancels a pending wait operation by removing the waiter.

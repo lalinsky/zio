@@ -4,7 +4,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const log = @import("common.zig").log;
-const Waiter = @import("common.zig").Waiter;
+const common = @import("common.zig");
+const Waiter = common.Waiter;
 const meta = @import("meta.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentExecutor = @import("runtime.zig").getCurrentExecutor;
@@ -238,38 +239,62 @@ pub const Group = struct {
 
     pub const Result = void;
 
-    pub const WaitContext = Futex.FutexWaiter;
+    pub const WaitContext = struct {
+        fw: Futex.FutexWaiter = .{},
+        registered: bool = false,
+    };
 
     pub fn getResult(self: *Group, ctx: *WaitContext) void {
         _ = self;
         _ = ctx;
     }
 
-    pub fn asyncWait(self: *Group, waiter: *Waiter, ctx: *WaitContext) bool {
+    pub fn asyncWait(self: *Group, waiter: *Waiter, ctx: *WaitContext) common.AsyncWaitState {
         const state_ptr = self.getState();
 
+        // Unhook any previous registration so a re-poll never
+        // double-registers; one that is already gone was dequeued and
+        // signaled by a completion without a claim.
+        const had_signal = ctx.registered and !Futex.cancelWait(&ctx.fw);
+        ctx.registered = false;
+
         // Fast path: no pending tasks means the group is already "complete".
-        if (@atomicLoad(u32, state_ptr, .acquire) & counter_mask == 0) return false;
+        if (@atomicLoad(u32, state_ptr, .acquire) & counter_mask == 0) {
+            return switch (waiter.tryClaim()) {
+                .won => if (had_signal) .ready_signaled else .ready,
+                .busy => unreachable,
+                .lost => .decided,
+            };
+        }
 
         // Park on the completion futex address.
-        Futex.prepareWait(state_ptr, ctx, waiter);
+        Futex.prepareWait(state_ptr, &ctx.fw, waiter);
+        ctx.registered = true;
 
         // Double-check: the last task may have completed (and issued its wake)
         // between the fast-path check and our registration above.
         if (@atomicLoad(u32, state_ptr, .acquire) & counter_mask == 0) {
             // We removed ourselves before any wake -> already complete.
-            if (Futex.cancelWait(ctx)) return false;
-            // A concurrent completion already dequeued us; the wake is in-flight.
-            return true;
+            if (Futex.cancelWait(&ctx.fw)) {
+                ctx.registered = false;
+                return switch (waiter.tryClaim()) {
+                    .won => if (had_signal) .ready_signaled else .ready,
+                    .busy => unreachable,
+                    .lost => .decided,
+                };
+            }
+            // A concurrent completion already dequeued us; the wake (and its
+            // claim attempt) is in-flight.
         }
 
-        return true;
+        return if (had_signal) .requeued else .queued;
     }
 
     pub fn asyncCancelWait(self: *Group, waiter: *Waiter, ctx: *WaitContext) bool {
         _ = self;
         _ = waiter;
-        return Futex.cancelWait(ctx);
+        if (!ctx.registered) return true;
+        return Futex.cancelWait(&ctx.fw);
     }
 };
 

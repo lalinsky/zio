@@ -49,8 +49,9 @@ const Runtime = @import("../runtime.zig").Runtime;
 const os = @import("../os/root.zig");
 const yield = @import("../runtime.zig").yield;
 const Group = @import("../group.zig").Group;
-const Cancelable = @import("../common.zig").Cancelable;
-const Timeoutable = @import("../common.zig").Timeoutable;
+const common = @import("../common.zig");
+const Cancelable = common.Cancelable;
+const Timeoutable = common.Timeoutable;
 const Timeout = @import("../time.zig").Timeout;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
@@ -203,12 +204,11 @@ pub fn getResult(self: *const ResetEvent) void {
     return;
 }
 
-/// Registers a waiter to be notified when the event is set.
+/// Registers a waiter to be notified when the event is set, or claims the
+/// select if it already is.
 /// This is part of the Future protocol for select().
-/// Returns false if the event is already set (no wait needed), true if added to queue.
-pub fn asyncWait(self: *ResetEvent, waiter: *Waiter) bool {
-    // Try to push to queue - only succeeds if event is not set (flag not set)
-    return self.wait_queue.pushUnlessFlag(&waiter.node);
+pub fn asyncWait(self: *ResetEvent, waiter: *Waiter) common.AsyncWaitState {
+    return common.waitOnFlagQueue(&self.wait_queue, waiter);
 }
 
 /// Cancels a pending wait operation by removing the waiter.

@@ -5,8 +5,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
 const yield = @import("../runtime.zig").yield;
-const Cancelable = @import("../common.zig").Cancelable;
-const Waiter = @import("../common.zig").Waiter;
+const common = @import("../common.zig");
+const Cancelable = common.Cancelable;
+const Waiter = common.Waiter;
 const WaitQueue = @import("../utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const meta = @import("../meta.zig");
@@ -114,16 +115,11 @@ pub fn Future(comptime T: type) type {
             return self.value.get().?;
         }
 
-        /// Registers a waiter to be notified when the future is set.
+        /// Registers a waiter to be notified when the future is set, or claims
+        /// the select if it already is.
         /// This is part of the Future protocol for select().
-        /// Returns false if the future is already set (no wait needed), true if added to queue.
-        pub fn asyncWait(self: *Self, waiter: *Waiter) bool {
-            // Fast path: check if already set
-            if (self.value.isSet()) {
-                return false;
-            }
-            // Try to push to queue - only succeeds if future is not done (flag not set)
-            return self.wait_queue.pushUnlessFlag(&waiter.node);
+        pub fn asyncWait(self: *Self, waiter: *Waiter) common.AsyncWaitState {
+            return common.waitOnFlagQueue(&self.wait_queue, waiter);
         }
 
         /// Cancels a pending wait operation by removing the waiter.
