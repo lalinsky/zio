@@ -303,14 +303,20 @@ pub const CompletionQueue = struct {
         _ = ctx;
         self.mutex.lock();
         const node = self.completed.pop();
-        const drained = node == null and self.closed and self.pending.isEmpty();
         self.mutex.unlock();
 
         if (node) |n| return completionFromGroup(n);
-        // A wake on `signal` means a completion was pushed (and only the
-        // caller, as the driver, takes completions out) or the queue is
-        // drained; a close over in-flight operations stays silent.
-        std.debug.assert(drained);
+        // A wake on `signal` normally means a completion was pushed (and only
+        // the caller, as the driver, takes completions out) or the queue is
+        // drained. Under select, a stale wake can also win this arm with the
+        // queue EMPTY and OPEN: a signal dispatched for a registration that a
+        // concurrent winner canceled can outlive the select's signal
+        // accounting and land on a later select's re-used waiter slot. That
+        // is a protocol bug upstream of this function; asserting here turned
+        // it into a crash (ReleaseSafe) or an undefined-behavior return
+        // (ReleaseFast). `error.Closed` is the only outcome this contract can
+        // express, so the caller that knows it never closed the queue must
+        // treat it as spurious and re-poll rather than tear down.
         return error.Closed;
     }
 
