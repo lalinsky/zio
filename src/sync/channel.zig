@@ -48,6 +48,19 @@ const ChannelImpl = struct {
         return self.buffer + (index * self.elem_size);
     }
 
+    /// Ordering rule for every send path, named so the call sites can point
+    /// here: a sender may hand its item straight to a queued receiver only
+    /// while the buffer is empty.
+    ///
+    /// Normally a receiver is only queued when the buffer is empty, so the
+    /// rule costs nothing. A busy (fenced) receiver breaks that invariant: it
+    /// stays queued while a send skips it and buffers behind it, so a later
+    /// send finding it claimable would hand over an item that overtakes the
+    /// buffered ones. Buffering instead keeps FIFO; the skipped receiver is
+    /// already owed a re-poll (its tryClaim bumped the select's generation),
+    /// and that re-poll takes the oldest buffered item.
+    const handoffOrder = {};
+
     /// Scan `queue` (under the channel mutex) for a waiter whose claim wins
     /// and remove it. The caller is committed to delivering that waiter's
     /// side effect and exactly one signal (after unlocking).
@@ -220,13 +233,17 @@ const ChannelImpl = struct {
             return error.Closed;
         }
 
-        if (self.claimWaiter(&self.receiver_queue)) |node| {
-            const recv_ctx: *AsyncReceiveImpl.WaitContext = @ptrFromInt(node.userdata);
-            @memcpy(recv_ctx.result_ptr[0..self.elem_size], elem_ptr[0..self.elem_size]);
-            recv_ctx.result_set = true;
-            self.mutex.unlock();
-            Waiter.fromNode(node).signal();
-            return;
+        // Hand off to a waiting receiver only when the buffer is empty, or
+        // this item would overtake the ones already in it; see handoffOrder.
+        if (self.count == 0) {
+            if (self.claimWaiter(&self.receiver_queue)) |node| {
+                const recv_ctx: *AsyncReceiveImpl.WaitContext = @ptrFromInt(node.userdata);
+                @memcpy(recv_ctx.result_ptr[0..self.elem_size], elem_ptr[0..self.elem_size]);
+                recv_ctx.result_set = true;
+                self.mutex.unlock();
+                Waiter.fromNode(node).signal();
+                return;
+            }
         }
 
         if (self.count < self.capacity) {
@@ -265,13 +282,17 @@ const ChannelImpl = struct {
             return error.Closed;
         }
 
-        if (self.claimWaiter(&self.receiver_queue)) |node| {
-            const recv_ctx: *AsyncReceiveImpl.WaitContext = @ptrFromInt(node.userdata);
-            @memcpy(recv_ctx.result_ptr[0..self.elem_size], elem_ptr[0..self.elem_size]);
-            recv_ctx.result_set = true;
-            self.mutex.unlock();
-            Waiter.fromNode(node).signal();
-            return;
+        // Hand off to a waiting receiver only when the buffer is empty, or
+        // this item would overtake the ones already in it; see handoffOrder.
+        if (self.count == 0) {
+            if (self.claimWaiter(&self.receiver_queue)) |node| {
+                const recv_ctx: *AsyncReceiveImpl.WaitContext = @ptrFromInt(node.userdata);
+                @memcpy(recv_ctx.result_ptr[0..self.elem_size], elem_ptr[0..self.elem_size]);
+                recv_ctx.result_set = true;
+                self.mutex.unlock();
+                Waiter.fromNode(node).signal();
+                return;
+            }
         }
 
         if (self.count == self.capacity) {
@@ -344,7 +365,11 @@ const AsyncSendImpl = struct {
         // parked receiver) only need to win our own winner word; once it is
         // won, nothing can be torn apart. Commits that pair a peer waiter
         // additionally need the commit fence, taken below.
-        if (ch.closed or (ch.receiver_queue.isEmpty() and ch.count < ch.capacity)) {
+        //
+        // A non-empty buffer takes this path even with a receiver queued: the
+        // item must go behind the ones already buffered rather than overtake
+        // them in a direct handoff; see handoffOrder.
+        if (ch.closed or (ch.count < ch.capacity and (ch.count > 0 or ch.receiver_queue.isEmpty()))) {
             switch (waiter.tryClaim()) {
                 .won => {},
                 .busy => unreachable, // own sweep never claims while fenced
@@ -381,7 +406,9 @@ const AsyncSendImpl = struct {
 
         ctx.item_ptr = item_ptr;
 
-        if (ch.claimWaiter(&ch.receiver_queue)) |node| {
+        // Only reachable with an empty buffer (a non-empty one was handled
+        // above) or a full one, where handing off would also reorder.
+        if (if (ch.count == 0) ch.claimWaiter(&ch.receiver_queue) else null) |node| {
             const recv_ctx: *AsyncReceiveImpl.WaitContext = @ptrFromInt(node.userdata);
             @memcpy(recv_ctx.result_ptr[0..ch.elem_size], ctx.item_ptr[0..ch.elem_size]);
             recv_ctx.result_set = true;
@@ -2148,4 +2175,44 @@ test "Channel: rendezvous racing a level source in the same select" {
         try sender.join();
         try std.testing.expectEqual(1, observed);
     }
+}
+
+test "Channel: a send behind a fenced receiver does not overtake the buffer" {
+    // A select receiver stays queued while its owning select holds the commit
+    // fence for another arm, so a send skips it and buffers instead. A second
+    // send must not then hand its item straight to that receiver, which would
+    // deliver it ahead of the item already buffered.
+    var buffer: [4]u32 = undefined;
+    var channel = Channel(u32).init(&buffer);
+
+    var recv = channel.asyncReceive();
+    var ctx: AsyncReceive(u32).WaitContext = .{};
+    var parent = Waiter.init();
+    var winner: std.atomic.Value(usize) = .init(NO_WINNER);
+    var gen: std.atomic.Value(u32) = .init(0);
+    var waiter = Waiter.initSelect(&parent, &winner, &gen, 0);
+
+    try std.testing.expectEqual(.queued, recv.asyncWait(&waiter, &ctx));
+
+    // The owning select's sweep takes the fence for a different arm.
+    winner.store(common.COMMITTING, .seq_cst);
+
+    // The receiver is busy, so this item is buffered behind it. The skipped
+    // claim bumps the generation, which is what owes the receiver a re-poll.
+    try channel.trySend(111);
+    try std.testing.expectEqual(1, channel.impl.count);
+    try std.testing.expect(gen.load(.seq_cst) != 0);
+
+    // Fence released: the receiver is claimable again.
+    winner.store(NO_WINNER, .seq_cst);
+
+    // Must be buffered, not handed over: 111 is older.
+    try channel.trySend(222);
+    try std.testing.expectEqual(2, channel.impl.count);
+    try std.testing.expect(!ctx.impl_ctx.result_set);
+
+    // The receiver's re-poll takes the oldest item, and FIFO holds.
+    try std.testing.expectEqual(.ready, recv.asyncWait(&waiter, &ctx));
+    try std.testing.expectEqual(111, try recv.getResult(&ctx));
+    try std.testing.expectEqual(222, try channel.tryReceive());
 }
