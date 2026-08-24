@@ -156,6 +156,15 @@ const ChannelImpl = struct {
             return;
         }
 
+        // Closed comes before the sender scan: a sender still queued after
+        // close was fence-skipped by close() and must re-poll into
+        // error.Closed, never have its send completed by a late receiver
+        // (same rule as admitSender).
+        if (self.closed) {
+            self.mutex.unlock();
+            return error.Closed;
+        }
+
         if (self.claimWaiter(&self.sender_queue)) |node| {
             const send_ctx: *AsyncSendImpl.WaitContext = @ptrFromInt(node.userdata);
             @memcpy(elem_ptr[0..self.elem_size], send_ctx.item_ptr[0..self.elem_size]);
@@ -165,9 +174,8 @@ const ChannelImpl = struct {
             return;
         }
 
-        const is_closed = self.closed;
         self.mutex.unlock();
-        return if (is_closed) error.Closed else error.WouldBlock;
+        return error.WouldBlock;
     }
 
     fn send(self: *Self, elem_ptr: [*]const u8) !void {
