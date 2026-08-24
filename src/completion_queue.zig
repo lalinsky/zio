@@ -315,8 +315,9 @@ pub const CompletionQueue = struct {
         // is a protocol bug upstream of this function; asserting here turned
         // it into a crash (ReleaseSafe) or an undefined-behavior return
         // (ReleaseFast). `error.Closed` is the only outcome this contract can
-        // express, so the caller that knows it never closed the queue must
-        // treat it as spurious and re-poll rather than tear down.
+        // express, so a driver disambiguates with `isDrained()`: false means
+        // keep driving (stale wake, or a close with operations still in
+        // flight), true means the terminal state this error describes.
         return error.Closed;
     }
 
@@ -376,6 +377,22 @@ pub const CompletionQueue = struct {
 
         ctx.pending_signal = false;
         return if (had_signal) .requeued else .queued;
+    }
+
+    /// Whether the queue is closed AND fully drained: no pending operation
+    /// can deliver another completion, and none is waiting to be taken. This
+    /// is the predicate a select driver checks after `error.Closed` from its
+    /// queue arm, and it answers the action question directly: `true` means
+    /// stop (the terminal state `error.Closed` describes); `false` means
+    /// keep driving — whether the win was a stale wake on an open queue, or
+    /// a `close` raced in with operations still in flight whose completions
+    /// `ownerCallback` will still deliver. `isClosed` alone was wrong for
+    /// the second case: closed-but-not-drained must keep draining or those
+    /// completions leak.
+    pub fn isDrained(self: *CompletionQueue) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.closed and self.pending.isEmpty() and self.completed.isEmpty();
     }
 
     pub fn asyncCancelWait(self: *CompletionQueue, waiter: *Waiter, ctx: *WaitContext) bool {
