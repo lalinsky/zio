@@ -179,7 +179,14 @@ const ChannelImpl = struct {
         waiter.wait(1, .allow_cancel) catch |err| {
             const was_removed = recv.asyncCancelWait(&waiter, &ctx);
             if (!was_removed) {
+                // A sender already claimed us, so the operation reports its
+                // result rather than the cancellation. The cancelable wait
+                // above consumed the request, so put it back for the next
+                // cancelable operation, as waitForIo does. A null task
+                // binding means the wait blocked the thread and consumed
+                // nothing.
                 waiter.wait(1, .no_cancel);
+                if (waiter.mode.direct.task) |t| t.recancel();
                 return recv.getResult(&ctx);
             }
             return err;
@@ -265,7 +272,11 @@ const ChannelImpl = struct {
         waiter.wait(1, .allow_cancel) catch |err| {
             const was_removed = send_op.asyncCancelWait(&waiter, &ctx);
             if (!was_removed) {
+                // See receive(): a receiver already claimed us, so the send
+                // reports its result and the consumed cancellation request
+                // goes back for the next cancelable operation.
                 waiter.wait(1, .no_cancel);
+                if (waiter.mode.direct.task) |t| t.recancel();
                 return send_op.getResult(&ctx);
             }
             return err;
@@ -2220,4 +2231,52 @@ test "Channel: a send behind a fenced receiver does not overtake the buffer" {
     try std.testing.expectEqual(.ready, recv.asyncWait(&waiter, &ctx));
     try std.testing.expectEqual(111, try recv.getResult(&ctx));
     try std.testing.expectEqual(222, try channel.tryReceive());
+}
+
+test "Channel: a receive that commits under cancellation keeps the request pending" {
+    // A sender claims the parked receiver and only then is the receiver
+    // canceled, so its cancelable wait reports the cancellation while the item
+    // is already committed to it. The receive must deliver the item rather
+    // than drop it, and because that wait consumed the cancellation request,
+    // the next cancellation point must still report it.
+    //
+    // One executor, and the send before the cancel, so the receiver cannot run
+    // in between: that pins the race to the committed branch every time.
+    const checkCancel = @import("../runtime.zig").checkCancel;
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(1) });
+    defer runtime.deinit();
+
+    const Outcome = struct {
+        received: ?u32 = null,
+        after_receive: ?anyerror = null,
+    };
+
+    const Tasks = struct {
+        fn receiver(ch: *Channel(u32), entered: *std.atomic.Value(bool), out: *Outcome) !void {
+            entered.store(true, .release);
+            const item = ch.receive() catch |err| {
+                out.after_receive = err;
+                return;
+            };
+            out.received = item;
+            out.after_receive = if (checkCancel()) |_| null else |err| err;
+        }
+    };
+
+    var buffer: [1]u32 = undefined;
+    var channel = Channel(u32).init(&buffer);
+    var entered = std.atomic.Value(bool).init(false);
+    var outcome: Outcome = .{};
+
+    var handle = try runtime.spawn(Tasks.receiver, .{ &channel, &entered, &outcome });
+    while (!entered.load(.acquire)) try yield();
+    try yield(); // let the receiver park
+
+    try channel.trySend(7);
+    handle.cancel();
+    try handle.join();
+
+    try std.testing.expectEqual(@as(?u32, 7), outcome.received);
+    try std.testing.expectEqual(@as(?anyerror, error.Canceled), outcome.after_receive);
 }
