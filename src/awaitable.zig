@@ -6,7 +6,8 @@ const builtin = @import("builtin");
 
 const RefCounter = @import("utils/ref_counter.zig").RefCounter;
 const WaitNode = @import("utils/wait_queue.zig").WaitNode;
-const Waiter = @import("common.zig").Waiter;
+const common = @import("common.zig");
+const Waiter = common.Waiter;
 const GroupNode = @import("group.zig").GroupNode;
 const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 
@@ -49,16 +50,11 @@ pub const Awaitable = struct {
         }
     }
 
-    /// Registers a waiter to be notified when the awaitable completes.
+    /// Registers a waiter to be notified when the awaitable completes, or
+    /// claims the select if it already did.
     /// This is part of the Future protocol for select().
-    /// Returns false if the awaitable is already complete (no wait needed), true if added to queue.
-    pub fn asyncWait(self: *Awaitable, waiter: *Waiter) bool {
-        // Fast path: check if already complete
-        if (self.waiting_list.isFlagSet()) {
-            return false;
-        }
-        // Try to push to queue - only succeeds if awaitable is not complete (flag not set)
-        return self.waiting_list.pushUnlessFlag(&waiter.node);
+    pub fn asyncWait(self: *Awaitable, waiter: *Waiter) common.AsyncWaitState {
+        return common.waitOnFlagQueue(&self.waiting_list, waiter);
     }
 
     /// Cancels a pending wait operation by removing the waiter.

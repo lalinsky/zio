@@ -289,7 +289,15 @@ pub const CompletionQueue = struct {
 
     pub const Result = Closeable!*Completion;
 
-    pub const WaitContext = Futex.FutexWaiter;
+    pub const WaitContext = struct {
+        fw: Futex.FutexWaiter = .{},
+        registered: bool = false,
+        /// A wake was dispatched for a dequeued registration but never
+        /// reported to the caller (the arm's claim lost before it could be):
+        /// asyncCancelWait must keep reporting it as an in-flight signal so
+        /// the caller's cleanup outwaits it.
+        pending_signal: bool = false,
+    };
 
     pub fn getResult(self: *CompletionQueue, ctx: *WaitContext) Closeable!*Completion {
         _ = ctx;
@@ -314,29 +322,62 @@ pub const CompletionQueue = struct {
         return !self.completed.isEmpty() or (self.closed and self.pending.isEmpty());
     }
 
-    pub fn asyncWait(self: *CompletionQueue, waiter: *Waiter, ctx: *WaitContext) bool {
-        // Fast path: something to report already.
-        if (self.isReady()) return false;
+    pub fn asyncWait(self: *CompletionQueue, waiter: *Waiter, ctx: *WaitContext) common.AsyncWaitState {
+        // Unhook any previous registration so a re-poll never
+        // double-registers; one that is already gone was dequeued and
+        // signaled without a claim. The signal stays owed (pending_signal)
+        // until a return value reports it to the caller.
+        const had_signal = ctx.pending_signal or (ctx.registered and !Futex.cancelWait(&ctx.fw));
+        ctx.registered = false;
+        ctx.pending_signal = had_signal;
+
+        // Fast path: something to report already. Readiness is level state
+        // under the single-driver rule (only this task takes completions
+        // out), so claiming before the getResult pop cannot go stale.
+        if (self.isReady()) {
+            return switch (waiter.tryClaim()) {
+                .won => blk: {
+                    ctx.pending_signal = false;
+                    break :blk if (had_signal) .ready_signaled else .ready;
+                },
+                .busy => unreachable,
+                .lost => .decided,
+            };
+        }
 
         // Park on the completion futex word.
-        Futex.prepareWait(&self.signal.raw, ctx, waiter);
+        Futex.prepareWait(&self.signal.raw, &ctx.fw, waiter);
+        ctx.registered = true;
 
         // Double-check: a completion or the drained close may have landed (and
         // issued its wake) between the fast-path check and the registration.
         if (self.isReady()) {
             // We removed ourselves before any wake -> report readiness now.
-            if (Futex.cancelWait(ctx)) return false;
-            // A concurrent wake already dequeued us; the signal is in-flight.
-            return true;
+            if (Futex.cancelWait(&ctx.fw)) {
+                ctx.registered = false;
+                return switch (waiter.tryClaim()) {
+                    .won => blk: {
+                        ctx.pending_signal = false;
+                        break :blk if (had_signal) .ready_signaled else .ready;
+                    },
+                    .busy => unreachable,
+                    .lost => .decided,
+                };
+            }
+            // A concurrent wake already dequeued us; the signal (and its
+            // claim attempt) is in-flight.
         }
 
-        return true;
+        ctx.pending_signal = false;
+        return if (had_signal) .requeued else .queued;
     }
 
     pub fn asyncCancelWait(self: *CompletionQueue, waiter: *Waiter, ctx: *WaitContext) bool {
         _ = self;
         _ = waiter;
-        return Futex.cancelWait(ctx);
+        if (ctx.pending_signal) return false;
+        if (!ctx.registered) return true;
+        return Futex.cancelWait(&ctx.fw);
     }
 
     /// What `cancelAll` does with the results of the operations it waited for.

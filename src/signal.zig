@@ -6,8 +6,9 @@ const builtin = @import("builtin");
 const posix = @import("os/posix.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const Group = @import("group.zig").Group;
-const Cancelable = @import("common.zig").Cancelable;
-const Timeoutable = @import("common.zig").Timeoutable;
+const common = @import("common.zig");
+const Cancelable = common.Cancelable;
+const Timeoutable = common.Timeoutable;
 const Timeout = @import("time.zig").Timeout;
 const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const WaitNode = @import("utils/wait_queue.zig").WaitNode;
@@ -350,18 +351,37 @@ pub const Signal = struct {
         _ = self.entry.counter.swap(0, .acquire);
     }
 
-    /// Registers a waiter to be notified when the signal is received.
+    /// Registers a waiter to be notified when the signal is received, or
+    /// claims the select if one already was.
     /// This is part of the Future protocol for select().
-    /// Returns false if the signal was already received (no wait needed), true if added to wait queue.
-    pub fn asyncWait(self: *Signal, waiter: *Waiter) bool {
-        // Fast path: signal already received
-        if (self.entry.counter.swap(0, .acquire) > 0) {
-            return false;
+    pub fn asyncWait(self: *Signal, waiter: *Waiter) common.AsyncWaitState {
+        // Unhook any previous registration so a re-poll never
+        // double-registers; one that is already gone was popped and signaled
+        // by the handler without a claim. A direct waiter is never
+        // re-polled, so it never has a registration to unhook.
+        const had_registration = !waiter.isDirect() and self.entry.waiters.remove(&waiter.node);
+
+        const n = self.entry.counter.swap(0, .acquire);
+        if (n > 0) {
+            switch (waiter.tryClaim()) {
+                .won => return if (had_registration) .ready else .ready_signaled,
+                .busy => unreachable,
+                .lost => {
+                    // A lost arm may not consume: the count is additive, so
+                    // put it back and re-broadcast to waiters that may have
+                    // gone back to sleep while we held it.
+                    _ = self.entry.counter.fetchAdd(n, .release);
+                    while (self.entry.waiters.pop()) |wait_node| {
+                        Waiter.fromNode(wait_node).signal();
+                    }
+                    return .decided;
+                },
+            }
         }
 
         // Add to wait queue
         self.entry.waiters.push(&waiter.node);
-        return true;
+        return if (had_registration) .queued else .requeued;
     }
 
     /// Cancels a pending wait operation by removing the waiter.
@@ -615,4 +635,44 @@ test "Signal: select with signal and task" {
     try sender.join();
 
     try std.testing.expectEqual(.signal, winner);
+}
+
+test "Signal: a delivery that races the commit fence is not lost" {
+    // The handler pops every waiter and signals it. When the select's sweep
+    // holds the commit fence for another arm, that signal cannot claim the
+    // winner word, and a re-poll afterwards need not recover it: a second
+    // waiter can consume the shared counter first. The bounced arm must be
+    // recorded instead, matching Signal.wait(), which returns on the signal
+    // without requiring the counter.
+    const NO_WINNER = common.NO_WINNER;
+
+    var sig = try Signal.init(.interrupt);
+    defer sig.deinit();
+
+    var parent = Waiter.init();
+    var winner: std.atomic.Value(usize) = .init(NO_WINNER);
+    var gen: std.atomic.Value(u32) = .init(0);
+    var pending: std.atomic.Value(usize) = .init(NO_WINNER);
+    var waiter = Waiter.initSelect(&parent, &winner, &gen, &pending, 2);
+
+    try std.testing.expectEqual(.requeued, sig.asyncWait(&waiter));
+
+    // Owner's sweep is committing a different arm when the signal arrives.
+    winner.store(common.COMMITTING, .seq_cst);
+    _ = sig.entry.counter.fetchAdd(1, .release);
+    while (sig.entry.waiters.pop()) |node| Waiter.fromNode(node).signal();
+
+    // A peer waiter drains the counter before we get to look again.
+    winner.store(NO_WINNER, .seq_cst);
+    _ = sig.entry.counter.swap(0, .acquire);
+
+    // Re-polling cannot see it: the counter is gone.
+    try std.testing.expectEqual(.requeued, sig.asyncWait(&waiter));
+
+    // The arm's identity survived, so the select still reports it.
+    try std.testing.expectEqual(2, pending.load(.acquire));
+    try std.testing.expect(Waiter.promotePending(&winner, &pending));
+    try std.testing.expectEqual(2, winner.load(.acquire));
+
+    _ = sig.asyncCancelWait(&waiter);
 }
