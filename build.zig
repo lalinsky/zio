@@ -59,7 +59,13 @@ pub fn build(b: *std.Build) void {
     docs_step.dependOn(&install_docs.step);
 
     // Examples configuration
-    const examples = [_]struct { name: []const u8, file: []const u8 }{
+    const examples = [_]struct {
+        name: []const u8,
+        file: []const u8,
+        /// Uses POSIX-only APIs (socketpair, fcntl) and does not build for
+        /// Windows.
+        posix_only: bool = false,
+    }{
         .{ .name = "hello-world", .file = "examples/hello_world.zig" },
         .{ .name = "sleep", .file = "examples/sleep.zig" },
         .{ .name = "tcp-echo-server", .file = "examples/tcp_echo_server.zig" },
@@ -77,7 +83,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "coro-demo", .file = "examples/coro_demo.zig" },
         .{ .name = "ev-demo", .file = "examples/ev_demo.zig" },
         .{ .name = "stderr-smoke", .file = "examples/stderr_smoke.zig" },
-        .{ .name = "cq-spurious-select-repro", .file = "examples/cq_spurious_select_repro.zig" },
+        .{ .name = "cq-spurious-select-repro", .file = "examples/cq_spurious_select_repro.zig", .posix_only = true },
         .{ .name = "cq-two-driver-misuse", .file = "examples/cq_two_driver_misuse.zig" },
     };
 
@@ -89,6 +95,13 @@ pub fn build(b: *std.Build) void {
     // Create example executables
     for (examples) |example| {
         if (only_example) |name| if (!std.mem.eql(u8, name, example.name)) continue;
+        if (example.posix_only and target.result.os.tag == .windows) {
+            if (only_example != null) {
+                const fail = b.addFail(b.fmt("{s} uses POSIX-only APIs and does not build for Windows", .{example.name}));
+                examples_step.dependOn(&fail.step);
+            }
+            continue;
+        }
         const exe = b.addExecutable(.{
             .name = example.name,
             .root_module = b.createModule(.{

@@ -8,12 +8,13 @@
 //!
 //!   CompletionQueue: selected from two tasks; one task must drive the queue
 //!
-//! so a harness runs it and checks for a NON-zero exit. Exit 0 means the
-//! misuse was silently accepted, which is the failure this example exists
-//! to catch. (The pre-claims protocol accepted it silently and corrupted
-//! the claim accounting instead: each driver could take a valid claim on
-//! one completion, and one select later won with nothing to take,
-//! surfacing as a `getResult` assert far from the cause.)
+//! A harness accepts only that abort (SIGABRT, or the message). Exit 3
+//! means the misuse ran for the full window without a panic: the check
+//! failed. Any other exit means the example itself failed to run. (The
+//! pre-claims protocol accepted two drivers silently and corrupted the
+//! claim accounting instead: each driver could take a valid claim on one
+//! completion, and one select later won with nothing to take, surfacing
+//! as a `getResult` assert far from the cause.)
 //!
 //! Run: `zig build examples -Dexample=cq-two-driver-misuse && ./zig-out/bin/cq-two-driver-misuse`
 const std = @import("std");
@@ -72,5 +73,5 @@ pub fn main(init: std.process.Init) !void {
     try handle.join();
 
     std.debug.print("MISUSE NOT DETECTED: two drivers ran without a panic\n", .{});
-    std.process.exit(0);
+    std.process.exit(3);
 }
