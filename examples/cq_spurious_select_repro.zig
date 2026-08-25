@@ -73,6 +73,15 @@ fn driver(sh: *Shared, generations: u64, selects_per_gen: u64, spurious: *std.at
         defer sh.feed_fd.store(-1, .release);
 
         var cq = zio.CompletionQueue.init();
+        // Error paths (the SPURIOUS detection included) must not unwind past
+        // live operations: their callbacks would touch this dead frame. The
+        // normal path runs the explicit teardown at the end of the
+        // generation instead, so this fires only on early returns.
+        errdefer {
+            cq.close();
+            cq.cancelAll(.keep);
+            while (cq.next()) |_| {}
+        }
         var recv_buf: [64]u8 = undefined;
         var iov: [1]std.c.iovec = undefined;
         var recv_op = zio.ev.NetRecv.init(fds[0], zio.ev.ReadBuf.fromSlice(&recv_buf, &iov), .{});
