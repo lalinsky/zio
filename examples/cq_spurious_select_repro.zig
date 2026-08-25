@@ -34,26 +34,14 @@ const zio = @import("zio");
 const Shared = struct {
     ch: *zio.Channel(u64),
     stop: std.atomic.Value(bool) = .init(false),
-    /// The write end of the driver's current socketpair, -1 between
-    /// generations. The flooder feeds it so recv completions keep coming
-    /// from the backend's harvest path. Guarded by `feed_mu`, together
-    /// with the close of the descriptor: an atomic value alone does not
-    /// protect the descriptor lifetime, and a write racing the close
-    /// could land on a reused descriptor number.
-    feed_mu: zio.Mutex = .init,
-    feed_fd: std.c.fd_t = -1,
 };
 
 fn flooder(sh: *Shared) !void {
-    // Keep the channel arm ready most of the time, and keep the driver's
-    // socket fed; yield so the driver runs.
+    // Keep the channel arm ready most of the time; yield so the driver
+    // runs. The driver feeds its own socket (see the select loop), so the
+    // descriptor has exactly one owner and no cross-task lifetime.
     while (!sh.stop.load(.acquire)) {
         sh.ch.trySend(1) catch {};
-        {
-            try sh.feed_mu.lock();
-            defer sh.feed_mu.unlock();
-            if (sh.feed_fd >= 0) _ = std.c.write(sh.feed_fd, "y", 1);
-        }
         try zio.yield();
     }
 }
@@ -72,23 +60,14 @@ fn driver(sh: *Shared, generations: u64, selects_per_gen: u64, spurious: *std.at
             const fl = std.c.fcntl(fd, std.c.F.GETFL, @as(c_int, 0));
             _ = std.c.fcntl(fd, std.c.F.SETFL, fl | @as(c_int, 1 << @bitOffsetOf(std.c.O, "NONBLOCK")));
         }
-        // Prime some bytes so recv completes quickly, and keep feeding.
+        // Runs after the queue teardown below: the operations reference
+        // these fds. Only this task writes or closes them, so there is no
+        // descriptor lifetime to synchronize.
+        defer _ = std.c.close(fds[0]);
+        defer _ = std.c.close(fds[1]);
+        // Prime some bytes so recv completes quickly; the select loop
+        // below keeps feeding.
         _ = std.c.write(fds[1], "xxxxxxxx", 8);
-        {
-            try sh.feed_mu.lock();
-            defer sh.feed_mu.unlock();
-            sh.feed_fd = fds[1];
-        }
-        // Clear and close under one mutex hold, so the flooder can never
-        // write to a closed (and possibly reused) descriptor. Runs after
-        // the queue teardown below: the operations reference these fds.
-        defer {
-            sh.feed_mu.lockUncancelable();
-            defer sh.feed_mu.unlock();
-            sh.feed_fd = -1;
-            _ = std.c.close(fds[0]);
-            _ = std.c.close(fds[1]);
-        }
 
         var cq = zio.CompletionQueue.init();
         // Error paths (the SPURIOUS detection included) must not unwind past
@@ -110,6 +89,10 @@ fn driver(sh: *Shared, generations: u64, selects_per_gen: u64, spurious: *std.at
 
         var s: u64 = 0;
         while (s < selects_per_gen) : (s += 1) {
+            // Feed the socket from the owning task, between selects, so
+            // recv completions keep coming from the backend's harvest
+            // path (nonblocking; a full buffer just skips a beat).
+            _ = std.c.write(fds[1], "y", 1);
             const winner = try zio.select(.{
                 .io = &cq,
                 .msg = sh.ch.asyncReceive(),
