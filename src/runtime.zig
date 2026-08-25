@@ -773,7 +773,9 @@ pub const Executor = struct {
 
             // Retune the tick budget from this batch. Skipped when we may have
             // slept in parkAndSearch — sleep time would poison the estimate.
-            const tick_now = Timestamp.now(.monotonic);
+            // The cached snapshot: every path above ends in a `loop.poll`,
+            // which refreshes it on return.
+            const tick_now = self.loop.now();
             // Skip the retune on the fresh-drain entry pass: tick_task_count
             // still holds quanta spent before run() was entered, while
             // tick_started_at was just reset, so the pair would yield a bogus

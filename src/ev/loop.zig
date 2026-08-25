@@ -234,7 +234,7 @@ pub const LoopState = struct {
     wake_requested: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     /// Cached "now" per wall clock, indexed by `clockIndex`. `awake` is
-    /// refreshed eagerly once per scan (`updateNow`); `boot`/`real` are
+    /// refreshed eagerly at the start of each scan (`updateNow`); `boot`/`real` are
     /// refreshed lazily on first use within a scan and cached for the rest of
     /// it. `tick` is a monotonically increasing scan counter; `now_tick[i]`
     /// records the scan that `now[i]` was last filled, so a mismatch refreshes.
@@ -382,6 +382,8 @@ pub const LoopState = struct {
 
     /// Advance the scan counter and refresh the awake snapshot. Bumping `tick`
     /// invalidates the lazily-cached boot/real values for the new scan.
+    /// Owner-thread only, so no timer lock: the cross-thread `clearTimer`
+    /// never reads `now`/`tick`.
     pub fn updateNow(self: *LoopState) void {
         self.tick +%= 1;
         self.now[0] = time.now(.monotonic);
@@ -963,6 +965,8 @@ pub const Loop = struct {
         fired: bool,
     };
 
+    /// Fire every timer whose deadline has passed and report the earliest one
+    /// still pending. Scans against the current snapshot; `poll` owns the tick.
     fn checkTimers(self: *Loop) TimerCheckResult {
         const native_wall = Backend.native_wall_timers;
 
@@ -1384,6 +1388,8 @@ pub const Loop = struct {
         if (self.done()) return;
 
         const wait = wait_cap.value != 0;
+
+        self.state.updateNow();
         const timer_result = self.checkTimers();
 
         // Re-send SIGURG to any worker still blocked in a canceled syscall.
@@ -1415,19 +1421,11 @@ pub const Loop = struct {
         // This avoids syscall overhead for pure CPU-bound workloads.
         const should_poll = wait or self.backend.hasInflight();
         const wake_flags = self.state.wake_requested.swap(0, .acq_rel);
-        const backend_timeout: Duration = if (wake_flags != 0) .zero else timeout;
-        const timed_out = if (should_poll) try self.backend.poll(&self.state, backend_timeout) else false;
+        const timed_out = if (should_poll) try self.backend.poll(&self.state, if (wake_flags != 0) .zero else timeout) else false;
 
-        // The single refresh point of the awake snapshot (plus `setTimer`).
-        // Refreshing here rather than at the top of `checkTimers` puts the
-        // fresh value where it is consumed: everything that runs before the
-        // next poll — completion callbacks below, and the caller's task batch
-        // after this returns — computes `.duration` timer deadlines from this
-        // snapshot via `armTimer`. Before this, a poll that slept woke with a
-        // snapshot stale by the whole sleep (up to `max_wait`), and a timeout
-        // armed in that batch was already expired. Unconditional, so a
-        // CPU-bound caller polling with `.zero` refreshes each pass too; the
-        // cost is the same one clock read per poll that `checkTimers` paid.
+        // The backend poll is the only place the loop sleeps, so the snapshot
+        // is stale by the whole sleep here. Refresh before anything that can
+        // arm a timer: the callbacks below, and the caller's task batch.
         self.state.updateNow();
 
         // Process async handles if the async bit was set
@@ -1443,7 +1441,8 @@ pub const Loop = struct {
         // Process any work completions from thread pool
         self.processCompletions();
 
-        // Only check timers again if we timed out (avoids syscall when woken by I/O)
+        // Only if we timed out: the timeout was the earliest deadline, so
+        // waking ahead of it means nothing has expired.
         if (timed_out) {
             _ = self.checkTimers();
         }
