@@ -1471,3 +1471,209 @@ test "CompletionQueue: generic wait() on the queue" {
     try std.testing.expectEqual(&timer.c, try result.value);
     try std.testing.expect(cq.isEmpty());
 }
+
+test "CompletionQueue: close claims the drained state to a parked select" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+
+    const Driver = struct {
+        const select = @import("select.zig").select;
+
+        fn run(cq_: *CompletionQueue) !void {
+            const result = try select(.{ .io = cq_ });
+            try std.testing.expectError(error.Closed, result.io);
+        }
+    };
+    var handle = try rt.spawn(Driver.run, .{&cq});
+    defer handle.cancel();
+
+    // Let the driver park on the empty open queue, then close it. Nothing
+    // is pending, so the close is what drains the queue: it must claim the
+    // parked select and deliver `error.Closed` through the claim protocol.
+    var pause = ev.Timer.init(.{ .duration = .fromMilliseconds(20) });
+    try common.waitForIo(&pause.c);
+    cq.close();
+    try handle.join();
+}
+
+test "CompletionQueue: a close racing the claim delivers the completion, then error.Closed" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    // Race a thread-safe `close` against the completion of an in-flight
+    // operation while the driver selects. Whatever interleaves - the claim
+    // beats the close, the close finds the completion already in
+    // `completed`, or the close drains first and the callback claims later
+    // - the completion must be delivered exactly once, and `error.Closed`
+    // only after it.
+    const Driver = struct {
+        const select = @import("select.zig").select;
+
+        fn run(cq_: *CompletionQueue, timer: *ev.Timer) !u32 {
+            var delivered: u32 = 0;
+            while (true) {
+                const result = try select(.{ .io = cq_ });
+                const c = result.io catch break;
+                try std.testing.expectEqual(&timer.c, c);
+                delivered += 1;
+            }
+            return delivered;
+        }
+    };
+
+    var round: u32 = 0;
+    while (round < 50) : (round += 1) {
+        var cq = CompletionQueue.init();
+        var timer = ev.Timer.init(.{ .duration = .fromMicroseconds(round % 7 * 100) });
+        try cq.submit(&timer.c);
+
+        var handle = try rt.spawn(Driver.run, .{ &cq, &timer });
+
+        // Vary the close's landing spot relative to the completion.
+        var spin: u32 = 0;
+        while (spin < round % 5) : (spin += 1) {
+            try @import("runtime.zig").yield();
+        }
+        cq.close();
+
+        const delivered = try handle.join();
+        try std.testing.expectEqual(1, delivered);
+        try std.testing.expect(cq.isDrained());
+    }
+}
+
+test "CompletionQueue: callbacks racing cancelAll(.keep) conserve every completion" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    // A spread of durations so that when `cancelAll` runs, some operations
+    // are already in `completed`, some are completing on the loops right
+    // now (their callbacks racing the drain), and some are still pending
+    // and get canceled. Every one of them must come out exactly once.
+    var timers: [64]ev.Timer = undefined;
+    var cq = CompletionQueue.init();
+    for (&timers, 0..) |*t, i| {
+        t.* = ev.Timer.init(.{ .duration = .fromMicroseconds(i * 50) });
+        try cq.submit(&t.c);
+    }
+
+    // Let a prefix of them land.
+    var pause = ev.Timer.init(.{ .duration = .fromMilliseconds(1) });
+    try common.waitForIo(&pause.c);
+
+    cq.cancelAll(.keep);
+    try std.testing.expect(!cq.hasPending());
+
+    var seen: usize = 0;
+    while (cq.next()) |_| seen += 1;
+    try std.testing.expectEqual(timers.len, seen);
+    try std.testing.expect(cq.isEmpty());
+}
+
+test "CompletionQueue: a claim landing on a canceled select is delivered, never dropped" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    // Cancel the selecting driver while a notify races toward it. The
+    // select either reports `error.Canceled` with the completion still
+    // takeable from the queue, or delivers the claimed completion (#700:
+    // a claimed winner is delivered even on the canceled path). Delivered
+    // AND still in the queue, or neither, is the conservation failure this
+    // pins down.
+    const Driver = struct {
+        const select = @import("select.zig").select;
+
+        fn run(cq_: *CompletionQueue, expected: *ev.Completion) (Cancelable || Closeable)!bool {
+            const result = try select(.{ .io = cq_ });
+            const c = try result.io;
+            return c == expected;
+        }
+    };
+
+    var round: u32 = 0;
+    while (round < 200) : (round += 1) {
+        var cq = CompletionQueue.init();
+        var mail = ev.Async.init();
+        try cq.submit(&mail.c);
+
+        var handle = try rt.spawn(Driver.run, .{ &cq, &mail.c });
+
+        // Vary where the cancel lands relative to the notify's claim.
+        var spin: u32 = 0;
+        while (spin < round % 4) : (spin += 1) {
+            try @import("runtime.zig").yield();
+        }
+        mail.notify();
+        handle.cancel();
+
+        if (handle.join()) |was_expected| {
+            // The claim won: the completion left the queue with the select.
+            try std.testing.expect(was_expected);
+            try std.testing.expect(cq.isEmpty());
+        } else |err| {
+            try std.testing.expectEqual(error.Canceled, err);
+            // No claim: the completion stays at its source.
+            const c = try cq.timedWait(.fromSeconds(5));
+            try std.testing.expectEqual(&mail.c, c);
+            try std.testing.expect(cq.isEmpty());
+        }
+    }
+}
+
+test "CompletionQueue: teardown drain leaves the queue memory quiescent" {
+    var rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
+    defer rt.deinit();
+
+    // The documented stack teardown (`defer cq.cancelAll(.discard)`) frees
+    // the queue the moment the drain returns, so the drain observing
+    // `pending` empty must mean no callback will touch the queue's memory
+    // again. Poison the struct right after the drain and keep watching it:
+    // a straggling `fetchAdd` on the signal word (the pre-claims protocol
+    // issued it outside the mutex, in the gap after its `completed` push
+    // became visible) flips the poison. Instrument validation: with that
+    // gap artificially widened to 50us this fails every run, and the flip
+    // is the fetchAdd's +1 on a poison byte; at the real gap's width (two
+    // instructions) a black-box watch needs the OS to preempt exactly
+    // there, so a pass is one more clean sample, while a failure is
+    // definitive. The enforced protection is the code shape: the write
+    // sits inside the critical section the drain synchronizes on.
+    // The interleaving needs completions on SEVERAL loops: with one loop,
+    // the wake that lets the drain observe `pending` empty is always the
+    // last callback's own, which follows its signal-word write. Submitting
+    // from parallel tasks puts each batch on the submitter's loop, so one
+    // loop's final wake can release the drain while another loop's final
+    // callback is still between its unlock and its write.
+    const Submitter = struct {
+        fn run(cq_: *CompletionQueue, timers: []ev.Timer) !void {
+            for (timers) |*t| {
+                // Long timers, so every completion is a cancellation
+                // delivered in a burst WHILE the drain runs; completions
+                // that land before `cancelAll` starts exercise nothing.
+                t.* = ev.Timer.init(.{ .duration = .fromSeconds(10) });
+                try cq_.submit(&t.c);
+            }
+        }
+    };
+
+    var round: u32 = 0;
+    while (round < 200) : (round += 1) {
+        var cq = CompletionQueue.init();
+        var timers: [64]ev.Timer = undefined;
+        var subs: [4]@TypeOf(try rt.spawn(Submitter.run, .{ &cq, timers[0..0] })) = undefined;
+        for (&subs, 0..) |*h, i| {
+            h.* = try rt.spawn(Submitter.run, .{ &cq, timers[i * 16 ..][0..16] });
+        }
+        for (&subs) |*h| try h.join();
+        cq.cancelAll(.discard);
+
+        @memset(std.mem.asBytes(&cq), 0xAA);
+        var checks: u32 = 0;
+        while (checks < 500) : (checks += 1) {
+            for (std.mem.asBytes(&cq)) |b| {
+                try std.testing.expectEqual(0xAA, b);
+            }
+        }
+    }
+}
