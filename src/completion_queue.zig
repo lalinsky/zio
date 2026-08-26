@@ -10,7 +10,8 @@
 //! Runtime-only: must be used from within an async task context.
 //!
 //! One task drives the queue: `wait`, `timedWait`, `next`, `cancel` and
-//! `cancelAll` belong to it. `submit` and `close` are thread-safe, so other
+//! `cancelAll` belong to it, and the rule is enforced: any of them called
+//! while another task's select is parked on the queue panics. `submit` and `close` are thread-safe, so other
 //! tasks can park their own operations here for the driver to process. An
 //! operation submitted from another task must not live in that task's frame:
 //! the submitter may unwind before the driver takes the completion, so such
@@ -77,19 +78,35 @@ pub const CompletionQueue = struct {
     mutex: os.Mutex,
     pending: Queue,
     completed: Queue,
-    /// Futex word the driver waits on. Counts completion arrivals and a close
-    /// with nothing in flight (a close over in-flight operations stays silent,
-    /// each of them wakes the driver on its own way to `completed`). Never
-    /// reset: waiters snapshot it before checking the queues, so a push
-    /// landing between the check and the wait flips the word and the wait
-    /// returns immediately. The future protocol depends on the strict reading
-    /// of a wake: a completion is takeable, or the queue is drained.
+    /// Futex word the blocking driver paths (`wait`, `timedWait`, `cancel`,
+    /// `cancelAll`) snapshot and park on. Counts completion arrivals and a
+    /// close with nothing in flight (a close over in-flight operations stays
+    /// silent, each of them wakes the driver on its own way to `completed`).
+    /// Never reset: waiters snapshot it before checking the queues, so a
+    /// push landing between the check and the wait flips the word and the
+    /// wait returns immediately. Those paths re-check the queues on every
+    /// wake, so a wake here carries no claim; the future protocol does not
+    /// park on this word at all (see `reg`).
     signal: std.atomic.Value(u32),
+    /// The future-protocol registration: the one select (or generic wait)
+    /// currently parked on this queue. Guarded by `mutex`. A producer that
+    /// makes the queue ready claims the waiter, deposits the completion (or
+    /// the drained state) into its context, and clears this slot in the
+    /// same critical section, then sends the claim's one signal. A signal
+    /// therefore always carries a deposit and cannot outlive its select. A
+    /// non-null slot also witnesses the single-driver rule; the driver-only
+    /// entry points panic on it.
+    reg: ?Registration,
     /// No new submissions. Written under `mutex`.
     closed: bool,
 
     const GroupNode = @FieldType(Completion, "group");
     const Queue = SimpleQueue(GroupNode);
+
+    const Registration = struct {
+        waiter: *Waiter,
+        ctx: *WaitContext,
+    };
 
     pub fn init() CompletionQueue {
         return .{
@@ -97,6 +114,7 @@ pub const CompletionQueue = struct {
             .pending = .empty,
             .completed = .empty,
             .signal = .init(0),
+            .reg = null,
             .closed = false,
         };
     }
@@ -153,16 +171,27 @@ pub const CompletionQueue = struct {
         const was_closed = self.closed;
         self.closed = true;
         const pending_empty = self.pending.isEmpty();
-        self.mutex.unlock();
-        if (was_closed) return;
 
         // Wake only when this close is what makes the queue drained: a driver
         // parked over in-flight operations has nothing new to see, and each of
         // those operations wakes it through `ownerCallback` later.
-        if (pending_empty) {
-            _ = self.signal.fetchAdd(1, .release);
-            Futex.wake(&self.signal.raw, 1);
+        if (was_closed or !pending_empty) {
+            self.mutex.unlock();
+            return;
         }
+
+        // A parked select gets the wake through the claim protocol: what it
+        // carries is a leftover completion if one is still in `completed`,
+        // or the drained state.
+        if (self.claimToRegistered()) |r| {
+            self.mutex.unlock();
+            r.waiter.signal();
+            return;
+        }
+
+        _ = self.signal.fetchAdd(1, .release);
+        self.mutex.unlock();
+        Futex.wake(&self.signal.raw, 1);
     }
 
     /// Wait for the next completion. Blocks while the queue is open, even if
@@ -181,6 +210,7 @@ pub const CompletionQueue = struct {
             const seen = self.signal.load(.acquire);
 
             self.mutex.lock();
+            self.checkSingleDriverLocked();
             const node = self.completed.pop();
             const drained = node == null and self.closed and self.pending.isEmpty();
             self.mutex.unlock();
@@ -214,6 +244,7 @@ pub const CompletionQueue = struct {
             const seen = self.signal.load(.acquire);
 
             self.mutex.lock();
+            self.checkSingleDriverLocked();
             const node = self.completed.pop();
             const drained = node == null and self.closed and self.pending.isEmpty();
             self.mutex.unlock();
@@ -262,10 +293,24 @@ pub const CompletionQueue = struct {
         return !self.completed.isEmpty();
     }
 
+    /// Whether the queue is closed AND fully drained: no pending operation
+    /// can deliver another completion, and none is waiting to be taken. This
+    /// is the terminal state that `wait` and a select's queue arm report as
+    /// `error.Closed`. `isClosed` alone would be the wrong stop predicate
+    /// for a driver: a `close` raced in with operations still in flight
+    /// reads closed while `ownerCallback` will still deliver their
+    /// completions, and a driver stopping there leaks them.
+    pub fn isDrained(self: *CompletionQueue) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.closed and self.pending.isEmpty() and self.completed.isEmpty();
+    }
+
     /// Non-blocking poll for the next completed operation.
     /// Returns null if no completions are ready yet.
     pub fn next(self: *CompletionQueue) ?*Completion {
         self.mutex.lock();
+        self.checkSingleDriverLocked();
         const node = self.completed.pop();
         self.mutex.unlock();
 
@@ -275,109 +320,146 @@ pub const CompletionQueue = struct {
         return null;
     }
 
+    /// The registered select IS the driver's wait, so a second consumer in
+    /// a driver-only entry point is a second driver. The slot makes the old
+    /// silent failure (two valid claims on one completion) one pointer
+    /// check. The caller holds the mutex.
+    fn checkSingleDriverLocked(self: *CompletionQueue) void {
+        if (self.reg != null) {
+            @panic("CompletionQueue: driven by two tasks (a select is parked on the queue); one task must own wait/next/cancel/cancelAll");
+        }
+    }
+
     // Future protocol implementation for use with select() / wait().
     //
     // The registered wait completes when a completion is ready to be taken or
-    // the queue is drained; `getResult` then pops one like `next`, or reports
-    // `error.Closed`. The single-driver rule applies: a select over the queue
-    // is the driver's wait. Canceling the select only deregisters; it does not
-    // close the queue or cancel the operations in it the way a canceled
-    // `wait()` does, that cleanup is the caller's to do.
+    // the queue is drained. The single-driver rule applies: a select over the
+    // queue is the driver's wait. Canceling the select only deregisters; it
+    // does not close the queue or cancel the operations in it the way a
+    // canceled `wait()` does, that cleanup is the caller's to do.
     //
-    // Registration parks on the same futex word that `ownerCallback` and a
-    // drained `close` wake, so the queue needs no waiter storage.
+    // Producer-claims discipline: `asyncWait` checks readiness and stores
+    // the waiter in `reg` in one critical section, so there is no
+    // check-then-park window. A producer that makes the queue ready claims
+    // the waiter, deposits into its context, and clears the slot under the
+    // same mutex, then signals once. Deregistration takes the same mutex,
+    // so removal and claim exclude each other: removed means no signal is
+    // ever sent, claimed means the deposit is in hand and one signal is
+    // accounted. A signal without a deposit cannot exist, which is what
+    // rules out a stale wake crossing select generations (the previous
+    // protocol parked registrations on the `signal` futex word, where a
+    // wake dispatched in the publish-to-wake gap could outlive its select
+    // and claim a later one with the queue empty and open).
 
     pub const Result = Closeable!*Completion;
 
     pub const WaitContext = struct {
-        fw: Futex.FutexWaiter = .{},
+        /// True while this context sits in the queue's `reg` slot. Mirrors
+        /// the slot exactly; both change together under the queue mutex.
         registered: bool = false,
-        /// A wake was dispatched for a dequeued registration but never
-        /// reported to the caller (the arm's claim lost before it could be):
-        /// asyncCancelWait must keep reporting it as an in-flight signal so
-        /// the caller's cleanup outwaits it.
-        pending_signal: bool = false,
+        /// The completion the winning claim popped from `completed`, by the
+        /// producer at claim time or by the driver's own ready fast path.
+        /// Consumed by `getResult`. An abandoned direct wait restores it to
+        /// the queue in `asyncCancelWait`; a select waiter never abandons a
+        /// deposit (a claimed select arm is the winner, and select delivers
+        /// its winner even when canceled).
+        claimed: ?*Completion = null,
+        /// The winning claim found the queue drained: `getResult` reports
+        /// `error.Closed`.
+        drained: bool = false,
     };
 
     pub fn getResult(self: *CompletionQueue, ctx: *WaitContext) Closeable!*Completion {
-        _ = ctx;
-        self.mutex.lock();
-        const node = self.completed.pop();
-        const drained = node == null and self.closed and self.pending.isEmpty();
-        self.mutex.unlock();
-
-        if (node) |n| return completionFromGroup(n);
-        // A wake on `signal` means a completion was pushed (and only the
-        // caller, as the driver, takes completions out) or the queue is
-        // drained; a close over in-flight operations stays silent.
-        std.debug.assert(drained);
+        _ = self;
+        if (ctx.claimed) |c| {
+            ctx.claimed = null;
+            return c;
+        }
+        // A won CQ arm always carries its deposit: the claim popped the
+        // completion, or latched the drained state, in the same critical
+        // section that decided the winner word. Reaching here with neither
+        // is a protocol violation.
+        std.debug.assert(ctx.drained);
         return error.Closed;
     }
 
-    /// Whether a registered wait would have something to report: a takeable
-    /// completion, or the drained state behind `error.Closed`.
-    fn isReady(self: *CompletionQueue) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        return !self.completed.isEmpty() or (self.closed and self.pending.isEmpty());
-    }
-
     pub fn asyncWait(self: *CompletionQueue, waiter: *Waiter, ctx: *WaitContext) common.AsyncWaitState {
-        // Unhook any previous registration so a re-poll never
-        // double-registers; one that is already gone was dequeued and
-        // signaled without a claim. The signal stays owed (pending_signal)
-        // until a return value reports it to the caller.
-        const had_signal = ctx.pending_signal or (ctx.registered and !Futex.cancelWait(&ctx.fw));
-        ctx.registered = false;
-        ctx.pending_signal = had_signal;
+        self.mutex.lock();
 
-        // Fast path: something to report already. Readiness is level state
-        // under the single-driver rule (only this task takes completions
-        // out), so claiming before the getResult pop cannot go stale.
-        if (self.isReady()) {
-            return switch (waiter.tryClaim()) {
-                .won => blk: {
-                    ctx.pending_signal = false;
-                    break :blk if (had_signal) .ready_signaled else .ready;
-                },
-                .busy => unreachable,
-                .lost => .decided,
-            };
+        // A producer claimed to this context since the last poll: the winner
+        // word already holds this arm and exactly one signal was sent (it
+        // may still be in flight). Never taken on a first call: a fresh
+        // context has no deposit, so the sweep cannot see this state.
+        if (ctx.claimed != null or ctx.drained) {
+            self.mutex.unlock();
+            return .ready_signaled;
         }
 
-        // Park on the completion futex word.
-        Futex.prepareWait(&self.signal.raw, &ctx.fw, waiter);
-        ctx.registered = true;
-
-        // Double-check: a completion or the drained close may have landed (and
-        // issued its wake) between the fast-path check and the registration.
-        if (self.isReady()) {
-            // We removed ourselves before any wake -> report readiness now.
-            if (Futex.cancelWait(&ctx.fw)) {
+        if (!self.completed.isEmpty() or (self.closed and self.pending.isEmpty())) {
+            // Unhook before claiming so a lost claim leaves no registration
+            // behind. Under the mutex this cannot race a producer's claim.
+            if (ctx.registered) {
+                std.debug.assert(self.reg != null and self.reg.?.ctx == ctx);
+                self.reg = null;
                 ctx.registered = false;
-                return switch (waiter.tryClaim()) {
-                    .won => blk: {
-                        ctx.pending_signal = false;
-                        break :blk if (had_signal) .ready_signaled else .ready;
-                    },
-                    .busy => unreachable,
-                    .lost => .decided,
-                };
             }
-            // A concurrent wake already dequeued us; the signal (and its
-            // claim attempt) is in-flight.
+            switch (waiter.tryClaim()) {
+                .won => {
+                    if (self.completed.pop()) |node| {
+                        ctx.claimed = completionFromGroup(node);
+                    } else {
+                        ctx.drained = true;
+                    }
+                    self.mutex.unlock();
+                    return .ready;
+                },
+                // Only the owning select's sweep calls asyncWait, and it
+                // never holds its own commit fence while polling.
+                .busy => unreachable,
+                .lost => {
+                    self.mutex.unlock();
+                    return .decided;
+                },
+            }
         }
 
-        ctx.pending_signal = false;
-        return if (had_signal) .requeued else .queued;
+        if (!ctx.registered) {
+            if (self.reg != null) {
+                self.mutex.unlock();
+                @panic("CompletionQueue: selected from two tasks; one task must drive the queue");
+            }
+            self.reg = .{ .waiter = waiter, .ctx = ctx };
+            ctx.registered = true;
+        }
+        self.mutex.unlock();
+        return .queued;
     }
 
     pub fn asyncCancelWait(self: *CompletionQueue, waiter: *Waiter, ctx: *WaitContext) bool {
-        _ = self;
-        _ = waiter;
-        if (ctx.pending_signal) return false;
-        if (!ctx.registered) return true;
-        return Futex.cancelWait(&ctx.fw);
+        self.mutex.lock();
+        if (ctx.registered) {
+            std.debug.assert(self.reg != null and self.reg.?.ctx == ctx);
+            self.reg = null;
+            ctx.registered = false;
+            self.mutex.unlock();
+            // Removed before any claim: no signal was or will be sent.
+            return true;
+        }
+        const was_claimed = ctx.claimed != null or ctx.drained;
+        if (was_claimed and waiter.isDirect()) {
+            // A canceled generic wait abandons its deposit: put the
+            // completion back so it stays takeable (the drained state is
+            // re-derivable). A select waiter never abandons a deposit; a
+            // deposit means the winner word holds this arm, and select
+            // delivers its winner even on the canceled path.
+            if (ctx.claimed) |c| {
+                self.completed.push(&c.group);
+                ctx.claimed = null;
+            }
+        }
+        self.mutex.unlock();
+        // A claim carries exactly one signal; without one, nothing is owed.
+        return !was_claimed;
     }
 
     /// What `cancelAll` does with the results of the operations it waited for.
@@ -414,6 +496,7 @@ pub const CompletionQueue = struct {
     /// canceled.
     pub fn cancel(self: *CompletionQueue, c: *Completion) void {
         self.mutex.lock();
+        self.checkSingleDriverLocked();
         if (unlink(&self.completed, &c.group)) {
             // Finished already, just not taken yet. Nothing to cancel.
             self.mutex.unlock();
@@ -494,6 +577,7 @@ pub const CompletionQueue = struct {
         const executor = getCurrentExecutor();
         while (true) {
             self.mutex.lock();
+            self.checkSingleDriverLocked();
             const target: ?*Completion = blk: {
                 var node = self.pending.head;
                 while (node) |n| : (node = n.next) {
@@ -541,6 +625,37 @@ pub const CompletionQueue = struct {
         self.cancelAll(.keep);
     }
 
+    /// Producer side of the claim protocol: hand what the queue holds (the
+    /// head completion, or the drained state) to the parked waiter. The
+    /// caller holds the mutex and has just made the queue ready.
+    ///
+    /// On `.won` the deposit lands in the waiter's context, the slot is
+    /// cleared, and the returned registration owes exactly one
+    /// `waiter.signal()` after unlock (the frame stays alive: a claimed
+    /// context makes `asyncCancelWait` report the in-flight signal, and
+    /// the settle phase outwaits it). On `.busy` and `.lost` nothing is
+    /// consumed, the slot stays, and no signal may be sent. Busy needs no
+    /// wake: `tryClaim` bumped the select's generation counter, so the
+    /// owner re-polls and finds the readiness we leave in place. Lost
+    /// leaves cleanup to the losing select's settle phase.
+    fn claimToRegistered(self: *CompletionQueue) ?Registration {
+        const r = self.reg orelse return null;
+        switch (r.waiter.tryClaim()) {
+            .won => {
+                if (self.completed.pop()) |node| {
+                    r.ctx.claimed = completionFromGroup(node);
+                } else {
+                    std.debug.assert(self.closed and self.pending.isEmpty());
+                    r.ctx.drained = true;
+                }
+                r.ctx.registered = false;
+                self.reg = null;
+                return r;
+            },
+            .busy, .lost => return null,
+        }
+    }
+
     fn ownerCallback(_: *ev.Loop, c: *Completion) void {
         const self: *CompletionQueue = @ptrCast(@alignCast(c.group.owner.?));
 
@@ -548,9 +663,20 @@ pub const CompletionQueue = struct {
         const removed = self.pending.remove(&c.group);
         std.debug.assert(removed);
         self.completed.push(&c.group);
-        self.mutex.unlock();
 
+        if (self.claimToRegistered()) |r| {
+            self.mutex.unlock();
+            r.waiter.signal();
+            return;
+        }
+
+        // No claim: wake the futex for the blocking driver paths. The count
+        // moves inside the critical section, so once a teardown drain sees
+        // `pending` empty the callback never touches the queue's memory
+        // again; `Futex.wake` takes only the address and dereferences
+        // nothing.
         _ = self.signal.fetchAdd(1, .release);
+        self.mutex.unlock();
         Futex.wake(&self.signal.raw, 1);
     }
 };
@@ -571,6 +697,31 @@ test "CompletionQueue: wait on a closed empty queue returns error.Closed" {
     // Idempotent.
     cq.close();
     try std.testing.expectError(error.Closed, cq.wait());
+}
+
+test "CompletionQueue: isDrained reports only the terminal state" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+
+    // Open and empty: not drained.
+    try std.testing.expect(!cq.isDrained());
+
+    // Closed with an operation still in flight: still not drained. The
+    // completion arrives later via `ownerCallback`; a driver that stopped
+    // here would leak it.
+    var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
+    try cq.submit(&timer.c);
+    cq.close();
+    try std.testing.expect(!cq.isDrained());
+
+    // Drain the in-flight completion, then the queue is drained: closed,
+    // nothing pending, nothing left to take.
+    const c = try cq.wait();
+    try std.testing.expectEqual(&timer.c, c);
+    try std.testing.expectError(error.Closed, cq.wait());
+    try std.testing.expect(cq.isDrained());
 }
 
 test "CompletionQueue: single timer" {
@@ -1319,4 +1470,210 @@ test "CompletionQueue: generic wait() on the queue" {
     const result = try waitFuture(&cq);
     try std.testing.expectEqual(&timer.c, try result.value);
     try std.testing.expect(cq.isEmpty());
+}
+
+test "CompletionQueue: close claims the drained state to a parked select" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+
+    const Driver = struct {
+        const select = @import("select.zig").select;
+
+        fn run(cq_: *CompletionQueue) !void {
+            const result = try select(.{ .io = cq_ });
+            try std.testing.expectError(error.Closed, result.io);
+        }
+    };
+    var handle = try rt.spawn(Driver.run, .{&cq});
+    defer handle.cancel();
+
+    // Let the driver park on the empty open queue, then close it. Nothing
+    // is pending, so the close is what drains the queue: it must claim the
+    // parked select and deliver `error.Closed` through the claim protocol.
+    var pause = ev.Timer.init(.{ .duration = .fromMilliseconds(20) });
+    try common.waitForIo(&pause.c);
+    cq.close();
+    try handle.join();
+}
+
+test "CompletionQueue: a close racing the claim delivers the completion, then error.Closed" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    // Race a thread-safe `close` against the completion of an in-flight
+    // operation while the driver selects. Whatever interleaves - the claim
+    // beats the close, the close finds the completion already in
+    // `completed`, or the close drains first and the callback claims later
+    // - the completion must be delivered exactly once, and `error.Closed`
+    // only after it.
+    const Driver = struct {
+        const select = @import("select.zig").select;
+
+        fn run(cq_: *CompletionQueue, timer: *ev.Timer) !u32 {
+            var delivered: u32 = 0;
+            while (true) {
+                const result = try select(.{ .io = cq_ });
+                const c = result.io catch break;
+                try std.testing.expectEqual(&timer.c, c);
+                delivered += 1;
+            }
+            return delivered;
+        }
+    };
+
+    var round: u32 = 0;
+    while (round < 50) : (round += 1) {
+        var cq = CompletionQueue.init();
+        var timer = ev.Timer.init(.{ .duration = .fromMicroseconds(round % 7 * 100) });
+        try cq.submit(&timer.c);
+
+        var handle = try rt.spawn(Driver.run, .{ &cq, &timer });
+
+        // Vary the close's landing spot relative to the completion.
+        var spin: u32 = 0;
+        while (spin < round % 5) : (spin += 1) {
+            try @import("runtime.zig").yield();
+        }
+        cq.close();
+
+        const delivered = try handle.join();
+        try std.testing.expectEqual(1, delivered);
+        try std.testing.expect(cq.isDrained());
+    }
+}
+
+test "CompletionQueue: callbacks racing cancelAll(.keep) conserve every completion" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    // A spread of durations so that when `cancelAll` runs, some operations
+    // are already in `completed`, some are completing on the loops right
+    // now (their callbacks racing the drain), and some are still pending
+    // and get canceled. Every one of them must come out exactly once.
+    var timers: [64]ev.Timer = undefined;
+    var cq = CompletionQueue.init();
+    for (&timers, 0..) |*t, i| {
+        t.* = ev.Timer.init(.{ .duration = .fromMicroseconds(i * 50) });
+        try cq.submit(&t.c);
+    }
+
+    // Let a prefix of them land.
+    var pause = ev.Timer.init(.{ .duration = .fromMilliseconds(1) });
+    try common.waitForIo(&pause.c);
+
+    cq.cancelAll(.keep);
+    try std.testing.expect(!cq.hasPending());
+
+    var seen: usize = 0;
+    while (cq.next()) |_| seen += 1;
+    try std.testing.expectEqual(timers.len, seen);
+    try std.testing.expect(cq.isEmpty());
+}
+
+test "CompletionQueue: a claim landing on a canceled select is delivered, never dropped" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    // Cancel the selecting driver while a notify races toward it. The
+    // select either reports `error.Canceled` with the completion still
+    // takeable from the queue, or delivers the claimed completion (#700:
+    // a claimed winner is delivered even on the canceled path). Delivered
+    // AND still in the queue, or neither, is the conservation failure this
+    // pins down.
+    const Driver = struct {
+        const select = @import("select.zig").select;
+
+        fn run(cq_: *CompletionQueue, expected: *ev.Completion) (Cancelable || Closeable)!bool {
+            const result = try select(.{ .io = cq_ });
+            const c = try result.io;
+            return c == expected;
+        }
+    };
+
+    var round: u32 = 0;
+    while (round < 200) : (round += 1) {
+        var cq = CompletionQueue.init();
+        var mail = ev.Async.init();
+        try cq.submit(&mail.c);
+
+        var handle = try rt.spawn(Driver.run, .{ &cq, &mail.c });
+
+        // Vary where the cancel lands relative to the notify's claim.
+        var spin: u32 = 0;
+        while (spin < round % 4) : (spin += 1) {
+            try @import("runtime.zig").yield();
+        }
+        mail.notify();
+        handle.cancel();
+
+        if (handle.join()) |was_expected| {
+            // The claim won: the completion left the queue with the select.
+            try std.testing.expect(was_expected);
+            try std.testing.expect(cq.isEmpty());
+        } else |err| {
+            try std.testing.expectEqual(error.Canceled, err);
+            // No claim: the completion stays at its source.
+            const c = try cq.timedWait(.fromSeconds(5));
+            try std.testing.expectEqual(&mail.c, c);
+            try std.testing.expect(cq.isEmpty());
+        }
+    }
+}
+
+test "CompletionQueue: teardown drain leaves the queue memory quiescent" {
+    var rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
+    defer rt.deinit();
+
+    // The documented stack teardown (`defer cq.cancelAll(.discard)`) frees
+    // the queue the moment the drain returns, so the drain observing
+    // `pending` empty must mean no callback will touch the queue's memory
+    // again. Poison the struct right after the drain and keep watching it:
+    // a straggling `fetchAdd` on the signal word (the pre-claims protocol
+    // issued it outside the mutex, in the gap after its `completed` push
+    // became visible) flips the poison. Instrument validation: with that
+    // gap artificially widened to 50us this fails every run, and the flip
+    // is the fetchAdd's +1 on a poison byte; at the real gap's width (two
+    // instructions) a black-box watch needs the OS to preempt exactly
+    // there, so a pass is one more clean sample, while a failure is
+    // definitive. The enforced protection is the code shape: the write
+    // sits inside the critical section the drain synchronizes on.
+    // The interleaving needs completions on SEVERAL loops: with one loop,
+    // the wake that lets the drain observe `pending` empty is always the
+    // last callback's own, which follows its signal-word write. Submitting
+    // from parallel tasks puts each batch on the submitter's loop, so one
+    // loop's final wake can release the drain while another loop's final
+    // callback is still between its unlock and its write.
+    const Submitter = struct {
+        fn run(cq_: *CompletionQueue, timers: []ev.Timer) !void {
+            for (timers) |*t| {
+                // Long timers, so every completion is a cancellation
+                // delivered in a burst WHILE the drain runs; completions
+                // that land before `cancelAll` starts exercise nothing.
+                t.* = ev.Timer.init(.{ .duration = .fromSeconds(10) });
+                try cq_.submit(&t.c);
+            }
+        }
+    };
+
+    var round: u32 = 0;
+    while (round < 200) : (round += 1) {
+        var cq = CompletionQueue.init();
+        var timers: [64]ev.Timer = undefined;
+        var subs: [4]@TypeOf(try rt.spawn(Submitter.run, .{ &cq, timers[0..0] })) = undefined;
+        for (&subs, 0..) |*h, i| {
+            h.* = try rt.spawn(Submitter.run, .{ &cq, timers[i * 16 ..][0..16] });
+        }
+        for (&subs) |*h| try h.join();
+        cq.cancelAll(.discard);
+
+        @memset(std.mem.asBytes(&cq), 0xAA);
+        var checks: u32 = 0;
+        while (checks < 500) : (checks += 1) {
+            for (std.mem.asBytes(&cq)) |b| {
+                try std.testing.expectEqual(0xAA, b);
+            }
+        }
+    }
 }
