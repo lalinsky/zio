@@ -2466,9 +2466,9 @@ test "Dir: createTempFile with too long prefix" {
     defer t.deinit();
 
     const dir = t.dir;
-    const prefix = "x" ** (max_temp_prefix_len + 1);
-    try std.testing.expectError(error.NameTooLong, dir.createTempFile(.{ .prefix = prefix }));
-    try std.testing.expectError(error.NameTooLong, dir.createTempDir(.{ .prefix = prefix }));
+    const prefix: [max_temp_prefix_len + 1]u8 = @splat('x');
+    try std.testing.expectError(error.NameTooLong, dir.createTempFile(.{ .prefix = &prefix }));
+    try std.testing.expectError(error.NameTooLong, dir.createTempDir(.{ .prefix = &prefix }));
 }
 
 test "Dir: createTempDir" {

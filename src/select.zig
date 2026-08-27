@@ -304,7 +304,7 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
         w.* = Waiter.initSelect(&waiter, &winner, &gen, &pending_winner, i);
     }
 
-    var registered = [_]bool{false} ** field_names.len;
+    var registered: [field_names.len]bool = @splat(false);
     // Signals sent (or in flight) for registrations that were popped without a
     // claim, reported via .requeued/.ready_signaled. The settle phase must
     // outwait them before the frame can be released.
@@ -495,7 +495,7 @@ pub fn selectAwaitables(awaitables: []const *Awaitable) Cancelable!usize {
         w.* = Waiter.initSelect(&waiter, &winner, &gen, &pending_winner, i);
     }
 
-    var registered = [_]bool{false} ** max_awaitables;
+    var registered: [max_awaitables]bool = @splat(false);
     var self_claimed = false;
     var decided = false;
 
