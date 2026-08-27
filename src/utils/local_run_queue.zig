@@ -28,6 +28,11 @@ const builtin = @import("builtin");
 const SimpleQueue = @import("simple_queue.zig").SimpleQueue;
 const OsMutex = @import("../os/thread.zig").Mutex;
 
+/// Whether a drain may wait for the overflow queue's lock. A caller that already
+/// has work to run picks `try_only`: losing the race defers one task, whereas
+/// blocking would park a runnable executor in a futex.
+pub const LockMode = enum { block, try_only };
+
 /// Thread-safe FIFO overflow queue: a mutex-guarded intrusive list plus an atomic
 /// length so the drain fast-path can skip the lock when empty. `count` is mutated
 /// only while holding the mutex, so it always equals the queue length whenever the
@@ -59,9 +64,12 @@ pub fn OverflowQueue(comptime T: type) type {
         }
 
         /// Pop up to `out.len` tasks into `out`; returns how many were taken.
-        pub fn popBatch(self: *Self, out: []*T) usize {
+        pub fn popBatch(self: *Self, out: []*T, comptime lock_mode: LockMode) usize {
             if (self.count.load(.acquire) == 0) return 0;
-            self.mutex.lock();
+            switch (lock_mode) {
+                .block => self.mutex.lock(),
+                .try_only => if (!self.mutex.tryLock()) return 0,
+            }
             defer self.mutex.unlock();
             var i: usize = 0;
             while (i < out.len) : (i += 1) {
@@ -239,8 +247,11 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
         }
 
         /// Pull up to `max` tasks from the overflow queue into the ring (owner,
-        /// once per tick). Only fills available space, so it never overflows.
-        pub fn refill(self: *Self, max: usize) void {
+        /// once per tick), returning how many moved. Only fills available space,
+        /// so it never overflows. The tasks land straight in the ring's own slots
+        /// and the tail is published once, so this costs strictly less than a pop
+        /// followed by a push.
+        pub fn refill(self: *Self, max: usize, comptime lock_mode: LockMode) usize {
             const t = self.ownTail();
             const h = self.loadHead();
             const space: usize = capacity - (t -% h);
@@ -248,10 +259,11 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
             const start: usize = t & mask;
             const contiguous = capacity - start;
             const want = @min(contiguous, @min(space, @min(max, max_batch)));
-            if (want == 0) return;
+            if (want == 0) return 0;
 
-            const got = self.overflow.popBatch(self.buffer[start .. start + want]);
+            const got = self.overflow.popBatch(self.buffer[start .. start + want], lock_mode);
             if (got > 0) self.storeTail(t +% @as(u32, @intCast(got)));
+            return got;
         }
 
         /// Number of tasks currently in the ring (used for maybeYield fairness).
@@ -350,7 +362,7 @@ test "LocalRunQueue: overflow spills to the overflow queue and everything drains
     }
     var buf: [64]*TestNode = undefined;
     while (true) {
-        const got = ov.popBatch(&buf);
+        const got = ov.popBatch(&buf, .block);
         if (got == 0) break;
         for (buf[0..got]) |n| {
             try testing.expect(!seen[n.id]);
@@ -404,7 +416,7 @@ test "LocalRunQueue: non-stealable variant pushes, pops, and overflows" {
     while (q.pop()) |_| count += 1;
     var buf: [64]*TestNode = undefined;
     while (true) {
-        const got = ov.popBatch(&buf);
+        const got = ov.popBatch(&buf, .block);
         if (got == 0) break;
         count += got;
     }
@@ -431,7 +443,7 @@ test "LocalRunQueue: refill writes directly on both sides of ring wrap" {
         node.* = .{ .id = id };
         ov.push(node);
     }
-    q.refill(20);
+    _ = q.refill(20, .block);
     try testing.expectEqual(6, q.len());
     try testing.expectEqual(14, ov.len());
     for (250..256) |id| {
@@ -439,7 +451,7 @@ test "LocalRunQueue: refill writes directly on both sides of ring wrap" {
     }
 
     // Once tail wraps, the next refill writes directly at the ring's start.
-    q.refill(20);
+    _ = q.refill(20, .block);
     try testing.expectEqual(14, q.len());
     try testing.expect(ov.isEmpty());
     for (256..270) |id| {
@@ -559,7 +571,7 @@ test "LocalRunQueue: concurrent push/pop and steal loses or duplicates no task" 
         if (i % 64 == 0) {
             if (owner.pop()) |n| ctx.mark(n);
         }
-        const got = owner_ov.popBatch(&buf);
+        const got = owner_ov.popBatch(&buf, .block);
         for (buf[0..got]) |n| ctx.mark(n);
     }
     ctx.stop.store(true, .release);
@@ -568,13 +580,13 @@ test "LocalRunQueue: concurrent push/pop and steal loses or duplicates no task" 
     // Drain everything that remains anywhere.
     while (owner.pop()) |n| ctx.mark(n);
     while (true) {
-        const got = owner_ov.popBatch(&buf);
+        const got = owner_ov.popBatch(&buf, .block);
         if (got == 0) break;
         for (buf[0..got]) |n| ctx.mark(n);
     }
     while (thief.pop()) |n| ctx.mark(n);
     while (true) {
-        const got = thief_ov.popBatch(&buf);
+        const got = thief_ov.popBatch(&buf, .block);
         if (got == 0) break;
         for (buf[0..got]) |n| ctx.mark(n);
     }
@@ -643,13 +655,13 @@ test "LocalRunQueue: multiple concurrent stealers lose or duplicate no task" {
     var buf: [64]*TestNode = undefined;
     while (owner.pop()) |n| ctx.mark(n);
     while (true) {
-        const got = owner_ov.popBatch(&buf);
+        const got = owner_ov.popBatch(&buf, .block);
         if (got == 0) break;
         for (buf[0..got]) |n| ctx.mark(n);
     }
     for (&thieves) |*t| while (t.pop()) |n| ctx.mark(n);
     for (&thief_ovs) |*o| while (true) {
-        const got = o.popBatch(&buf);
+        const got = o.popBatch(&buf, .block);
         if (got == 0) break;
         for (buf[0..got]) |n| ctx.mark(n);
     };
@@ -673,13 +685,13 @@ test "OverflowQueue: push and popBatch are FIFO" {
     try testing.expectEqual(5, ov.len());
 
     var buf: [3]*TestNode = undefined;
-    try testing.expectEqual(3, ov.popBatch(&buf));
+    try testing.expectEqual(3, ov.popBatch(&buf, .block));
     try testing.expectEqual(0, buf[0].id);
     try testing.expectEqual(2, buf[2].id);
     try testing.expectEqual(2, ov.len());
 
     var buf2: [10]*TestNode = undefined;
-    try testing.expectEqual(2, ov.popBatch(&buf2));
+    try testing.expectEqual(2, ov.popBatch(&buf2, .block));
     try testing.expect(ov.isEmpty());
-    try testing.expectEqual(0, ov.popBatch(&buf2));
+    try testing.expectEqual(0, ov.popBatch(&buf2, .block));
 }
