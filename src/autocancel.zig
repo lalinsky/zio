@@ -12,6 +12,8 @@ const loopClearTimer = @import("runtime.zig").loopClearTimer;
 const JoinHandle = @import("runtime.zig").JoinHandle;
 const Duration = @import("time.zig").Duration;
 const Timeout = @import("time.zig").Timeout;
+const Clock = @import("time.zig").Clock;
+const Timestamp = @import("time.zig").Timestamp;
 const AnyTask = @import("task.zig").AnyTask;
 const meta = @import("meta.zig");
 const Timeoutable = @import("common.zig").Timeoutable;
@@ -56,7 +58,18 @@ pub const AutoCancel = struct {
         self.task = null;
     }
 
+    /// Arms against the monotonic clock. See `setClock` to pick another.
     pub fn set(self: *AutoCancel, timeout: Timeout) void {
+        self.setClock(timeout, .awake);
+    }
+
+    /// Same as `set`, but measures `timeout` against `clock`.
+    ///
+    /// A `.deadline` is an absolute timestamp in that clock's epoch, so one on
+    /// `.real` follows wall-clock adjustments where a monotonic deadline
+    /// cannot. Only the wall clocks are valid for a timer; the CPU-time clocks
+    /// are rejected when the timer is armed.
+    pub fn setClock(self: *AutoCancel, timeout: Timeout, clock: Clock) void {
         // Retire the previous arm before touching this struct again. Two
         // things make that necessary: a timer still live on another
         // executor's loop cannot be re-armed from this one, and a callback
@@ -84,6 +97,10 @@ pub const AutoCancel = struct {
         // Initialize ev.Timer
         self.timer.c.userdata = self;
         self.timer.c.callback = autoCancelCallback;
+        // Only ever written while disarmed. The clock picks which heap the
+        // timer lives in, so moving it under an armed timer would disarm it
+        // from the wrong one; the `clear` above is what makes this safe.
+        self.timer.clock = clock;
 
         // Activate the timer
         executor.loopSetTimer(&self.timer, timeout);
@@ -645,4 +662,104 @@ test "AutoCancel: re-armed while the previous arm is still live on another execu
         handle.* = try rt.spawn(worker, .{@as(usize, 200)});
     }
     for (&handles) |*handle| handle.join();
+}
+
+test "AutoCancel: set arms against the monotonic clock" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var timeout: AutoCancel = .init;
+    defer timeout.clear();
+
+    timeout.set(.fromMilliseconds(50));
+    try std.testing.expectEqual(Clock.awake, timeout.timer.clock);
+}
+
+test "AutoCancel: setClock fires a duration measured on the real clock" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var timeout: AutoCancel = .init;
+    defer timeout.clear();
+
+    timeout.setClock(.fromMilliseconds(10), .real);
+    try std.testing.expectEqual(Clock.real, timeout.timer.clock);
+
+    rt.sleep(.fromMilliseconds(500)) catch |err| {
+        try std.testing.expect(timeout.check(err));
+        return;
+    };
+
+    return error.TestUnexpectedResult;
+}
+
+test "AutoCancel: setClock takes an absolute deadline in the clock's own epoch" {
+    // The deadline is a wall-clock timestamp, not an offset from now. Passing
+    // it to a monotonic timer would read it as a point in the monotonic epoch,
+    // which is time since boot and so already long past.
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var timeout: AutoCancel = .init;
+    defer timeout.clear();
+
+    const deadline = Timestamp.now(.real).addDuration(.fromMilliseconds(10));
+    timeout.setClock(.{ .deadline = deadline }, .real);
+
+    rt.sleep(.fromMilliseconds(500)) catch |err| {
+        try std.testing.expect(timeout.check(err));
+        return;
+    };
+
+    return error.TestUnexpectedResult;
+}
+
+test "AutoCancel: re-arming on another clock leaves the first heap" {
+    // Each clock has its own timer heap, and a disarm removes from the heap
+    // named by `timer.clock`. Re-arming has to disarm under the old clock
+    // before adopting the new one, or it corrupts the wrong heap.
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var timeout: AutoCancel = .init;
+    defer timeout.clear();
+
+    // Far enough out that it is still armed, in the real clock's heap, when
+    // the second arm moves it.
+    timeout.setClock(.fromSeconds(60), .real);
+    timeout.setClock(.fromMilliseconds(10), .awake);
+    try std.testing.expectEqual(Clock.awake, timeout.timer.clock);
+
+    rt.sleep(.fromMilliseconds(500)) catch |err| {
+        try std.testing.expect(timeout.check(err));
+        return;
+    };
+
+    return error.TestUnexpectedResult;
+}
+
+test "AutoCancel: a cleared real-clock timer does not fire" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var timeout: AutoCancel = .init;
+    defer timeout.clear();
+
+    timeout.setClock(.fromMilliseconds(10), .real);
+    timeout.clear();
+
+    try rt.sleep(.fromMilliseconds(50));
+}
+
+test "AutoCancel: setClock with .none arms nothing" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var timeout: AutoCancel = .init;
+    defer timeout.clear();
+
+    timeout.setClock(.fromMilliseconds(10), .real);
+    timeout.setClock(.none, .real);
+
+    try rt.sleep(.fromMilliseconds(50));
 }
