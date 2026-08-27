@@ -44,6 +44,7 @@ pub const time = @import("time.zig"); // TODO: make non-pub
 pub const Duration = time.Duration;
 pub const Timestamp = time.Timestamp;
 pub const Timeout = time.Timeout;
+pub const Clock = time.Clock;
 pub const Stopwatch = time.Stopwatch;
 
 const fs = @import("fs.zig");
