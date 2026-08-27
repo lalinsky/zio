@@ -3814,6 +3814,29 @@ test "io: dir createDirPath creates nested directories" {
     try std.testing.expectEqual(Io.Dir.CreatePathStatus.existed, status2);
 }
 
+test "io: dir createDirPath with a dot-prefixed path" {
+    var t = try TestDirFixture.init();
+    defer t.deinit();
+    const io = t.rt.io();
+
+    const dir = t.stdDir();
+    const sep = Io.Dir.path.sep_str;
+    // The component iterator yields "." as its own component, so this is also
+    // the path zio itself asks the OS to create. Regression test for #714.
+    const nested_path = "." ++ sep ++ "test_io_dot_path" ++ sep ++ "admin";
+
+    defer {
+        dir.deleteDir(io, nested_path) catch {};
+        dir.deleteDir(io, "test_io_dot_path") catch {};
+    }
+
+    try std.testing.expectEqual(Io.Dir.CreatePathStatus.created, try dir.createDirPathStatus(io, nested_path, .default_dir));
+    try std.testing.expectEqual(Io.Dir.CreatePathStatus.existed, try dir.createDirPathStatus(io, nested_path, .default_dir));
+
+    var sub = try dir.openDir(io, nested_path, .{});
+    sub.close(io);
+}
+
 test "io: dir createDirPathOpen creates and opens" {
     var t = try TestDirFixture.init();
     defer t.deinit();

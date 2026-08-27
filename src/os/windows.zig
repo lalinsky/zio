@@ -1297,16 +1297,87 @@ pub fn pathToWide(allocator: std.mem.Allocator, dir: HANDLE, path: []const u8) P
         dir_path = dir_buf[0..result];
     }
 
-    // Join: dir_path + '\' + path_wide + null
-    // dir_path from GetFinalPathNameByHandleW has \\?\ prefix and no trailing slash
-    const total_len = dir_path.len + 1 + path_wide.len;
-    const joined = allocator.allocSentinel(WCHAR, total_len, 0) catch return error.SystemResources;
+    // A handle on a drive or share root canonicalizes with a trailing separator
+    // ("\\?\C:\"), unlike every other directory. Drop it so the join adds exactly
+    // one separator; joinRelative puts it back if the path resolves to the root.
+    if (dir_path.len > 0 and dir_path[dir_path.len - 1] == '\\') {
+        dir_path = dir_path[0 .. dir_path.len - 1];
+    }
 
-    @memcpy(joined[0..dir_path.len], dir_path);
-    joined[dir_path.len] = '\\';
-    @memcpy(joined[dir_path.len + 1 ..][0..path_wide.len], path_wide);
+    // dir_path comes from GetFinalPathNameByHandleW with FILE_NAME_NORMALIZED, so
+    // it carries the \\?\ prefix. That prefix tells Win32 to pass the path to the
+    // object manager verbatim, where "." and ".." are ordinary (and rejected) name
+    // components and repeated separators are empty ones, so the join resolves them.
+    //
+    // Each component costs its own length plus one separator, and only the ones
+    // the join eliminates make the result shorter, so this bound is exact for a
+    // path that needs no resolution -- the common case, which then avoids a copy.
+    const max_len = dir_path.len + 1 + path_wide.len;
+    const buf = allocator.allocSentinel(WCHAR, max_len, 0) catch return error.SystemResources;
+    const joined_len = joinRelative(dir_path, path_wide, buf);
+    if (joined_len == max_len) return buf;
 
+    defer allocator.free(buf);
+    const joined = allocator.allocSentinel(WCHAR, joined_len, 0) catch return error.SystemResources;
+    @memcpy(joined, buf[0..joined_len]);
     return joined;
+}
+
+/// Writes the relative `rel` appended to the normalized absolute `base` into
+/// `out`, resolving ".", ".." and empty components the way the kernel would for a
+/// path without the \\?\ prefix. A ".." that would escape `base`'s root is
+/// dropped, matching how POSIX resolves "/..". `base` must not end in a
+/// separator. `out` must have room for `base.len + 1 + rel.len` code units;
+/// returns how many were written.
+fn joinRelative(base: []const WCHAR, rel: []const WCHAR, out: []WCHAR) usize {
+    const dot = std.unicode.utf8ToUtf16LeStringLiteral(".");
+    const dot_dot = std.unicode.utf8ToUtf16LeStringLiteral("..");
+
+    const root = rootLength(base);
+    const root_len = root orelse base.len;
+    var len = base.len;
+    @memcpy(out[0..base.len], base);
+
+    var it = std.mem.tokenizeScalar(WCHAR, rel, '\\');
+    while (it.next()) |component| {
+        if (std.mem.eql(WCHAR, component, dot)) continue;
+        if (std.mem.eql(WCHAR, component, dot_dot)) {
+            if (len > root_len) {
+                const parent = std.mem.lastIndexOfScalar(WCHAR, out[0..len], '\\') orelse root_len;
+                len = @max(parent, root_len);
+            }
+            continue;
+        }
+        out[len] = '\\';
+        @memcpy(out[len + 1 ..][0..component.len], component);
+        len += 1 + component.len;
+    }
+
+    // "\\?\C:" names the volume rather than its root directory, so a path that
+    // resolved all the way back to the root keeps a trailing separator.
+    if (root != null and len == root_len) {
+        out[len] = '\\';
+        len += 1;
+    }
+    return len;
+}
+
+/// Length of the leading part of `path` that ".." must never pop through: the
+/// drive in \\?\C:\dir, or the share in \\?\UNC\server\share\dir, without the
+/// separator that follows it. Null if `path` is not a \\?\ path of either shape,
+/// in which case it has no root to speak of and is treated as indivisible.
+fn rootLength(path: []const WCHAR) ?usize {
+    const dos_prefix = std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\");
+    const unc_prefix = std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\UNC\\");
+    if (!std.mem.startsWith(WCHAR, path, dos_prefix)) return null;
+
+    if (std.mem.startsWith(WCHAR, path, unc_prefix)) {
+        const server_end = std.mem.indexOfScalarPos(WCHAR, path, unc_prefix.len, '\\') orelse return null;
+        return std.mem.indexOfScalarPos(WCHAR, path, server_end + 1, '\\') orelse path.len;
+    }
+
+    if (path.len < dos_prefix.len + 2 or path[dos_prefix.len + 1] != ':') return null;
+    return dos_prefix.len + 2;
 }
 
 /// Converts UTF-8 string to null-terminated wide string.
@@ -1379,4 +1450,89 @@ pub extern "bcryptprimitives" fn ProcessPrng(pbData: [*]u8, cbData: SIZE_T) call
 pub fn getrandom(buffer: []u8) (GetRandomError || syscall_cancel.Cancelable)!void {
     if (buffer.len == 0) return;
     if (ProcessPrng(buffer.ptr, buffer.len) == 0) return error.EntropyUnavailable;
+}
+
+fn testJoinRelative(base: []const u8, rel: []const u8, expected: []const u8) !void {
+    var base_buf: [256]WCHAR = undefined;
+    var rel_buf: [256]WCHAR = undefined;
+    var out_buf: [512]WCHAR = undefined;
+    const base_w = base_buf[0..try std.unicode.utf8ToUtf16Le(&base_buf, base)];
+    const rel_w = rel_buf[0..try std.unicode.utf8ToUtf16Le(&rel_buf, rel)];
+
+    const len = joinRelative(base_w, rel_w, &out_buf);
+    try std.testing.expect(len <= base_w.len + 1 + rel_w.len);
+
+    var utf8_buf: [512]u8 = undefined;
+    const utf8 = utf8_buf[0..try std.unicode.utf16LeToUtf8(&utf8_buf, out_buf[0..len])];
+    try std.testing.expectEqualStrings(expected, utf8);
+}
+
+test "windows: joinRelative resolves dot components under the \\\\?\\ prefix" {
+    try testJoinRelative("\\\\?\\C:\\base", "data", "\\\\?\\C:\\base\\data");
+    try testJoinRelative("\\\\?\\C:\\base", ".\\data", "\\\\?\\C:\\base\\data");
+    try testJoinRelative("\\\\?\\C:\\base", ".\\data\\.\\admin", "\\\\?\\C:\\base\\data\\admin");
+    try testJoinRelative("\\\\?\\C:\\base", "data\\\\admin", "\\\\?\\C:\\base\\data\\admin");
+    try testJoinRelative("\\\\?\\C:\\base", "data\\", "\\\\?\\C:\\base\\data");
+    try testJoinRelative("\\\\?\\C:\\base", ".", "\\\\?\\C:\\base");
+}
+
+test "windows: joinRelative resolves dotdot without escaping the root" {
+    try testJoinRelative("\\\\?\\C:\\base\\sub", "..\\data", "\\\\?\\C:\\base\\data");
+    try testJoinRelative("\\\\?\\C:\\base", "..\\data", "\\\\?\\C:\\data");
+    try testJoinRelative("\\\\?\\C:\\base", "..\\..\\..\\data", "\\\\?\\C:\\data");
+    try testJoinRelative("\\\\?\\C:\\base", "sub\\..\\..\\..\\data", "\\\\?\\C:\\data");
+    try testJoinRelative("\\\\?\\UNC\\server\\share\\dir", "..\\..\\..\\data", "\\\\?\\UNC\\server\\share\\data");
+}
+
+test "windows: joinRelative keeps the separator on a path that resolves to the root" {
+    // A drive-root handle canonicalizes to "\\?\C:\"; pathToWide trims the
+    // trailing separator, and joining must not leave "\\?\C:", which names the
+    // volume rather than its root directory.
+    try testJoinRelative("\\\\?\\C:", "data", "\\\\?\\C:\\data");
+    try testJoinRelative("\\\\?\\C:", ".\\data", "\\\\?\\C:\\data");
+    try testJoinRelative("\\\\?\\C:", ".", "\\\\?\\C:\\");
+    try testJoinRelative("\\\\?\\C:\\base", "..", "\\\\?\\C:\\");
+    try testJoinRelative("\\\\?\\UNC\\server\\share", "data", "\\\\?\\UNC\\server\\share\\data");
+    try testJoinRelative("\\\\?\\UNC\\server\\share\\dir", "..", "\\\\?\\UNC\\server\\share\\");
+}
+
+test "windows: pathToWide joins onto a drive-root handle without doubling the separator" {
+    const root = CreateFileW(
+        std.unicode.utf8ToUtf16LeStringLiteral("C:\\"),
+        0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        null,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        null,
+    );
+    if (root == INVALID_HANDLE_VALUE) return error.SkipZigTest;
+    defer _ = CloseHandle(root);
+
+    // A root handle is the one directory GetFinalPathNameByHandleW canonicalizes
+    // with a trailing separator ("\\?\C:\").
+    const joined = try pathToWide(std.testing.allocator, root, "Windows");
+    defer std.testing.allocator.free(joined);
+
+    var utf8_buf: [512]u8 = undefined;
+    const utf8 = utf8_buf[0..try std.unicode.utf16LeToUtf8(&utf8_buf, joined)];
+    try std.testing.expectEqualStrings("\\\\?\\C:\\Windows", utf8);
+}
+
+test "windows: rootLength" {
+    const cases = .{
+        .{ "\\\\?\\C:\\base\\sub", "\\\\?\\C:" },
+        .{ "\\\\?\\C:", "\\\\?\\C:" },
+        .{ "\\\\?\\UNC\\server\\share\\dir", "\\\\?\\UNC\\server\\share" },
+        .{ "\\\\?\\UNC\\server\\share", "\\\\?\\UNC\\server\\share" },
+    };
+    inline for (cases) |case| {
+        const path = std.unicode.utf8ToUtf16LeStringLiteral(case[0]);
+        const root = std.unicode.utf8ToUtf16LeStringLiteral(case[1]);
+        try std.testing.expectEqual(root.len, rootLength(path));
+    }
+
+    // Not a \\?\ path, and a \\?\ path with no drive or share to anchor on.
+    try std.testing.expectEqual(null, rootLength(std.unicode.utf8ToUtf16LeStringLiteral("C:\\base")));
+    try std.testing.expectEqual(null, rootLength(std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\Volume{0}\\base")));
 }
