@@ -2617,6 +2617,47 @@ test "Dir: access" {
     return error.TestExpectedError;
 }
 
+test "Dir: dot components in relative paths" {
+    var t = try TestDirFixture.init();
+    defer t.deinit();
+
+    const dir = t.dir;
+    const sep = std.fs.path.sep_str;
+
+    // A directory handle canonicalizes to a \\?\ path on Windows, where "." and
+    // ".." are illegal name components rather than navigation.
+    try dir.createDir("." ++ sep ++ "dots", 0o755);
+    try dir.createDir("dots" ++ sep ++ "." ++ sep ++ "sub", 0o755);
+    try dir.createDir("dots" ++ sep ++ "sub" ++ sep ++ ".." ++ sep ++ "sibling", 0o755);
+
+    try std.testing.expectEqual(.directory, (try dir.statPath("." ++ sep ++ "dots" ++ sep ++ "sibling")).kind);
+    try dir.access("dots" ++ sep ++ "." ++ sep ++ "sub", .{ .read = true });
+
+    var file = try dir.createFile("." ++ sep ++ "dots" ++ sep ++ "f.txt", .{});
+    file.close();
+    try dir.rename("dots" ++ sep ++ "." ++ sep ++ "f.txt", dir, "dots" ++ sep ++ "sub" ++ sep ++ ".." ++ sep ++ "g.txt");
+    try dir.deleteFile("." ++ sep ++ "dots" ++ sep ++ "g.txt");
+
+    try dir.deleteDir("dots" ++ sep ++ "sub" ++ sep ++ ".." ++ sep ++ "sibling");
+    try dir.deleteDir("." ++ sep ++ "dots" ++ sep ++ "sub");
+    try dir.deleteDir("." ++ sep ++ "dots");
+}
+
+test "Dir: a malformed path reports BadPathName" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var t = try TestDirFixture.init();
+    defer t.deinit();
+
+    // '<' is not a legal character in a Windows file name.
+    try std.testing.expectError(error.BadPathName, t.dir.createDir("bad<name", 0o755));
+    try std.testing.expectError(error.BadPathName, t.dir.deleteDir("bad<name"));
+    try std.testing.expectError(error.BadPathName, t.dir.deleteFile("bad<name"));
+    try std.testing.expectError(error.BadPathName, t.dir.statPath("bad<name"));
+    try std.testing.expectError(error.BadPathName, t.dir.openFile("bad<name", .{}));
+    try std.testing.expectError(error.BadPathName, t.dir.access("bad<name", .{ .read = true }));
+}
+
 test "Dir: resolve_beneath blocks parent escape" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
