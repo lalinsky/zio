@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file.
   `unexpected error: .INVALID_NAME` (#714). This affected every path API taking a `Dir`,
   down to `dir.createDir("./data", ...)`.
 
+- Windows path APIs now return `error.BadPathName` for a malformed path, instead of
+  `error.Unexpected` with a stack dump. `DirCreateDirError`, `DirDeleteDirError`,
+  `DirDeleteFileError` and `FileStatError` gained `BadPathName`.
+
 ## [0.17.0] - 2026-08-05
 
 - Work-stealing is fully wired up now. Idle executors publish an `idle_mask` and coordinate

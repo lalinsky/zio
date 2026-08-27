@@ -2643,6 +2643,21 @@ test "Dir: dot components in relative paths" {
     try dir.deleteDir("." ++ sep ++ "dots");
 }
 
+test "Dir: a malformed path reports BadPathName" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var t = try TestDirFixture.init();
+    defer t.deinit();
+
+    // '<' is not a legal character in a Windows file name.
+    try std.testing.expectError(error.BadPathName, t.dir.createDir("bad<name", 0o755));
+    try std.testing.expectError(error.BadPathName, t.dir.deleteDir("bad<name"));
+    try std.testing.expectError(error.BadPathName, t.dir.deleteFile("bad<name"));
+    try std.testing.expectError(error.BadPathName, t.dir.statPath("bad<name"));
+    try std.testing.expectError(error.BadPathName, t.dir.openFile("bad<name", .{}));
+    try std.testing.expectError(error.BadPathName, t.dir.access("bad<name", .{ .read = true }));
+}
+
 test "Dir: resolve_beneath blocks parent escape" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 

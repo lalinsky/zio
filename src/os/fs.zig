@@ -301,6 +301,7 @@ pub const DirDeleteFileError = error{
     IsDir,
     SymLinkLoop,
     NameTooLong,
+    BadPathName,
     NotDir,
     SystemResources,
     ReadOnlyFileSystem,
@@ -314,6 +315,7 @@ pub const DirDeleteDirError = error{
     FileNotFound,
     SymLinkLoop,
     NameTooLong,
+    BadPathName,
     NotDir,
     SystemResources,
     ReadOnlyFileSystem,
@@ -330,6 +332,7 @@ pub const DirCreateDirError = error{
     SymLinkLoop,
     LinkQuotaExceeded,
     NameTooLong,
+    BadPathName,
     FileNotFound,
     SystemResources,
     NoSpaceLeft,
@@ -574,6 +577,7 @@ pub const FileStatError = error{
     InvalidFileDescriptor,
     FileNotFound,
     NameTooLong,
+    BadPathName,
     NotDir,
     SymLinkLoop,
     SystemResources,
@@ -666,6 +670,7 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
             return switch (w.GetLastError()) {
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
+                .INVALID_NAME, .BAD_PATHNAME => error.BadPathName,
                 .ACCESS_DENIED => error.AccessDenied,
                 else => |err| return unexpectedError(err),
             };
@@ -802,6 +807,7 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
             return switch (w.GetLastError()) {
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
+                .INVALID_NAME, .BAD_PATHNAME => error.BadPathName,
                 .ACCESS_DENIED => error.AccessDenied,
                 else => |err| return unexpectedError(err),
             };
@@ -930,6 +936,7 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
             return switch (w.GetLastError()) {
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
+                .INVALID_NAME, .BAD_PATHNAME => error.BadPathName,
                 .ACCESS_DENIED => error.AccessDenied,
                 .ALREADY_EXISTS => error.PathAlreadyExists,
                 .FILE_EXISTS => error.PathAlreadyExists,
@@ -1471,6 +1478,7 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
             switch (w.GetLastError()) {
                 .FILE_NOT_FOUND => return error.FileNotFound,
                 .PATH_NOT_FOUND => return error.FileNotFound,
+                .INVALID_NAME, .BAD_PATHNAME => return error.BadPathName,
                 .ACCESS_DENIED => return error.AccessDenied,
                 .ALREADY_EXISTS => return error.Unexpected,
                 .SHARING_VIOLATION => return error.FileBusy,
@@ -1522,6 +1530,7 @@ pub fn renameatPreserve(allocator: std.mem.Allocator, old_dir: fd_t, old_path: [
             switch (w.GetLastError()) {
                 .FILE_NOT_FOUND => return error.FileNotFound,
                 .PATH_NOT_FOUND => return error.FileNotFound,
+                .INVALID_NAME, .BAD_PATHNAME => return error.BadPathName,
                 .ACCESS_DENIED => return error.AccessDenied,
                 .ALREADY_EXISTS, .FILE_EXISTS => return error.PathAlreadyExists,
                 .SHARING_VIOLATION => return error.FileBusy,
@@ -1674,6 +1683,7 @@ pub fn dirDeleteFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) 
             return switch (w.GetLastError()) {
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
+                .INVALID_NAME, .BAD_PATHNAME => error.BadPathName,
                 .ACCESS_DENIED => blk: {
                     // DeleteFileW returns ACCESS_DENIED when the path is a
                     // directory.  Check with GetFileAttributesW so the caller
@@ -1745,6 +1755,7 @@ pub fn dirDeleteDir(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) D
             return switch (w.GetLastError()) {
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
+                .INVALID_NAME, .BAD_PATHNAME => error.BadPathName,
                 .ACCESS_DENIED => error.AccessDenied,
                 .SHARING_VIOLATION => error.FileBusy,
                 .DIR_NOT_EMPTY => error.DirNotEmpty,
@@ -1782,6 +1793,7 @@ pub fn mkdirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, mode: 
             return switch (w.GetLastError()) {
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
+                .INVALID_NAME, .BAD_PATHNAME => error.BadPathName,
                 .ACCESS_DENIED => error.AccessDenied,
                 .ALREADY_EXISTS => error.PathAlreadyExists,
                 .FILE_EXISTS => error.PathAlreadyExists,
@@ -2241,6 +2253,7 @@ pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
             return switch (w.GetLastError()) {
                 .FILE_NOT_FOUND => error.FileNotFound,
                 .PATH_NOT_FOUND => error.FileNotFound,
+                .INVALID_NAME, .BAD_PATHNAME => error.BadPathName,
                 .ACCESS_DENIED => error.AccessDenied,
                 else => |err| return unexpectedError(err),
             };
@@ -3013,7 +3026,7 @@ fn dirAccessWindows(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, f
     switch (w.GetLastError()) {
         .FILE_NOT_FOUND, .PATH_NOT_FOUND => return error.FileNotFound,
         .ACCESS_DENIED => return error.AccessDenied,
-        .INVALID_NAME => return error.BadPathName,
+        .INVALID_NAME, .BAD_PATHNAME => return error.BadPathName,
         else => return error.Unexpected,
     }
 }
@@ -3375,6 +3388,7 @@ fn dirRealPathFileWindows(allocator: std.mem.Allocator, dir: fd_t, path: []const
         return switch (w.GetLastError()) {
             .FILE_NOT_FOUND, .PATH_NOT_FOUND => error.FileNotFound,
             .ACCESS_DENIED => error.AccessDenied,
+            .INVALID_NAME, .BAD_PATHNAME => error.BadPathName,
             .NOT_ENOUGH_MEMORY => error.SystemResources,
             else => error.Unexpected,
         };
