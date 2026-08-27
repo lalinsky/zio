@@ -895,8 +895,7 @@ pub const Executor = struct {
                     pending / @max(self.runtime.executors.items.len, 1) + 1
                 else
                     pending;
-                self.run_queue.refill(batch);
-                if (!self.run_queue.isEmpty()) {
+                if (self.run_queue.refill(batch, .block) > 0) {
                     _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
                     if (!self.run_queue.overflow.isEmpty()) self.runtime.armSearcher(null);
                     return;
@@ -928,26 +927,33 @@ pub const Executor = struct {
         // a pre-park check can sleep on the only work in existence.
         self.drainDispatched();
         const main_ready = check_main_ready and self.main_task.state.load(.acquire).tag == .ready;
-        // Overflow work counts too: if the ring is empty but the overflow queue
-        // still holds tasks (e.g. a local ring spill, which doesn't wake the
-        // loop), don't block — return promptly and refill from it below.
-        var has_work = main_ready or !self.run_queue.isEmpty();
-        // Pull a fair batch from the overflow queue (global when migration is
-        // on, this executor's own when off) back into the ring.
-        const pending = self.run_queue.overflow.len();
-        if (pending != 0 and !has_work) {
-            // With migration on the overflow is the shared global queue, so
-            // take only a fair ~1/n_exec slice to avoid monopolizing it. With
-            // migration off it is this executor's own private queue and we are
-            // its sole drainer, so take as much as fits (refill caps it).
-            const batch = if (self.runtime.options.enable_task_migration)
-                pending / @max(self.runtime.executors.items.len, 1) + 1
-            else
-                pending;
-            self.run_queue.refill(batch);
-            has_work = !self.run_queue.isEmpty();
+        if (main_ready or !self.run_queue.isEmpty()) {
+            // The batch refill below is reached only on an empty ring, but a ring
+            // that keeps refilling itself (tasks yielding to each other, a steady
+            // completion stream) never empties: it exits the run loop's drain on
+            // tick budget instead. Its overflow queue would then hold cross-thread
+            // wakes indefinitely, with no other rescue — the sole drainer is this
+            // executor, stealing takes from rings rather than from here, and
+            // armSearcher is a no-op while nobody is idle. One task per check
+            // bounds that wait to a tick without displacing local work.
+            _ = self.run_queue.refill(1, .try_only);
+            return true;
         }
-        return has_work;
+        // Ring empty: pull a fair batch from the overflow queue (global when
+        // migration is on, this executor's own when off) back into it. Overflow
+        // work counts as work, so a local ring spill (which doesn't wake the
+        // loop) can't put this executor to sleep.
+        const pending = self.run_queue.overflow.len();
+        if (pending == 0) return false;
+        // With migration on the overflow is the shared global queue, so take
+        // only a fair ~1/n_exec slice to avoid monopolizing it. With migration
+        // off it is this executor's own private queue and we are its sole
+        // drainer, so take as much as fits (refill caps it).
+        const batch = if (self.runtime.options.enable_task_migration)
+            pending / @max(self.runtime.executors.items.len, 1) + 1
+        else
+            pending;
+        return self.run_queue.refill(batch, .block) > 0;
     }
 
     /// Steal half of a random victim's ring into ours. Reached only from
@@ -2615,4 +2621,75 @@ test "runtime: installs a SIGPIPE handler while the disposition is default" {
         os.posix.sigaction(os.posix.SIG.PIPE, null, &current);
         try std.testing.expect(current.handler.handler == saved.handler.handler);
     }
+}
+
+test "runtime: a busy ring still drains cross-thread wakes from the overflow queue" {
+    // A ring that keeps refilling itself never empties, so it never reaches the
+    // batch refill: the inner drain exits on tick budget with tasks still queued.
+    // A task woken from a foreign thread lands in the overflow queue, whose only
+    // consumer is this executor, so without the per-check single-task peek it
+    // waits for the spinners to finish rather than for the wake.
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const ResetEvent = @import("sync/ResetEvent.zig");
+
+    const H = struct {
+        // Bounds the failing case: without the peek the spinners run to the cap
+        // instead of being stopped by the woken task, so the test fails rather
+        // than hangs.
+        const spin_cap: u32 = 2_000_000;
+        // The foreign thread waits for this many yields before signaling, so the
+        // wake is guaranteed to land while the ring is busy.
+        const spin_before_wake: u32 = 1_000;
+
+        fn spinner(stop: *std.atomic.Value(bool), ticks: *std.atomic.Value(u32), hit_cap: *std.atomic.Value(bool)) !void {
+            var i: u32 = 0;
+            while (!stop.load(.acquire)) : (i += 1) {
+                if (i == spin_cap) {
+                    hit_cap.store(true, .release);
+                    return;
+                }
+                _ = ticks.fetchAdd(1, .monotonic);
+                try yield();
+            }
+        }
+
+        fn waiter(event: *ResetEvent, stop: *std.atomic.Value(bool), woken: *std.atomic.Value(bool)) !void {
+            try event.wait();
+            woken.store(true, .release);
+            stop.store(true, .release);
+        }
+
+        fn signaler(event: *ResetEvent, ticks: *std.atomic.Value(u32)) void {
+            while (ticks.load(.monotonic) < spin_before_wake) os.thread.yield();
+            event.set();
+        }
+    };
+
+    // One executor: the overflow queue then has exactly one possible consumer,
+    // and no thief can rescue the woken task.
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(1) });
+    defer runtime.deinit();
+
+    var event = ResetEvent.init;
+    var stop = std.atomic.Value(bool).init(false);
+    var ticks = std.atomic.Value(u32).init(0);
+    var hit_cap = std.atomic.Value(bool).init(false);
+    var woken = std.atomic.Value(bool).init(false);
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(H.waiter, .{ &event, &stop, &woken });
+    try group.spawn(H.spinner, .{ &stop, &ticks, &hit_cap });
+
+    const thread = try std.Thread.spawn(.{}, H.signaler, .{ &event, &ticks });
+    defer thread.join();
+
+    try group.wait();
+    try std.testing.expect(!group.hasFailed());
+
+    try std.testing.expect(woken.load(.acquire));
+    // The spinner was stopped by the wake, not by its own cap.
+    try std.testing.expect(!hit_cap.load(.acquire));
 }
