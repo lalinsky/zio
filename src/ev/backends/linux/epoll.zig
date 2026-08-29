@@ -32,8 +32,12 @@ const sockreg = @import("../../sockreg.zig");
 pub const NetHandle = net.fd_t;
 
 const Support = @import("../../completion.zig").Support;
+const WallTimerMode = @import("../../completion.zig").WallTimerMode;
 
-pub const native_wall_timers = true;
+/// timerfds on CLOCK_BOOTTIME and CLOCK_REALTIME, armed with TFD_TIMER_ABSTIME.
+/// The kernel rebases an absolute CLOCK_REALTIME timer across a clock step, so
+/// neither needs a cap.
+pub const wall_timer_modes: [3]WallTimerMode = .{ .fallback, .native, .native };
 pub const supports_nonblocking_file_io = false;
 
 pub fn capability(comptime op: Op) Support {

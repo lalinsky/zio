@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const time = @import("../../time.zig");
 const Loop = @import("../loop.zig").Loop;
 const Timer = @import("../completion.zig").Timer;
+const Timestamp = @import("../../time.zig").Timestamp;
 const FileReadStreaming = @import("../completion.zig").FileReadStreaming;
 const ReadBuf = @import("../buf.zig").ReadBuf;
 const fs = @import("../../os/fs.zig");
@@ -180,6 +181,23 @@ test "timer with explicit deadline" {
     std.log.info("deadline timer: expected=100ms, actual={f}", .{elapsed});
 }
 
+/// How late a wall-clock timer may fire before the test calls it a failure. This
+/// is a latency budget, not a semantic bound: what the assertions mean is that
+/// the timer did not fire before its deadline and that it fired at all. Every
+/// platform is held to the same one, because on every platform it is the loop's
+/// own poll timeout that fires a timer coming due while the process is awake.
+const max_lateness_ms = 150;
+
+/// A wall-clock timer's deadline is only meaningful in its own clock, so a
+/// test measures the firing moment there rather than on an awake stopwatch: a
+/// suspend or a wall-clock step moves the two apart, and only the timer's clock
+/// keeps "now" and the deadline crossing together.
+fn expectFiredAt(deadline: Timestamp, fired_at: Timestamp) !void {
+    // durationTo saturates at zero, so each direction reads as its own slack.
+    try std.testing.expect(fired_at.durationTo(deadline).toMilliseconds() <= 1);
+    try std.testing.expect(deadline.durationTo(fired_at).toMilliseconds() <= max_lateness_ms);
+}
+
 test "timer on boot clock fires (duration)" {
     var loop: Loop = undefined;
     try loop.init(.{});
@@ -189,14 +207,15 @@ test "timer on boot clock fires (duration)" {
     loop.setTimer(&timer, .{ .duration = .fromMilliseconds(100) });
     try std.testing.expectEqual(.running, timer.c.loadState().phase);
 
-    var wall_timer = time.Stopwatch.start();
+    // The loop turned the duration into a deadline in the boot epoch; assert
+    // against that rather than against a nominal 100ms measured elsewhere.
+    const deadline = timer.deadline;
     try loop.run();
-    const elapsed = wall_timer.read();
+    const fired_at = time.Timestamp.now(.boot);
 
     try std.testing.expectEqual(.dead, timer.c.loadState().phase);
-    try std.testing.expect(elapsed.toMilliseconds() >= 90);
-    try std.testing.expect(elapsed.toMilliseconds() <= 250);
-    std.log.info("boot timer: expected=100ms, actual={f}", .{elapsed});
+    try expectFiredAt(deadline, fired_at);
+    std.log.info("boot timer: late by {f}", .{deadline.durationTo(fired_at)});
 }
 
 test "timer on real clock fires (absolute deadline)" {
@@ -221,12 +240,11 @@ test "timer on real clock fires (absolute deadline)" {
     // moment in monotonic terms and made this test flaky; in the timer's own
     // clock domain a step moves "now" and the crossing together, so the
     // elapsed time stays ~100ms plus firing latency either way.
-    const elapsed = start.durationTo(time.Timestamp.now(.real));
+    const fired_at = time.Timestamp.now(.real);
 
     try std.testing.expectEqual(.dead, timer.c.loadState().phase);
-    try std.testing.expect(elapsed.toMilliseconds() >= 90);
-    try std.testing.expect(elapsed.toMilliseconds() <= 250);
-    std.log.info("real timer: expected=100ms, actual={f}", .{elapsed});
+    try expectFiredAt(deadline, fired_at);
+    std.log.info("real timer: late by {f}", .{deadline.durationTo(fired_at)});
 }
 
 test "clearTimer racing a firing timer (cross-thread)" {

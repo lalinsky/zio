@@ -163,10 +163,14 @@ pub const NetHandle = net.fd_t;
 
 const Op = @import("../completion.zig").Op;
 const Support = @import("../completion.zig").Support;
+const WallTimerMode = @import("../completion.zig").WallTimerMode;
 
-// Boot/real deadlines are armed via per-loop waitable timers whose
-// completion-routine APC fires during the alertable poll wait.
-pub const native_wall_timers = true;
+// Real deadlines are armed via a per-loop waitable timer whose completion-
+// routine APC fires during the alertable poll wait, and an absolute due time is
+// interpreted against the system clock on every evaluation, so it needs no cap.
+// Windows has no clock that separates suspend from awake, so boot timers live in
+// the awake heap and never reach the backend.
+pub const wall_timer_modes: [3]WallTimerMode = .{ .fallback, .fallback, .native };
 pub const supports_nonblocking_file_io = true;
 
 pub fn capability(comptime op: Op) Support {

@@ -82,8 +82,12 @@ pub const NetHandle = net.fd_t;
 
 const Op = @import("../../completion.zig").Op;
 const Support = @import("../../completion.zig").Support;
+const WallTimerMode = @import("../../completion.zig").WallTimerMode;
 
-pub const native_wall_timers = true;
+/// IORING_TIMEOUT_BOOTTIME and IORING_TIMEOUT_REALTIME|ABS are kernel hrtimers
+/// on CLOCK_BOOTTIME and CLOCK_REALTIME, and the kernel rebases an absolute
+/// CLOCK_REALTIME timer when the wall clock is stepped, so neither needs a cap.
+pub const wall_timer_modes: [3]WallTimerMode = .{ .fallback, .native, .native };
 pub const supports_nonblocking_file_io = true;
 
 pub fn capability(comptime op: Op) Support {

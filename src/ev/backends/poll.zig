@@ -24,9 +24,11 @@ const PipeClose = @import("../completion.zig").PipeClose;
 pub const NetHandle = net.fd_t;
 
 const Support = @import("../completion.zig").Support;
+const WallTimerMode = @import("../completion.zig").WallTimerMode;
 const fs = @import("../../os/fs.zig");
 
-pub const native_wall_timers = false;
+/// Nothing but the poll timeout, so every wall deadline rides the cap.
+pub const wall_timer_modes: [3]WallTimerMode = .{ .fallback, .fallback, .fallback };
 pub const supports_nonblocking_file_io = false;
 
 pub fn capability(comptime op: Op) Support {

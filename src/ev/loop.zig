@@ -968,7 +968,9 @@ pub const Loop = struct {
     /// Fire every timer whose deadline has passed and report the earliest one
     /// still pending. Scans against the current snapshot; `poll` owns the tick.
     fn checkTimers(self: *Loop) TimerCheckResult {
-        const native_wall = Backend.native_wall_timers;
+        // Per wall clock: whether the backend arms the deadline itself, and
+        // whether the loop still has to re-examine it on the cap anyway.
+        const modes = Backend.wall_timer_modes;
 
         var fired = false;
         var next_timeout: ?Duration = null;
@@ -1004,26 +1006,28 @@ pub const Loop = struct {
                 while (self.state.timers[idx].peek()) |timer| {
                     const now_clock = self.state.nowFor(clock);
                     if (timer.deadline.value > now_clock.value) {
-                        if (native_wall and clock != .awake) {
-                            // Backend arms this clock natively; record its
-                            // earliest deadline, plus a capped remaining to fold
-                            // only if the backend later reports it couldn't arm.
-                            wall_deadline[idx] = timer.deadline.value;
-                            var remaining = now_clock.durationTo(timer.deadline);
-                            if (remaining.value > self.wall_clock_cap.value) {
-                                remaining = self.wall_clock_cap;
-                            }
-                            wall_remaining[idx] = remaining;
-                        } else {
-                            var remaining = now_clock.durationTo(timer.deadline);
-                            // boot/real can't be tracked by the awake poll clock,
-                            // so bound the wait to re-evaluate across suspend/steps.
-                            if (clock != .awake and remaining.value > self.wall_clock_cap.value) {
-                                remaining = self.wall_clock_cap;
-                            }
-                            if (next_timeout == null or remaining.value < next_timeout.?.value) {
-                                next_timeout = remaining;
-                            }
+                        var remaining = now_clock.durationTo(timer.deadline);
+                        // boot/real can't be tracked by the awake poll clock, so
+                        // bound the wait to re-evaluate across suspend/steps.
+                        if (clock != .awake and remaining.value > self.wall_clock_cap.value) {
+                            remaining = self.wall_clock_cap;
+                        }
+                        // A clock the backend arms records its earliest deadline
+                        // for syncWallTimer below, and keeps the capped remaining
+                        // to fold only if that arming fails. `native_capped` folds
+                        // it either way: there the kernel timer is a backstop for
+                        // what the poll clock cannot see (a deadline coming due
+                        // during suspend), and this timeout is still the schedule.
+                        const fold = switch (modes[idx]) {
+                            .fallback => true,
+                            .native, .native_capped => blk: {
+                                wall_deadline[idx] = timer.deadline.value;
+                                wall_remaining[idx] = remaining;
+                                break :blk modes[idx] == .native_capped;
+                            },
+                        };
+                        if (fold and (next_timeout == null or remaining.value < next_timeout.?.value)) {
+                            next_timeout = remaining;
                         }
                         break;
                     }
@@ -1050,17 +1054,17 @@ pub const Loop = struct {
         // syncWallTimer returns false only when it couldn't arm a pending
         // deadline (e.g. SQ full); then fold that clock's capped remaining into
         // the poll timeout so it's still re-evaluated within the cap.
-        if (comptime native_wall) {
-            // Always arm real; arm boot only where it is a distinct clock —
-            // otherwise boot timers live in the awake heap and are never handed
-            // to the backend (e.g. Windows/IOCP has no boot-clock timer).
-            const wall_idxs = comptime if (time.boot_distinct_from_awake) [_]usize{ 1, 2 } else [_]usize{2};
-            for (wall_idxs) |idx| {
-                const clock = indexClock(idx);
-                if (self.backend.syncWallTimer(clock, wall_deadline[idx])) continue;
-                const remaining = wall_remaining[idx];
-                if (next_timeout == null or remaining.value < next_timeout.?.value) {
-                    next_timeout = remaining;
+        inline for (1..wall_clock_count) |idx| {
+            // A clock left on the fallback never reaches the backend, and where
+            // boot is not distinct from awake its timers live in the awake heap,
+            // so its entry stays null and there is nothing to arm.
+            if (comptime modes[idx] != .fallback and (idx != 1 or time.boot_distinct_from_awake)) {
+                const clock = comptime indexClock(idx);
+                if (!self.backend.syncWallTimer(clock, wall_deadline[idx])) {
+                    const remaining = wall_remaining[idx];
+                    if (next_timeout == null or remaining.value < next_timeout.?.value) {
+                        next_timeout = remaining;
+                    }
                 }
             }
         }
