@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Under `.single_executor` scheduling, task spawn no longer goes through the round-robin
+  cursor: with one executor there is nothing to rotate, so the shared atomic increment
+  and the division by a runtime executor count both go away. Measured ~5% faster spawns
+  (median 189ns vs 199ns per spawn, 5/5 interleaved A/B pairs).
+
+- The state that exists only to move work between executors (the global overflow queue,
+  the searcher count, the stealable flag, the per-executor steal PRNG and doze flag, and
+  the round-robin cursor) is now zero-bit under the disciplines that never use it, on the
+  same pattern as the idle mask. This also drops a per-executor PRNG seeding at init.
+
 - Compile-time configuration moved from build options to the root module. Declare
   `pub const zio_options: zio.Options = .{ ... }` in your `main.zig` instead of passing
   `-D` flags through `b.dependency`. Every zio in a binary (yours, and any library's that

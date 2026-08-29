@@ -357,6 +357,10 @@ pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
         return error.RuntimeShutdown;
     }
 
+    // One executor is the whole rotation: skip the shared cursor and the
+    // division by a runtime value.
+    if (comptime !zio_options.scheduling.multiExecutor()) return rt.executors.items[0];
+
     const index = rt.next_executor_index.fetchAdd(1, .monotonic);
     return rt.executors.items[index % rt.executors.items.len];
 }
@@ -404,6 +408,21 @@ const metrics_storage_init: MetricsStorage = if (metrics_enabled) .{} else {};
 const IdleMask = if (zio_options.scheduling.migrates()) std.atomic.Value(usize) else void;
 const idle_mask_init: IdleMask = if (zio_options.scheduling.migrates()) .init(0) else {};
 
+// State that exists only to move work between executors. Zero-bit under the
+// disciplines that never do, on the same pattern as IdleMask above.
+const Searchers = if (zio_options.scheduling.migrates()) std.atomic.Value(u32) else void;
+const searchers_init: Searchers = if (zio_options.scheduling.migrates()) .init(0) else {};
+const Stealable = if (zio_options.scheduling.migrates()) std.atomic.Value(bool) else void;
+const stealable_init: Stealable = if (zio_options.scheduling.migrates()) .init(false) else {};
+const GlobalOverflow = if (zio_options.scheduling.migrates()) OverflowQueue(WaitNode) else void;
+const global_overflow_init: GlobalOverflow = if (zio_options.scheduling.migrates()) .{} else {};
+const StealPrng = if (zio_options.scheduling.migrates()) std.Random.DefaultPrng else void;
+const Dozed = if (zio_options.scheduling.migrates()) bool else void;
+const dozed_init: Dozed = if (zio_options.scheduling.migrates()) false else {};
+// The round-robin cursor is meaningless when there is only one executor.
+const NextExecutor = if (zio_options.scheduling.multiExecutor()) std.atomic.Value(usize) else void;
+const next_executor_init: NextExecutor = if (zio_options.scheduling.multiExecutor()) .init(0) else {};
+
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
     pub const max_executors = std.math.maxInt(ExecutorId) + 1;
@@ -418,7 +437,7 @@ pub const Executor = struct {
 
     /// Cheap PRNG for steal victim selection; the CSPRNG is for user-facing
     /// random() and too heavy for the park/steal path.
-    steal_prng: std.Random.DefaultPrng,
+    steal_prng: StealPrng,
 
     // Per-executor local run queue: bounded FIFO ring buffer (Go runq / Tokio
     // style). Overflow and cross-thread wakes go to `run_queue.overflow`, which
@@ -461,7 +480,7 @@ pub const Executor = struct {
     // Whether this executor has already spent its doze (the steal-free grace
     // park, see parkAndSearch) since it last had local work. Reset by any
     // local work; while set, empty passes go straight to the full park.
-    dozed: bool = false,
+    dozed: Dozed = dozed_init,
 
     // Scheduler event counters; written only by this executor's thread.
     metrics: MetricsStorage = metrics_storage_init,
@@ -570,7 +589,9 @@ pub const Executor = struct {
 
         // Initialize this executor's random state from OS entropy.
         try random_mod.setup(&self.random_state);
-        self.steal_prng = std.Random.DefaultPrng.init(self.random_state.csprng.random().int(u64));
+        if (comptime zio_options.scheduling.migrates()) {
+            self.steal_prng = std.Random.DefaultPrng.init(self.random_state.csprng.random().int(u64));
+        }
 
         try self.loop.init(.{
             .allocator = self.runtime.allocator,
@@ -738,7 +759,7 @@ pub const Executor = struct {
 
         // Entering the run loop means the main task just ran (or this executor
         // just started): that was productive work, a fresh doze is due.
-        self.dozed = false;
+        self.resetDoze();
 
         // When entered with the tick budget already spent (e.g. the main task
         // yielded because its slice ran out), ready tasks must get one
@@ -765,7 +786,7 @@ pub const Executor = struct {
             // as the tick budget, but consulted here rather than in the
             // retune below: the park decision runs between the two, and it
             // must see the fresh value.
-            if (self.tick_task_count > 0) self.dozed = false;
+            if (self.tick_task_count > 0) self.resetDoze();
 
             // Exit if loop is stopped
             if (self.loop.stopped()) {
@@ -827,6 +848,12 @@ pub const Executor = struct {
     /// parks indefinitely with stealing folded into the pre-park check — by
     /// then idleness is proven and the steal is also what makes the park's
     /// wake protocol sound (see park).
+    /// Reset the doze grace window. A no-op where there is no stealing churn
+    /// for the window to absorb, so the run loop's two calls compile away.
+    inline fn resetDoze(self: *Executor) void {
+        if (comptime zio_options.scheduling.migrates()) self.dozed = false;
+    }
+
     fn parkAndSearch(self: *Executor, check_ready: bool) !void {
         if (comptime !zio_options.scheduling.migrates()) {
             self.bump("parks_full", 1);
@@ -1456,16 +1483,16 @@ pub const Runtime = struct {
     options: RuntimeOptions,
 
     executors: std.ArrayList(*Executor) = .empty,
-    executors_stealable: std.atomic.Value(bool) = .init(false),
+    executors_stealable: Stealable = stealable_init,
     // Shared global run queue (used when task migration is on): external
     // submissions, cross-thread wakes, and per-executor ring overflow land here,
     // and every executor drains a fair batch from it once per tick.
-    global_overflow: OverflowQueue(WaitNode) = .{},
+    global_overflow: GlobalOverflow = global_overflow_init,
     idle_mask: IdleMask = idle_mask_init,
-    searchers: std.atomic.Value(u32) = .init(0),
+    searchers: Searchers = searchers_init,
     loop_group: ev.LoopGroup = .{},
     main_executor: Executor,
-    next_executor_index: std.atomic.Value(usize) = .init(0),
+    next_executor_index: NextExecutor = next_executor_init,
     workers: std.ArrayList(Worker) = .empty,
     task_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), // Active task counter
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -1559,7 +1586,7 @@ pub const Runtime = struct {
             }
             // With no workers there is nobody to steal from or to; leaving this
             // false lets single-executor runtimes skip the steal machinery.
-            if (num_workers > 0) self.executors_stealable.store(true, .release);
+            if (num_workers > 0) self.setStealable(true);
         }
 
         if (options.metrics_log_interval.value > 0) {
@@ -1603,7 +1630,7 @@ pub const Runtime = struct {
 
     /// Stop worker executors and join threads. Used by deinit() and init() error path.
     fn shutdownWorkers(self: *Runtime) void {
-        self.executors_stealable.store(false, .release);
+        self.setStealable(false);
         // Wait for all workers to finish initialization, then stop their event loops.
         // Workers that failed to initialize (err != null) don't have valid executors.
         for (self.workers.items) |*worker| {
@@ -1787,6 +1814,14 @@ pub const Runtime = struct {
             }
         }
         return total;
+    }
+
+    /// Publish whether other executors may steal from this runtime's queues.
+    /// Compiles away where nothing steals.
+    inline fn setStealable(self: *Runtime, stealable: bool) void {
+        if (comptime zio_options.scheduling.migrates()) {
+            self.executors_stealable.store(stealable, .release);
+        }
     }
 
     /// Whether other executors can currently steal from this runtime's queues.
