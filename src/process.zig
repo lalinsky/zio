@@ -121,3 +121,52 @@ test "childWait: spawn nonexistent binary returns FileNotFound" {
     const result = std.process.spawn(rt.io(), .{ .argv = &.{"definitely-not-a-real-binary-xyz123"} });
     try std.testing.expectError(error.FileNotFound, result);
 }
+
+test "spawn: captures child stdout through a pipe" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ "sh", "-c", "printf hello" },
+        .stdout = .pipe,
+    });
+
+    var read_buf: [64]u8 = undefined;
+    var reader = child.stdout.?.readerStreaming(io, &read_buf);
+    var out: [64]u8 = undefined;
+    const n = try reader.interface.readSliceShort(&out);
+
+    const term = try childWait(&child);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
+    try std.testing.expectEqualStrings("hello", out[0..n]);
+}
+
+test "spawn: passes a custom environment to the child" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("ZIO_SPAWN_TEST", "works");
+
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ "sh", "-c", "printf %s \"$ZIO_SPAWN_TEST\"" },
+        .stdout = .pipe,
+        .environ_map = &env,
+    });
+
+    var read_buf: [64]u8 = undefined;
+    var reader = child.stdout.?.readerStreaming(io, &read_buf);
+    var out: [64]u8 = undefined;
+    const n = try reader.interface.readSliceShort(&out);
+
+    const term = try childWait(&child);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
+    try std.testing.expectEqualStrings("works", out[0..n]);
+}
