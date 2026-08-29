@@ -422,7 +422,7 @@ fn checkCancelImpl(_: ?*anyopaque) Io.Cancelable!void {
 }
 
 fn futexWaitImpl(_: ?*anyopaque, ptr: *const u32, expected: u32, timeout: Io.Timeout) Io.Cancelable!void {
-    Futex.timedWaitClock(ptr, expected, .fromStd(timeout), .fromStdTimeout(timeout)) catch |err| switch (err) {
+    Futex.waitTimeoutClock(ptr, expected, .fromStd(timeout), .fromStdTimeout(timeout)) catch |err| switch (err) {
         error.Timeout => return,
         error.Canceled => return error.Canceled,
     };
@@ -716,7 +716,7 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
         if (batch.completed.head != .none or batch.pending.head == .none) return;
 
         // Wait for ready_count to become non-zero
-        Futex.timedWaitClock(&state.ready_count.raw, 0, .fromStd(timeout), .fromStdTimeout(timeout)) catch |err| switch (err) {
+        Futex.waitTimeoutClock(&state.ready_count.raw, 0, .fromStd(timeout), .fromStdTimeout(timeout)) catch |err| switch (err) {
             error.Timeout => {
                 // Drain one more time before returning timeout
                 batchDrainReady(batch, state);

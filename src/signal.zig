@@ -316,7 +316,7 @@ pub const Signal = struct {
     ///
     /// Arguments:
     /// - timeout: Timeout
-    pub fn timedWait(self: *Signal, timeout: Timeout) (Timeoutable || Cancelable)!void {
+    pub fn waitTimeout(self: *Signal, timeout: Timeout) (Timeoutable || Cancelable)!void {
         // Check if we already have pending signals
         if (self.entry.counter.swap(0, .acquire) > 0) {
             return;
@@ -350,6 +350,9 @@ pub const Signal = struct {
         // Consume the counter
         _ = self.entry.counter.swap(0, .acquire);
     }
+
+    /// Alias for `waitTimeout`. Deprecated, will be removed in a future release.
+    pub const timedWait = waitTimeout;
 
     /// Registers a waiter to be notified when the signal is received, or
     /// claims the select if one already was.
@@ -472,7 +475,7 @@ test "Signal: multiple handlers for same signal" {
     try std.testing.expectEqual(3, count.load(.monotonic));
 }
 
-test "Signal: timedWait timeout" {
+test "Signal: waitTimeout timeout" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     var rt = try Runtime.init(std.testing.allocator, .{});
@@ -481,11 +484,11 @@ test "Signal: timedWait timeout" {
     var sig = try Signal.init(.interrupt);
     defer sig.deinit();
 
-    const result = sig.timedWait(.{ .duration = .fromMilliseconds(50) });
+    const result = sig.waitTimeout(.{ .duration = .fromMilliseconds(50) });
     try std.testing.expectError(error.Timeout, result);
 }
 
-test "Signal: timedWait receives signal before timeout" {
+test "Signal: waitTimeout receives signal before timeout" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     var rt = try Runtime.init(std.testing.allocator, .{});
@@ -497,7 +500,7 @@ test "Signal: timedWait receives signal before timeout" {
         fn call(flag: *bool) !void {
             var sig = try Signal.init(.interrupt);
             defer sig.deinit();
-            try sig.timedWait(.{ .duration = .fromSeconds(1) });
+            try sig.waitTimeout(.{ .duration = .fromSeconds(1) });
             flag.* = true;
         }
     }.call;

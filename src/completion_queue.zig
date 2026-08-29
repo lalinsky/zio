@@ -9,7 +9,7 @@
 //!
 //! Runtime-only: must be used from within an async task context.
 //!
-//! One task drives the queue: `wait`, `timedWait`, `next`, `cancel` and
+//! One task drives the queue: `wait`, `waitTimeout`, `next`, `cancel` and
 //! `cancelAll` belong to it, and the rule is enforced: any of them called
 //! while another task's select is parked on the queue panics. `submit` and `close` are thread-safe, so other
 //! tasks can park their own operations here for the driver to process. An
@@ -78,7 +78,7 @@ pub const CompletionQueue = struct {
     mutex: os.Mutex,
     pending: Queue,
     completed: Queue,
-    /// Futex word the blocking driver paths (`wait`, `timedWait`, `cancel`,
+    /// Futex word the blocking driver paths (`wait`, `waitTimeout`, `cancel`,
     /// `cancelAll`) snapshot and park on. Counts completion arrivals and a
     /// close with nothing in flight (a close over in-flight operations stays
     /// silent, each of them wakes the driver on its own way to `completed`).
@@ -235,7 +235,7 @@ pub const CompletionQueue = struct {
     /// ready before the timeout expires.
     ///
     /// Returns `error.Closed` when the queue is closed and fully drained.
-    pub fn timedWait(self: *CompletionQueue, timeout: Timeout) (Timeoutable || Cancelable || Closeable)!*Completion {
+    pub fn waitTimeout(self: *CompletionQueue, timeout: Timeout) (Timeoutable || Cancelable || Closeable)!*Completion {
         if (timeout == .none) {
             return self.wait();
         }
@@ -252,7 +252,7 @@ pub const CompletionQueue = struct {
             if (node) |n| return completionFromGroup(n);
             if (drained) return error.Closed;
 
-            Futex.timedWait(&self.signal.raw, seen, timeout) catch |err| switch (err) {
+            Futex.waitTimeout(&self.signal.raw, seen, timeout) catch |err| switch (err) {
                 error.Canceled => {
                     self.closeAndKeepResults();
                     return error.Canceled;
@@ -271,6 +271,9 @@ pub const CompletionQueue = struct {
             };
         }
     }
+
+    /// Alias for `waitTimeout`. Deprecated, will be removed in a future release.
+    pub const timedWait = waitTimeout;
 
     /// Returns true if there are no pending or completed operations.
     pub fn isEmpty(self: *CompletionQueue) bool {
@@ -487,7 +490,7 @@ pub const CompletionQueue = struct {
     ///
     /// NOT thread-safe, unlike `submit` and `close`: this belongs to the task
     /// that drives the queue and must never run concurrently with `wait`,
-    /// `timedWait`, `next` or `cancelAll`. A concurrent consumer could take
+    /// `waitTimeout`, `next` or `cancelAll`. A concurrent consumer could take
     /// the finished `c` out of the queue first, leaving the wait below stuck
     /// forever on a node that already left; the single-driver rule is what
     /// makes that impossible. To cancel a specific operation from another
@@ -692,7 +695,7 @@ test "CompletionQueue: wait on a closed empty queue returns error.Closed" {
 
     cq.close();
     try std.testing.expectError(error.Closed, cq.wait());
-    try std.testing.expectError(error.Closed, cq.timedWait(.fromMilliseconds(10)));
+    try std.testing.expectError(error.Closed, cq.waitTimeout(.fromMilliseconds(10)));
 
     // Idempotent.
     cq.close();
@@ -790,7 +793,7 @@ test "CompletionQueue: dynamic submit during iteration" {
     try std.testing.expectEqual(2, count);
 }
 
-test "CompletionQueue: wait then timedWait does not false-timeout" {
+test "CompletionQueue: wait then waitTimeout does not false-timeout" {
     var rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
@@ -802,14 +805,14 @@ test "CompletionQueue: wait then timedWait does not false-timeout" {
     const c1 = try cq.wait();
     try std.testing.expectEqual(&timer1.c, c1);
 
-    // Second: submit and timedWait() — must not return false Timeout
+    // Second: submit and waitTimeout() — must not return false Timeout
     var timer2 = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
     try cq.submit(&timer2.c);
-    const c2 = try cq.timedWait(.{ .duration = .fromSeconds(1) });
+    const c2 = try cq.waitTimeout(.{ .duration = .fromSeconds(1) });
     try std.testing.expectEqual(&timer2.c, c2);
 }
 
-test "CompletionQueue: timedWait completes before timeout" {
+test "CompletionQueue: waitTimeout completes before timeout" {
     var rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
@@ -818,11 +821,11 @@ test "CompletionQueue: timedWait completes before timeout" {
     var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
     try cq.submit(&timer.c);
 
-    const c = try cq.timedWait(.{ .duration = .fromSeconds(1) });
+    const c = try cq.waitTimeout(.{ .duration = .fromSeconds(1) });
     try std.testing.expectEqual(&timer.c, c);
 }
 
-test "CompletionQueue: timedWait returns timeout" {
+test "CompletionQueue: waitTimeout returns timeout" {
     var rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
@@ -832,20 +835,20 @@ test "CompletionQueue: timedWait returns timeout" {
     var timer = ev.Timer.init(.{ .duration = .fromSeconds(10) });
     try cq.submit(&timer.c);
 
-    try std.testing.expectError(error.Timeout, cq.timedWait(.fromMilliseconds(10)));
+    try std.testing.expectError(error.Timeout, cq.waitTimeout(.fromMilliseconds(10)));
 
     // Clean up
     cq.cancelAll(.discard);
 }
 
-test "CompletionQueue: timedWait on an open empty queue waits for the timeout" {
+test "CompletionQueue: waitTimeout on an open empty queue waits for the timeout" {
     var rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
     // An open queue blocks on empty rather than reporting exhaustion, so
     // with nothing submitted the timeout is the only way out.
     var cq = CompletionQueue.init();
-    try std.testing.expectError(error.Timeout, cq.timedWait(.fromMilliseconds(10)));
+    try std.testing.expectError(error.Timeout, cq.waitTimeout(.fromMilliseconds(10)));
 }
 
 test "CompletionQueue: cancel pending operations" {
@@ -884,7 +887,7 @@ test "CompletionQueue: a finished completion can be submitted again (#673)" {
     try cq.submit(&timer.c);
     try std.testing.expect(cq.hasPending());
 
-    const second = try cq.timedWait(.fromSeconds(5));
+    const second = try cq.waitTimeout(.fromSeconds(5));
     try std.testing.expectEqual(&timer.c, second);
     try std.testing.expect(cq.isEmpty());
 }
@@ -901,7 +904,7 @@ test "CompletionQueue: re-submitting the completion that fired leaves the others
     try cq.submit(&fast.c);
     try cq.submit(&slow.c);
 
-    const first = try cq.timedWait(.fromSeconds(5));
+    const first = try cq.waitTimeout(.fromSeconds(5));
     try std.testing.expectEqual(&fast.c, first);
 
     try cq.submit(&fast.c);
@@ -910,8 +913,8 @@ test "CompletionQueue: re-submitting the completion that fired leaves the others
     // across the re-submission. Which lands first is a wall-clock question and
     // not what this pins, so take them in either order. A lost queue link
     // shows up as `error.Timeout` here rather than as a test that hangs.
-    const second = try cq.timedWait(.fromSeconds(5));
-    const third = try cq.timedWait(.fromSeconds(5));
+    const second = try cq.waitTimeout(.fromSeconds(5));
+    const third = try cq.waitTimeout(.fromSeconds(5));
     try std.testing.expect(
         (second == &fast.c and third == &slow.c) or
             (second == &slow.c and third == &fast.c),
@@ -939,7 +942,7 @@ test "CompletionQueue: a notify that lands while an Async is unarmed is not lost
     mailbox.notify();
     try cq.submit(&mailbox.c);
 
-    const second = try cq.timedWait(.fromSeconds(5));
+    const second = try cq.waitTimeout(.fromSeconds(5));
     try std.testing.expectEqual(&mailbox.c, second);
 }
 
@@ -1129,7 +1132,7 @@ test "CompletionQueue: close hands out in-flight completions before error.Closed
 
     // Closed but not drained: the wait still blocks for the in-flight
     // operation and delivers it.
-    const c = try cq.timedWait(.fromSeconds(5));
+    const c = try cq.waitTimeout(.fromSeconds(5));
     try std.testing.expectEqual(&timer.c, c);
     try timer.getResult();
 
@@ -1159,7 +1162,7 @@ test "CompletionQueue: another task's submit satisfies a wait blocked on an empt
     defer handle.cancel();
 
     // Empty and open: parks until the producer's operation completes.
-    const c = try cq.timedWait(.fromSeconds(5));
+    const c = try cq.waitTimeout(.fromSeconds(5));
     try std.testing.expectEqual(&timer.c, c);
     try timer.getResult();
     try handle.join();
@@ -1182,7 +1185,7 @@ test "CompletionQueue: race group of I/O and timer works as an idle timeout (#67
     try cq.submit(&grp1.c);
 
     mail1.notify();
-    const first = try cq.timedWait(.fromSeconds(5));
+    const first = try cq.waitTimeout(.fromSeconds(5));
     try std.testing.expectEqual(&grp1.c, first);
     try grp1.getResult();
     try mail1.getResult();
@@ -1198,7 +1201,7 @@ test "CompletionQueue: race group of I/O and timer works as an idle timeout (#67
     grp2.add(&idle2.c);
     try cq.submit(&grp2.c);
 
-    const second = try cq.timedWait(.fromSeconds(5));
+    const second = try cq.waitTimeout(.fromSeconds(5));
     try std.testing.expectEqual(&grp2.c, second);
     try grp2.getResult();
     try idle2.getResult();
@@ -1342,7 +1345,7 @@ test "CompletionQueue: losing a select does not lose the completion" {
 
     // The queue was only deregistered from; the operation is still armed and
     // comes back through the ordinary wait.
-    const c = try cq.timedWait(.fromSeconds(5));
+    const c = try cq.waitTimeout(.fromSeconds(5));
     try std.testing.expectEqual(&timer.c, c);
     try std.testing.expect(cq.isEmpty());
 }
@@ -1451,7 +1454,7 @@ test "CompletionQueue: canceling a select leaves the queue open" {
     try std.testing.expect(cq.hasPending());
     var other = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
     try cq.submit(&other.c);
-    const c = try cq.timedWait(.fromSeconds(5));
+    const c = try cq.waitTimeout(.fromSeconds(5));
     try std.testing.expectEqual(&other.c, c);
 }
 
@@ -1615,7 +1618,7 @@ test "CompletionQueue: a claim landing on a canceled select is delivered, never 
         } else |err| {
             try std.testing.expectEqual(error.Canceled, err);
             // No claim: the completion stays at its source.
-            const c = try cq.timedWait(.fromSeconds(5));
+            const c = try cq.waitTimeout(.fromSeconds(5));
             try std.testing.expectEqual(&mail.c, c);
             try std.testing.expect(cq.isEmpty());
         }

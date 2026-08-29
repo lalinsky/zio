@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Renamed `ResetEvent` to `Event`, matching `std.Io.Event`. `zio.ResetEvent` stays as a
+  deprecated alias, so existing code keeps working, but it will be removed in a future
+  release.
+
+- Renamed `timedWait` to `waitTimeout` on `Event`, `Condition`, `Semaphore`, `Futex`,
+  `Signal` and `CompletionQueue`, matching `std.Io.Event.waitTimeout`. `Futex.timedWaitClock`
+  became `Futex.waitTimeoutClock`. The old names stay as deprecated aliases, so existing code
+  keeps working, but they will be removed in a future release.
+
 - Fixed relative paths containing `.` or `..` failing on Windows with
   `unexpected error: .INVALID_NAME` (#714). This affected every path API taking a `Dir`,
   down to `dir.createDir("./data", ...)`.

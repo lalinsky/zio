@@ -156,7 +156,7 @@ pub fn waitUncancelable(self: *Condition, mutex: *Mutex) void {
 /// Returns `error.Canceled` if the task is cancelled while waiting. Cancellation
 /// takes priority over timeout - if both occur, `error.Canceled` is returned.
 /// The mutex will be held when returning with any error.
-pub fn timedWait(self: *Condition, mutex: *Mutex, timeout: Timeout) (Timeoutable || Cancelable)!void {
+pub fn waitTimeout(self: *Condition, mutex: *Mutex, timeout: Timeout) (Timeoutable || Cancelable)!void {
     // Stack-allocated waiter - separates operation wait node from task wait node
     var waiter: Waiter = .init();
 
@@ -208,6 +208,9 @@ pub fn timedWait(self: *Condition, mutex: *Mutex, timeout: Timeout) (Timeoutable
         return error.Timeout;
     }
 }
+
+/// Alias for `waitTimeout`. Deprecated, will be removed in a future release.
+pub const timedWait = waitTimeout;
 
 /// Wakes one task waiting on this condition variable.
 ///
@@ -297,7 +300,7 @@ test "Condition basic wait/signal" {
     try std.testing.expect(ready);
 }
 
-test "Condition timedWait timeout" {
+test "Condition waitTimeout timeout" {
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -307,7 +310,7 @@ test "Condition timedWait timeout" {
     try mutex.lock();
     defer mutex.unlock();
 
-    const result = condition.timedWait(&mutex, .{ .duration = .fromMilliseconds(10) });
+    const result = condition.waitTimeout(&mutex, .{ .duration = .fromMilliseconds(10) });
     try std.testing.expectError(error.Timeout, result);
 }
 

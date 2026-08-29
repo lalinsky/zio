@@ -119,7 +119,7 @@ pub fn waitUncancelable(self: *Semaphore) void {
 ///
 /// Returns `error.Timeout` if the timeout expires before a permit becomes available.
 /// Returns `error.Canceled` if the task is cancelled while waiting.
-pub fn timedWait(self: *Semaphore, timeout: Timeout) (Timeoutable || Cancelable)!void {
+pub fn waitTimeout(self: *Semaphore, timeout: Timeout) (Timeoutable || Cancelable)!void {
     if (timeout == .none) {
         return self.wait();
     }
@@ -130,7 +130,7 @@ pub fn timedWait(self: *Semaphore, timeout: Timeout) (Timeoutable || Cancelable)
     defer self.mutex.unlock();
 
     while (self.permits == 0) {
-        self.cond.timedWait(&self.mutex, deadline) catch |err| switch (err) {
+        self.cond.waitTimeout(&self.mutex, deadline) catch |err| switch (err) {
             error.Timeout => return error.Timeout,
             error.Canceled => {
                 // Wake another waiter to handle any race with permit availability
@@ -147,6 +147,9 @@ pub fn timedWait(self: *Semaphore, timeout: Timeout) (Timeoutable || Cancelable)
         self.cond.signal();
     }
 }
+
+/// Alias for `waitTimeout`. Deprecated, will be removed in a future release.
+pub const timedWait = waitTimeout;
 
 /// Releases a permit.
 ///
@@ -191,18 +194,18 @@ test "Semaphore: basic wait/post" {
     try std.testing.expectEqual(3, n);
 }
 
-test "Semaphore: timedWait timeout" {
+test "Semaphore: waitTimeout timeout" {
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var sem = Semaphore{};
 
-    const result = sem.timedWait(.{ .duration = .fromMilliseconds(10) });
+    const result = sem.waitTimeout(.{ .duration = .fromMilliseconds(10) });
     try std.testing.expectError(error.Timeout, result);
     try std.testing.expectEqual(0, sem.permits);
 }
 
-test "Semaphore: timedWait success" {
+test "Semaphore: waitTimeout success" {
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -213,7 +216,7 @@ test "Semaphore: timedWait success" {
     const TestFn = struct {
         fn waiter(s: *Semaphore, flag: *bool, ready_flag: *std.atomic.Value(bool)) void {
             ready_flag.store(true, .release);
-            s.timedWait(.{ .duration = .fromMilliseconds(100) }) catch return;
+            s.waitTimeout(.{ .duration = .fromMilliseconds(100) }) catch return;
             flag.* = true;
         }
 

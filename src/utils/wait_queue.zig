@@ -50,7 +50,7 @@ pub const WaitNode = struct {
 ///
 /// ## Usage Examples
 ///
-/// For ResetEvent (flag = "is set"):
+/// For Event (flag = "is set"):
 /// - `isFlagSet()` → check if event is signaled
 /// - `pushUnlessFlag()` → wait unless already set
 /// - `setFlag()` + `pop()` loop → signal and wake all waiters
@@ -299,7 +299,7 @@ pub fn WaitQueue(comptime T: type) type {
         /// Add item to the end of the queue, unless the flag is set.
         /// Returns true if item was pushed, false if flag was set.
         ///
-        /// This is useful for ResetEvent/Future wait - don't wait if already signaled.
+        /// This is useful for Event/Future wait - don't wait if already signaled.
         pub fn pushUnlessFlag(self: *Self, item: *T) bool {
             const old_state = self.acquireMutationLock();
 
@@ -433,7 +433,7 @@ pub fn WaitQueue(comptime T: type) type {
         /// `is_last == true` means this node was the final waiter and callers must not
         /// call popAndSetFlag again - it is safe to stop iterating without touching self.
         ///
-        /// This matters for use cases like ResetEvent where `self` lives on a coroutine
+        /// This matters for use cases like Event where `self` lives on a coroutine
         /// stack: signaling the last waiter can resume the parent task on another
         /// executor in parallel, which may return and free the stack before we get a
         /// chance to touch `self` again.
@@ -446,7 +446,7 @@ pub fn WaitQueue(comptime T: type) type {
         /// Returns the popped waiter and whether it was the last one, or null if no
         /// waiters (flag is still set).
         ///
-        /// This is useful for ResetEvent.set() / Future.set() - set the flag and
+        /// This is useful for Event.set() / Future.set() - set the flag and
         /// wake all waiters. Callers MUST break out of the loop once `is_last` is true
         /// without calling popAndSetFlag again, because signaling the last waiter can
         /// cause `self` to be freed.

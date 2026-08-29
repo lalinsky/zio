@@ -9,7 +9,7 @@ const SimpleQueue = @import("../utils/simple_queue.zig").SimpleQueue;
 const SimpleStack = @import("../utils/simple_stack.zig").SimpleStack;
 const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
 const select = @import("../select.zig").select;
-const ResetEvent = @import("ResetEvent.zig");
+const Event = @import("Event.zig");
 const common = @import("../common.zig");
 const Waiter = common.Waiter;
 const Closeable = common.Closeable;
@@ -1904,7 +1904,7 @@ test "Channel: canceled select conserves a concurrently sent item" {
 
     const State = struct {
         channel: *Channel(u32),
-        never: *ResetEvent,
+        never: *Event,
         entered: std.atomic.Value(bool) = .init(false),
         go: std.atomic.Value(bool) = .init(false),
         received: std.atomic.Value(u32) = .init(0),
@@ -1930,7 +1930,7 @@ test "Channel: canceled select conserves a concurrently sent item" {
     for (0..200) |_| {
         var buffer: [1]u32 = undefined;
         var channel = Channel(u32).init(&buffer);
-        var never = ResetEvent.init;
+        var never = Event.init;
         var state = State{ .channel = &channel, .never = &never };
 
         var receiver = try runtime.spawn(State.waitForItem, .{&state});
@@ -2015,7 +2015,7 @@ test "Channel: unbuffered select send rendezvous with select receive" {
     defer runtime.deinit();
 
     const Tasks = struct {
-        fn send(ch: *Channel(u64), other: *ResetEvent) !void {
+        fn send(ch: *Channel(u64), other: *Event) !void {
             var operation = ch.asyncSend(42);
             const result = try select(.{ .send = &operation, .never = other });
             switch (result) {
@@ -2024,7 +2024,7 @@ test "Channel: unbuffered select send rendezvous with select receive" {
             }
         }
 
-        fn receive(ch: *Channel(u64), other: *ResetEvent) !u64 {
+        fn receive(ch: *Channel(u64), other: *Event) !u64 {
             var operation = ch.asyncReceive();
             const result = try select(.{ .receive = &operation, .never = other });
             return switch (result) {
@@ -2036,7 +2036,7 @@ test "Channel: unbuffered select send rendezvous with select receive" {
 
     for (0..200) |_| {
         var channel = Channel(u64).init(&.{});
-        var never = ResetEvent.init;
+        var never = Event.init;
         var sender = try runtime.spawn(Tasks.send, .{ &channel, &never });
         var receiver = try runtime.spawn(Tasks.receive, .{ &channel, &never });
         try std.testing.expectEqual(42, try receiver.join());
@@ -2127,7 +2127,7 @@ test "Channel: cancel removes a parked select send" {
 }
 
 test "Channel: rendezvous racing a level source in the same select" {
-    // Exercises the fence-window wake: the ResetEvent can fire while the
+    // Exercises the fence-window wake: the Event can fire while the
     // select's sweep holds its commit fence on the rendezvous arm, in which
     // case the event's signal claims nothing and the select must recover the
     // standing readiness by re-polling. The item must never be lost.
@@ -2136,7 +2136,7 @@ test "Channel: rendezvous racing a level source in the same select" {
 
     const State = struct {
         channel: *Channel(u32),
-        event: *ResetEvent,
+        event: *Event,
         received: std.atomic.Value(u32) = .init(0),
 
         fn choose(self: *@This()) !void {
@@ -2163,7 +2163,7 @@ test "Channel: rendezvous racing a level source in the same select" {
 
     for (0..200) |_| {
         var channel = Channel(u32).init(&.{});
-        var event = ResetEvent.init;
+        var event = Event.init;
         var state = State{ .channel = &channel, .event = &event };
 
         var chooser = try runtime.spawn(State.choose, .{&state});
