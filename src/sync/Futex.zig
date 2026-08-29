@@ -26,6 +26,7 @@
 //! ```
 
 const std = @import("std");
+const zio_options = @import("../options.zig").options;
 const builtin = @import("builtin");
 
 const Runtime = @import("../runtime.zig").Runtime;
@@ -282,6 +283,7 @@ pub fn cancelWait(node: *FutexWaiter) bool {
 }
 
 test "Futex: basic wait/wake" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const Main = struct {
         fn waiterFunc(v: *u32, w: *bool) !void {
             while (@atomicLoad(u32, v, .acquire) == 0) {
@@ -322,6 +324,7 @@ test "Futex: basic wait/wake" {
 }
 
 test "Futex: spurious wakeup - value already changed" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
@@ -332,6 +335,7 @@ test "Futex: spurious wakeup - value already changed" {
 }
 
 test "Futex: wake with no waiters" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
@@ -343,6 +347,7 @@ test "Futex: wake with no waiters" {
 }
 
 test "Futex: multiple waiters same address" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const Main = struct {
         fn waiterFunc(v: *u32, w: *u32, ready: *std.atomic.Value(u32)) !void {
             _ = ready.fetchAdd(1, .release);
@@ -393,6 +398,7 @@ test "Futex: multiple waiters same address" {
 }
 
 test "Futex: multiple waiters different addresses" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const Main = struct {
         fn waiterFunc(v: *u32, w: *u32) !void {
             while (@atomicLoad(u32, v, .acquire) == 0) {
@@ -445,6 +451,7 @@ test "Futex: multiple waiters different addresses" {
 }
 
 test "Futex: waitTimeout timeout" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 

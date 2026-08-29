@@ -1,3 +1,9 @@
+// zio's own suite exercises multi-executor scheduling, so it opts out of the
+// library's .single_executor default. `-Dscheduling=` still wins.
+pub const zio_options: @import("zio").Options = .{
+    .scheduling = @import("zio").build_scheduling orelse .work_stealing,
+};
+
 // in your build.zig, you can specify a custom test runner:
 // const tests = b.addTest(.{
 //    .root_module = $MODULE_BEING_TESTED,

@@ -247,8 +247,8 @@ pub const AnyTask = struct {
         return Executor.fromCoroutine(&self.coro);
     }
 
-    /// Migration of tasks is controlled by Runtime.options.enable_task_migration.
-    /// Use task.getRuntime().options.enable_task_migration to check at runtime.
+    /// Whether tasks migrate at all is fixed at compile time by
+    /// `zio_options.scheduling`.
     pub inline fn getRuntime(self: *AnyTask) *Runtime {
         return self.getExecutor().runtime;
     }

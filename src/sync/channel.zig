@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
+const zio_options = @import("../options.zig").options;
 const Runtime = @import("../runtime.zig").Runtime;
 const yield = @import("../runtime.zig").yield;
 const Group = @import("../group.zig").Group;
@@ -1899,6 +1900,7 @@ test "Channel: close classifies select waiters before signaling" {
 }
 
 test "Channel: canceled select conserves a concurrently sent item" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -1954,6 +1956,7 @@ test "Channel: canceled select conserves a concurrently sent item" {
 }
 
 test "Channel: ready arm does not clobber an earlier channel notification" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -2011,6 +2014,7 @@ test "Channel: ready arm does not clobber an earlier channel notification" {
 }
 
 test "Channel: unbuffered select send rendezvous with select receive" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -2047,6 +2051,7 @@ test "Channel: unbuffered select send rendezvous with select receive" {
 }
 
 test "Channel: select over two rendezvous channels racing select senders" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     // The composition main deadlocked on: a select whose arms are two
     // rendezvous channels, racing senders that are themselves selects. Every
     // pairing must go through the commit fence and re-poll machinery.
@@ -2102,6 +2107,7 @@ test "Channel: select over two rendezvous channels racing select senders" {
 }
 
 test "Channel: cancel removes a parked select send" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -2127,6 +2133,7 @@ test "Channel: cancel removes a parked select send" {
 }
 
 test "Channel: rendezvous racing a level source in the same select" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     // Exercises the fence-window wake: the Event can fire while the
     // select's sweep holds its commit fence on the rendezvous arm, in which
     // case the event's signal claims nothing and the select must recover the

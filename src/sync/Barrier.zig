@@ -47,6 +47,7 @@
 //! ```
 
 const std = @import("std");
+const zio_options = @import("../options.zig").options;
 const Runtime = @import("../runtime.zig").Runtime;
 const Group = @import("../group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
@@ -128,6 +129,7 @@ pub fn wait(self: *Barrier) (Cancelable || error{BrokenBarrier})!bool {
 }
 
 test "Barrier: basic synchronization" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(3) });
     defer runtime.deinit();
 
@@ -165,6 +167,7 @@ test "Barrier: basic synchronization" {
 }
 
 test "Barrier: leader detection" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(3) });
     defer runtime.deinit();
 
@@ -195,6 +198,7 @@ test "Barrier: leader detection" {
 }
 
 test "Barrier: reusable for multiple cycles" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -234,6 +238,7 @@ test "Barrier: reusable for multiple cycles" {
 }
 
 test "Barrier: single coroutine barrier" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -244,6 +249,7 @@ test "Barrier: single coroutine barrier" {
 }
 
 test "Barrier: ordering test" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(3) });
     defer runtime.deinit();
 
@@ -288,6 +294,7 @@ test "Barrier: ordering test" {
 }
 
 test "Barrier: many coroutines" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(5) });
     defer runtime.deinit();
 

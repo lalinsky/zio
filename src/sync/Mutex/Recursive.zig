@@ -35,6 +35,7 @@
 //! ```
 
 const std = @import("std");
+const zio_options = @import("../../options.zig").options;
 const Runtime = @import("../../runtime.zig").Runtime;
 const Group = @import("../../group.zig").Group;
 const Cancelable = @import("../../common.zig").Cancelable;
@@ -173,6 +174,7 @@ pub fn isLocked(self: *const Recursive) bool {
 }
 
 test "Recursive basic lock/unlock" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -202,6 +204,7 @@ test "Recursive basic lock/unlock" {
 }
 
 test "Recursive tryLock" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
@@ -220,6 +223,7 @@ test "Recursive tryLock" {
 }
 
 test "Recursive recursive lock" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
@@ -254,6 +258,7 @@ test "Recursive recursive lock" {
 }
 
 test "Recursive mutual exclusion with recursion" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
     defer runtime.deinit();
 
@@ -289,6 +294,7 @@ test "Recursive mutual exclusion with recursion" {
 }
 
 test "Recursive different owners cannot recurse" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
@@ -320,6 +326,7 @@ test "Recursive different owners cannot recurse" {
 }
 
 test "Recursive cancel waiting on first acquisition" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 

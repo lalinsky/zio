@@ -58,6 +58,7 @@
 //! operations in it.
 
 const std = @import("std");
+const zio_options = @import("options.zig").options;
 
 const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
@@ -1626,6 +1627,7 @@ test "CompletionQueue: a claim landing on a canceled select is delivered, never 
 }
 
 test "CompletionQueue: teardown drain leaves the queue memory quiescent" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     var rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
     defer rt.deinit();
 

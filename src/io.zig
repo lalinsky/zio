@@ -51,7 +51,7 @@ const zio_net = @import("net.zig");
 const zio_dns = @import("dns/root.zig");
 const fillBuf = @import("utils/writer.zig").fillBuf;
 const MemoryPool = @import("utils/memory_pool.zig").MemoryPool;
-const zio_options = @import("zio_options");
+const zio_options = @import("options.zig").options;
 
 /// Must match `net.Stream.max_iovecs_len` in std.Io. Used as the cap on
 /// scatter/gather vector counts for netRead/netWrite so we never promise
@@ -4461,6 +4461,7 @@ test "io: batch awaitConcurrent times out when no data arrives" {
 }
 
 test "io: concurrent cross-executor cancel of N blocked recvmsg fibers is UAF-free" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const N = 8;
     const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();

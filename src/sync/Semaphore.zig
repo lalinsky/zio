@@ -41,6 +41,7 @@
 //! ```
 
 const std = @import("std");
+const zio_options = @import("../options.zig").options;
 const Runtime = @import("../runtime.zig").Runtime;
 const beginShield = @import("../runtime.zig").beginShield;
 const endShield = @import("../runtime.zig").endShield;
@@ -166,6 +167,7 @@ pub fn post(self: *Semaphore) void {
 }
 
 test "Semaphore: basic wait/post" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(3) });
     defer runtime.deinit();
 
@@ -195,6 +197,7 @@ test "Semaphore: basic wait/post" {
 }
 
 test "Semaphore: waitTimeout timeout" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -206,6 +209,7 @@ test "Semaphore: waitTimeout timeout" {
 }
 
 test "Semaphore: waitTimeout success" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -242,6 +246,7 @@ test "Semaphore: waitTimeout success" {
 }
 
 test "Semaphore: multiple permits" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(3) });
     defer runtime.deinit();
 

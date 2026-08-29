@@ -10,7 +10,15 @@ zio is built in layers, and each layer is usable on its own:
 - **`zio.coro`**: stackful coroutine primitives (context switching, growable stacks, manual scheduling), with no I/O or scheduler attached. This is what you'd build a different kind of scheduler on top of, if `zio.Runtime`'s isn't the one you want.
 - **`zio.Runtime`**: the full runtime. It schedules `zio.coro` coroutines across executor threads, drives their I/O through `zio.ev`, and adds structured concurrency (task groups), cancellation, synchronization primitives, and the `std.Io` implementation. Most programs use this directly and never touch the layers below it.
 
-A runtime can run single-threaded, or multi-threaded in one of two modes. With work-stealing (the default), idle executors steal work from busy ones. This keeps every thread busy when runnable work is spread unevenly to begin with. With pinned scheduling, a task stays on whichever executor it was spawned on for its entire life, with no migration and no cross-executor synchronization on the scheduling path, at the cost of no rebalancing if load is uneven.
+A runtime can run single-threaded, or multi-threaded in one of two modes, chosen at compile time with `zio_options.scheduling` in your root module. The default is `.single_executor`, so running on more than one thread is opt-in:
+
+```zig
+pub const zio_options: zio.Options = .{ .scheduling = .pinned };
+```
+
+With `.work_stealing`, idle executors steal work from busy ones. This keeps every thread busy when runnable work is spread unevenly to begin with. With `.pinned`, a task stays on whichever executor it was spawned on for its entire life, with no migration and no cross-executor synchronization on the scheduling path, at the cost of no rebalancing if load is uneven. With `.single_executor`, the default, there is one executor and the count is known at compile time, which drops the executor topology entirely. `RuntimeOptions.executors` then only accepts `.exact(1)` or `.auto`, both meaning one; `.exact(N)` for larger N is a compile error that names the declaration to add.
+
+Because the choice is made at compile time, the default removes the multi-executor machinery rather than branching around it, and `.pinned` removes the stealing machinery.
 
 ## Features
 

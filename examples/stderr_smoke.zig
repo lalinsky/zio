@@ -25,6 +25,9 @@ const zio = @import("zio");
 pub const std_options: std.Options = .{ .log_level = .info };
 pub const std_options_debug_io = zio.debug_io;
 
+// The smoke test wants two executors logging concurrently.
+pub const zio_options: zio.Options = .{ .scheduling = .work_stealing };
+
 fn taskLog(id: usize) void {
     std.log.info("smoke: task {d}", .{id});
 }

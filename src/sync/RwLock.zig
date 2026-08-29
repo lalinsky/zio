@@ -29,6 +29,7 @@
 //! ```
 
 const std = @import("std");
+const zio_options = @import("../options.zig").options;
 const Runtime = @import("../runtime.zig").Runtime;
 const beginShield = @import("../runtime.zig").beginShield;
 const endShield = @import("../runtime.zig").endShield;
@@ -210,6 +211,7 @@ pub fn unlockShared(self: *RwLock) void {
 }
 
 test "RwLock basic write lock/unlock" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
@@ -224,6 +226,7 @@ test "RwLock basic write lock/unlock" {
 }
 
 test "RwLock basic shared lock/unlock" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
@@ -239,6 +242,7 @@ test "RwLock basic shared lock/unlock" {
 }
 
 test "RwLock last reader wakes writer when reader is queued first" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
     defer runtime.deinit();
 
@@ -301,6 +305,7 @@ test "RwLock last reader wakes writer when reader is queued first" {
 }
 
 test "RwLock concurrent readers and writers" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
     defer runtime.deinit();
 
@@ -351,6 +356,7 @@ test "RwLock concurrent readers and writers" {
 }
 
 test "RwLock writer exclusion" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
     defer runtime.deinit();
 
@@ -381,6 +387,7 @@ test "RwLock writer exclusion" {
 }
 
 test "RwLock cancel waiting writer" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -420,6 +427,7 @@ test "RwLock cancel waiting writer" {
 }
 
 test "RwLock canceled writer must not leave a semaphore permit" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
