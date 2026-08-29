@@ -10,7 +10,7 @@ zio is built in layers, and each layer is usable on its own:
 - **`zio.coro`**: stackful coroutine primitives (context switching, growable stacks, manual scheduling), with no I/O or scheduler attached. This is what you'd build a different kind of scheduler on top of, if `zio.Runtime`'s isn't the one you want.
 - **`zio.Runtime`**: the full runtime. It schedules `zio.coro` coroutines across executor threads, drives their I/O through `zio.ev`, and adds structured concurrency (task groups), cancellation, synchronization primitives, and the `std.Io` implementation. Most programs use this directly and never touch the layers below it.
 
-A runtime can run single-threaded, or multi-threaded in one of two modes, chosen at compile time with `zio_options.scheduling` in your root module. The default is `.single_executor`, so running on more than one thread is opt-in:
+A runtime runs on one executor, or on many in one of two modes, chosen at compile time with `zio_options.scheduling` in your root module. The default is `.single_executor`, so running tasks on more than one thread is opt-in:
 
 ```zig
 pub const zio_options: zio.Options = .{ .scheduling = .pinned };

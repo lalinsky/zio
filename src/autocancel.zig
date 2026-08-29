@@ -395,7 +395,7 @@ test "AutoCancel: set with Duration.max clears prior timer" {
 }
 
 test "AutoCancel: attributed when it fires on a task running elsewhere" {
-    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
+    if (comptime !zio_options.scheduling.migrates()) return error.SkipZigTest;
     // Attribution under churn: the callback hands the cancellation over from
     // the loop that armed the timer, which after a migration is not the
     // executor the task runs on. This does not reproduce the ordering window
@@ -636,7 +636,7 @@ test "withTimeout: nested, outer deadline fires while inner is running" {
 }
 
 test "AutoCancel: re-armed while the previous arm is still live on another executor" {
-    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
+    if (comptime !zio_options.scheduling.migrates()) return error.SkipZigTest;
     // The deadline is far past the end of the test, so every `set` below
     // re-arms a timer that is still sitting in some loop's heap. After a
     // migration that loop is not the one the task is running on, which is

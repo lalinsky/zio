@@ -133,8 +133,8 @@ pub fn Future(comptime T: type) type {
 }
 
 test "Future: basic set and get" {
-    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
-    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    // Runs entirely inside one task, so it needs no particular executor count.
+    const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
     const TestContext = struct {

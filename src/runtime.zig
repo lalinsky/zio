@@ -114,7 +114,8 @@ pub const ExecutorCount = enum(u8) {
             const msg = "zio: this build compiles in `.scheduling = .single_executor`, so " ++
                 "the executor count is fixed at one. Declare " ++
                 "`pub const zio_options: zio.Options = .{ .scheduling = .work_stealing }` " ++
-                "in your root module to choose a count.";
+                "(or `.pinned`, if tasks should not migrate) in your root module to " ++
+                "choose a count.";
             if (@typeInfo(@TypeOf(n)) != .comptime_int) @compileError(msg);
             if (n != 1) @compileError(msg);
         }
@@ -2438,7 +2439,7 @@ test "runtime: multi-threaded execution with max executors" {
 }
 
 test "Runtime: multi-threaded with task migration" {
-    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
+    if (comptime !zio_options.scheduling.migrates()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(8) });
     defer runtime.deinit();
 

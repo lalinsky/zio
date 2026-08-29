@@ -6,6 +6,10 @@ on:
     tags:
   pull_request:
 
+# Test-only workflow: nothing here needs to write to the repository.
+permissions:
+  contents: read
+
 jobs:
   test:
     strategy:
@@ -35,6 +39,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        persist-credentials: false
 
     - name: Setup Zig
       uses: mlugg/setup-zig@v2
@@ -126,6 +132,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        persist-credentials: false
 
     - name: Setup Zig
       uses: mlugg/setup-zig@v2

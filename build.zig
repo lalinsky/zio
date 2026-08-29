@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
     const backend = b.option(BackendOption, "backend", "Override the default event loop backend");
 
     const SchedulingOption = enum { single_executor, pinned, work_stealing };
-    const scheduling = b.option(SchedulingOption, "scheduling", "Scheduling discipline compiled into the scheduler (default work_stealing, or single_executor when -fsingle-threaded)");
+    const scheduling = b.option(SchedulingOption, "scheduling", "Scheduling discipline compiled into the scheduler: single_executor (default), pinned, or work_stealing");
 
     const ResolveBeneathMode = enum { strict, best_effort };
     const resolve_beneath_mode = b.option(ResolveBeneathMode, "resolve-beneath-mode", "How to handle resolve_beneath on platforms without kernel support: strict (error.Unsupported) or best_effort (log warning, continue)");

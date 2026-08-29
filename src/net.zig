@@ -2651,7 +2651,7 @@ test "Stream.Reader/Writer.fromStd" {
 // an error; std.testing.allocator also fails on any leak, exercising the shared
 // table teardown.
 test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reuse)" {
-    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
+    if (comptime !zio_options.scheduling.migrates()) return error.SkipZigTest;
 
     const H = struct {
         const executors = 3;
@@ -2853,7 +2853,7 @@ fn errName(code: u16) []const u8 {
 }
 
 test "multi-executor: timeout cancel racing a cross-loop readiness edge" {
-    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
+    if (comptime !zio_options.scheduling.migrates()) return error.SkipZigTest;
 
     const H = struct {
         const pairs = 8;
