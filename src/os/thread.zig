@@ -337,19 +337,34 @@ const FutexFreeBSD = struct {
     }
 
     pub fn timedWait(ptr: *const std.atomic.Value(u32), expected: u32, timeout: Duration) error{Timeout}!void {
-        const timeout_ts = timeout.toTimespec();
+        // The interval has to travel as a `umtx_time` rather than a bare
+        // `timespec`, because the bare form is read on CLOCK_REALTIME: the
+        // kernel turns it into a deadline on that clock right away, so a wall
+        // clock step then moves a wait that should only have measured elapsed
+        // time. Which of the two forms the kernel reads is decided purely by
+        // the size handed to it in `uaddr`.
+        const interval: sys.umtx_time = .{
+            .timeout = timeout.toTimespec(),
+            .flags = 0, // an interval, not an absolute deadline
+            .clockid = @intFromEnum(posix.system.CLOCK.MONOTONIC),
+        };
 
         const rc = sys._umtx_op(
             &ptr.raw,
             sys.UMTX_OP_WAIT_UINT_PRIVATE,
             expected,
-            null,
-            @ptrCast(@constCast(&timeout_ts)),
+            @ptrFromInt(@sizeOf(sys.umtx_time)),
+            @ptrCast(@constCast(&interval)),
         );
 
         if (rc == -1) {
             const err = posix.errno(rc);
             if (err == .TIMEDOUT) return error.Timeout;
+            // A signal is the only other failure this request can produce once
+            // it is well formed, so anything else means we built it wrong (a
+            // malformed interval or the wrong size in `uaddr` both surface as
+            // EINVAL) and every wait would be returning without waiting.
+            std.debug.assert(err == .INTR);
         }
     }
 

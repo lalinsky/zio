@@ -4,20 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-- Fixed a FreeBSD bug where `Condition.wait` and `Condition.timedWait` returned without
-  the mutex. Both were built on `UMTX_OP_CV_WAIT`, which unlocks the mutex before
-  sleeping and, in the words of `_umtx_op(2)`, "after wakeup, the uaddr umutex is not
-  relocked". Re-acquiring it is the caller's job, which libthr does with
-  `_mutex_cv_lock` and we did not, so every caller ran its critical section unlocked
-  from its first wait onwards. In the thread pool that let two workers pop from the same
-  queue at once (seen in CI as an `integer overflow` panic on `queue_size -= 1`), and an
-  idle worker could spin at 100%, because a second wait on a mutex it no longer owned
-  returned `EPERM` immediately instead of sleeping.
+- Timed `Futex` waits on FreeBSD now use `CLOCK_MONOTONIC` instead of `CLOCK_REALTIME`,
+  where a wall clock step could cut a wait short or stretch it.
 
-  FreeBSD now uses the same futex-backed `Mutex` and `Condition` as every other
-  platform, on top of the `UMTX_OP_WAIT_UINT_PRIVATE` wrappers that were already there.
-  This is what Go's runtime does too. It is also faster: an uncontended lock or unlock is
-  now a userspace CAS, where the umutex path made a syscall every time, contended or not.
+- Fixed a FreeBSD bug where the internal condition variable returned without
+  re-acquiring its mutex, corrupting the thread pool's queue or spinning an idle worker
+  at 100%; `Mutex` and `Condition` are now futex-backed there, like everywhere else.
 
 - Renamed `ResetEvent` to `Event`, matching `std.Io.Event`. `zio.ResetEvent` stays as a
   deprecated alias, so existing code keeps working, but it will be removed in a future
