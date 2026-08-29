@@ -33,12 +33,30 @@ pub const NetHandle = net.fd_t;
 
 const Op = @import("../completion.zig").Op;
 const Support = @import("../completion.zig").Support;
+const WallTimerMode = @import("../completion.zig").WallTimerMode;
 
-// Only Darwin has usable absolute wall-clock EVFILT_TIMER semantics
-// (NOTE_ABSOLUTE = gettimeofday, NOTE_MACH_CONTINUOUS_TIME = suspend-aware).
-// The BSDs' EVFILT_TIMER absolute clock is monotonic-only and underspecified
-// with no CLOCK_REALTIME timer, so they keep the capped poll-timeout fallback.
-pub const native_wall_timers = builtin.os.tag.isDarwin();
+// Boot is the one wall clock worth arming here, and only on Darwin. It is a
+// relative NOTE_MACH_CONTINUOUS_TIME timer, so XNU computes the deadline in its
+// own continuous timebase and nothing can invalidate it later; that also makes
+// it the only way to fire a boot deadline that comes due while the system is
+// asleep, which a poll timeout measured on the awake clock would sleep through.
+// It is capped rather than trusted outright because the kernel is free to
+// coalesce it (see armWall), and the poll timeout is the prompter of the two.
+//
+// Real is not armed at all. XNU converts a NOTE_ABSOLUTE calendar deadline to a
+// Mach deadline once at registration, with an explicit "if the relationship
+// between MAT and gettimeofday changes, the underlying timer does not update"
+// in filt_timervalidate, so a wall-clock step afterwards leaves it pointing at
+// the wrong moment. Re-deriving the interval from now(.real) on every scan,
+// which is what the fallback does, is both correct across steps and no less
+// prompt, so the timer would only add a syscall and a wake to ignore.
+//
+// The other BSDs arm neither: their EVFILT_TIMER absolute clock is
+// monotonic-only and underspecified, with no CLOCK_REALTIME timer at all.
+pub const wall_timer_modes: [3]WallTimerMode = if (builtin.os.tag.isDarwin())
+    .{ .fallback, .native_capped, .fallback }
+else
+    .{ .fallback, .fallback, .fallback };
 pub const supports_nonblocking_file_io = false;
 
 pub fn capability(comptime op: Op) Support {
@@ -186,11 +204,10 @@ fn filterForDir(dir: sockreg.Dir) i16 {
     };
 }
 
-// EVFILT_TIMER idents for the boot/real wall-clock timers (Darwin only). They
-// share the EVFILT_TIMER filter, which nothing else uses, so plain 0/1 idents
-// don't collide with fd-based idents on other filters.
+// EVFILT_TIMER ident for the boot wall-clock timer (Darwin only). It has the
+// EVFILT_TIMER filter to itself, so a plain 0 ident doesn't collide with the
+// fd-based idents on the other filters.
 const WALL_BOOT_IDENT: usize = 0;
-const WALL_REAL_IDENT: usize = 1;
 
 const PollEntry = struct {
     completions: Queue(Completion),
@@ -205,9 +222,9 @@ waker_ident: usize = undefined,
 poll_queue: std.AutoHashMapUnmanaged(u64, PollEntry) = .empty,
 change_buffer: std.ArrayList(std.c.Kevent) = .empty,
 events: []std.c.Kevent,
-/// Currently-armed absolute deadline (ns in the clock's epoch) for the boot/real
-/// EVFILT_TIMER, or null if disarmed. Index 0 = boot, 1 = real. Darwin only.
-wall_armed: [2]?u64 = .{ null, null },
+/// Currently-armed absolute deadline (ns in the boot epoch) for the boot
+/// EVFILT_TIMER, or null if disarmed. Darwin only.
+wall_armed: ?u64 = null,
 
 fn makeKey(ident: usize, filter: i32) u64 {
     std.debug.assert(ident <= std.math.maxInt(u32));
@@ -294,24 +311,21 @@ pub fn wake(self: *Self, state: *LoopState) void {
     }
 }
 
-/// Arm/update/disarm the given wall clock's EVFILT_TIMER to an absolute deadline
-/// (ns in that clock's epoch; null = disarm). Returns false only if it couldn't
-/// arm a pending deadline, so the loop folds that clock into the capped poll
-/// timeout. Darwin only; other kqueue platforms keep the fallback (the comptime
-/// guard also keeps the Darwin-only NOTE_* references out of their builds).
+/// Arm/update/disarm the boot clock's EVFILT_TIMER to an absolute deadline (ns
+/// in the boot epoch; null = disarm). Returns false only if it couldn't arm a
+/// pending deadline, so the loop falls back to its poll timeout alone. Darwin
+/// only; other kqueue platforms keep the fallback (the comptime guard also keeps
+/// the Darwin-only NOTE_* references out of their builds).
 pub fn syncWallTimer(self: *Self, clock: Clock, deadline: ?u64) bool {
     if (comptime builtin.os.tag.isDarwin()) {
-        return switch (clock) {
-            .boot => self.armWall(0, WALL_BOOT_IDENT, deadline),
-            .real => self.armWall(1, WALL_REAL_IDENT, deadline),
-            else => unreachable,
-        };
+        std.debug.assert(clock == .boot);
+        return self.armWall(deadline);
     }
     return true;
 }
 
-fn armWall(self: *Self, idx: usize, ident: usize, deadline: ?u64) bool {
-    if (self.wall_armed[idx] == deadline) return true; // unchanged (incl. both null)
+fn armWall(self: *Self, deadline: ?u64) bool {
+    if (self.wall_armed == deadline) return true; // unchanged (incl. both null)
     // reserveChange only fails on OOM: the change buffer grows and is reused
     // across polls (clearRetainingCapacity), so there's no "full" condition like
     // io_uring's fixed SQ ring. On OOM while arming a pending deadline, report
@@ -323,22 +337,29 @@ fn armWall(self: *Self, idx: usize, ident: usize, deadline: ?u64) bool {
         return deadline == null;
     };
     if (deadline) |d| {
-        var fflags: u32 = std.c.NOTE.NSECONDS;
-        var data: isize = undefined;
-        if (idx == 0) {
-            // boot: relative continuous-time timer — counts suspend, and being
-            // relative it needs no epoch match with our boot clock.
-            const now_ns = time.now(.boot).toNanoseconds();
-            fflags |= std.c.NOTE.MACH_CONTINUOUS_TIME;
-            data = @intCast(if (d > now_ns) d - now_ns else 0);
-        } else {
-            // real: absolute gettimeofday timer — fires at the wall moment and
-            // is re-evaluated by the kernel across clock steps.
-            fflags |= std.c.NOTE.ABSOLUTE;
-            data = @intCast(d);
-        }
+        // A relative interval on the continuous timebase: XNU computes the
+        // deadline with clock_continuoustime_interval_to_deadline and arms the
+        // thread_call with THREAD_CALL_CONTINUOUS, so it counts suspend and
+        // there is no foreign epoch for the kernel to snapshot. Our `.boot` is
+        // CLOCK_MONOTONIC_RAW, the same counter, and an interval needs no epoch
+        // match anyway.
+        //
+        // Deliberately not NOTE_CRITICAL. The kernel coalesces this against the
+        // thread's latency QoS (timer_compute_leeway), and NOTE_CRITICAL is the
+        // only lever that narrows that window: NOTE_LEEWAY can only widen it,
+        // and timer_call_slop skips coalescing only for TIMER_CALL_SYS_CRITICAL,
+        // which no kevent can ask for. But the flag asks the system for
+        // realtime-tier treatment of every boot deadline a program sets, which
+        // is the application's call to make and not a library's; libdispatch
+        // exposes the same thing as an opt-in (DISPATCH_TIMER_STRICT) and
+        // coalesces by default. The lateness it would buy back is already
+        // covered: `native_capped` keeps the loop's own poll timeout, and that
+        // is what actually decides when a due timer fires.
+        const now_ns = time.now(.boot).toNanoseconds();
+        const fflags: u32 = std.c.NOTE.NSECONDS | std.c.NOTE.MACH_CONTINUOUS_TIME;
+        const data: isize = @intCast(if (d > now_ns) d - now_ns else 0);
         change.* = .{
-            .ident = ident,
+            .ident = WALL_BOOT_IDENT,
             .filter = std.c.EVFILT.TIMER,
             .flags = std.c.EV.ADD | std.c.EV.ONESHOT,
             .fflags = fflags,
@@ -347,7 +368,7 @@ fn armWall(self: *Self, idx: usize, ident: usize, deadline: ?u64) bool {
         };
     } else {
         change.* = .{
-            .ident = ident,
+            .ident = WALL_BOOT_IDENT,
             .filter = std.c.EVFILT.TIMER,
             .flags = std.c.EV.DELETE,
             .fflags = 0,
@@ -355,7 +376,7 @@ fn armWall(self: *Self, idx: usize, ident: usize, deadline: ?u64) bool {
             .udata = 0,
         };
     }
-    self.wall_armed[idx] = deadline;
+    self.wall_armed = deadline;
     return true;
 }
 
@@ -734,14 +755,13 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
             continue;
         }
 
-        // A boot/real wall timer event. Forget the armed deadline in both the
+        // A boot wall timer event. Forget the armed deadline in both the
         // fired and the failed-registration case: on a successful one-shot fire
         // the kernel already removed it (EV_ONESHOT), and on EV_ERROR the ADD
         // never stuck, so the stored deadline is stale either way — clearing it
         // lets syncWallTimer re-queue the ADD on the next scan.
         if (event.filter == std.c.EVFILT.TIMER) {
-            if (event.ident == WALL_BOOT_IDENT) self.wall_armed[0] = null;
-            if (event.ident == WALL_REAL_IDENT) self.wall_armed[1] = null;
+            self.wall_armed = null;
             // EV_ERROR surfaces a changelist (ADD/DELETE) failure with errno in
             // event.data; no timer actually fired, so don't report a timeout.
             if (event.flags & EV_ERROR != 0) {

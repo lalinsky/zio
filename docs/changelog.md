@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Darwin no longer arms a kernel timer for realtime deadlines, since XNU converts one to
+  a Mach deadline at arming and never rebases it across a wall-clock step.
+
 - Timed `Futex` waits on FreeBSD now use `CLOCK_MONOTONIC` instead of `CLOCK_REALTIME`,
   where a wall clock step could cut a wait short or stretch it.
 

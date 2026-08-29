@@ -23,6 +23,25 @@ pub const Support = enum {
     maybe,
 };
 
+/// How a backend handles timers on a wall clock (`boot`, `real`). The loop's
+/// poll timeout is measured on `awake`, which tracks neither suspend nor a
+/// wall-clock step, so a wall deadline the backend does not own has to be
+/// re-examined on a cap instead.
+///
+/// `native_capped` is for a kernel timer that is worth having for a property
+/// only it provides, while the loop's own timeout stays the schedule. Darwin's
+/// boot timer is the case: it is the only thing that can fire a deadline coming
+/// due during suspend, but the kernel may coalesce it by tens of milliseconds,
+/// so the poll timeout is what fires a timer that comes due while awake.
+pub const WallTimerMode = enum {
+    /// The loop drives this clock entirely through the capped poll timeout.
+    fallback,
+    /// The backend owns the deadline; the loop stops timing this clock.
+    native,
+    /// The backend arms the deadline as a backstop, and the loop keeps timing it.
+    native_capped,
+};
+
 /// The route selected for a `maybe` operation. It is recorded at submission so
 /// cancellation follows the original route rather than repeating a feature or
 /// handle probe whose answer might no longer describe the in-flight work.

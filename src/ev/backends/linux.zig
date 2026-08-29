@@ -5,6 +5,7 @@ const Epoll = @import("linux/epoll.zig");
 const Completion = @import("../completion.zig").Completion;
 const Op = @import("../completion.zig").Op;
 const Support = @import("../completion.zig").Support;
+const WallTimerMode = @import("../completion.zig").WallTimerMode;
 const LoopState = @import("../loop.zig").LoopState;
 const Duration = @import("../../time.zig").Duration;
 const Clock = @import("../../time.zig").Clock;
@@ -35,7 +36,10 @@ pub fn Backend(comptime mode: Mode) type {
         };
 
         pub const NetHandle = IoUring.NetHandle;
-        pub const native_wall_timers = true;
+        /// Both engines arm boot and real natively (timerfd or io_uring
+        /// timeouts), and the kernel rebases an absolute CLOCK_REALTIME timer
+        /// across a clock step, so neither needs a cap.
+        pub const wall_timer_modes: [3]WallTimerMode = .{ .fallback, .native, .native };
         // In auto mode a delegated open means epoll was selected; probePollable
         // applies O_NONBLOCK after opening, matching the old epoll behavior.
         pub const supports_nonblocking_file_io = mode == .io_uring;
