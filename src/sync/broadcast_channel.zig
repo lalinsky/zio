@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
+const zio_options = @import("../options.zig").options;
 const Runtime = @import("../runtime.zig").Runtime;
 const yield = @import("../runtime.zig").yield;
 const Group = @import("../group.zig").Group;
@@ -990,6 +991,7 @@ test "BroadcastChannel: position counter overflow handling" {
 }
 
 test "BroadcastChannel: cancelling parked consumers does not re-queue a live wait node" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     // Regression test for a reused `Waiter` in `receive`. Cancelling a consumer
     // that is parked in `receive` hands its pending signal to the next queued
     // consumer, which then wakes with nothing to read and loops. With a single

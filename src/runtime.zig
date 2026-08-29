@@ -5,7 +5,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
-const zio_options = @import("zio_options");
+const zio_options = @import("options.zig").options;
 
 const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
@@ -99,17 +99,33 @@ const mod = @This();
 
 /// Number of executor threads to run (including main).
 pub const ExecutorCount = enum(u8) {
-    /// Auto-detect based on CPU count
+    /// Auto-detect based on CPU count. Resolves to 1 under `.single_executor`
+    /// scheduling, where there is nothing to detect.
     auto = 0,
     _,
 
-    /// Create an exact executor count (1 = single-threaded, no worker threads)
-    pub fn exact(n: u8) ExecutorCount {
-        assert(n >= 1 and n <= Executor.max_executors);
-        return @enumFromInt(n);
+    /// Create an exact executor count (1 = a single executor, no worker threads).
+    ///
+    /// `n` is `anytype` so that a literal stays comptime-known here: under
+    /// `.single_executor` scheduling, asking for more than one is then a compile
+    /// error at the call site rather than a failure when the runtime is built.
+    pub fn exact(n: anytype) ExecutorCount {
+        if (comptime !zio_options.scheduling.multiExecutor()) {
+            const msg = "zio: this build compiles in `.scheduling = .single_executor`, so " ++
+                "the executor count is fixed at one. Declare " ++
+                "`pub const zio_options: zio.Options = .{ .scheduling = .work_stealing }` " ++
+                "in your root module to choose a count.";
+            if (@typeInfo(@TypeOf(n)) != .comptime_int) @compileError(msg);
+            if (n != 1) @compileError(msg);
+        }
+        const count: u8 = n;
+        assert(count >= 1 and count <= Executor.max_executors);
+        return @enumFromInt(count);
     }
 
     pub fn resolve(self: ExecutorCount) u8 {
+        // Nothing to detect and nothing to honor when only one is compiled in.
+        if (comptime !zio_options.scheduling.multiExecutor()) return 1;
         return switch (self) {
             .auto => autoDetect(),
             _ => @intFromEnum(self),
@@ -149,11 +165,6 @@ pub const RuntimeOptions = struct {
     /// Set to false when creating runtimes in background threads that should not block
     /// the creating thread in an event loop. Requires executors >= 1 to have any workers.
     enable_main_executor: bool = true,
-    /// Allow tasks to migrate between executors when true. Requires migration
-    /// support to be compiled in (the `task-migration` build option, default on);
-    /// enabling it in a build compiled without support is an error at init.
-    /// Defaults to whether support is compiled in.
-    enable_task_migration: bool = zio_options.task_migration,
     /// DNS resolver configuration.
     dns: DnsOptions = .{},
 };
@@ -318,14 +329,14 @@ comptime {
 // the per-dispatch re-publish is skipped entirely (it would only rewrite the same
 // value), making parent_context_ptr effectively write-once.
 inline fn storeParentContext(field: **Context, ctx: *Context) void {
-    if (zio_options.task_migration) {
+    if (zio_options.scheduling.migrates()) {
         @atomicStore(*Context, field, ctx, .release);
     } else {
         field.* = ctx;
     }
 }
 inline fn updateParentContext(task: *AnyTask, ctx: *Context) void {
-    if (zio_options.task_migration) {
+    if (zio_options.scheduling.migrates()) {
         @atomicStore(*Context, &task.coro.parent_context_ptr, ctx, .release);
     } else {
         // Pinned task: parent_context_ptr is constant, so there is nothing to
@@ -335,7 +346,7 @@ inline fn updateParentContext(task: *AnyTask, ctx: *Context) void {
     }
 }
 inline fn loadParentContext(field: *const *Context) *Context {
-    return if (zio_options.task_migration)
+    return if (zio_options.scheduling.migrates())
         @atomicLoad(*Context, field, .acquire)
     else
         field.*;
@@ -390,8 +401,8 @@ pub const SchedulerMetrics = struct {
 
 const MetricsStorage = if (metrics_enabled) SchedulerMetrics else void;
 const metrics_storage_init: MetricsStorage = if (metrics_enabled) .{} else {};
-const IdleMask = if (zio_options.task_migration) std.atomic.Value(usize) else void;
-const idle_mask_init: IdleMask = if (zio_options.task_migration) .init(0) else {};
+const IdleMask = if (zio_options.scheduling.migrates()) std.atomic.Value(usize) else void;
+const idle_mask_init: IdleMask = if (zio_options.scheduling.migrates()) .init(0) else {};
 
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
@@ -413,7 +424,7 @@ pub const Executor = struct {
     // style). Overflow and cross-thread wakes go to `run_queue.overflow`, which
     // is wired at init to either the runtime global queue (migration on) or this
     // executor's own `overflow` queue below (migration off).
-    run_queue: LocalRunQueue(WaitNode, zio_options.task_migration) = .{},
+    run_queue: LocalRunQueue(WaitNode, zio_options.scheduling.migrates()) = .{},
 
     // This executor's own overflow queue, used ONLY when task migration is
     // disabled — cross-thread wakes and ring overflow for this executor land here
@@ -531,7 +542,7 @@ pub const Executor = struct {
         // overflow queue when off (tasks stay on their home executor). Worker
         // executors live in a pre-sized, non-reallocating list, so &self.overflow
         // is a stable address.
-        self.run_queue.overflow = if (runtime.options.enable_task_migration)
+        self.run_queue.overflow = if (comptime zio_options.scheduling.migrates())
             &runtime.global_overflow
         else
             &self.overflow;
@@ -817,7 +828,7 @@ pub const Executor = struct {
     /// then idleness is proven and the steal is also what makes the park's
     /// wake protocol sound (see park).
     fn parkAndSearch(self: *Executor, check_ready: bool) !void {
-        if (comptime !zio_options.task_migration) {
+        if (comptime !zio_options.scheduling.migrates()) {
             self.bump("parks_full", 1);
             try self.loop.poll(.max);
             self.drainDispatched();
@@ -891,7 +902,7 @@ pub const Executor = struct {
 
             const pending = self.run_queue.overflow.len();
             if (pending != 0) {
-                const batch = if (self.runtime.options.enable_task_migration)
+                const batch = if (comptime zio_options.scheduling.migrates())
                     pending / @max(self.runtime.executors.items.len, 1) + 1
                 else
                     pending;
@@ -949,7 +960,7 @@ pub const Executor = struct {
         // only a fair ~1/n_exec slice to avoid monopolizing it. With migration
         // off it is this executor's own private queue and we are its sole
         // drainer, so take as much as fits (refill caps it).
-        const batch = if (self.runtime.options.enable_task_migration)
+        const batch = if (comptime zio_options.scheduling.migrates())
             pending / @max(self.runtime.executors.items.len, 1) + 1
         else
             pending;
@@ -1142,7 +1153,7 @@ pub const Executor = struct {
             // spawns and round-robin homes (migration off). Only already-running
             // tasks may migrate to the current executor (cache locality with the
             // waker).
-            if (zio_options.task_migration and old.tag != .new and current_exec.runtime == home_exec.runtime and home_exec.runtime.options.enable_task_migration) {
+            if (zio_options.scheduling.migrates() and old.tag != .new and current_exec.runtime == home_exec.runtime) {
                 // Migrate to the current executor
                 current_exec.scheduleTaskLocal(task);
                 return;
@@ -1486,11 +1497,6 @@ pub const Runtime = struct {
     }
 
     pub fn initStatic(self: *Runtime, allocator: Allocator, options: RuntimeOptions) !void {
-        // Task migration can only be enabled at runtime if it was compiled in.
-        if (!zio_options.task_migration and options.enable_task_migration) {
-            return error.TaskMigrationNotCompiledIn;
-        }
-
         const num_executors = options.executors.resolve();
         const num_workers = if (options.enable_main_executor) num_executors - 1 else num_executors;
 
@@ -1785,11 +1791,11 @@ pub const Runtime = struct {
 
     /// Whether other executors can currently steal from this runtime's queues.
     pub inline fn stealingActive(self: *Runtime) bool {
-        return zio_options.task_migration and self.options.enable_task_migration and self.executors_stealable.load(.acquire);
+        return zio_options.scheduling.migrates() and self.executors_stealable.load(.acquire);
     }
 
     fn armSearcher(self: *Runtime, hint: ?ExecutorId) void {
-        if (comptime !zio_options.task_migration) return;
+        if (comptime !zio_options.scheduling.migrates()) return;
 
         // The two early-return loads pair with the parker: an executor sets its
         // idle bit (seq_cst RMW) and only then makes its final work check, while
@@ -1843,7 +1849,7 @@ pub const Runtime = struct {
     /// that lets one extra election through, it never loses a wake.
     /// Returns the number of sleepers actually woken.
     fn batchWakeSleepers(self: *Runtime, ready: usize, hint: ExecutorId) u64 {
-        if (comptime !zio_options.task_migration) return 0;
+        if (comptime !zio_options.scheduling.migrates()) return 0;
 
         if (!self.stealingActive() or ready < 2) return 0;
         if (self.idle_mask.load(.seq_cst) == 0) return 0;
@@ -1930,6 +1936,7 @@ pub const Runtime = struct {
 };
 
 test "Runtime: scheduler metrics count parks and drained wakes" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     if (!metrics_enabled) return error.SkipZigTest;
 
     const runtime = try Runtime.init(std.testing.allocator, .{
@@ -2313,17 +2320,17 @@ test "runtime: sleep from main allows tasks to run" {
     try std.testing.expectEqual(10, counter);
 }
 
-test "runtime: enabling task migration at runtime errors when compiled out" {
-    // Only meaningful in a build without migration support; a normal build
-    // compiles migration in, so there is nothing to reject.
-    if (zio_options.task_migration) return error.SkipZigTest;
-    try std.testing.expectError(
-        error.TaskMigrationNotCompiledIn,
-        Runtime.init(std.testing.allocator, .{ .enable_task_migration = true }),
-    );
+test "runtime: .auto resolves to one executor when only one is compiled in" {
+    // .exact() does not compile under .single_executor, so .auto is the only way
+    // to ask for a count there; it must resolve rather than reject.
+    if (comptime zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .auto });
+    defer runtime.deinit();
+    try std.testing.expectEqual(1, runtime.executors.items.len);
 }
 
 test "runtime: multi-threaded execution with 2 executors" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -2352,26 +2359,25 @@ test "runtime: multi-threaded execution with 2 executors" {
 }
 
 test "runtime: local ring overflow spills and drains with task migration disabled" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
+    // Pinned scheduling only: the private-overflow path exists only there.
+    if (zio_options.scheduling != .pinned) return error.SkipZigTest;
     // With migration disabled, spawn far more ready tasks than the local ring
     // holds (capacity 256) so the ring spills into the executor's own overflow
     // queue (the runqputslow path) and must drain every task back out. All are
     // spawned before any drain, so the ring genuinely overflows. Two executors
     // also covers the remote sub-path: tasks whose round-robin home is the other
     // executor go straight to that executor's overflow queue.
-    if (builtin.single_threaded) return error.SkipZigTest;
 
     const H = struct {
-        const n_tasks = 2 * LocalRunQueue(WaitNode, zio_options.task_migration).capacity; // 512 >> 256
+        const n_tasks = 2 * LocalRunQueue(WaitNode, zio_options.scheduling.migrates()).capacity; // 512 >> 256
 
         fn child(counter: *std.atomic.Value(u32)) void {
             _ = counter.fetchAdd(1, .monotonic);
         }
     };
 
-    const runtime = try Runtime.init(std.testing.allocator, .{
-        .executors = .exact(2),
-        .enable_task_migration = false,
-    });
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var counter = std.atomic.Value(u32).init(0);
@@ -2389,6 +2395,7 @@ test "runtime: local ring overflow spills and drains with task migration disable
 }
 
 test "runtime: multi-threaded execution with max executors" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(Executor.max_executors) });
     defer runtime.deinit();
 
@@ -2396,6 +2403,7 @@ test "runtime: multi-threaded execution with max executors" {
 }
 
 test "Runtime: multi-threaded with task migration" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(8) });
     defer runtime.deinit();
 
@@ -2445,18 +2453,19 @@ test "Runtime: multi-threaded with task migration" {
 }
 
 test "runtime: wake-before-park awaken bit stress (single executor)" {
-    try wakeBeforeParkStress(1);
+    try wakeBeforeParkStress(.exact(1));
 }
 
 test "runtime: wake-before-park awaken bit stress (two executors)" {
-    try wakeBeforeParkStress(2);
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
+    try wakeBeforeParkStress(.exact(2));
 }
 
-fn wakeBeforeParkStress(executor_count: u6) !void {
+fn wakeBeforeParkStress(executors: ExecutorCount) !void {
     const Event = @import("sync/Event.zig");
 
     const runtime = try Runtime.init(std.testing.allocator, .{
-        .executors = .exact(executor_count),
+        .executors = executors,
     });
     defer runtime.deinit();
 
@@ -2508,6 +2517,7 @@ fn wakeBeforeParkStress(executor_count: u6) !void {
 }
 
 test "runtime: mutex contention with task migration" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const Mutex = @import("sync/Mutex.zig");
 
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
@@ -2538,7 +2548,7 @@ test "runtime: mutex contention with task migration" {
 }
 
 test "runtime: disable main executor" {
-    if (builtin.single_threaded) return error.SkipZigTest;
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
 
     // Create a runtime where the calling thread is not an executor.
     // All tasks run on background worker threads.

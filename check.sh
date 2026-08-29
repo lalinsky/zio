@@ -11,6 +11,7 @@ RELEASE_MODE=false
 TEST_FILTER=""
 TARGET=""
 BACKEND=""
+SCHEDULING=""
 USE_WINE=false
 USE_QEMU=false
 NO_EXEC=false
@@ -19,7 +20,7 @@ TIMEOUT=""
 
 # Parse arguments
 usage() {
-  echo "Usage: $0 [--filter \"test name\"] [--target <target>] [--backend <backend>] [--wine] [--qemu] [--no-exec] [--coverage] [--ci] [--full] [--release] [--verbose] [--timeout <seconds>]"
+  echo "Usage: $0 [--filter \"test name\"] [--target <target>] [--backend <backend>] [--scheduling <mode>] [--wine] [--qemu] [--no-exec] [--coverage] [--ci] [--full] [--release] [--verbose] [--timeout <seconds>]"
 }
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -38,6 +39,10 @@ while [[ $# -gt 0 ]]; do
         --backend)
             [[ $# -ge 2 ]] || { echo "--backend requires an argument"; usage; exit 1; }
             BACKEND="$2"; shift 2
+            ;;
+        --scheduling)
+            [[ $# -ge 2 ]] || { echo "--scheduling requires an argument"; usage; exit 1; }
+            SCHEDULING="$2"; shift 2
             ;;
         --wine)
             USE_WINE=true
@@ -102,6 +107,11 @@ if [ -n "$TARGET" ]; then
     echo "Target: $TARGET"
     BUILD_ARGS+=("-Dtarget=$TARGET")
 fi
+if [ -n "$SCHEDULING" ]; then
+    echo "Scheduling: $SCHEDULING"
+    BUILD_ARGS+=("-Dscheduling=$SCHEDULING")
+fi
+
 if [ -n "$BACKEND" ]; then
     echo "Backend: $BACKEND"
     BUILD_ARGS+=("-Dbackend=$BACKEND")

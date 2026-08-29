@@ -35,6 +35,7 @@
 //! only happens while a task actually holds the user lock.
 
 const std = @import("std");
+const zio_options = @import("options.zig").options;
 const Io = std.Io;
 
 const Mutex = @import("sync/Mutex.zig");
@@ -459,6 +460,7 @@ test "stderr lock: the crash path takes over the mounted task's lock" {
 }
 
 test "stderr lock: a task waits for another task and is handed the lock" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const rt = try runtime.Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 

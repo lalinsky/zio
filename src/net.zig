@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const zio_options = @import("options.zig").options;
 const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
 const runtime_mod = @import("runtime.zig");
@@ -2650,7 +2651,7 @@ test "Stream.Reader/Writer.fromStd" {
 // an error; std.testing.allocator also fails on any leak, exercising the shared
 // table teardown.
 test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reuse)" {
-    if (builtin.single_threaded) return error.SkipZigTest;
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
 
     const H = struct {
         const executors = 3;
@@ -2852,7 +2853,7 @@ fn errName(code: u16) []const u8 {
 }
 
 test "multi-executor: timeout cancel racing a cross-loop readiness edge" {
-    if (builtin.single_threaded) return error.SkipZigTest;
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
 
     const H = struct {
         const pairs = 8;
@@ -3007,13 +3008,14 @@ test "multi-executor: timeout cancel racing a cross-loop readiness edge" {
     try std.testing.expect(sh.timeouts.load(.monotonic) > 0);
 }
 
-// Migration-disabled bypass: with enable_task_migration=false the executors do
-// not share a loop group, so each loop registers its sockets purely locally. A
+// Migration-disabled bypass: under pinned scheduling the executors do not share
+// a loop group, so each loop registers its sockets purely locally. A
 // connection's reader and writer still run as separate tasks that land on
 // different executors, so the same fd is driven from two loops at once (each
 // owning its own direction in its own table) - verify that still works.
 test "multi-executor: full-duplex with task migration disabled" {
-    if (builtin.single_threaded) return error.SkipZigTest;
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
+    if (zio_options.scheduling != .pinned) return error.SkipZigTest;
 
     const H = struct {
         const conns = 16;
@@ -3133,10 +3135,7 @@ test "multi-executor: full-duplex with task migration disabled" {
         }
     };
 
-    const runtime = try Runtime.init(std.testing.allocator, .{
-        .executors = .exact(3),
-        .enable_task_migration = false,
-    });
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(3) });
     defer runtime.deinit();
 
     var sh: H.Shared = .{};

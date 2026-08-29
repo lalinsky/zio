@@ -139,10 +139,18 @@ The worker allocates memory for each matching line, sends ownership through the 
 
 ### Multi-threaded Execution
 
-ZIO's runtime can use multiple OS threads (executors) to run tasks in parallel:
+ZIO's runtime can use multiple OS threads (executors) to run tasks in parallel. Running
+more than one executor is opt-in at compile time, declared in your root module:
+
+```zig
+pub const zio_options: zio.Options = .{ .scheduling = .work_stealing };
+```
+
+Without that declaration the build compiles in `.single_executor` scheduling, `.exact(N)`
+is a compile error, and `.auto` resolves to one. With it, you choose the count per runtime:
 
 - `.executors = .auto` - auto-detect based on CPU count (good for CPU-bound work)
-- `.executors = .exact(1)` - single-threaded (default, good for I/O-bound work)
+- `.executors = .exact(1)` - a single executor (the default, good for I/O-bound work)
 - `.executors = .exact(N)` - explicit number of threads
 
 Tasks are automatically distributed across executors. Channels handle synchronization, so you don't need locks or atomic operations - just send and receive messages safely between tasks.

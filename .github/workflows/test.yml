@@ -110,3 +110,33 @@ jobs:
           done
       env:
         TEST_VERBOSE: 2
+
+  # The scheduling discipline is a compile-time choice, so the pinned and
+  # single-executor paths are only covered by building against them.
+  scheduling:
+    strategy:
+      fail-fast: false
+      matrix:
+        zig_version: ['0.16.0']
+        mode: [debug, release]
+        scheduling: [pinned, single_executor]
+
+    runs-on: ubuntu-24.04
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: ${{ matrix.zig_version }}
+
+    - name: Build and test
+      shell: bash
+      run: |
+        ./check.sh --full --scheduling ${{ matrix.scheduling }} \
+          ${{ matrix.mode == 'release' && '--release' || '' }}
+      timeout-minutes: 10
+      env:
+        TEST_VERBOSE: 2

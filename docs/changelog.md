@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Compile-time configuration moved from build options to the root module. Declare
+  `pub const zio_options: zio.Options = .{ ... }` in your `main.zig` instead of passing
+  `-D` flags through `b.dependency`. Every zio in a binary (yours, and any library's that
+  depends on zio) now sees one configuration, where per-dependency build options could
+  produce two incompatible copies of `Runtime`. The `-D` options remain in zio's own
+  `build.zig` as defaults for its test and example builds; a root declaration wins.
+
+- Replaced the `task-migration` build option and `RuntimeOptions.enable_task_migration`
+  with a single compile-time `zio_options.scheduling`, which names the three modes the
+  runtime actually has: `.single_executor`, `.pinned`, and `.work_stealing`. Because the
+  discipline is now fixed at compile time, each step down removes the machinery rather
+  than branching around it, and `.single_executor` additionally makes the executor count
+  comptime-known.
+
+- **Breaking:** running on more than one thread is now opt-in. `zio_options.scheduling`
+  defaults to `.single_executor`, matching `RuntimeOptions.executors`, which has always
+  defaulted to a single executor. To use more, declare this in your root module:
+
+  ```zig
+  pub const zio_options: zio.Options = .{ .scheduling = .work_stealing };
+  ```
+
+  Without it, `.executors = .exact(N)` is a **compile error** naming that declaration,
+  and `.auto` resolves to one executor. The failure is at compile time by design: a
+  default that silently began running tasks in parallel would turn correct programs
+  into racy ones, and nothing in Zig would flag it.
+
+- `ExecutorCount.exact` now takes its count as `anytype`, so a literal stays
+  comptime-known: under `.single_executor`, asking for more than one (or for a count
+  computed at runtime) is rejected at the call site rather than when the runtime is
+  built. `.exact(1)` still compiles everywhere, and `RuntimeOptions.executors` still
+  defaults to it.
+
+- `Runtime.init` no longer returns `error.TaskMigrationNotCompiledIn`, which had no
+  remaining source.
+
 - Renamed `ResetEvent` to `Event`, matching `std.Io.Event`. `zio.ResetEvent` stays as a
   deprecated alias, so existing code keeps working, but it will be removed in a future
   release.

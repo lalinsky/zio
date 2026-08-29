@@ -4,6 +4,19 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const zio_options = @import("options.zig");
+/// Compile-time configuration. Declare `pub const zio_options: zio.Options` in
+/// your root module to override the defaults.
+pub const Options = zio_options.Options;
+/// The resolved configuration, after the root module's declaration is applied.
+pub const options = zio_options.options;
+/// The discipline zio's own `-Dscheduling` build option asked for, for zio's
+/// test runner and examples. Consumers declare `zio_options` instead.
+pub const build_scheduling = zio_options.build_scheduling;
+pub const Scheduling = zio_options.Scheduling;
+pub const BackendType = zio_options.BackendType;
+pub const ResolveBeneathMode = zio_options.ResolveBeneathMode;
+
 const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;
 pub const RuntimeOptions = runtime.RuntimeOptions;

@@ -3,6 +3,10 @@ const zio = @import("zio");
 
 pub const std_options_debug_io = zio.debug_io;
 
+// This example spreads work across cores, so it opts out of the default
+// single-executor scheduling.
+pub const zio_options: zio.Options = .{ .scheduling = .work_stealing };
+
 const SearchResult = struct {
     file_path: []const u8,
     line_number: usize,

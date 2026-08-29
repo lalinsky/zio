@@ -49,6 +49,7 @@
 //! ```
 
 const std = @import("std");
+const zio_options = @import("../options.zig").options;
 const Runtime = @import("../runtime.zig").Runtime;
 const beginShield = @import("../runtime.zig").beginShield;
 const endShield = @import("../runtime.zig").endShield;
@@ -255,6 +256,7 @@ pub fn broadcast(self: *Condition) void {
 }
 
 test "Condition basic wait/signal" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -301,6 +303,7 @@ test "Condition basic wait/signal" {
 }
 
 test "Condition waitTimeout timeout" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -315,6 +318,7 @@ test "Condition waitTimeout timeout" {
 }
 
 test "Condition broadcast" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
     defer runtime.deinit();
 

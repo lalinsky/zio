@@ -7,32 +7,30 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const backend = b.option(
-        []const u8,
-        "backend",
-        "Override the default event loop backend (linux, io_uring, epoll, kqueue, iocp, poll)",
-    );
+    // Defaults for the compile-time options in src/options.zig, for zio's own
+    // test and example builds. A root module's `zio_options` declaration wins
+    // over anything set here; consumers configure zio that way, not with these.
+    const BackendOption = enum { poll, linux, epoll, kqueue, io_uring, iocp };
+    const backend = b.option(BackendOption, "backend", "Override the default event loop backend");
+
+    const SchedulingOption = enum { single_executor, pinned, work_stealing };
+    const scheduling = b.option(SchedulingOption, "scheduling", "Scheduling discipline compiled into the scheduler (default work_stealing, or single_executor when -fsingle-threaded)");
 
     const ResolveBeneathMode = enum { strict, best_effort };
-    const resolve_beneath_mode = b.option(
-        ResolveBeneathMode,
-        "resolve-beneath-mode",
-        "How to handle resolve_beneath on platforms without kernel support: strict (error.Unsupported) or best_effort (log warning, continue)",
-    ) orelse .strict;
+    const resolve_beneath_mode = b.option(ResolveBeneathMode, "resolve-beneath-mode", "How to handle resolve_beneath on platforms without kernel support: strict (error.Unsupported) or best_effort (log warning, continue)");
 
-    const no_hacks = b.option(bool, "no-hacks", "Avoid unsafe performance tricks (bool smuggling, etc.)") orelse false;
+    const no_hacks = b.option(bool, "no-hacks", "Avoid unsafe performance tricks (bool smuggling, etc.)");
 
-    const task_migration = b.option(bool, "task-migration", "Compile in task migration / work-stealing support. When false, tasks are pinned to their home executor and the scheduler can drop the machinery it needs (default true)") orelse true;
+    const scheduler_metrics = b.option(bool, "scheduler_metrics", "Count scheduler events (parks, steals, wake batches) in per-executor counters readable via Runtime.schedulerMetrics (default true)");
 
-    const scheduler_metrics = b.option(bool, "scheduler_metrics", "Count scheduler events (parks, steals, wake batches) in per-executor counters readable via Runtime.schedulerMetrics (default true; the counters sit on executor-local paths and cost one plain increment per event)") orelse true;
-
-    // Create options for backend selection
     var options = b.addOptions();
-    options.addOption(?[]const u8, "backend", backend);
-    options.addOption(ResolveBeneathMode, "resolve_beneath_mode", resolve_beneath_mode);
-    options.addOption(bool, "no_hacks", no_hacks);
-    options.addOption(bool, "task_migration", task_migration);
-    options.addOption(bool, "scheduler_metrics", scheduler_metrics);
+    // Stored as tag names: the CLI still validates against the enums above, but
+    // an optional enum makes addOptions emit an unresolvable type reference.
+    options.addOption(?[]const u8, "backend", if (backend) |v| @tagName(v) else null);
+    options.addOption(?[]const u8, "scheduling", if (scheduling) |v| @tagName(v) else null);
+    options.addOption(?[]const u8, "resolve_beneath_mode", if (resolve_beneath_mode) |v| @tagName(v) else null);
+    options.addOption(?bool, "no_hacks", no_hacks);
+    options.addOption(?bool, "scheduler_metrics", scheduler_metrics);
 
     const zio = b.addModule("zio", .{
         .root_source_file = b.path("src/zio.zig"),
@@ -40,7 +38,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = target.result.os.tag != .freestanding,
     });
-    zio.addOptions("zio_options", options);
+    zio.addOptions("zio_build_options", options);
+    // Lets test_runner.zig (the root file of the test binary, which lives outside
+    // src/ and so cannot reach it by relative path) name the `zio.Options` type
+    // for its `zio_options` declaration.
+    zio.addImport("zio", zio);
 
     const zio_lib = b.addLibrary(.{
         .name = "zio",

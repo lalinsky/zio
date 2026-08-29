@@ -44,6 +44,7 @@
 //! ```
 
 const std = @import("std");
+const zio_options = @import("../options.zig").options;
 const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
 const os = @import("../os/root.zig");
@@ -222,6 +223,7 @@ pub fn asyncCancelWait(self: *Event, waiter: *Waiter) bool {
 }
 
 test "Event basic set/reset/isSet" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -248,6 +250,7 @@ test "Event basic set/reset/isSet" {
 }
 
 test "Event wait/set signaling" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -285,6 +288,7 @@ test "Event wait/set signaling" {
 }
 
 test "Event waitTimeout timeout" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
@@ -296,6 +300,7 @@ test "Event waitTimeout timeout" {
 }
 
 test "Event multiple waiters broadcast" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
     defer runtime.deinit();
 
@@ -335,6 +340,7 @@ test "Event multiple waiters broadcast" {
 }
 
 test "Event wait on already set event" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
@@ -354,6 +360,7 @@ test "Event size" {
 }
 
 test "Event: cancel waiting task" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -384,6 +391,7 @@ test "Event: cancel waiting task" {
 }
 
 test "Event: select" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const select = @import("../select.zig").select;
 
     const TestContext = struct {
@@ -412,6 +420,7 @@ test "Event: select" {
 }
 
 test "Event: foreign thread signals async task" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -448,6 +457,7 @@ test "Event: foreign thread signals async task" {
 }
 
 test "Event: async task signals foreign thread" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 

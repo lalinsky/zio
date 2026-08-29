@@ -25,6 +25,7 @@
 //! ```
 
 const std = @import("std");
+const zio_options = @import("../options.zig").options;
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const getCurrentTaskOrNull = @import("../runtime.zig").getCurrentTaskOrNull;
@@ -151,6 +152,7 @@ fn lockSlow(self: *Mutex, comptime cancel_mode: Executor.YieldCancelMode) if (ca
 }
 
 test "Mutex basic lock/unlock" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -180,6 +182,7 @@ test "Mutex basic lock/unlock" {
 }
 
 test "Mutex tryLock" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
@@ -193,6 +196,7 @@ test "Mutex tryLock" {
 }
 
 test "Mutex contention" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
     defer runtime.deinit();
 
@@ -246,7 +250,7 @@ test "Mutex foreign threads" {
 }
 
 test "Mutex mixed tasks and threads" {
-    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
 
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
@@ -285,6 +289,7 @@ test "Mutex mixed tasks and threads" {
 }
 
 test "Mutex cancellation while parked under churn" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -330,7 +335,7 @@ test "Mutex cancellation while parked under churn" {
 }
 
 test "Mutex repeated cancellation generations under churn" {
-    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
 
     // Regression stress for lost wakeups on weakly ordered CPUs (both found
     // via this test hanging or stalling on Apple Silicon in release mode):

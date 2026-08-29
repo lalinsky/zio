@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
+const zio_options = @import("../options.zig").options;
 const builtin = @import("builtin");
 const Runtime = @import("../runtime.zig").Runtime;
 const yield = @import("../runtime.zig").yield;
@@ -132,6 +133,7 @@ pub fn Future(comptime T: type) type {
 }
 
 test "Future: basic set and get" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -153,6 +155,7 @@ test "Future: basic set and get" {
 }
 
 test "Future: await from coroutine" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -191,6 +194,7 @@ test "Future: await from coroutine" {
 }
 
 test "Future: multiple waiters" {
+    if (comptime !zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
     defer runtime.deinit();
 

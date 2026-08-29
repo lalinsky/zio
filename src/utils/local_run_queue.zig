@@ -11,16 +11,16 @@
 //! stack has.
 //!
 //! When the ring is full, half of it plus the new task spill to an `OverflowQueue`
-//! (Go's `runqputslow` → global queue). Which overflow queue is chosen by the
-//! `enable_task_migration` flag, via the `overflow` pointer set at init:
-//!   * migration on  -> the shared runtime global queue (load-balanced across all).
-//!   * migration off -> this executor's own queue (tasks never leave home).
+//! (Go's `runqputslow` → global queue). Which overflow queue is chosen by
+//! `zio_options.scheduling`, via the `overflow` pointer set at init:
+//!   * work_stealing -> the shared runtime global queue (load-balanced across all).
+//!   * pinned        -> this executor's own queue (tasks never leave home).
 //!
 //! Concurrency (stealable queues): `head` is CAS'd by the owner pop and (phase 2)
 //! stealers; `tail` is written only by the owning thread (store-release) and read
 //! plain by the owner, acquire by stealers. When the queue is built non-stealable
-//! (task migration compiled out) it is single-owner, so the cursors are plain and
-//! `steal` is a compile error. `T` must have a `next: ?*T` field (for the overflow
+//! (pinned or single-executor scheduling) it is single-owner, so the cursors
+//! are plain and `steal` is a compile error. `T` must have a `next: ?*T` field (for the overflow
 //! list) and, in debug, `in_list: bool` (managed by the overflow queue, not ring).
 
 const std = @import("std");

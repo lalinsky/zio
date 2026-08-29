@@ -187,7 +187,7 @@ zig build examples
 Running tests (with options to run specific tests, or select a non-default I/O backend)
 
 ```bash
-zig build test -Dtest-filter="foo" -Dbackend=epoll
+zig build test -Dtest-filter="foo" -Dbackend=epoll -Dscheduling=pinned
 ```
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for more details.
