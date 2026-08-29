@@ -222,3 +222,42 @@ pub fn errnoToSetCurrentDirError(errno: posix.system.E) SetCurrentDirError {
         else => |e| unexpectedError(e),
     };
 }
+
+/// Write the path of the running executable into `buffer`, returning its
+/// length. Follows symlinks so the result names the real image. Windows, the
+/// BSDs, and the argv0-only systems (OpenBSD, Haiku) are not handled here yet
+/// and are still served by std's implementation from the vtable.
+///
+/// The zio error sets returned below are deliberately subsets of
+/// `std.process.ExecutablePathError`, so they coerce on return without an
+/// explicit remap.
+pub fn getExecutablePath(allocator: std.mem.Allocator, buffer: []u8) std.process.ExecutablePathError!usize {
+    switch (builtin.os.tag) {
+        .linux => {
+            // procfs exposes the executable image as a symlink at /proc/self/exe.
+            return fs.dirReadLink(allocator, fs.cwd(), "/proc/self/exe", buffer);
+        },
+        .macos, .ios, .tvos, .watchos, .visionos => {
+            // _NSGetExecutablePath can hand back a path that is itself a symlink
+            // (and not necessarily absolute), so resolve it afterward.
+            var symlink_buf: [posix.PATH_MAX + 1]u8 = undefined;
+            var symlink_len: u32 = symlink_buf.len;
+            if (std.c._NSGetExecutablePath(&symlink_buf, &symlink_len) != 0) return error.NameTooLong;
+            const symlink_path = std.mem.sliceTo(&symlink_buf, 0);
+            return fs.dirRealPathFile(allocator, fs.cwd(), symlink_path, buffer);
+        },
+        else => return error.OperationUnsupported,
+    }
+}
+
+test "getExecutablePath returns an absolute path to the test binary" {
+    switch (builtin.os.tag) {
+        .linux, .macos, .ios, .tvos, .watchos, .visionos => {},
+        else => return error.SkipZigTest,
+    }
+
+    var buf: [posix.PATH_MAX]u8 = undefined;
+    const len = try getExecutablePath(std.testing.allocator, &buf);
+    try std.testing.expect(len > 0);
+    try std.testing.expect(buf[0] == '/');
+}

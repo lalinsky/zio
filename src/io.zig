@@ -1581,12 +1581,17 @@ fn fileIsTtyImpl(_: ?*anyopaque, file: Io.File) Io.Cancelable!bool {
     return os_fs.isTty(stdIoHandleToZio(file.handle));
 }
 
-fn fileEnableAnsiEscapeCodesImpl(_: ?*anyopaque, file: Io.File) Io.File.EnableAnsiEscapeCodesError!void {
+fn fileEnableAnsiEscapeCodesImpl(userdata: ?*anyopaque, file: Io.File) Io.File.EnableAnsiEscapeCodesError!void {
     // Turning the mode on for a Windows console is the one thing this does that
     // is not a query, and it goes through the console driver protocol that std
-    // implements.
-    const io = globalIo();
-    return io.vtable.fileEnableAnsiEscapeCodes(io.userdata, file);
+    // implements; keep delegating there. On POSIX there is nothing to enable,
+    // so the whole operation is just the terminal-device check.
+    if (builtin.os.tag == .windows) {
+        const io = globalIo();
+        return io.vtable.fileEnableAnsiEscapeCodes(io.userdata, file);
+    }
+    _ = userdata;
+    if (!os_fs.supportsAnsiEscapeCodes(stdIoHandleToZio(file.handle))) return error.NotTerminalDevice;
 }
 
 fn fileSupportsAnsiEscapeCodesImpl(_: ?*anyopaque, file: Io.File) Io.Cancelable!bool {
@@ -1708,9 +1713,19 @@ fn processExecutableOpenImpl(_: ?*anyopaque, _: Io.Dir.OpenFileOptions) std.proc
     @panic("processExecutableOpen: not supported");
 }
 
-fn processExecutablePathImpl(_: ?*anyopaque, buffer: []u8) std.process.ExecutablePathError!usize {
-    const io = globalIo();
-    return io.vtable.processExecutablePath(io.userdata, buffer);
+fn processExecutablePathImpl(userdata: ?*anyopaque, buffer: []u8) std.process.ExecutablePathError!usize {
+    switch (builtin.os.tag) {
+        .linux, .macos, .ios, .tvos, .watchos, .visionos => {
+            const rt: *Runtime = @ptrCast(@alignCast(userdata));
+            return os_process.getExecutablePath(rt.allocator, buffer);
+        },
+        // Windows (PEB), the BSDs (sysctl), and the argv0-only systems still go
+        // through std until they are implemented natively.
+        else => {
+            const io = globalIo();
+            return io.vtable.processExecutablePath(io.userdata, buffer);
+        },
+    }
 }
 
 fn lockStderrImpl(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.Cancelable!Io.LockedStderr {
@@ -2534,13 +2549,26 @@ fn netShutdownImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, how: Io.net.Shu
 }
 
 fn netInterfaceNameResolveImpl(_: ?*anyopaque, name: *const Io.net.Interface.Name) Io.net.Interface.Name.ResolveError!Io.net.Interface {
-    const io = globalIo();
-    return io.vtable.netInterfaceNameResolve(io.userdata, name);
+    // Windows resolves names through iphlpapi, which std already wraps; keep
+    // delegating there until it is implemented natively.
+    if (builtin.os.tag == .windows) {
+        const io = globalIo();
+        return io.vtable.netInterfaceNameResolve(io.userdata, name);
+    }
+    const index = try os_net.interfaceNameToIndex(&name.bytes);
+    return .{ .index = index };
 }
 
 fn netInterfaceNameImpl(_: ?*anyopaque, interface: Io.net.Interface) Io.net.Interface.NameError!Io.net.Interface.Name {
-    const io = globalIo();
-    return io.vtable.netInterfaceName(io.userdata, interface);
+    // std only implements this for Windows (Linux/libc both panic there), so on
+    // POSIX we implement it ourselves and only delegate on Windows.
+    if (builtin.os.tag == .windows) {
+        const io = globalIo();
+        return io.vtable.netInterfaceName(io.userdata, interface);
+    }
+    var buf: [os_net.IF_NAMESIZE]u8 = undefined;
+    const len = try os_net.interfaceIndexToName(interface.index, &buf);
+    return Io.net.Interface.Name.fromSlice(buf[0..len]) catch return error.NameTooLong;
 }
 
 fn netLookupImpl(
