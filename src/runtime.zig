@@ -2241,13 +2241,13 @@ test "runtime: maybeYield yields once the tick budget is spent" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
 
-    const ResetEvent = @import("sync/ResetEvent.zig");
+    const Event = @import("sync/Event.zig");
 
-    var event: ResetEvent = .init;
+    var event: Event = .init;
     var counter: usize = 0;
 
     const waiterTask = struct {
-        fn call(reset_event: *ResetEvent, counter_ptr: *usize) !void {
+        fn call(reset_event: *Event, counter_ptr: *usize) !void {
             try reset_event.wait();
             counter_ptr.* += 1;
         }
@@ -2399,14 +2399,14 @@ test "Runtime: multi-threaded with task migration" {
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(8) });
     defer runtime.deinit();
 
-    const ResetEvent = @import("sync/ResetEvent.zig");
+    const Event = @import("sync/Event.zig");
 
     const TestContext = struct {
         group: *Group,
-        done: ResetEvent = .{},
+        done: Event = .{},
         counter: std.atomic.Value(u32) = .init(0),
 
-        fn task(ctx: *@This(), parent: *ResetEvent) !void {
+        fn task(ctx: *@This(), parent: *Event) !void {
             parent.set();
 
             const n = ctx.counter.fetchAdd(1, .acquire);
@@ -2415,7 +2415,7 @@ test "Runtime: multi-threaded with task migration" {
                 return;
             }
 
-            var event: ResetEvent = .{};
+            var event: Event = .{};
             ctx.group.spawn(task, .{ ctx, &event }) catch |err| {
                 std.debug.print("task migration failed: {}\n", .{err});
                 return err;
@@ -2432,7 +2432,7 @@ test "Runtime: multi-threaded with task migration" {
 
     var ctx: TestContext = .{ .group = &group };
 
-    var event: ResetEvent = .{};
+    var event: Event = .{};
 
     try group.spawn(TestContext.task, .{ &ctx, &event });
 
@@ -2453,7 +2453,7 @@ test "runtime: wake-before-park awaken bit stress (two executors)" {
 }
 
 fn wakeBeforeParkStress(executor_count: u6) !void {
-    const ResetEvent = @import("sync/ResetEvent.zig");
+    const Event = @import("sync/Event.zig");
 
     const runtime = try Runtime.init(std.testing.allocator, .{
         .executors = .exact(executor_count),
@@ -2464,8 +2464,8 @@ fn wakeBeforeParkStress(executor_count: u6) !void {
         // Number of ping-pong iterations to exercise the wake-before-park window.
         const iterations: u32 = 10_000;
 
-        ping: ResetEvent = .{},
-        pong: ResetEvent = .{},
+        ping: Event = .{},
+        pong: Event = .{},
         counter: std.atomic.Value(u32) = .init(0),
 
         // Waits on ping each iteration — this is the task that parks, and the one
@@ -2631,7 +2631,7 @@ test "runtime: a busy ring still drains cross-thread wakes from the overflow que
     // waits for the spinners to finish rather than for the wake.
     if (builtin.single_threaded) return error.SkipZigTest;
 
-    const ResetEvent = @import("sync/ResetEvent.zig");
+    const Event = @import("sync/Event.zig");
 
     const H = struct {
         // Bounds the failing case: without the peek the spinners run to the cap
@@ -2654,13 +2654,13 @@ test "runtime: a busy ring still drains cross-thread wakes from the overflow que
             }
         }
 
-        fn waiter(event: *ResetEvent, stop: *std.atomic.Value(bool), woken: *std.atomic.Value(bool)) !void {
+        fn waiter(event: *Event, stop: *std.atomic.Value(bool), woken: *std.atomic.Value(bool)) !void {
             try event.wait();
             woken.store(true, .release);
             stop.store(true, .release);
         }
 
-        fn signaler(event: *ResetEvent, ticks: *std.atomic.Value(u32)) void {
+        fn signaler(event: *Event, ticks: *std.atomic.Value(u32)) void {
             while (ticks.load(.monotonic) < spin_before_wake) os.thread.yield();
             event.set();
         }
@@ -2671,7 +2671,7 @@ test "runtime: a busy ring still drains cross-thread wakes from the overflow que
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(1) });
     defer runtime.deinit();
 
-    var event = ResetEvent.init;
+    var event = Event.init;
     var stop = std.atomic.Value(bool).init(false);
     var ticks = std.atomic.Value(u32).init(0);
     var hit_cap = std.atomic.Value(bool).init(false);

@@ -66,7 +66,7 @@ const meta = @import("meta.zig");
 //         reported: a notification whose claim bounced off the commit fence
 //         records its arm, and select() promotes that record. So a source
 //         whose readiness can lapse (a drained Group taking new tasks, a set
-//         ResetEvent being reset) may report itself unready here without
+//         Event being reset) may report itself unready here without
 //         losing the event.
 //       - Thread-safe with respect to the source; only the owning select's
 //         sweep calls asyncWait for a given waiter.
@@ -1104,10 +1104,10 @@ test "select: promotes a notification that bounced off the commit fence" {
     // The synthetic arm becomes ready on its second poll, so a regression in
     // the promotion or settle wiring shows up as the wrong arm winning rather
     // than as a hang.
-    const ResetEvent = @import("sync/ResetEvent.zig");
+    const Event = @import("sync/Event.zig");
 
     const FenceArm = struct {
-        event: *ResetEvent,
+        event: *Event,
 
         pub const Result = void;
         pub const WaitContext = struct { fenced: bool = false };
@@ -1147,7 +1147,7 @@ test "select: promotes a notification that bounced off the commit fence" {
 
     const Body = struct {
         fn run() !void {
-            var event = ResetEvent.init;
+            var event = Event.init;
             var fence_arm = FenceArm{ .event = &event };
 
             const result = try select(.{ .event = &event, .fence = &fence_arm });

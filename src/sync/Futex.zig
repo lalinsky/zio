@@ -16,7 +16,7 @@
 //! try Futex.wait(ptr, expect);
 //!
 //! // Wait with timeout
-//! Futex.timedWait(ptr, expect, .{ .duration = .fromMilliseconds(100) }) catch |err| switch (err) {
+//! Futex.waitTimeout(ptr, expect, .{ .duration = .fromMilliseconds(100) }) catch |err| switch (err) {
 //!     error.Timeout => // timed out,
 //!     error.Canceled => // task was cancelled,
 //! };
@@ -121,7 +121,7 @@ pub fn waitUncancelable(ptr: *const u32, expect: u32) void {
 /// Stack-allocated waiter node for the global futex buckets.
 ///
 /// `waiter` references an externally-owned `Waiter`: the blocking `wait()` /
-/// `timedWait()` paths point it at a local direct waiter, while the non-blocking
+/// `waitTimeout()` paths point it at a local direct waiter, while the non-blocking
 /// `prepareWait()` path used by select() points it at a caller-owned select
 /// waiter. All fields default so the node can serve as a select `WaitContext`.
 pub const FutexWaiter = struct {
@@ -137,12 +137,15 @@ pub const FutexWaiter = struct {
 };
 
 /// Like `wait`, but also returns `error.Timeout` if the timeout elapses.
-pub fn timedWait(ptr: *const u32, expect: u32, timeout: Timeout) (Timeoutable || Cancelable)!void {
-    return timedWaitClock(ptr, expect, timeout, .awake);
+pub fn waitTimeout(ptr: *const u32, expect: u32, timeout: Timeout) (Timeoutable || Cancelable)!void {
+    return waitTimeoutClock(ptr, expect, timeout, .awake);
 }
 
-/// Like `timedWait`, but the timeout is measured against `clock`.
-pub fn timedWaitClock(ptr: *const u32, expect: u32, timeout: Timeout, clock: Clock) (Timeoutable || Cancelable)!void {
+/// Alias for `waitTimeout`. Deprecated, will be removed in a future release.
+pub const timedWait = waitTimeout;
+
+/// Like `waitTimeout`, but the timeout is measured against `clock`.
+pub fn waitTimeoutClock(ptr: *const u32, expect: u32, timeout: Timeout, clock: Clock) (Timeoutable || Cancelable)!void {
     // No deadline: delegate to the untimed `wait`. This skips the timer setup
     // and, more importantly, the unconditional post-wake `removeFromBucket`
     // below (a second bucket-mutex acquisition per wait) that can never observe
@@ -199,6 +202,9 @@ pub fn timedWaitClock(ptr: *const u32, expect: u32, timeout: Timeout, clock: Clo
         },
     };
 }
+
+/// Alias for `waitTimeoutClock`. Deprecated, will be removed in a future release.
+pub const timedWaitClock = waitTimeoutClock;
 
 /// Remove a waiter from its bucket (for cancellation/timeout).
 /// Returns true if the waiter was in the queue, false if already removed by wake.
@@ -438,13 +444,13 @@ test "Futex: multiple waiters different addresses" {
     try std.testing.expectEqual(1, woken);
 }
 
-test "Futex: timedWait timeout" {
+test "Futex: waitTimeout timeout" {
     const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer rt.deinit();
 
     var value: u32 = 0;
 
     // Wait with timeout, no one will wake it, so should timeout
-    const result = Futex.timedWait(&value, 0, .{ .duration = .fromMilliseconds(10) });
+    const result = Futex.waitTimeout(&value, 0, .{ .duration = .fromMilliseconds(10) });
     try std.testing.expectError(error.Timeout, result);
 }

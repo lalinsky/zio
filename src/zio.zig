@@ -68,7 +68,7 @@ pub const net = @import("net.zig");
 
 pub const Mutex = @import("sync/Mutex.zig");
 pub const Condition = @import("sync/Condition.zig");
-pub const ResetEvent = @import("sync/ResetEvent.zig");
+pub const Event = @import("sync/Event.zig");
 pub const RwLock = @import("sync/RwLock.zig");
 pub const Semaphore = @import("sync/Semaphore.zig");
 pub const Barrier = @import("sync/Barrier.zig");
@@ -76,6 +76,9 @@ pub const Futex = @import("sync/Futex.zig");
 pub const Channel = @import("sync/channel.zig").Channel;
 pub const BroadcastChannel = @import("sync/broadcast_channel.zig").BroadcastChannel;
 pub const Future = @import("sync/future.zig").Future;
+
+/// Alias for `Event`. Deprecated, will be removed in a future release.
+pub const ResetEvent = Event;
 
 pub const Signal = @import("signal.zig").Signal;
 pub const SignalKind = @import("signal.zig").SignalKind;

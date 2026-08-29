@@ -38,7 +38,7 @@ fn poolWorker() void {
 /// call returns, so an implementation that let the waiter through early fails
 /// rather than producing the same output.
 const Contend = struct {
-    has_lock: zio.ResetEvent = .init,
+    has_lock: zio.Event = .init,
     released: std.atomic.Value(bool) = .init(false),
 };
 

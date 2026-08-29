@@ -161,7 +161,7 @@ pub const Waiter = struct {
         /// commit fence. Such a notification consumed nothing, but its
         /// identity would otherwise be lost, and re-polling only recovers it
         /// for sources whose readiness is still standing afterwards (a
-        /// drained Group can take new tasks, a set ResetEvent can be reset).
+        /// drained Group can take new tasks, a set Event can be reset).
         /// The owning select promotes this into `winner` once the fence is
         /// down; see `promotePending`.
         pending: *std.atomic.Value(usize),
@@ -561,7 +561,7 @@ pub const Waiter = struct {
 };
 
 /// Shared `asyncWait` body for level sources backed by a sticky-flag
-/// WaitQueue (Future, ResetEvent, Awaitable): readiness is the flag,
+/// WaitQueue (Future, Event, Awaitable): readiness is the flag,
 /// completion pops every waiter and signals it. Idempotent under re-poll,
 /// and claims the select before reporting ready.
 pub fn waitOnFlagQueue(queue: *WaitQueue(WaitNode), waiter: *Waiter) AsyncWaitState {
