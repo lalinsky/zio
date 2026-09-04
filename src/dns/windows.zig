@@ -119,7 +119,6 @@ fn fillBuffers(
                 if (i >= storage.len) return i;
                 const name_slice = std.mem.sliceTo(name_ptr, 0);
                 const len = std.unicode.utf16LeToUtf8(cname_buf, name_slice) catch return error.UnknownHostName;
-                cname_buf[len] = 0;
                 storage[i] = .{ .canonical_name = .{ .bytes = cname_buf[0..len] } };
                 i += 1;
             }

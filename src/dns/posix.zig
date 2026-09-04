@@ -23,10 +23,13 @@ pub fn fillResultsFromAddrinfo(
             if (h.canonname) |name_ptr| {
                 if (i >= storage.len) return i;
                 const name_slice = std.mem.sliceTo(name_ptr, 0);
-                @memcpy(cname_buf[0..name_slice.len], name_slice);
-                cname_buf[name_slice.len] = 0;
-                storage[i] = .{ .canonical_name = .{ .bytes = cname_buf[0..name_slice.len] } };
-                i += 1;
+                // A resolver that answers with a name too long to be encodable
+                // has told us nothing usable; drop it rather than truncate.
+                if (name_slice.len <= cname_buf.len) {
+                    @memcpy(cname_buf[0..name_slice.len], name_slice);
+                    storage[i] = .{ .canonical_name = .{ .bytes = cname_buf[0..name_slice.len] } };
+                    i += 1;
+                }
             }
         }
     }

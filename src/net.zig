@@ -73,7 +73,20 @@ pub const HostName = struct {
     /// Externally managed memory. Already checked to be valid.
     bytes: []const u8,
 
-    pub const max_len = 255;
+    /// Size of a buffer that holds any host name, canonical names included.
+    /// Taken from the standard library so the `canonical_name_buffer` types in
+    /// `LookupOptions` stay identical to `std.Io.net.HostName`'s and cannot
+    /// drift apart as Zig changes the value (see #725). It is always at least
+    /// `max_encodable_len`, and on Zig 0.16 one byte more.
+    pub const max_len = std.Io.net.HostName.max_len;
+
+    /// The longest host name the DNS wire format can carry, in text form. A
+    /// name is capped at 255 octets on the wire, where every label carries a
+    /// one-octet length prefix and the root label is a single zero octet
+    /// (RFC 1035, Section 3.1). That leaves 254 characters with the trailing
+    /// dot standing in for the root label, or 253 without it.
+    const max_encodable_len = 254;
+    const max_encodable_len_without_root = max_encodable_len - 1;
 
     pub const ValidateError = error{
         NameTooLong,
@@ -86,16 +99,17 @@ pub const HostName = struct {
         if (IpAddress.parseIp(bytes, 0)) |_| return else |_| {}
         if (bytes[0] == '.') return error.InvalidHostName;
 
-        // The trailing dot of an FQDN counts toward the length. In a DNS packet it is
-        // the zero-length root label, which still takes up a byte. Checking the full
-        // length here also keeps `max_len` big enough to hold any validated hostname.
-        if (bytes.len > max_len) return error.NameTooLong;
-
-        // Ignore trailing dot (FQDN) when validating labels.
+        // Ignore the trailing dot of an FQDN when measuring and validating
+        // labels. In a packet it is the zero-length root label, so it costs an
+        // octet either way and the limit below already accounts for it.
         const end = if (bytes[bytes.len - 1] == '.') end: {
             if (bytes.len == 1) return error.InvalidHostName;
             break :end bytes.len - 1;
         } else bytes.len;
+
+        // Measured without the trailing dot, so that a name is judged by what
+        // it costs on the wire rather than by how it happens to be spelled.
+        if (end > max_encodable_len_without_root) return error.NameTooLong;
 
         // Hostnames are divided into dot-separated "labels", which:
         // - Start with a letter or digit
