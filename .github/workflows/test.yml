@@ -5,6 +5,9 @@ on:
     branches: [ main, zig-0.17 ]
     tags:
   pull_request:
+  # Lets the daily "Zig master drift" job on main run this workflow at this
+  # ref, to catch stdlib changes that land while nothing is pushed here.
+  workflow_dispatch:
 
 jobs:
   test:
