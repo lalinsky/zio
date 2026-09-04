@@ -1,0 +1,40 @@
+# The zig-0.17 branch is the port to current Zig master, and its own CI only
+# runs when something is pushed to it. Zig master moves underneath it in
+# between, so a break can sit there unnoticed until a user reports it (#725).
+# This is the heartbeat that turns that silent drift into a daily signal.
+#
+# It only triggers the branch's own CI, it does not reimplement it: the matrix
+# lives on zig-0.17, next to the code it builds, and stays the single place to
+# change it.
+#
+# The schedule has to live on the default branch, because GitHub only schedules
+# workflows from there. A `schedule:` trigger added to test.yml on zig-0.17
+# would never fire, so instead we dispatch that workflow at that ref from here.
+name: Zig master drift
+
+on:
+  schedule:
+    # Daily, deliberately off the top of the hour: GitHub's scheduler is
+    # congested there and delays runs.
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+concurrency:
+  group: zig-master-drift
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+    # Runs test.yml as defined on zig-0.17, against Zig master, with that
+    # branch's full matrix. Dispatching with GITHUB_TOKEN does start a real
+    # run: workflow_dispatch and repository_dispatch are the two events
+    # exempt from the rule that token-triggered events do not chain.
+    - name: Trigger the port branch's CI
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh workflow run test.yml --repo "$GITHUB_REPOSITORY" --ref zig-0.17
