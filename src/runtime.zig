@@ -2633,36 +2633,90 @@ test "runtime: a busy ring still drains cross-thread wakes from the overflow que
 
     const Event = @import("sync/Event.zig");
 
+    // How the spinner stopped. An enum rather than a pair of flags so a CI
+    // failure names the way it broke instead of only that something did; the
+    // tag type is explicit so it fits in an atomic.
+    const Outcome = enum(u8) {
+        // Still running, or gone without saying — `hasFailed` covers the latter.
+        spinning,
+        // The woken task got in and stopped it, which is the point of the test.
+        stopped_by_wake,
+        // It outran the wake: the regression this test guards against.
+        spun_past_wake,
+        // The foreign thread never signaled. Says the machine starved a thread,
+        // not that the runtime dropped a wake.
+        never_signaled,
+    };
+
     const H = struct {
         // Bounds the failing case: without the peek the spinners run to the cap
         // instead of being stopped by the woken task, so the test fails rather
-        // than hangs.
+        // than hangs. The cap counts from the wake, not from the first yield:
+        // how long the foreign thread takes to start and reach set() is the
+        // machine's business, it varies by an order of magnitude on a loaded CI
+        // runner, and charging it to the same budget is what made this flaky.
+        // What remains is the wait the peek bounds to a tick, so the slack here
+        // is enormous.
         const spin_cap: u32 = 2_000_000;
         // The foreign thread waits for this many yields before signaling, so the
         // wake is guaranteed to land while the ring is busy.
         const spin_before_wake: u32 = 1_000;
+        // Backstop for a thread that never runs at all: the spinner gives up,
+        // releases the waiter so the group can finish, and the assertion below
+        // reports it. In wall-clock, since a yield count means different things
+        // on different machines, and sampled coarsely because reading a clock
+        // costs more than the yield it would be measuring.
+        const never_signaled_ms = 5_000;
+        const clock_check_mask: u32 = 0xFFFF;
 
-        fn spinner(stop: *std.atomic.Value(bool), ticks: *std.atomic.Value(u32), hit_cap: *std.atomic.Value(bool)) !void {
+        const Shared = struct {
+            event: Event = Event.init,
+            stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+            // Published before set(), so the cap starts counting no later than
+            // the wake it is there to measure.
+            signaled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+            ticks: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+            woken: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+            outcome: std.atomic.Value(Outcome) = std.atomic.Value(Outcome).init(.spinning),
+        };
+
+        fn spinner(s: *Shared) !void {
+            const started = Timestamp.now(.monotonic);
             var i: u32 = 0;
-            while (!stop.load(.acquire)) : (i += 1) {
-                if (i == spin_cap) {
-                    hit_cap.store(true, .release);
+            var since_wake: u32 = 0;
+            while (!s.stop.load(.acquire)) : (i += 1) {
+                if (s.signaled.load(.acquire)) {
+                    if (since_wake == spin_cap) {
+                        s.outcome.store(.spun_past_wake, .release);
+                        return;
+                    }
+                    since_wake += 1;
+                } else if (i & clock_check_mask == 0 and
+                    started.durationTo(Timestamp.now(.monotonic)).toMilliseconds() > never_signaled_ms)
+                {
+                    s.outcome.store(.never_signaled, .release);
+                    // The waiter is parked on an event nobody is coming to set;
+                    // release it so the group finishes and the assertion fails
+                    // instead of the test hanging.
+                    s.event.set();
                     return;
                 }
-                _ = ticks.fetchAdd(1, .monotonic);
+                _ = s.ticks.fetchAdd(1, .monotonic);
                 try yield();
             }
+            s.outcome.store(.stopped_by_wake, .release);
         }
 
-        fn waiter(event: *Event, stop: *std.atomic.Value(bool), woken: *std.atomic.Value(bool)) !void {
-            try event.wait();
-            woken.store(true, .release);
-            stop.store(true, .release);
+        fn waiter(s: *Shared) !void {
+            try s.event.wait();
+            s.woken.store(true, .release);
+            s.stop.store(true, .release);
         }
 
-        fn signaler(event: *Event, ticks: *std.atomic.Value(u32)) void {
-            while (ticks.load(.monotonic) < spin_before_wake) os.thread.yield();
-            event.set();
+        fn signaler(s: *Shared) void {
+            while (s.ticks.load(.monotonic) < spin_before_wake) os.thread.yield();
+            s.signaled.store(true, .release);
+            s.event.set();
         }
     };
 
@@ -2671,25 +2725,21 @@ test "runtime: a busy ring still drains cross-thread wakes from the overflow que
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(1) });
     defer runtime.deinit();
 
-    var event = Event.init;
-    var stop = std.atomic.Value(bool).init(false);
-    var ticks = std.atomic.Value(u32).init(0);
-    var hit_cap = std.atomic.Value(bool).init(false);
-    var woken = std.atomic.Value(bool).init(false);
+    var shared: H.Shared = .{};
 
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(H.waiter, .{ &event, &stop, &woken });
-    try group.spawn(H.spinner, .{ &stop, &ticks, &hit_cap });
+    try group.spawn(H.waiter, .{&shared});
+    try group.spawn(H.spinner, .{&shared});
 
-    const thread = try std.Thread.spawn(.{}, H.signaler, .{ &event, &ticks });
+    const thread = try std.Thread.spawn(.{}, H.signaler, .{&shared});
     defer thread.join();
 
     try group.wait();
     try std.testing.expect(!group.hasFailed());
 
-    try std.testing.expect(woken.load(.acquire));
+    try std.testing.expect(shared.woken.load(.acquire));
     // The spinner was stopped by the wake, not by its own cap.
-    try std.testing.expect(!hit_cap.load(.acquire));
+    try std.testing.expectEqual(Outcome.stopped_by_wake, shared.outcome.load(.acquire));
 }
