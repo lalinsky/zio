@@ -2636,18 +2636,24 @@ test "runtime: a busy ring still drains cross-thread wakes from the overflow que
     const H = struct {
         // Bounds the failing case: without the peek the spinners run to the cap
         // instead of being stopped by the woken task, so the test fails rather
-        // than hangs.
+        // than hangs. Counted from the wake rather than from the first yield:
+        // how long the foreign thread takes to start and reach set() is the
+        // machine's business, it swamps the wait being measured, and charging
+        // it here is what made this flaky on a loaded CI runner.
         const spin_cap: u32 = 2_000_000;
         // The foreign thread waits for this many yields before signaling, so the
         // wake is guaranteed to land while the ring is busy.
         const spin_before_wake: u32 = 1_000;
 
-        fn spinner(stop: *std.atomic.Value(bool), ticks: *std.atomic.Value(u32), hit_cap: *std.atomic.Value(bool)) !void {
+        fn spinner(stop: *std.atomic.Value(bool), ticks: *std.atomic.Value(u32), hit_cap: *std.atomic.Value(bool), signaled: *std.atomic.Value(bool)) !void {
             var i: u32 = 0;
-            while (!stop.load(.acquire)) : (i += 1) {
-                if (i == spin_cap) {
-                    hit_cap.store(true, .release);
-                    return;
+            while (!stop.load(.acquire)) {
+                if (signaled.load(.acquire)) {
+                    if (i == spin_cap) {
+                        hit_cap.store(true, .release);
+                        return;
+                    }
+                    i += 1;
                 }
                 _ = ticks.fetchAdd(1, .monotonic);
                 try yield();
@@ -2660,8 +2666,11 @@ test "runtime: a busy ring still drains cross-thread wakes from the overflow que
             stop.store(true, .release);
         }
 
-        fn signaler(event: *Event, ticks: *std.atomic.Value(u32)) void {
+        fn signaler(event: *Event, ticks: *std.atomic.Value(u32), signaled: *std.atomic.Value(bool)) void {
             while (ticks.load(.monotonic) < spin_before_wake) os.thread.yield();
+            // Before set(), so the cap starts counting no later than the wake
+            // it is there to measure.
+            signaled.store(true, .release);
             event.set();
         }
     };
@@ -2675,15 +2684,16 @@ test "runtime: a busy ring still drains cross-thread wakes from the overflow que
     var stop = std.atomic.Value(bool).init(false);
     var ticks = std.atomic.Value(u32).init(0);
     var hit_cap = std.atomic.Value(bool).init(false);
+    var signaled = std.atomic.Value(bool).init(false);
     var woken = std.atomic.Value(bool).init(false);
 
     var group: Group = .init;
     defer group.cancel();
 
     try group.spawn(H.waiter, .{ &event, &stop, &woken });
-    try group.spawn(H.spinner, .{ &stop, &ticks, &hit_cap });
+    try group.spawn(H.spinner, .{ &stop, &ticks, &hit_cap, &signaled });
 
-    const thread = try std.Thread.spawn(.{}, H.signaler, .{ &event, &ticks });
+    const thread = try std.Thread.spawn(.{}, H.signaler, .{ &event, &ticks, &signaled });
     defer thread.join();
 
     try group.wait();
