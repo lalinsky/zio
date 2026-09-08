@@ -1783,16 +1783,23 @@ fn processSetCurrentPathImpl(userdata: ?*anyopaque, path: []const u8) std.proces
     };
 }
 
-// TODO: implement using our own execve wrapper
-fn processReplaceImpl(_: ?*anyopaque, options: std.process.ReplaceOptions) std.process.ReplaceError {
-    const io = globalIo();
-    return io.vtable.processReplace(io.userdata, options);
+fn processReplaceImpl(userdata: ?*anyopaque, options: std.process.ReplaceOptions) std.process.ReplaceError {
+    if (builtin.os.tag == .windows) {
+        // Windows cannot replace the process image; std.process.can_replace is
+        // false there, so this is the expected result rather than a fallback.
+        return error.OperationUnsupported;
+    } else {
+        const rt: *Runtime = @ptrCast(@alignCast(userdata));
+        return os_process.replace(rt.allocator, options, processEnviron());
+    }
 }
 
-// TODO: implement using our own execve wrapper
 fn processReplacePathImpl(_: ?*anyopaque, dir: Io.Dir, options: std.process.ReplaceOptions) std.process.ReplaceError {
-    const io = globalIo();
-    return io.vtable.processReplacePath(io.userdata, dir, options);
+    // Resolving the program relative to a dir fd is not implemented yet (neither
+    // is it in std.Io.Threaded, which only panics here); return a clean error.
+    _ = dir;
+    _ = options;
+    return error.OperationUnsupported;
 }
 
 fn processEnviron() std.process.Environ {
@@ -1806,26 +1813,45 @@ fn processEnviron() std.process.Environ {
     return .empty;
 }
 
-// TODO: implement using our own posix_spawn/fork+exec wrapper
 fn processSpawnImpl(userdata: ?*anyopaque, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
     const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    var threaded: Io.Threaded = .init(rt.allocator, .{ .environ = processEnviron() });
-    defer threaded.deinit();
-    const io = threaded.io();
-    var child = try io.vtable.processSpawn(io.userdata, options);
-    setChildPipesNonblocking(&child);
-    return child;
+    if (builtin.os.tag == .windows) {
+        // Windows spawn (CreateProcess) is not implemented natively yet; keep
+        // standing up a throwaway std.Io.Threaded there.
+        var threaded: Io.Threaded = .init(rt.allocator, .{ .environ = processEnviron() });
+        defer threaded.deinit();
+        const io = threaded.io();
+        var child = try io.vtable.processSpawn(io.userdata, options);
+        setChildPipesNonblocking(&child);
+        return child;
+    } else {
+        const spawned = try os_process.spawn(rt.allocator, options, processEnviron());
+        var child: std.process.Child = .{
+            .id = spawned.id,
+            .thread_handle = {},
+            .stdin = if (spawned.stdin) |fd| childPipeFile(fd) else null,
+            .stdout = if (spawned.stdout) |fd| childPipeFile(fd) else null,
+            .stderr = if (spawned.stderr) |fd| childPipeFile(fd) else null,
+            .request_resource_usage_statistics = options.request_resource_usage_statistics,
+        };
+        setChildPipesNonblocking(&child);
+        return child;
+    }
 }
 
-// TODO: implement using our own posix_spawn/fork+exec wrapper
-fn processSpawnPathImpl(userdata: ?*anyopaque, dir: Io.Dir, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    var threaded: Io.Threaded = .init(rt.allocator, .{ .environ = processEnviron() });
-    defer threaded.deinit();
-    const io = threaded.io();
-    var child = try io.vtable.processSpawnPath(io.userdata, dir, options);
-    setChildPipesNonblocking(&child);
-    return child;
+fn processSpawnPathImpl(_: ?*anyopaque, dir: Io.Dir, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
+    // Resolving the program relative to a dir fd is not implemented yet (neither
+    // is it in std.Io.Threaded, which only panics here); return a clean error.
+    _ = dir;
+    _ = options;
+    return error.OperationUnsupported;
+}
+
+/// Wrap a spawned child's pipe fd as an Io.File. The handle is left marked
+/// blocking; setChildPipesNonblocking flips the underlying fd afterward, which
+/// is the same handoff the old std.Io.Threaded-backed path used.
+fn childPipeFile(handle: Io.File.Handle) Io.File {
+    return .{ .handle = handle, .flags = .{ .nonblocking = false } };
 }
 
 fn setChildPipesNonblocking(child: *std.process.Child) void {
