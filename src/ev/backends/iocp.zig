@@ -876,6 +876,16 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
     // Operation will complete via IOCP (either immediate or async)
 }
 
+/// SO_TYPE lookup for the poll probe; a datagram socket needs a peeking read.
+fn isDatagramSocket(handle: windows.SOCKET) !bool {
+    var sock_type: i32 = 0;
+    net.getsockopt(handle, net.SOL.SOCKET, net.SO.TYPE, std.mem.asBytes(&sock_type)) catch |err| {
+        log.err("getsockopt(SO_TYPE) failed: {}", .{err});
+        return err;
+    };
+    return sock_type == windows.SOCK.DGRAM;
+}
+
 fn submitPoll(self: *Self, state: *LoopState, data: *NetPoll) !void {
     _ = self;
 
@@ -888,7 +898,12 @@ fn submitPoll(self: *Self, state: *LoopState, data: *NetPoll) !void {
     var dummy: u8 = 0;
     var zero_buf = windows.WSABUF{ .len = 0, .buf = @ptrCast(&dummy) };
 
-    data.c.internal.flags = 0;
+    // On a datagram socket a zero-length read is satisfied from the queued
+    // datagram, which is truncated to nothing and lost, and the call reports
+    // WSAEMSGSIZE. Peeking keeps the datagram in place, so WSAEMSGSIZE then
+    // simply means one is there. Stream sockets keep the plain zero-length
+    // read, which never touches data.
+    data.c.internal.flags = if (data.event == .recv and try isDatagramSocket(data.handle)) windows.MSG.PEEK else 0;
 
     // Choose WSARecv or WSASend based on which event is requested
     const result = switch (data.event) {
@@ -914,6 +929,13 @@ fn submitPoll(self: *Self, state: *LoopState, data: *NetPoll) !void {
 
     if (result == windows.SOCKET_ERROR) {
         const err = windows.WSAGetLastError();
+        if (err == .EMSGSIZE and data.event == .recv) {
+            // A datagram is queued (see the peek above). WSAEMSGSIZE is a
+            // completed operation, not a failed submission: the underlying
+            // STATUS_BUFFER_OVERFLOW is a success-class status, so a
+            // completion packet follows and the handler finishes the op.
+            return;
+        }
         if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             log.err("WSARecv/WSASend (poll) failed: {}", .{err});
@@ -962,7 +984,9 @@ fn submitRecv(self: *Self, state: *LoopState, data: *NetRecv) !void {
     // complete it immediately here.
     if (result == windows.SOCKET_ERROR) {
         const err = windows.WSAGetLastError();
-        if (err != .IO_PENDING) {
+        // WSAEMSGSIZE is a truncated datagram that was delivered, not a
+        // failed submission, so its completion packet still follows.
+        if (err != .IO_PENDING and err != .EMSGSIZE) {
             // Real error - complete immediately with error
             log.err("WSARecv failed: {}", .{err});
             data.c.setError(net.errnoToRecvError(err));
@@ -1048,7 +1072,9 @@ fn submitRecvFrom(self: *Self, state: *LoopState, data: *NetRecvFrom) !void {
     // the completion will be posted to the IOCP port.
     if (result == windows.SOCKET_ERROR) {
         const err = windows.WSAGetLastError();
-        if (err != .IO_PENDING) {
+        // WSAEMSGSIZE is a truncated datagram that was delivered, not a
+        // failed submission, so its completion packet still follows.
+        if (err != .IO_PENDING and err != .EMSGSIZE) {
             // Real error - complete immediately with error
             log.err("WSARecvFrom failed: {}", .{err});
             data.c.setError(net.errnoToRecvError(err));
@@ -1156,7 +1182,9 @@ fn submitRecvMsg(self: *Self, state: *LoopState, data: *NetRecvMsg) !void {
 
     if (result == windows.SOCKET_ERROR) {
         const err = windows.WSAGetLastError();
-        if (err != .IO_PENDING) {
+        // WSAEMSGSIZE is a truncated datagram that was delivered, not a
+        // failed submission, so its completion packet still follows.
+        if (err != .IO_PENDING and err != .EMSGSIZE) {
             log.err("WSARecvMsg failed: {}", .{err});
             data.c.setError(net.errnoToRecvError(err));
             state.markCompletedFromBackend(&data.c);
@@ -2065,7 +2093,12 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
 
             if (result == windows.FALSE) {
                 const err = windows.WSAGetLastError();
-                c.setError(net.errnoToRecvError(err));
+                if (err == .EMSGSIZE and data.event == .recv) {
+                    // The peeking zero-length read found a datagram: ready.
+                    c.setResult(.net_poll, {});
+                } else {
+                    c.setError(net.errnoToRecvError(err));
+                }
             } else {
                 // Zero-length operation completed - socket is ready
                 c.setResult(.net_poll, {});

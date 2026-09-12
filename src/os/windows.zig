@@ -1230,6 +1230,7 @@ pub const SO = struct {
     pub const SNDBUF: i32 = 0x1001;
     pub const RCVBUF: i32 = 0x1002;
     pub const ERROR: i32 = 0x1007;
+    pub const TYPE: i32 = 0x1008;
 };
 
 // TCP options (IPPROTO_TCP level)
