@@ -1032,12 +1032,20 @@ pub const RecvFlags = packed struct {
     /// truncation). Silently ignored on platforms without MSG_TRUNC input
     /// semantics (e.g. Windows).
     trunc: bool = false,
+    /// Fail with `error.WouldBlock` instead of waiting when nothing is queued.
+    /// On POSIX this is MSG_DONTWAIT and holds regardless of the socket's
+    /// blocking mode. Windows has no such flag, so there it relies on the
+    /// socket being in FIONBIO mode. Backends that declare
+    /// `supports_recv_dontwait` complete such an operation immediately instead
+    /// of parking it on readiness.
+    dontwait: bool = false,
 };
 
 fn recvFlagsToSys(flags: RecvFlags) c_int {
     var sys_flags: c_int = 0;
     const MSG = if (builtin.os.tag == .windows) windows.MSG else posix.system.MSG;
     if (flags.peek and @hasDecl(MSG, "PEEK")) sys_flags |= MSG.PEEK;
+    if (flags.dontwait and @hasDecl(MSG, "DONTWAIT")) sys_flags |= MSG.DONTWAIT;
     if (flags.waitall and @hasDecl(MSG, "WAITALL")) sys_flags |= MSG.WAITALL;
     if (flags.oob and @hasDecl(MSG, "OOB")) sys_flags |= MSG.OOB;
     // MSG_TRUNC as an *input* flag is Linux-specific; on other POSIX systems

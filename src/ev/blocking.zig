@@ -212,6 +212,24 @@ fn pollForReady(fd: os.net.fd_t, events: i16) !void {
     _ = try os.net.poll(&pfd, -1);
 }
 
+/// Wait for readiness before a dontwait receive, or don't. On POSIX the
+/// syscall carries MSG_DONTWAIT and needs no poll at all. Winsock has no such
+/// flag and a blocking-mode socket would park the thread, so a zero-timeout
+/// poll stands in for it and reports an empty queue as WouldBlock. The poll
+/// and the receive are two steps, so a second thread receiving on the same
+/// blocking-mode socket can drain it in between and this one then waits in
+/// the receive; a nonblocking-mode socket keeps the try-once promise either
+/// way, because its receive reports the empty queue itself.
+fn pollForDontWait(fd: os.net.fd_t, events: i16) !void {
+    if (builtin.os.tag != .windows) return;
+    var pfd = [_]os.net.pollfd{.{
+        .fd = fd,
+        .events = events,
+        .revents = 0,
+    }};
+    if (try os.net.poll(&pfd, 0) == 0) return error.WouldBlock;
+}
+
 /// Helper to handle pipe create operation
 fn handlePipeCreate(c: *Completion) void {
     if (os.fs.pipe()) |fds| {
@@ -273,9 +291,11 @@ fn handleNetRecv(c: *Completion) void {
 
     // Poll+recv loop: the socket may be nonblocking (NetAccept hands out
     // nonblocking sockets by default), and multiple threads may race on the
-    // same socket; poll readiness and retry on WouldBlock either way.
+    // same socket; poll readiness and retry on WouldBlock either way. A
+    // dontwait receive is the exception: it never waits, and an empty queue
+    // is reported as WouldBlock.
     while (true) {
-        pollForReady(data.handle, os.net.POLL.IN) catch |err| {
+        (if (data.flags.dontwait) pollForDontWait(data.handle, os.net.POLL.IN) else pollForReady(data.handle, os.net.POLL.IN)) catch |err| {
             c.setError(err);
             return;
         };
@@ -284,7 +304,13 @@ fn handleNetRecv(c: *Completion) void {
             c.setResult(.net_recv, bytes_read);
             return;
         } else |err| switch (err) {
-            error.WouldBlock => continue, // Another thread consumed data, retry
+            error.WouldBlock => {
+                if (data.flags.dontwait) {
+                    c.setError(err);
+                    return;
+                }
+                continue; // Another thread consumed data, retry
+            },
             else => {
                 c.setError(err);
                 return;
@@ -321,9 +347,9 @@ fn handleNetSend(c: *Completion) void {
 fn handleNetRecvFrom(c: *Completion) void {
     const data = c.cast(NetRecvFrom);
 
-    // Poll+recvfrom loop; see handleNetRecv for why polling is unconditional.
+    // Poll+recvfrom loop; see handleNetRecv for why it polls first.
     while (true) {
-        pollForReady(data.handle, os.net.POLL.IN) catch |err| {
+        (if (data.flags.dontwait) pollForDontWait(data.handle, os.net.POLL.IN) else pollForReady(data.handle, os.net.POLL.IN)) catch |err| {
             c.setError(err);
             return;
         };
@@ -332,7 +358,13 @@ fn handleNetRecvFrom(c: *Completion) void {
             c.setResult(.net_recvfrom, bytes_read);
             return;
         } else |err| switch (err) {
-            error.WouldBlock => continue, // Another thread consumed data, retry
+            error.WouldBlock => {
+                if (data.flags.dontwait) {
+                    c.setError(err);
+                    return;
+                }
+                continue; // Another thread consumed data, retry
+            },
             else => {
                 c.setError(err);
                 return;
@@ -369,9 +401,9 @@ fn handleNetSendTo(c: *Completion) void {
 fn handleNetRecvMsg(c: *Completion) void {
     const data = c.cast(NetRecvMsg);
 
-    // Poll+recvmsg loop; see handleNetRecv for why polling is unconditional.
+    // Poll+recvmsg loop; see handleNetRecv for why it polls first.
     while (true) {
-        pollForReady(data.handle, os.net.POLL.IN) catch |err| {
+        (if (data.flags.dontwait) pollForDontWait(data.handle, os.net.POLL.IN) else pollForReady(data.handle, os.net.POLL.IN)) catch |err| {
             c.setError(err);
             return;
         };
@@ -380,7 +412,13 @@ fn handleNetRecvMsg(c: *Completion) void {
             c.setResult(.net_recvmsg, result);
             return;
         } else |err| switch (err) {
-            error.WouldBlock => continue, // Another thread consumed data, retry
+            error.WouldBlock => {
+                if (data.flags.dontwait) {
+                    c.setError(err);
+                    return;
+                }
+                continue; // Another thread consumed data, retry
+            },
             else => {
                 c.setError(err);
                 return;

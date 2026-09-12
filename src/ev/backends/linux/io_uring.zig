@@ -89,6 +89,7 @@ const WallTimerMode = @import("../../completion.zig").WallTimerMode;
 /// CLOCK_REALTIME timer when the wall clock is stepped, so neither needs a cap.
 pub const wall_timer_modes: [3]WallTimerMode = .{ .fallback, .native, .native };
 pub const supports_nonblocking_file_io = true;
+pub const supports_recv_dontwait = true;
 
 pub fn capability(comptime op: Op) Support {
     return switch (op) {
@@ -1754,6 +1755,9 @@ fn recvFlagsToMsg(flags: net.RecvFlags) u32 {
     if (flags.waitall) msg_flags |= linux.MSG.WAITALL;
     if (flags.oob) msg_flags |= linux.MSG.OOB;
     if (flags.trunc) msg_flags |= linux.MSG.TRUNC;
+    // MSG_DONTWAIT marks the request REQ_F_NOWAIT: an -EAGAIN from the inline
+    // attempt is posted as the CQE instead of arming poll.
+    if (flags.dontwait) msg_flags |= linux.MSG.DONTWAIT;
     return msg_flags;
 }
 

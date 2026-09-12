@@ -172,6 +172,12 @@ const WallTimerMode = @import("../completion.zig").WallTimerMode;
 // the awake heap and never reach the backend.
 pub const wall_timer_modes: [3]WallTimerMode = .{ .fallback, .fallback, .native };
 pub const supports_nonblocking_file_io = true;
+/// Winsock has no MSG_DONTWAIT and an overlapped receive either completes or
+/// pends, so a dontwait receive is issued without an OVERLAPPED instead: the
+/// call answers synchronously, and on a socket in FIONBIO mode (which NetOpen
+/// and NetAccept set) an empty queue comes back as WSAEWOULDBLOCK. The result
+/// is completed inline, since no completion packet follows a synchronous call.
+pub const supports_recv_dontwait = true;
 
 pub fn capability(comptime op: Op) Support {
     return switch (op) {
@@ -778,7 +784,9 @@ fn recvFlagsToMsg(flags: net.RecvFlags) windows.DWORD {
     if (flags.peek) msg_flags |= windows.MSG.PEEK;
     if (flags.waitall) msg_flags |= windows.MSG.WAITALL;
     if (flags.oob) msg_flags |= windows.MSG.OOB;
-    // flags.trunc has no Windows equivalent — silently dropped.
+    // flags.trunc has no Windows equivalent and is dropped. flags.dontwait is
+    // not a Winsock flag either; the submit paths honor it by calling without
+    // an OVERLAPPED, see `supports_recv_dontwait`.
     return msg_flags;
 }
 
@@ -934,9 +942,20 @@ fn submitRecv(self: *Self, state: *LoopState, data: *NetRecv) !void {
         @intCast(wsabufs.len),
         &data.c.internal.bytes,
         &data.c.internal.flags,
-        &data.c.internal.overlapped,
+        if (data.flags.dontwait) null else &data.c.internal.overlapped,
         null, // No completion routine
     );
+
+    if (data.flags.dontwait) {
+        // Synchronous call, nothing is posted to the port: finish here.
+        if (result == windows.SOCKET_ERROR) {
+            data.c.setError(net.errnoToRecvError(windows.WSAGetLastError()));
+        } else {
+            data.c.setResult(.net_recv, @intCast(data.c.internal.bytes));
+        }
+        state.markCompletedFromBackend(&data.c);
+        return;
+    }
 
     // When WSARecv succeeds (result == 0) OR returns WSA_IO_PENDING,
     // the completion will be posted to the IOCP port. We should NOT
@@ -1009,9 +1028,21 @@ fn submitRecvFrom(self: *Self, state: *LoopState, data: *NetRecvFrom) !void {
         &data.c.internal.flags,
         if (data.addr) |addr| @ptrCast(addr) else null,
         if (data.addr_len) |len| len else null,
-        &data.c.internal.overlapped,
+        if (data.flags.dontwait) null else &data.c.internal.overlapped,
         null, // No completion routine
     );
+
+    if (data.flags.dontwait) {
+        // Synchronous call, nothing is posted to the port: finish here.
+        // addr_len is written by WSARecvFrom itself.
+        if (result == windows.SOCKET_ERROR) {
+            data.c.setError(net.errnoToRecvError(windows.WSAGetLastError()));
+        } else {
+            data.c.setResult(.net_recvfrom, @intCast(data.c.internal.bytes));
+        }
+        state.markCompletedFromBackend(&data.c);
+        return;
+    }
 
     // When WSARecvFrom succeeds (result == 0) OR returns WSA_IO_PENDING,
     // the completion will be posted to the IOCP port.
@@ -1100,9 +1131,28 @@ fn submitRecvMsg(self: *Self, state: *LoopState, data: *NetRecvMsg) !void {
         data.handle,
         &data.internal.msg,
         &data.c.internal.bytes,
-        &data.c.internal.overlapped,
+        if (data.flags.dontwait) null else &data.c.internal.overlapped,
         null, // No completion routine
     );
+
+    if (data.flags.dontwait) {
+        // Synchronous call, nothing is posted to the port: finish here with
+        // the same result the completion handler would build.
+        if (result == windows.SOCKET_ERROR) {
+            data.c.setError(net.errnoToRecvError(windows.WSAGetLastError()));
+        } else {
+            if (data.addr_len) |len| {
+                len.* = @intCast(data.internal.msg.namelen);
+            }
+            data.c.setResult(.net_recvmsg, .{
+                .len = @intCast(data.c.internal.bytes),
+                .flags = data.internal.msg.dwFlags,
+                .controllen = @intCast(data.internal.msg.Control.len),
+            });
+        }
+        state.markCompletedFromBackend(&data.c);
+        return;
+    }
 
     if (result == windows.SOCKET_ERROR) {
         const err = windows.WSAGetLastError();
