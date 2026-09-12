@@ -58,6 +58,7 @@ pub const wall_timer_modes: [3]WallTimerMode = if (builtin.os.tag.isDarwin())
 else
     .{ .fallback, .fallback, .fallback };
 pub const supports_nonblocking_file_io = false;
+pub const supports_recv_dontwait = true;
 
 pub fn capability(comptime op: Op) Support {
     return switch (op) {
@@ -871,7 +872,13 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
                 comp.setResult(.net_recv, n);
                 return .completed;
             } else |err| switch (err) {
-                error.WouldBlock => return .requeue,
+                error.WouldBlock => {
+                    if (data.flags.dontwait) {
+                        comp.setError(err);
+                        return .completed;
+                    }
+                    return .requeue;
+                },
                 else => {
                     comp.setError(err);
                     return .completed;
@@ -905,7 +912,13 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
                 comp.setResult(.net_recvfrom, n);
                 return .completed;
             } else |err| switch (err) {
-                error.WouldBlock => return .requeue,
+                error.WouldBlock => {
+                    if (data.flags.dontwait) {
+                        comp.setError(err);
+                        return .completed;
+                    }
+                    return .requeue;
+                },
                 else => {
                     comp.setError(err);
                     return .completed;
@@ -939,7 +952,13 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
                 comp.setResult(.net_recvmsg, result);
                 return .completed;
             } else |err| switch (err) {
-                error.WouldBlock => return .requeue,
+                error.WouldBlock => {
+                    if (data.flags.dontwait) {
+                        comp.setError(err);
+                        return .completed;
+                    }
+                    return .requeue;
+                },
                 else => {
                     comp.setError(err);
                     return .completed;

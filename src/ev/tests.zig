@@ -6,6 +6,9 @@ const Async = @import("completion.zig").Async;
 const NetClose = @import("completion.zig").NetClose;
 const NetOpen = @import("completion.zig").NetOpen;
 const NetBind = @import("completion.zig").NetBind;
+const NetRecvMsg = @import("completion.zig").NetRecvMsg;
+const NetSendTo = @import("completion.zig").NetSendTo;
+const Backend = @import("backend.zig").Backend;
 const PipePoll = @import("completion.zig").PipePoll;
 const FileReadStreaming = @import("completion.zig").FileReadStreaming;
 const FileWriteStreaming = @import("completion.zig").FileWriteStreaming;
@@ -124,6 +127,67 @@ test "Loop: socket create and bind" {
     try std.testing.expect(addr.port != 0);
 
     // Close socket
+    var close: NetClose = .init(sock);
+    loop.add(&close.c);
+    try loop.run();
+}
+
+test "Loop: dontwait recvmsg reports an empty queue as WouldBlock" {
+    if (!Backend.supports_recv_dontwait) return error.SkipZigTest;
+
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    var open: NetOpen = .init(.ipv4, .dgram, .ip, .{ .nonblocking = true });
+    loop.add(&open.c);
+    try loop.run();
+    const sock = try open.c.getResult(.net_open);
+
+    var addr = net.sockaddr.in{
+        .family = net.AF.INET,
+        .port = 0,
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = @splat(0),
+    };
+    var addr_len: net.socklen_t = @sizeOf(@TypeOf(addr));
+    var bind: NetBind = .init(sock, @ptrCast(&addr), &addr_len);
+    loop.add(&bind.c);
+    try loop.run();
+    try bind.c.getResult(.net_bind);
+
+    // Nothing queued: the operation completes instead of parking.
+    var buf: [32]u8 = undefined;
+    var iov: [1]net.iovec = undefined;
+    var recv: NetRecvMsg = .init(sock, .fromSlice(&buf, &iov), .{ .dontwait = true }, null, null, null);
+    loop.add(&recv.c);
+    try loop.run();
+    try std.testing.expectError(error.WouldBlock, recv.c.getResult(.net_recvmsg));
+
+    // A queued datagram is received without waiting. Loopback delivery is
+    // asynchronous on some kernels, so keep asking until it has arrived:
+    // every attempt must come back promptly, with WouldBlock until then.
+    var send_iov: [1]net.iovec_const = undefined;
+    var send: NetSendTo = .init(sock, .fromSlice("ping", &send_iov), .{}, @ptrCast(&addr), addr_len);
+    loop.add(&send.c);
+    try loop.run();
+    try std.testing.expectEqual(4, try send.c.getResult(.net_sendto));
+
+    var attempts: usize = 0;
+    const result = while (attempts < 5000) : (attempts += 1) {
+        var recv2: NetRecvMsg = .init(sock, .fromSlice(&buf, &iov), .{ .dontwait = true }, null, null, null);
+        loop.add(&recv2.c);
+        try loop.run();
+        break recv2.c.getResult(.net_recvmsg) catch |err| switch (err) {
+            error.WouldBlock => {
+                os_time.sleep(.fromMilliseconds(1));
+                continue;
+            },
+            else => return err,
+        };
+    } else return error.DatagramNeverArrived;
+    try std.testing.expectEqualStrings("ping", buf[0..result.len]);
+
     var close: NetClose = .init(sock);
     loop.add(&close.c);
     try loop.run();

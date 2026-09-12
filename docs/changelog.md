@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `receiveManyTimeout` now fills every message slot the socket's queue can satisfy once
+  the first datagram has arrived, instead of always returning one (#731).
+
+- Added a `dontwait` receive flag to the `zio.ev` socket operations, which completes with
+  `error.WouldBlock` instead of parking when nothing is queued; backends advertise it with
+  `supports_recv_dontwait`, currently true on all of them.
+
+- The `poll` backend now tries a socket operation once on submit and only waits for
+  readiness on `WouldBlock`, like the `epoll` and `kqueue` backends already did.
+
 - Darwin no longer arms a kernel timer for realtime deadlines, since XNU converts one to
   a Mach deadline at arming and never rebases it across a wall-clock step.
 

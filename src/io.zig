@@ -471,14 +471,17 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout, clock: time.Cloc
             try timedWaitForIoClock(&op.c, timeout, clock);
             break :result try op.getResult();
         } },
-        .net_receive => |*o| return .{ .net_receive = result: {
-            netReceiveImpl(o.socket_handle, &o.message_buffer[0], o.data_buffer, o.flags, timeout, clock) catch |err| switch (err) {
-                error.Canceled => |e| return e,
-                error.Timeout => |e| return e,
-                else => |e| break :result .{ e, 0 },
-            };
-            break :result .{ null, 1 };
-        } },
+        .net_receive => |*o| return .{
+            .net_receive = result: {
+                netReceiveImpl(o.socket_handle, &o.message_buffer[0], o.data_buffer, o.flags, false, timeout, clock) catch |err| switch (err) {
+                    error.Canceled => |e| return e,
+                    error.Timeout => |e| return e,
+                    error.WouldBlock => unreachable, // only with dontwait
+                    else => |e| break :result .{ e, 0 },
+                };
+                break :result netReceiveMore(o);
+            },
+        },
     }
 }
 
@@ -2410,22 +2413,62 @@ fn decodeIncomingFlags(raw: u32) Io.net.IncomingMessage.Flags {
     }
 }
 
+/// Fill the slots after the first one with whatever the kernel already holds.
+/// The first receive waited for the socket; these never do (`dontwait`), so
+/// the count only grows by datagrams that were queued when the call ran.
+/// Returns the `net_receive` result for a first message that has already
+/// landed in `message_buffer[0]`.
+///
+/// Each message gets the whole remaining data buffer, as in std.Io.Threaded,
+/// so a datagram larger than what is left is truncated; sizing the buffer is
+/// the caller's job. The loop stops when the slots or the buffer run out or
+/// the queue is empty. A message already received must be reported, so an
+/// error after that point rides along in the tuple with the count, and a
+/// cancellation is re-armed for the next cancellation point instead of being
+/// returned. Peeking is excluded, since every slot would see the same
+/// datagram, and so is `trunc`: it reports the full datagram length, which
+/// the ever-shorter tail cannot hold and the caller could not have sized for.
+fn netReceiveMore(o: *const Io.Operation.NetReceive) Io.Operation.NetReceive.Result {
+    if (!ev.Backend.supports_recv_dontwait or o.flags.peek or o.flags.trunc) return .{ null, 1 };
+
+    var count: usize = 1;
+    var data_i: usize = o.message_buffer[0].data.len;
+    for (o.message_buffer[1..]) |*message| {
+        const remaining = o.data_buffer[data_i..];
+        if (remaining.len == 0) break;
+        netReceiveImpl(o.socket_handle, message, remaining, o.flags, true, .none, .awake) catch |err| switch (err) {
+            error.WouldBlock => break,
+            error.Canceled => {
+                runtime_mod.recancel();
+                break;
+            },
+            error.Timeout => unreachable,
+            else => |e| return .{ e, count },
+        };
+        count += 1;
+        data_i += message.data.len;
+    }
+    return .{ null, count };
+}
+
 /// Receive a single datagram, filling `message` with its metadata and returning
-/// the received bytes as a sub-slice of `data_buffer`. Mirrors the structure of
-/// std.Io.Threaded's netReceivePosix: one recvmsg per call, caller loops in the
-/// batch path if they want more.
+/// the received bytes as a sub-slice of `data_buffer`. Mirrors std.Io.Threaded's
+/// netReceivePosix: one recvmsg per call. With `dontwait` the operation reports
+/// an empty queue as `error.WouldBlock` instead of waiting for readiness.
 fn netReceiveImpl(
     socket_handle: Io.net.Socket.Handle,
     message: *Io.net.IncomingMessage,
     data_buffer: []u8,
     flags: Io.net.ReceiveFlags,
+    dontwait: bool,
     timeout: time.Timeout,
     clock: time.Clock,
-) (Io.net.Socket.ReceiveError || common.Timeoutable)!void {
+) (Io.net.Socket.ReceiveError || error{WouldBlock} || common.Timeoutable)!void {
     const zio_flags: os_net.RecvFlags = .{
         .peek = flags.peek,
         .oob = flags.oob,
         .trunc = flags.trunc,
+        .dontwait = dontwait,
     };
     var storage: zio_net.Address = undefined;
     var addr_len: os_net.socklen_t = @sizeOf(zio_net.Address);
@@ -2440,7 +2483,10 @@ fn netReceiveImpl(
         if (has_control) message.control else null,
     );
     try timedWaitForIoClock(&op.c, timeout, clock);
-    const result = op.getResult() catch |err| return recvMsgErrToReceiveErr(err);
+    const result = op.getResult() catch |err| switch (err) {
+        error.WouldBlock => return if (dontwait) error.WouldBlock else error.Unexpected,
+        else => |e| return recvMsgErrToReceiveErr(e),
+    };
     message.* = .{
         .from = zioIpToStdIo(zio_net.Address.fromPosix(&storage.any, addr_len).ip),
         // When flags.trunc is set on Linux, result.len is the full datagram
@@ -4224,6 +4270,84 @@ test "io: operateTimeout net_receive succeeds when data is ready" {
     try std.testing.expectEqualStrings("hello", msg.data);
 }
 
+test "io: receiveManyTimeout returns every datagram already queued" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+    var receiver = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer receiver.close(io);
+
+    try sender.send(io, &receiver.address, "one");
+    try sender.send(io, &receiver.address, "two");
+    try sender.send(io, &receiver.address, "three");
+
+    var messages: [8]Io.net.IncomingMessage = @splat(.init);
+    var buf: [64]u8 = undefined;
+    const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } };
+    const err, const n = receiver.receiveManyTimeout(io, &messages, &buf, .{}, timeout);
+    try std.testing.expectEqual(null, err);
+    if (!ev.Backend.supports_recv_dontwait) {
+        try std.testing.expectEqual(1, n);
+        return;
+    }
+    // Linux loopback delivery finishes inside send, so all three are queued
+    // when the first receive returns. Other kernels hand loopback packets to
+    // an input thread, so later datagrams may still be in flight; drain them
+    // across calls and check the total and the order instead.
+    if (builtin.os.tag == .linux) try std.testing.expectEqual(3, n);
+    const expected = [_][]const u8{ "one", "two", "three" };
+    var seen: usize = 0;
+    for (messages[0..n]) |*message| {
+        try std.testing.expectEqualStrings(expected[seen], message.data);
+        seen += 1;
+    }
+    while (seen < expected.len) {
+        const more_err, const more = receiver.receiveManyTimeout(io, &messages, &buf, .{}, timeout);
+        try std.testing.expectEqual(null, more_err);
+        try std.testing.expect(more > 0);
+        for (messages[0..more]) |*message| {
+            try std.testing.expectEqualStrings(expected[seen], message.data);
+            seen += 1;
+        }
+    }
+
+    // The queue is empty now, so a multi-slot receive waits like a single one.
+    const err2, const n2 = receiver.receiveManyTimeout(io, &messages, &buf, .{}, .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } });
+    try std.testing.expect(err2.? == error.Timeout);
+    try std.testing.expectEqual(0, n2);
+}
+
+test "io: receiveManyTimeout stops when the data buffer is full" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+    var receiver = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer receiver.close(io);
+
+    try sender.send(io, &receiver.address, "12345678");
+    try sender.send(io, &receiver.address, "abcdefgh");
+
+    var messages: [4]Io.net.IncomingMessage = @splat(.init);
+    var buf: [8]u8 = undefined;
+    const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } };
+    const err, const n = receiver.receiveManyTimeout(io, &messages, &buf, .{}, timeout);
+    try std.testing.expectEqual(null, err);
+    try std.testing.expectEqual(1, n);
+    try std.testing.expectEqualStrings("12345678", messages[0].data);
+
+    // The second datagram was left in the queue, not truncated into nothing.
+    const err2, const n2 = receiver.receiveManyTimeout(io, &messages, &buf, .{}, timeout);
+    try std.testing.expectEqual(null, err2);
+    try std.testing.expectEqual(1, n2);
+    try std.testing.expectEqualStrings("abcdefgh", messages[0].data);
+}
+
 test "io: operateTimeout net_receive times out when no data arrives" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
@@ -4480,10 +4604,14 @@ test "io: concurrent cross-executor cancel of N blocked recvmsg fibers is UAF-fr
             defer socket.close(cio);
             var data_buf: [2048]u8 = undefined;
             var ctrl_buf: [256]u8 align(8) = undefined;
+            // The poll backend on Windows receives through the synchronous
+            // Winsock path, which has no control messages and rejects a
+            // control buffer at the first attempt.
+            const control_unsupported = builtin.os.tag == .windows and ev.backend == .poll;
             var messages = [_]Io.net.IncomingMessage{.{
                 .from = undefined,
                 .data = undefined,
-                .control = &ctrl_buf,
+                .control = if (control_unsupported) &.{} else &ctrl_buf,
                 .flags = undefined,
             }};
             ctx.ready.post(cio);

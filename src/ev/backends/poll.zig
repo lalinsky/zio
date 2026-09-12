@@ -30,6 +30,7 @@ const fs = @import("../../os/fs.zig");
 /// Nothing but the poll timeout, so every wall deadline rides the cap.
 pub const wall_timer_modes: [3]WallTimerMode = .{ .fallback, .fallback, .fallback };
 pub const supports_nonblocking_file_io = false;
+pub const supports_recv_dontwait = true;
 
 pub fn capability(comptime op: Op) Support {
     return switch (op) {
@@ -278,6 +279,19 @@ fn getPollType(op: Op) PollEntryType {
     };
 }
 
+/// Try a socket op once before it joins the poll set, as the sockreg backends
+/// do: a ready socket completes inline without a poll round trip, and a
+/// dontwait receive on an empty queue completes as WouldBlock here instead of
+/// waiting for readiness it never asked for.
+fn submitSocketIo(self: *Self, state: *LoopState, fd: NetHandle, c: *Completion) void {
+    const events = getEvents(c);
+    const item: net.pollfd = .{ .fd = fd, .events = events, .revents = events };
+    switch (checkCompletion(c, &item)) {
+        .completed => state.markCompletedFromBackend(c),
+        .requeue => self.addToPollQueue(state, fd, c),
+    }
+}
+
 /// Add a completion to the poll queue, merging with existing fd if present.
 /// If queuing fails, completes the completion with error.Unexpected.
 fn addToPollQueue(self: *Self, state: *LoopState, fd: NetHandle, completion: *Completion) void {
@@ -442,35 +456,36 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
             }
         },
 
-        // Other async operations - queue and try on wakeup
+        // Socket I/O: try the syscall once, park on WouldBlock
         .net_accept => {
             const data = c.cast(NetAccept);
-            self.addToPollQueue(state, data.handle, c);
+            self.submitSocketIo(state, data.handle, c);
         },
         .net_recv => {
             const data = c.cast(NetRecv);
-            self.addToPollQueue(state, data.handle, c);
+            self.submitSocketIo(state, data.handle, c);
         },
         .net_send => {
             const data = c.cast(NetSend);
-            self.addToPollQueue(state, data.handle, c);
+            self.submitSocketIo(state, data.handle, c);
         },
         .net_recvfrom => {
             const data = c.cast(NetRecvFrom);
-            self.addToPollQueue(state, data.handle, c);
+            self.submitSocketIo(state, data.handle, c);
         },
         .net_sendto => {
             const data = c.cast(NetSendTo);
-            self.addToPollQueue(state, data.handle, c);
+            self.submitSocketIo(state, data.handle, c);
         },
         .net_recvmsg => {
             const data = c.cast(NetRecvMsg);
-            self.addToPollQueue(state, data.handle, c);
+            self.submitSocketIo(state, data.handle, c);
         },
         .net_sendmsg => {
             const data = c.cast(NetSendMsg);
-            self.addToPollQueue(state, data.handle, c);
+            self.submitSocketIo(state, data.handle, c);
         },
+        // Readiness only: nothing to try, wait for the event
         .net_poll => {
             const data = c.cast(NetPoll);
             self.addToPollQueue(state, data.handle, c);
@@ -664,7 +679,13 @@ pub fn checkCompletion(c: *Completion, item: *const net.pollfd) CheckResult {
                 c.setResult(.net_recv, n);
                 return .completed;
             } else |err| switch (err) {
-                error.WouldBlock => return .requeue,
+                error.WouldBlock => {
+                    if (data.flags.dontwait) {
+                        c.setError(err);
+                        return .completed;
+                    }
+                    return .requeue;
+                },
                 else => {
                     c.setError(err);
                     return .completed;
@@ -698,7 +719,13 @@ pub fn checkCompletion(c: *Completion, item: *const net.pollfd) CheckResult {
                 c.setResult(.net_recvfrom, n);
                 return .completed;
             } else |err| switch (err) {
-                error.WouldBlock => return .requeue,
+                error.WouldBlock => {
+                    if (data.flags.dontwait) {
+                        c.setError(err);
+                        return .completed;
+                    }
+                    return .requeue;
+                },
                 else => {
                     c.setError(err);
                     return .completed;
@@ -732,7 +759,13 @@ pub fn checkCompletion(c: *Completion, item: *const net.pollfd) CheckResult {
                 c.setResult(.net_recvmsg, result);
                 return .completed;
             } else |err| switch (err) {
-                error.WouldBlock => return .requeue,
+                error.WouldBlock => {
+                    if (data.flags.dontwait) {
+                        c.setError(err);
+                        return .completed;
+                    }
+                    return .requeue;
+                },
                 else => {
                     c.setError(err);
                     return .completed;

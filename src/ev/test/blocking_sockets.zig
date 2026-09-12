@@ -238,3 +238,53 @@ test "Blocking sockets: recv on a nonblocking socket waits for data" {
     const n = try recv.getResult();
     try std.testing.expectEqualStrings("late data", buf[0..n]);
 }
+
+test "Blocking sockets: dontwait recvmsg reports an empty queue as WouldBlock" {
+    // Normally done by Loop.init; this test bypasses the loop.
+    net.ensureWSAInitialized();
+
+    const alloc = std.testing.allocator;
+
+    var addr = net.sockaddr.in{
+        .family = net.AF.INET,
+        .port = 0,
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = @splat(0),
+    };
+    var addr_len: net.socklen_t = @sizeOf(net.sockaddr.in);
+
+    // Blocking mode on purpose: the flag alone must keep recvmsg from waiting.
+    var open = ev.NetOpen.init(.ipv4, .dgram, .ip, .{ .nonblocking = false });
+    blocking.executeBlocking(&open.c, alloc);
+    const sock = try open.c.getResult(.net_open);
+    defer {
+        var close = ev.NetClose.init(sock);
+        blocking.executeBlocking(&close.c, alloc);
+    }
+
+    var bind = ev.NetBind.init(sock, @ptrCast(&addr), &addr_len);
+    blocking.executeBlocking(&bind.c, alloc);
+    try bind.c.getResult(.net_bind);
+
+    var buf: [32]u8 = undefined;
+    var iov: [1]os.iovec = undefined;
+    var recv = ev.NetRecvMsg.init(sock, .fromSlice(&buf, &iov), .{ .dontwait = true }, null, null, null);
+    blocking.executeBlocking(&recv.c, alloc);
+    try std.testing.expectError(error.WouldBlock, recv.c.getResult(.net_recvmsg));
+
+    var send_iov: [1]os.iovec_const = undefined;
+    var send = ev.NetSendTo.init(sock, .fromSlice("ping", &send_iov), .{}, @ptrCast(&addr), addr_len);
+    blocking.executeBlocking(&send.c, alloc);
+    try std.testing.expectEqual(4, try send.c.getResult(.net_sendto));
+
+    // Loopback delivery is asynchronous on the BSDs; wait for readability
+    // before asking for the datagram without waiting.
+    var readable = ev.NetPoll.init(sock, .recv);
+    blocking.executeBlocking(&readable.c, alloc);
+    try readable.c.getResult(.net_poll);
+
+    var recv2 = ev.NetRecvMsg.init(sock, .fromSlice(&buf, &iov), .{ .dontwait = true }, null, null, null);
+    blocking.executeBlocking(&recv2.c, alloc);
+    const result = try recv2.c.getResult(.net_recvmsg);
+    try std.testing.expectEqualStrings("ping", buf[0..result.len]);
+}

@@ -43,6 +43,7 @@ pub fn Backend(comptime mode: Mode) type {
         // In auto mode a delegated open means epoll was selected; probePollable
         // applies O_NONBLOCK after opening, matching the old epoll behavior.
         pub const supports_nonblocking_file_io = mode == .io_uring;
+        pub const supports_recv_dontwait = true;
 
         // io_uring needs these operation-owned syscall arguments to outlive SQE
         // submission. Epoll has no corresponding per-operation scratch.
