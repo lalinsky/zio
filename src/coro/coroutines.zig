@@ -512,7 +512,9 @@ pub inline fn switchContext(
               .p15 = true,
               .fpcr = true,
               .fpsr = true,
-              .ffr = true,
+              // FFR is deliberately not listed: LLVM reserves it on SVE targets,
+              // so the clobber is ignored with a "reserved registers" warning,
+              // and no AArch64 PCS preserves it across a call anyway.
               .nzcv = true,
               .memory = true,
             }),
