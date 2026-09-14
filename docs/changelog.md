@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed `NetPoll` on the IOCP backend discarding a queued datagram and reporting
+  `error.MessageOversize` instead of readiness on UDP sockets.
+
 - `receiveManyTimeout` now fills every message slot the socket's queue can satisfy once
   the first datagram has arrived, instead of always returning one (#731).
 

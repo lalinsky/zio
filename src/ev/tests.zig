@@ -8,6 +8,7 @@ const NetOpen = @import("completion.zig").NetOpen;
 const NetBind = @import("completion.zig").NetBind;
 const NetRecvMsg = @import("completion.zig").NetRecvMsg;
 const NetSendTo = @import("completion.zig").NetSendTo;
+const NetPoll = @import("completion.zig").NetPoll;
 const Backend = @import("backend.zig").Backend;
 const PipePoll = @import("completion.zig").PipePoll;
 const FileReadStreaming = @import("completion.zig").FileReadStreaming;
@@ -187,6 +188,120 @@ test "Loop: dontwait recvmsg reports an empty queue as WouldBlock" {
         };
     } else return error.DatagramNeverArrived;
     try std.testing.expectEqualStrings("ping", buf[0..result.len]);
+
+    var close: NetClose = .init(sock);
+    loop.add(&close.c);
+    try loop.run();
+}
+
+test "Loop: NetPoll on a datagram socket reports readiness and keeps the datagram" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    var open: NetOpen = .init(.ipv4, .dgram, .ip, .{ .nonblocking = true });
+    loop.add(&open.c);
+    try loop.run();
+    const sock = try open.c.getResult(.net_open);
+
+    var addr = net.sockaddr.in{
+        .family = net.AF.INET,
+        .port = 0,
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = @splat(0),
+    };
+    var addr_len: net.socklen_t = @sizeOf(@TypeOf(addr));
+    var bind: NetBind = .init(sock, @ptrCast(&addr), &addr_len);
+    loop.add(&bind.c);
+    try loop.run();
+    try bind.c.getResult(.net_bind);
+
+    var buf: [32]u8 = undefined;
+    var iov: [1]net.iovec = undefined;
+    var send_iov: [1]net.iovec_const = undefined;
+
+    // Poll first, then send in the same run: the poll parks and is woken by
+    // the datagram. The datagram must survive the poll.
+    var readable: NetPoll = .init(sock, .recv);
+    loop.add(&readable.c);
+    var send: NetSendTo = .init(sock, .fromSlice("ping", &send_iov), .{}, @ptrCast(&addr), addr_len);
+    loop.add(&send.c);
+    try loop.run();
+    try std.testing.expectEqual(4, try send.c.getResult(.net_sendto));
+    try readable.c.getResult(.net_poll);
+
+    var recv: NetRecvMsg = .init(sock, .fromSlice(&buf, &iov), .{}, null, null, null);
+    loop.add(&recv.c);
+    try loop.run();
+    const first = try recv.c.getResult(.net_recvmsg);
+    try std.testing.expectEqualStrings("ping", buf[0..first.len]);
+
+    // Send first, then poll: the datagram is already queued when the poll
+    // is submitted, so readiness is answered on submit.
+    var send2: NetSendTo = .init(sock, .fromSlice("pong", &send_iov), .{}, @ptrCast(&addr), addr_len);
+    loop.add(&send2.c);
+    try loop.run();
+    try std.testing.expectEqual(4, try send2.c.getResult(.net_sendto));
+
+    var readable2: NetPoll = .init(sock, .recv);
+    loop.add(&readable2.c);
+    try loop.run();
+    try readable2.c.getResult(.net_poll);
+
+    var recv2: NetRecvMsg = .init(sock, .fromSlice(&buf, &iov), .{}, null, null, null);
+    loop.add(&recv2.c);
+    try loop.run();
+    const second = try recv2.c.getResult(.net_recvmsg);
+    try std.testing.expectEqualStrings("pong", buf[0..second.len]);
+
+    var close: NetClose = .init(sock);
+    loop.add(&close.c);
+    try loop.run();
+}
+
+test "Loop: receiving a datagram into a short buffer" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    var open: NetOpen = .init(.ipv4, .dgram, .ip, .{ .nonblocking = true });
+    loop.add(&open.c);
+    try loop.run();
+    const sock = try open.c.getResult(.net_open);
+
+    var addr = net.sockaddr.in{
+        .family = net.AF.INET,
+        .port = 0,
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+        .zero = @splat(0),
+    };
+    var addr_len: net.socklen_t = @sizeOf(@TypeOf(addr));
+    var bind: NetBind = .init(sock, @ptrCast(&addr), &addr_len);
+    loop.add(&bind.c);
+    try loop.run();
+    try bind.c.getResult(.net_bind);
+
+    var send_iov: [1]net.iovec_const = undefined;
+    var send: NetSendTo = .init(sock, .fromSlice("eightbyt", &send_iov), .{}, @ptrCast(&addr), addr_len);
+    loop.add(&send.c);
+    try loop.run();
+    try std.testing.expectEqual(8, try send.c.getResult(.net_sendto));
+
+    // The datagram is already queued, so the receive is answered on submit.
+    // POSIX truncates and reports the bytes kept; Winsock reports the
+    // truncation as WSAEMSGSIZE, and that completion must arrive exactly
+    // once.
+    var buf: [4]u8 = undefined;
+    var iov: [1]net.iovec = undefined;
+    var recv: NetRecvMsg = .init(sock, .fromSlice(&buf, &iov), .{}, null, null, null);
+    loop.add(&recv.c);
+    try loop.run();
+    if (builtin.os.tag == .windows) {
+        try std.testing.expectError(error.MessageOversize, recv.c.getResult(.net_recvmsg));
+    } else {
+        const result = try recv.c.getResult(.net_recvmsg);
+        try std.testing.expectEqualStrings("eigh", buf[0..result.len]);
+    }
 
     var close: NetClose = .init(sock);
     loop.add(&close.c);
