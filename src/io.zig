@@ -473,7 +473,7 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout, clock: time.Cloc
         } },
         .net_receive => |*o| return .{
             .net_receive = result: {
-                if (o.message_buffer.len > 1 and !o.flags.peek and !o.flags.trunc and !hasControl(o.message_buffer)) {
+                if (o.message_buffer.len > 1 and !o.flags.peek and !o.flags.trunc and !hasControl(o.message_buffer) and builtin.os.tag != .windows) {
                     break :result netReceiveMmsg(o, timeout, clock) catch |err| switch (err) {
                         error.Canceled => |e| return e,
                         error.Timeout => |e| return e,
@@ -2433,8 +2433,12 @@ fn netReceiveMmsg(
     timeout: time.Timeout,
     clock: time.Clock,
 ) (common.Cancelable || common.Timeoutable)!Io.Operation.NetReceive.Result {
-    const n = @min(o.message_buffer.len, max_mmsg_slots);
-    const chunk = o.data_buffer.len / n;
+    var n = @min(o.message_buffer.len, max_mmsg_slots);
+    var chunk = o.data_buffer.len / n;
+    while (chunk == 0 and n > 1) {
+        n -= 1;
+        chunk = o.data_buffer.len / n;
+    }
     if (chunk == 0) return .{ null, 0 };
 
     var slots: [max_mmsg_slots]ev.NetRecvMmsg.Slot = undefined;

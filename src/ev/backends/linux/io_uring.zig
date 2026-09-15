@@ -1795,9 +1795,15 @@ fn storeRecvMmsgResult(c: *Completion, res: i32, _: u32) void {
             .c = undefined,
             .handle = data.handle,
             .slots = data.slots[1..],
-            .flags = .{ .dontwait = true },
+            .flags = data.flags,
         };
-        count += remaining.recvFromSlots() catch 0;
+        count += remaining.recvFromSlots() catch |err| switch (err) {
+            error.WouldBlock => 0,
+            else => {
+                c.setError(err);
+                return;
+            },
+        };
     }
     c.setResult(.net_recvmmsg, count);
 }

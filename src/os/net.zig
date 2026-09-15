@@ -1480,7 +1480,7 @@ pub const has_recvmmsg = switch (builtin.os.tag) {
     else => false,
 };
 
-pub const mmsghdr = posix.system.mmsghdr;
+pub const mmsghdr = if (has_recvmmsg) posix.system.mmsghdr else struct {};
 
 pub fn recvmmsg(
     fd: fd_t,

@@ -1158,7 +1158,10 @@ pub const NetRecvMmsg = struct {
                     .len = 0,
                 };
             }
-            const n = try net.recvmmsg(self.handle, &msgvec, batch_len, flags);
+            const n = net.recvmmsg(self.handle, &msgvec, batch_len, flags) catch |err| switch (err) {
+                error.Unexpected => return recvSingleFromSlot(self.handle, &self.slots[0], flags),
+                else => |e| return e,
+            };
             for (0..n) |i| {
                 self.slots[i].received_len = msgvec[i].len;
                 self.slots[i].addr_len = msgvec[i].hdr.namelen;
