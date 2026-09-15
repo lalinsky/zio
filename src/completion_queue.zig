@@ -956,7 +956,7 @@ test "CompletionQueue: cancel takes one operation out and leaves the rest armed"
     var head = ev.Timer.init(.{ .duration = .fromSeconds(10) });
     var doomed = ev.Timer.init(.{ .duration = .fromSeconds(10) });
     var tail = ev.Timer.init(.{ .duration = .fromSeconds(10) });
-    var keeper = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
+    var keeper = ev.Timer.init(.{ .duration = .fromMilliseconds(20) });
     try cq.submit(&head.c);
     try cq.submit(&doomed.c);
     try cq.submit(&tail.c);
@@ -965,7 +965,7 @@ test "CompletionQueue: cancel takes one operation out and leaves the rest armed"
     // Let `keeper` finish, so the cancel below has to find `doomed` in the
     // middle of a non-empty `pending` while `completed` is non-empty too.
     // `SimpleQueue.remove` would accept it as a member of either list.
-    var pause = ev.Timer.init(.{ .duration = .fromMilliseconds(80) });
+    var pause = ev.Timer.init(.{ .duration = .fromMilliseconds(300) });
     try common.waitForIo(&pause.c);
     try std.testing.expect(cq.hasCompleted());
 
@@ -989,15 +989,15 @@ test "CompletionQueue: cancel of an operation that already finished keeps its re
     var cq = CompletionQueue.init();
     defer cq.cancelAll(.discard);
 
-    var first = ev.Timer.init(.{ .duration = .fromMilliseconds(5) });
-    var middle = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
-    var last = ev.Timer.init(.{ .duration = .fromMilliseconds(15) });
+    var first = ev.Timer.init(.{ .duration = .fromMilliseconds(20) });
+    var middle = ev.Timer.init(.{ .duration = .fromMilliseconds(40) });
+    var last = ev.Timer.init(.{ .duration = .fromMilliseconds(60) });
     try cq.submit(&first.c);
     try cq.submit(&middle.c);
     try cq.submit(&last.c);
 
     // Let all three finish into `completed` without taking any of them.
-    var pause = ev.Timer.init(.{ .duration = .fromMilliseconds(80) });
+    var pause = ev.Timer.init(.{ .duration = .fromMilliseconds(300) });
     try common.waitForIo(&pause.c);
     try std.testing.expect(!cq.hasPending());
 
