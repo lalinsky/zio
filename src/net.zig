@@ -896,6 +896,13 @@ pub const ReceiveMsgResult = struct {
     flags: u32,
 };
 
+pub const RecvMessage = struct {
+    buf: []u8,
+    from: Address = undefined,
+    len: u32 = 0,
+    flags: u32 = 0,
+};
+
 pub const Socket = struct {
     handle: Handle,
     address: Address,
@@ -1121,6 +1128,32 @@ pub const Socket = struct {
         var op = ev.NetSendMsg.init(self.handle, buf, .{}, addr_ptr, addr_len, control);
         try timedWaitForIo(&op.c, timeout);
         return try op.getResult();
+    }
+
+    pub fn receiveFromBatch(
+        self: Socket,
+        messages: []RecvMessage,
+        timeout: Timeout,
+    ) (ev.NetRecvMmsg.Error || common.Timeoutable)!u32 {
+        if (messages.len == 0) return 0;
+
+        var slots: [64]ev.NetRecvMmsg.Slot = undefined;
+        const n = @min(messages.len, slots.len);
+        for (0..n) |i| {
+            slots[i] = .{ .data = messages[i].buf };
+        }
+
+        var op = ev.NetRecvMmsg.init(self.handle, slots[0..n], .{});
+        try timedWaitForIo(&op.c, timeout);
+        const count = try op.getResult();
+
+        for (0..count) |i| {
+            messages[i].from = Address.fromPosix(@ptrCast(&slots[i].addr), slots[i].addr_len);
+            messages[i].len = slots[i].received_len;
+            messages[i].flags = slots[i].msg_flags;
+        }
+
+        return count;
     }
 
     pub fn shutdown(self: Socket, how: ShutdownHow) !void {
@@ -3234,4 +3267,32 @@ test "a canceled task does not start another operation" {
     group.cancel();
 
     try std.testing.expectEqual(@as(?anyerror, error.Canceled), outcome.after_recancel);
+}
+
+test "Socket: receiveFromBatch drains multiple queued datagrams" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    var sender = try addr.bind(.{});
+    defer sender.close();
+    var receiver = try addr.bind(.{});
+    defer receiver.close();
+
+    _ = try sender.sendTo(receiver.address, "aaa", .none);
+    _ = try sender.sendTo(receiver.address, "bbb", .none);
+    _ = try sender.sendTo(receiver.address, "ccc", .none);
+
+    var buf0: [64]u8 = undefined;
+    var buf1: [64]u8 = undefined;
+    var buf2: [64]u8 = undefined;
+    var messages = [_]RecvMessage{
+        .{ .buf = &buf0 },
+        .{ .buf = &buf1 },
+        .{ .buf = &buf2 },
+    };
+    const timeout: Timeout = .{ .duration = .fromSeconds(1) };
+    const n = try receiver.receiveFromBatch(&messages, timeout);
+    try std.testing.expect(n >= 1);
+    try std.testing.expectEqualStrings("aaa", messages[0].buf[0..messages[0].len]);
 }
