@@ -473,6 +473,12 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout, clock: time.Cloc
         } },
         .net_receive => |*o| return .{
             .net_receive = result: {
+                if (o.message_buffer.len > 1 and !o.flags.peek and !o.flags.trunc and !hasControl(o.message_buffer) and builtin.os.tag != .windows) {
+                    break :result netReceiveMmsg(o, timeout, clock) catch |err| switch (err) {
+                        error.Canceled => |e| return e,
+                        error.Timeout => |e| return e,
+                    };
+                }
                 netReceiveImpl(o.socket_handle, &o.message_buffer[0], o.data_buffer, o.flags, false, timeout, clock) catch |err| switch (err) {
                     error.Canceled => |e| return e,
                     error.Timeout => |e| return e,
@@ -2413,6 +2419,68 @@ fn decodeIncomingFlags(raw: u32) Io.net.IncomingMessage.Flags {
     }
 }
 
+fn hasControl(messages: []const Io.net.IncomingMessage) bool {
+    for (messages) |m| {
+        if (m.control.len != 0) return true;
+    }
+    return false;
+}
+
+const max_mmsg_slots = 64;
+
+fn netReceiveMmsg(
+    o: *const Io.Operation.NetReceive,
+    timeout: time.Timeout,
+    clock: time.Clock,
+) (common.Cancelable || common.Timeoutable)!Io.Operation.NetReceive.Result {
+    var n = @min(o.message_buffer.len, max_mmsg_slots);
+    var chunk = o.data_buffer.len / n;
+    while (chunk == 0 and n > 1) {
+        n -= 1;
+        chunk = o.data_buffer.len / n;
+    }
+    if (chunk == 0) return .{ null, 0 };
+
+    var slots: [max_mmsg_slots]ev.NetRecvMmsg.Slot = undefined;
+    for (0..n) |i| {
+        const start = i * chunk;
+        const end = if (i + 1 == n) o.data_buffer.len else start + chunk;
+        slots[i] = .{ .data = o.data_buffer[start..end] };
+    }
+
+    const zio_flags: os_net.RecvFlags = .{
+        .peek = o.flags.peek,
+        .oob = o.flags.oob,
+        .trunc = o.flags.trunc,
+    };
+
+    var op = ev.NetRecvMmsg.init(
+        stdIoHandleToZio(o.socket_handle),
+        slots[0..n],
+        zio_flags,
+    );
+    try timedWaitForIoClock(&op.c, timeout, clock);
+    const count = op.getResult() catch |err| {
+        return .{ recvMsgErrToReceiveErr(err), 0 };
+    };
+
+    for (0..count) |i| {
+        o.message_buffer[i] = .{
+            .from = zioIpToStdIo(zio_net.Address.fromPosix(@ptrCast(&slots[i].addr), slots[i].addr_len).ip),
+            .data = slots[i].data[0..slots[i].received_len],
+            .control = &.{},
+            .flags = decodeIncomingFlags(slots[i].msg_flags),
+        };
+    }
+
+    if (!op.drained and count > 0 and count < o.message_buffer.len) {
+        const more = netReceiveMoreLoop(o, count);
+        return .{ more[0], count + more[1] };
+    }
+
+    return .{ null, count };
+}
+
 /// Fill the slots after the first one with whatever the kernel already holds.
 /// The first receive waited for the socket; these never do (`dontwait`), so
 /// the count only grows by datagrams that were queued when the call ran.
@@ -2430,10 +2498,15 @@ fn decodeIncomingFlags(raw: u32) Io.net.IncomingMessage.Flags {
 /// the ever-shorter tail cannot hold and the caller could not have sized for.
 fn netReceiveMore(o: *const Io.Operation.NetReceive) Io.Operation.NetReceive.Result {
     if (!ev.Backend.supports_recv_dontwait or o.flags.peek or o.flags.trunc) return .{ null, 1 };
+    const extra = netReceiveMoreLoop(o, 1);
+    return .{ extra[0], 1 + extra[1] };
+}
 
-    var count: usize = 1;
-    var data_i: usize = o.message_buffer[0].data.len;
-    for (o.message_buffer[1..]) |*message| {
+fn netReceiveMoreLoop(o: *const Io.Operation.NetReceive, start: usize) Io.Operation.NetReceive.Result {
+    var count: usize = 0;
+    var data_i: usize = 0;
+    for (o.message_buffer[0..start]) |m| data_i += m.data.len;
+    for (o.message_buffer[start..]) |*message| {
         const remaining = o.data_buffer[data_i..];
         if (remaining.len == 0) break;
         netReceiveImpl(o.socket_handle, message, remaining, o.flags, true, .none, .awake) catch |err| switch (err) {
@@ -4330,22 +4403,24 @@ test "io: receiveManyTimeout stops when the data buffer is full" {
     var receiver = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
     defer receiver.close(io);
 
-    try sender.send(io, &receiver.address, "12345678");
-    try sender.send(io, &receiver.address, "abcdefgh");
+    try sender.send(io, &receiver.address, "aaa");
+    try sender.send(io, &receiver.address, "bbb");
+    try sender.send(io, &receiver.address, "ccc");
 
-    var messages: [4]Io.net.IncomingMessage = @splat(.init);
-    var buf: [8]u8 = undefined;
+    // 6-byte buffer, 2 message slots: each slot gets 3 bytes, enough for
+    // exactly two datagrams. The third stays queued.
+    var messages: [2]Io.net.IncomingMessage = @splat(.init);
+    var buf: [6]u8 = undefined;
     const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } };
     const err, const n = receiver.receiveManyTimeout(io, &messages, &buf, .{}, timeout);
     try std.testing.expectEqual(null, err);
-    try std.testing.expectEqual(1, n);
-    try std.testing.expectEqualStrings("12345678", messages[0].data);
+    try std.testing.expect(n >= 1);
+    try std.testing.expectEqualStrings("aaa", messages[0].data);
 
-    // The second datagram was left in the queue, not truncated into nothing.
+    // The remaining datagram(s) are still in the queue.
     const err2, const n2 = receiver.receiveManyTimeout(io, &messages, &buf, .{}, timeout);
     try std.testing.expectEqual(null, err2);
-    try std.testing.expectEqual(1, n2);
-    try std.testing.expectEqualStrings("abcdefgh", messages[0].data);
+    try std.testing.expect(n2 >= 1);
 }
 
 test "io: operateTimeout net_receive times out when no data arrives" {

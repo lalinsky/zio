@@ -22,6 +22,7 @@ const WriteBuf = @import("buf.zig").WriteBuf;
 const NetRecvFrom = @import("completion.zig").NetRecvFrom;
 const NetSendTo = @import("completion.zig").NetSendTo;
 const NetRecvMsg = @import("completion.zig").NetRecvMsg;
+const NetRecvMmsg = @import("completion.zig").NetRecvMmsg;
 const NetSendMsg = @import("completion.zig").NetSendMsg;
 const NetOpen = @import("completion.zig").NetOpen;
 const NetBind = @import("completion.zig").NetBind;
@@ -100,6 +101,7 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
         .net_recvfrom => handleNetRecvFrom(c),
         .net_sendto => handleNetSendTo(c),
         .net_recvmsg => handleNetRecvMsg(c),
+        .net_recvmmsg => handleNetRecvMmsg(c),
         .net_sendmsg => handleNetSendMsg(c),
         .net_listen => handleNetListen(c),
         .net_connect => handleNetConnect(c),
@@ -419,6 +421,28 @@ fn handleNetRecvMsg(c: *Completion) void {
                 }
                 continue; // Another thread consumed data, retry
             },
+            else => {
+                c.setError(err);
+                return;
+            },
+        }
+    }
+}
+
+fn handleNetRecvMmsg(c: *Completion) void {
+    const data = c.cast(NetRecvMmsg);
+
+    while (true) {
+        pollForReady(data.handle, os.net.POLL.IN) catch |err| {
+            c.setError(err);
+            return;
+        };
+
+        if (data.recvFromSlots()) |count| {
+            c.setResult(.net_recvmmsg, count);
+            return;
+        } else |err| switch (err) {
+            error.WouldBlock => continue,
             else => {
                 c.setError(err);
                 return;

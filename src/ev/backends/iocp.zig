@@ -18,6 +18,7 @@ const NetSend = @import("../completion.zig").NetSend;
 const NetRecvFrom = @import("../completion.zig").NetRecvFrom;
 const NetSendTo = @import("../completion.zig").NetSendTo;
 const NetRecvMsg = @import("../completion.zig").NetRecvMsg;
+const NetRecvMmsg = @import("../completion.zig").NetRecvMmsg;
 const NetSendMsg = @import("../completion.zig").NetSendMsg;
 const NetPoll = @import("../completion.zig").NetPoll;
 const NetSendFile = @import("../completion.zig").NetSendFile;
@@ -178,6 +179,7 @@ pub const supports_nonblocking_file_io = true;
 /// and NetAccept set) an empty queue comes back as WSAEWOULDBLOCK. The result
 /// is completed inline, since no completion packet follows a synchronous call.
 pub const supports_recv_dontwait = true;
+pub const supports_recvmmsg = false;
 
 pub fn capability(comptime op: Op) Support {
     return switch (op) {
@@ -231,6 +233,7 @@ pub fn capability(comptime op: Op) Support {
         .net_recvfrom,
         .net_sendto,
         .net_recvmsg,
+        .net_recvmmsg,
         .net_sendmsg,
         .net_poll,
         .net_shutdown,
@@ -652,6 +655,16 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
                 c.setError(err);
                 state.markCompletedFromBackend(c);
             };
+        },
+
+        .net_recvmmsg => {
+            const data = c.cast(NetRecvMmsg);
+            if (data.recvFromSlots()) |count| {
+                c.setResult(.net_recvmmsg, count);
+            } else |err| {
+                c.setError(err);
+            }
+            state.markCompletedFromBackend(c);
         },
 
         .net_sendmsg => {
@@ -1664,6 +1677,7 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
                 .net_recvfrom,
                 .net_sendto,
                 .net_recvmsg,
+                .net_recvmmsg,
                 .net_sendmsg,
                 .net_poll,
                 .net_send_file,
@@ -1677,6 +1691,7 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
                         .net_recvfrom => target.cast(NetRecvFrom).handle,
                         .net_sendto => target.cast(NetSendTo).handle,
                         .net_recvmsg => target.cast(NetRecvMsg).handle,
+                        .net_recvmmsg => target.cast(NetRecvMmsg).handle,
                         .net_sendmsg => target.cast(NetSendMsg).handle,
                         .net_poll => target.cast(NetPoll).handle,
                         .net_send_file => target.cast(NetSendFile).handle,
@@ -2054,6 +2069,8 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
 
             state.markCompletedFromBackend(c);
         },
+
+        .net_recvmmsg => unreachable, // completed synchronously at submit
 
         .net_sendmsg => {
             const data = c.cast(NetSendMsg);

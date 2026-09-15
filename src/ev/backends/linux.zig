@@ -44,6 +44,7 @@ pub fn Backend(comptime mode: Mode) type {
         // applies O_NONBLOCK after opening, matching the old epoll behavior.
         pub const supports_nonblocking_file_io = mode == .io_uring;
         pub const supports_recv_dontwait = true;
+        pub const supports_recvmmsg = mode == .epoll;
 
         // io_uring needs these operation-owned syscall arguments to outlive SQE
         // submission. Epoll has no corresponding per-operation scratch.
@@ -52,6 +53,7 @@ pub fn Backend(comptime mode: Mode) type {
         pub const NetRecvFromData = if (mode == .epoll) struct {} else IoUring.NetRecvFromData;
         pub const NetSendToData = if (mode == .epoll) struct {} else IoUring.NetSendToData;
         pub const NetRecvMsgData = if (mode == .epoll) struct {} else IoUring.NetRecvMsgData;
+        pub const NetRecvMmsgData = if (mode == .epoll) struct {} else IoUring.NetRecvMmsgData;
         pub const NetSendMsgData = if (mode == .epoll) struct {} else IoUring.NetSendMsgData;
         pub const FileOpenData = IoUring.FileOpenData;
         pub const FileCreateData = IoUring.FileCreateData;

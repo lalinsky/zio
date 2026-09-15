@@ -18,6 +18,7 @@ const NetSend = @import("../../completion.zig").NetSend;
 const NetRecvFrom = @import("../../completion.zig").NetRecvFrom;
 const NetSendTo = @import("../../completion.zig").NetSendTo;
 const NetRecvMsg = @import("../../completion.zig").NetRecvMsg;
+const NetRecvMmsg = @import("../../completion.zig").NetRecvMmsg;
 const NetSendMsg = @import("../../completion.zig").NetSendMsg;
 const NetPoll = @import("../../completion.zig").NetPoll;
 const NetClose = @import("../../completion.zig").NetClose;
@@ -94,6 +95,7 @@ pub fn capability(comptime op: Op) Support {
         .net_recvfrom,
         .net_sendto,
         .net_recvmsg,
+        .net_recvmmsg,
         .net_sendmsg,
         .net_poll,
         .net_shutdown,
@@ -332,6 +334,7 @@ fn getEvents(completion: *Completion) u32 {
         .net_recvfrom => std.os.linux.EPOLL.IN,
         .net_sendto => std.os.linux.EPOLL.OUT,
         .net_recvmsg => std.os.linux.EPOLL.IN,
+        .net_recvmmsg => std.os.linux.EPOLL.IN,
         .net_sendmsg => std.os.linux.EPOLL.OUT,
         .net_poll => blk: {
             const poll_data = completion.cast(NetPoll);
@@ -363,6 +366,7 @@ fn getPollType(op: Op) PollEntryType {
         .net_recvfrom => .send_or_recv,
         .net_sendto => .send_or_recv,
         .net_recvmsg => .send_or_recv,
+        .net_recvmmsg => .send_or_recv,
         .net_sendmsg => .send_or_recv,
         .net_poll => .send_or_recv,
         .file_read_streaming, .file_write_streaming => .send_or_recv,
@@ -501,6 +505,7 @@ fn getHandle(completion: *Completion) NetHandle {
         .net_recvfrom => completion.cast(NetRecvFrom).handle,
         .net_sendto => completion.cast(NetSendTo).handle,
         .net_recvmsg => completion.cast(NetRecvMsg).handle,
+        .net_recvmmsg => completion.cast(NetRecvMmsg).handle,
         .net_sendmsg => completion.cast(NetSendMsg).handle,
         .net_poll => completion.cast(NetPoll).handle,
         .pipe_poll => completion.cast(PipePoll).handle,
@@ -615,6 +620,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         .net_recvfrom,
         .net_sendto,
         .net_recvmsg,
+        .net_recvmmsg,
         .net_sendmsg,
         => sockreg.submitIo(self, state, c),
         .net_poll => sockreg.submitPoll(self, state, c),
@@ -950,6 +956,23 @@ pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) C
                     }
                     return .requeue;
                 },
+                else => {
+                    c.setError(err);
+                    return .completed;
+                },
+            }
+        },
+        .net_recvmmsg => {
+            const data = c.cast(NetRecvMmsg);
+            if (handleEpollError(event, net.errnoToRecvError)) |err| {
+                c.setError(err);
+                return .completed;
+            }
+            if (data.recvFromSlots()) |count| {
+                c.setResult(.net_recvmmsg, count);
+                return .completed;
+            } else |err| switch (err) {
+                error.WouldBlock => return .requeue,
                 else => {
                     c.setError(err);
                     return .completed;

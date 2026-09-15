@@ -51,6 +51,7 @@ const NetSend = @import("../../completion.zig").NetSend;
 const NetRecvFrom = @import("../../completion.zig").NetRecvFrom;
 const NetSendTo = @import("../../completion.zig").NetSendTo;
 const NetRecvMsg = @import("../../completion.zig").NetRecvMsg;
+const NetRecvMmsg = @import("../../completion.zig").NetRecvMmsg;
 const NetSendMsg = @import("../../completion.zig").NetSendMsg;
 const NetSendFile = @import("../../completion.zig").NetSendFile;
 const NetPoll = @import("../../completion.zig").NetPoll;
@@ -129,6 +130,7 @@ pub fn capability(comptime op: Op) Support {
         .net_recvfrom,
         .net_sendto,
         .net_recvmsg,
+        .net_recvmmsg,
         .net_sendmsg,
         .net_poll,
         .net_shutdown,
@@ -199,6 +201,11 @@ pub const NetSendToData = struct {
 
 pub const NetRecvMsgData = struct {
     msg: linux.msghdr = undefined,
+};
+
+pub const NetRecvMmsgData = struct {
+    msg: linux.msghdr = undefined,
+    iov: net.iovec = undefined,
 };
 
 pub const NetSendMsgData = struct {
@@ -607,6 +614,22 @@ fn submitInner(self: *Self, state: *LoopState, c: *Completion, is_new: bool) voi
                 .iovlen = data.data.iovecs.len,
                 .control = if (data.control) |ctl| ctl.ptr else null,
                 .controllen = if (data.control) |ctl| ctl.len else 0,
+                .flags = 0,
+            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
+            sqe.prep_recvmsg(data.handle, &data.internal.msg, recvFlagsToMsg(data.flags));
+            sqe.user_data = @intFromPtr(c);
+        },
+        .net_recvmmsg => {
+            const data = c.cast(NetRecvMmsg);
+            data.internal.iov = net.iovecFromSlice(data.slots[0].data);
+            data.internal.msg = .{
+                .name = @ptrCast(&data.slots[0].addr),
+                .namelen = data.slots[0].addr_len,
+                .iov = (&data.internal.iov)[0..1].ptr,
+                .iovlen = 1,
+                .control = null,
+                .controllen = 0,
                 .flags = 0,
             };
             const sqe = self.getSqeOrDefer(c) orelse return;
@@ -1317,7 +1340,11 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         }
 
         // Store the result in the completion
-        self.storeResult(completion, cqe.res);
+        if (completion.op == .net_recvmmsg) {
+            storeRecvMmsgResult(completion, cqe.res, cqe.flags);
+        } else {
+            self.storeResult(completion, cqe.res);
+        }
 
         // Mark as completed (also decrements inflight_io)
         state.markCompletedFromBackend(completion);
@@ -1354,6 +1381,7 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
     switch (c.op) {
         .group, .timer, .async, .work => unreachable,
         .net_open => unreachable,
+        .net_recvmmsg => unreachable, // handled in reap loop before storeResult
         .net_bind => {
             if (res < 0) {
                 c.setError(net.errnoToBindError(@enumFromInt(-res)));
@@ -1747,6 +1775,38 @@ fn statxToFileStat(statx: linux.Statx) fs.FileStatInfo {
 
 fn statxTimeToNanos(ts: linux.statx_timestamp) i64 {
     return @as(i64, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
+
+fn storeRecvMmsgResult(c: *Completion, res: i32, _: u32) void {
+    const data = c.cast(NetRecvMmsg);
+    if (res < 0) {
+        c.setError(net.errnoToRecvError(@enumFromInt(-res)));
+        return;
+    }
+    // First slot was received via the SQE's recvmsg.
+    data.slots[0].received_len = @intCast(res);
+    data.slots[0].addr_len = data.internal.msg.namelen;
+    data.slots[0].msg_flags = data.internal.msg.flags;
+
+    var count: u32 = 1;
+
+    if (data.slots.len > 1) {
+        var remaining = NetRecvMmsg{
+            .c = undefined,
+            .handle = data.handle,
+            .slots = data.slots[1..],
+            .flags = data.flags,
+        };
+        count += remaining.recvFromSlots() catch |err| switch (err) {
+            error.WouldBlock => 0,
+            else => {
+                c.setError(err);
+                return;
+            },
+        };
+        data.drained = remaining.drained;
+    }
+    c.setResult(.net_recvmmsg, count);
 }
 
 fn recvFlagsToMsg(flags: net.RecvFlags) u32 {

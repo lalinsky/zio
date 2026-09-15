@@ -68,6 +68,7 @@ pub const Op = enum {
     net_recvfrom,
     net_sendto,
     net_recvmsg,
+    net_recvmmsg,
     net_sendmsg,
     net_poll,
     net_shutdown,
@@ -132,6 +133,7 @@ pub const Op = enum {
             .net_recvfrom => NetRecvFrom,
             .net_sendto => NetSendTo,
             .net_recvmsg => NetRecvMsg,
+            .net_recvmmsg => NetRecvMmsg,
             .net_sendmsg => NetSendMsg,
             .net_poll => NetPoll,
             .net_close => NetClose,
@@ -198,6 +200,7 @@ pub const Op = enum {
             NetRecvFrom => .net_recvfrom,
             NetSendTo => .net_sendto,
             NetRecvMsg => .net_recvmsg,
+            NetRecvMmsg => .net_recvmmsg,
             NetSendMsg => .net_sendmsg,
             NetPoll => .net_poll,
             NetClose => .net_close,
@@ -1088,6 +1091,95 @@ pub const NetRecvMsg = struct {
 
     pub fn getResult(self: *const NetRecvMsg) Error!Result {
         return self.c.getResult(.net_recvmsg);
+    }
+};
+
+pub const NetRecvMmsg = struct {
+    c: Completion,
+    result_private_do_not_touch: u32 = undefined,
+    internal: if (@hasDecl(Backend, "NetRecvMmsgData")) Backend.NetRecvMmsgData else struct {} = .{},
+    handle: Backend.NetHandle,
+    slots: []Slot,
+    flags: net.RecvFlags,
+    drained: bool = false,
+
+    pub const Error = net.RecvError || Cancelable;
+    pub const Result = u32;
+
+    pub const Slot = struct {
+        data: []u8,
+        received_len: u32 = 0,
+        addr: net.sockaddr.storage = undefined,
+        addr_len: net.socklen_t = @sizeOf(net.sockaddr.storage),
+        msg_flags: u32 = 0,
+    };
+
+    pub fn init(
+        handle: Backend.NetHandle,
+        slots: []Slot,
+        flags: net.RecvFlags,
+    ) NetRecvMmsg {
+        return .{
+            .c = .init(.net_recvmmsg),
+            .handle = handle,
+            .slots = slots,
+            .flags = flags,
+        };
+    }
+
+    pub fn getResult(self: *const NetRecvMmsg) Error!Result {
+        return self.c.getResult(.net_recvmmsg);
+    }
+
+    const max_batch = 64;
+
+    pub fn recvFromSlots(self: *NetRecvMmsg) net.RecvError!u32 {
+        const flags: net.RecvFlags = .{
+            .peek = self.flags.peek,
+            .oob = self.flags.oob,
+            .trunc = self.flags.trunc,
+            .dontwait = true,
+        };
+        if (net.has_recvmmsg) {
+            const batch_len: u32 = @intCast(@min(self.slots.len, max_batch));
+            var msgvec: [max_batch]net.mmsghdr = undefined;
+            var iovecs: [max_batch]net.iovec = undefined;
+            for (0..batch_len) |i| {
+                iovecs[i] = net.iovecFromSlice(self.slots[i].data);
+                msgvec[i] = .{
+                    .hdr = .{
+                        .name = @ptrCast(&self.slots[i].addr),
+                        .namelen = self.slots[i].addr_len,
+                        .iov = (&iovecs[i])[0..1].ptr,
+                        .iovlen = 1,
+                        .control = null,
+                        .controllen = 0,
+                        .flags = 0,
+                    },
+                    .len = 0,
+                };
+            }
+            const n = net.recvmmsg(self.handle, &msgvec, batch_len, flags) catch |err| switch (err) {
+                error.Unexpected => return recvSingleFromSlot(self.handle, &self.slots[0], flags),
+                else => |e| return e,
+            };
+            for (0..n) |i| {
+                self.slots[i].received_len = msgvec[i].len;
+                self.slots[i].addr_len = msgvec[i].hdr.namelen;
+                self.slots[i].msg_flags = msgvec[i].hdr.flags;
+            }
+            self.drained = true;
+            return n;
+        }
+        return recvSingleFromSlot(self.handle, &self.slots[0], flags);
+    }
+
+    fn recvSingleFromSlot(handle: Backend.NetHandle, slot: *Slot, flags: net.RecvFlags) net.RecvError!u32 {
+        var iov = net.iovecFromSlice(slot.data);
+        const result = try net.recvmsg(handle, (&iov)[0..1], flags, @ptrCast(&slot.addr), &slot.addr_len, null);
+        slot.received_len = @intCast(result.len);
+        slot.msg_flags = result.flags;
+        return 1;
     }
 };
 

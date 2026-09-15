@@ -34,6 +34,7 @@ const NetSend = @import("completion.zig").NetSend;
 const NetRecvFrom = @import("completion.zig").NetRecvFrom;
 const NetSendTo = @import("completion.zig").NetSendTo;
 const NetRecvMsg = @import("completion.zig").NetRecvMsg;
+const NetRecvMmsg = @import("completion.zig").NetRecvMmsg;
 const NetSendMsg = @import("completion.zig").NetSendMsg;
 const NetSendFile = @import("completion.zig").NetSendFile;
 const NetPoll = @import("completion.zig").NetPoll;
@@ -166,6 +167,7 @@ pub fn isSocketOp(op: Op) bool {
         .net_recvfrom,
         .net_sendto,
         .net_recvmsg,
+        .net_recvmmsg,
         .net_sendmsg,
         .net_send_file,
         .net_poll,
@@ -177,7 +179,7 @@ pub fn isSocketOp(op: Op) bool {
 /// Direction a socket op waits on.
 pub fn dirForOp(c: *Completion) Dir {
     return switch (c.op) {
-        .net_accept, .net_recv, .net_recvfrom, .net_recvmsg => .read,
+        .net_accept, .net_recv, .net_recvfrom, .net_recvmsg, .net_recvmmsg => .read,
         .net_connect, .net_send, .net_sendto, .net_sendmsg, .net_send_file => .write,
         .net_poll => switch (c.cast(NetPoll).event) {
             .recv => .read,
@@ -197,6 +199,7 @@ pub fn netHandle(c: *Completion) net.fd_t {
         .net_recvfrom => c.cast(NetRecvFrom).handle,
         .net_sendto => c.cast(NetSendTo).handle,
         .net_recvmsg => c.cast(NetRecvMsg).handle,
+        .net_recvmmsg => c.cast(NetRecvMmsg).handle,
         .net_sendmsg => c.cast(NetSendMsg).handle,
         .net_send_file => c.cast(NetSendFile).handle,
         .net_poll => c.cast(NetPoll).handle,
