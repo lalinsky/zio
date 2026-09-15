@@ -1804,6 +1804,7 @@ fn storeRecvMmsgResult(c: *Completion, res: i32, _: u32) void {
                 return;
             },
         };
+        data.drained = remaining.drained;
     }
     c.setResult(.net_recvmmsg, count);
 }

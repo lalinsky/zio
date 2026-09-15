@@ -2473,7 +2473,7 @@ fn netReceiveMmsg(
         };
     }
 
-    if (!os_net.has_recvmmsg and count > 0 and count < o.message_buffer.len) {
+    if (!op.drained and count > 0 and count < o.message_buffer.len) {
         const more = netReceiveMoreLoop(o, count);
         return .{ more[0], count + more[1] };
     }

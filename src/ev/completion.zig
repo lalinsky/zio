@@ -1101,6 +1101,7 @@ pub const NetRecvMmsg = struct {
     handle: Backend.NetHandle,
     slots: []Slot,
     flags: net.RecvFlags,
+    drained: bool = false,
 
     pub const Error = net.RecvError || Cancelable;
     pub const Result = u32;
@@ -1167,6 +1168,7 @@ pub const NetRecvMmsg = struct {
                 self.slots[i].addr_len = msgvec[i].hdr.namelen;
                 self.slots[i].msg_flags = msgvec[i].hdr.flags;
             }
+            self.drained = true;
             return n;
         }
         return recvSingleFromSlot(self.handle, &self.slots[0], flags);
