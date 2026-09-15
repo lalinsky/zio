@@ -1475,6 +1475,50 @@ pub fn recvmsg(
     }
 }
 
+pub const has_recvmmsg = switch (builtin.os.tag) {
+    .linux, .freebsd, .netbsd => true,
+    else => false,
+};
+
+pub const mmsghdr = posix.system.mmsghdr;
+
+pub fn recvmmsg(
+    fd: fd_t,
+    msgvec: [*]mmsghdr,
+    vlen: u32,
+    flags: RecvFlags,
+) RecvError!u32 {
+    const sys_flags = recvFlagsToSys(flags);
+
+    while (true) {
+        const rc = recvmmsg_syscall(fd, msgvec, vlen, @intCast(sys_flags));
+
+        switch (posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            else => |err| return errnoToRecvError(err),
+        }
+    }
+}
+
+fn recvmmsg_syscall(fd: fd_t, msgvec: [*]mmsghdr, vlen: u32, flags: c_int) switch (builtin.os.tag) {
+    .linux => usize,
+    else => c_int,
+} {
+    switch (builtin.os.tag) {
+        .linux => return posix.system.recvmmsg(fd, msgvec, vlen, @intCast(flags), null),
+        .freebsd, .netbsd => return recvmmsg_libc(fd, msgvec, vlen, flags, null),
+        else => unreachable,
+    }
+}
+
+const recvmmsg_libc = if (builtin.os.tag == .freebsd or builtin.os.tag == .netbsd)
+    struct {
+        extern "c" fn recvmmsg(sockfd: fd_t, msgvec: [*]mmsghdr, vlen: c_uint, flags: c_int, timeout: ?*posix.system.timespec) c_int;
+    }.recvmmsg
+else
+    void;
+
 pub fn sendmsg(
     fd: fd_t,
     buffers: []const iovec_const,

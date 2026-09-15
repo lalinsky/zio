@@ -16,6 +16,7 @@ const NetSend = @import("../completion.zig").NetSend;
 const NetRecvFrom = @import("../completion.zig").NetRecvFrom;
 const NetSendTo = @import("../completion.zig").NetSendTo;
 const NetRecvMsg = @import("../completion.zig").NetRecvMsg;
+const NetRecvMmsg = @import("../completion.zig").NetRecvMmsg;
 const NetSendMsg = @import("../completion.zig").NetSendMsg;
 const NetPoll = @import("../completion.zig").NetPoll;
 const PipePoll = @import("../completion.zig").PipePoll;
@@ -31,6 +32,7 @@ const fs = @import("../../os/fs.zig");
 pub const wall_timer_modes: [3]WallTimerMode = .{ .fallback, .fallback, .fallback };
 pub const supports_nonblocking_file_io = false;
 pub const supports_recv_dontwait = true;
+pub const supports_recvmmsg = net.has_recvmmsg;
 
 pub fn capability(comptime op: Op) Support {
     return switch (op) {
@@ -86,6 +88,7 @@ pub fn capability(comptime op: Op) Support {
         .net_recvfrom,
         .net_sendto,
         .net_recvmsg,
+        .net_recvmmsg,
         .net_sendmsg,
         .net_poll,
         .net_shutdown,
@@ -240,6 +243,7 @@ fn getEvents(completion: *Completion) @FieldType(net.pollfd, "events") {
         .net_recvfrom => net.POLL.IN,
         .net_sendto => net.POLL.OUT,
         .net_recvmsg => net.POLL.IN,
+        .net_recvmmsg => net.POLL.IN,
         .net_sendmsg => net.POLL.OUT,
         .net_poll => blk: {
             const poll_data = completion.cast(NetPoll);
@@ -271,6 +275,7 @@ fn getPollType(op: Op) PollEntryType {
         .net_recvfrom => .send_or_recv,
         .net_sendto => .send_or_recv,
         .net_recvmsg => .send_or_recv,
+        .net_recvmmsg => .send_or_recv,
         .net_sendmsg => .send_or_recv,
         .net_poll => .send_or_recv,
         .file_read_streaming, .file_write_streaming => if (builtin.os.tag == .windows) unreachable else .send_or_recv,
@@ -382,6 +387,7 @@ fn getHandle(completion: *Completion) NetHandle {
         .net_recvfrom => completion.cast(NetRecvFrom).handle,
         .net_sendto => completion.cast(NetSendTo).handle,
         .net_recvmsg => completion.cast(NetRecvMsg).handle,
+        .net_recvmmsg => completion.cast(NetRecvMmsg).handle,
         .net_sendmsg => completion.cast(NetSendMsg).handle,
         .net_poll => completion.cast(NetPoll).handle,
         // Pipe handles are only compatible with NetHandle on non-Windows (Windows uses IOCP)
@@ -479,6 +485,10 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         .net_recvmsg => {
             const data = c.cast(NetRecvMsg);
+            self.submitSocketIo(state, data.handle, c);
+        },
+        .net_recvmmsg => {
+            const data = c.cast(NetRecvMmsg);
             self.submitSocketIo(state, data.handle, c);
         },
         .net_sendmsg => {
@@ -766,6 +776,23 @@ pub fn checkCompletion(c: *Completion, item: *const net.pollfd) CheckResult {
                     }
                     return .requeue;
                 },
+                else => {
+                    c.setError(err);
+                    return .completed;
+                },
+            }
+        },
+        .net_recvmmsg => {
+            const data = c.cast(NetRecvMmsg);
+            if (handlePollError(item, net.errnoToRecvError)) |err| {
+                c.setError(err);
+                return .completed;
+            }
+            if (data.recvFromSlots()) |count| {
+                c.setResult(.net_recvmmsg, count);
+                return .completed;
+            } else |err| switch (err) {
+                error.WouldBlock => return .requeue,
                 else => {
                     c.setError(err);
                     return .completed;
