@@ -124,7 +124,7 @@ const NtpPacket = extern struct {
 };
 ```
 
-The `extern` keyword ensures the struct has C-compatible layout with no padding. We serialize it to bytes using [`writeStruct()`](https://ziglang.org/documentation/0.15.2/std/#std.Io.Writer.writeStruct):
+The `extern` keyword ensures the struct has C-compatible layout with no padding. We serialize it to bytes using [`writeStruct()`](https://ziglang.org/documentation/0.16.0/std/#std.Io.Writer.writeStruct):
 
 ```zig
 const request: NtpPacket = .{};

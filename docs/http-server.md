@@ -1,8 +1,8 @@
 # HTTP Server
 
-This example follows the same pattern as [the TCP server we built previously](tcp-server.md) - accepting connections and spawning tasks to handle clients - but uses Zig's standard library [`std.http.Server`](https://ziglang.org/documentation/0.15.2/std/#std.http.Server) to handle the HTTP protocol.
+This example follows the same pattern as [the TCP server we built previously](tcp-server.md) - accepting connections and spawning tasks to handle clients - but uses Zig's standard library [`std.http.Server`](https://ziglang.org/documentation/0.16.0/std/#std.http.Server) to handle the HTTP protocol.
 
-You'll see that thanks to the standard [`std.Io.Reader`](https://ziglang.org/documentation/0.15.2/std/#std.Io.Reader) and [`std.Io.Writer`](https://ziglang.org/documentation/0.15.2/std/#std.Io.Writer) interfaces, you can use existing Zig libraries that were not written with async I/O in mind.
+You'll see that thanks to the standard [`std.Io.Reader`](https://ziglang.org/documentation/0.16.0/std/#std.Io.Reader) and [`std.Io.Writer`](https://ziglang.org/documentation/0.16.0/std/#std.Io.Writer) interfaces, you can use existing Zig libraries that were not written with async I/O in mind.
 
 ## The Code
 
@@ -35,7 +35,7 @@ For each client connection, we create an HTTP server instance:
 --8<-- "examples/http_server.zig:init"
 ```
 
-The key here is that `std.http.Server` works with any [`std.Io.Reader`](https://ziglang.org/documentation/0.15.2/std/#std.Io.Reader) and [`std.Io.Writer`](https://ziglang.org/documentation/0.15.2/std/#std.Io.Writer). ZIO's stream reader and writer implement these standard interfaces, so they work seamlessly with existing Zig libraries.
+The key here is that `std.http.Server` works with any [`std.Io.Reader`](https://ziglang.org/documentation/0.16.0/std/#std.Io.Reader) and [`std.Io.Writer`](https://ziglang.org/documentation/0.16.0/std/#std.Io.Writer). ZIO's stream reader and writer implement these standard interfaces, so they work seamlessly with existing Zig libraries.
 
 ### Handling Requests
 
@@ -49,7 +49,7 @@ The server supports HTTP keep-alive, allowing multiple requests over a single co
 
 ## Ecosystem Integration
 
-This example shows an important aspect of ZIO: because it implements the standard [`std.Io.Reader`](https://ziglang.org/documentation/0.15.2/std/#std.Io.Reader) and [`std.Io.Writer`](https://ziglang.org/documentation/0.15.2/std/#std.Io.Writer) interfaces, you can use ZIO with any library from the Zig ecosystem that works with these interfaces. You don't need special "async" versions of libraries - regular Zig libraries just work.
+This example shows an important aspect of ZIO: because it implements the standard [`std.Io.Reader`](https://ziglang.org/documentation/0.16.0/std/#std.Io.Reader) and [`std.Io.Writer`](https://ziglang.org/documentation/0.16.0/std/#std.Io.Writer) interfaces, you can use ZIO with any library from the Zig ecosystem that works with these interfaces. You don't need special "async" versions of libraries - regular Zig libraries just work.
 
 This means you can:
 

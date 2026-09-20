@@ -2,47 +2,104 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.18.0] - 2026-09-20
 
-- Fixed `NetPoll` on the IOCP backend discarding a queued datagram and reporting
-  `error.MessageOversize` instead of readiness on UDP sockets.
+- `CompletionQueue` is now usable as a long-lived, thread-safe dispatcher. `submit` may
+  be called from other tasks, completed operations may be resubmitted, and the queue can
+  be used with `select`. New `close`, `isDrained`, targeted `cancel`, and
+  `cancelAll(.keep/.discard)` APIs make shutdown and result ownership explicit. This is a
+  breaking change: `submit` is fallible, and `wait`/`waitTimeout` keep waiting on an open
+  empty queue and return `error.Closed` after a closed queue is drained instead of
+  returning `null`.
 
-- `receiveManyTimeout` now fills every message slot the socket's queue can satisfy once
-  the first datagram has arrived, instead of always returning one (#731).
+- Added `TempFile` and `TempDir`, with helpers for creating them in an open directory or
+  the system temporary directory. Their cleanup is shielded from cancellation. The
+  new `Dir.deleteFileUncancelable`, `deleteDirUncancelable`, and
+  `deleteTreeUncancelable` methods are also available for cleanup code. The atomic-file
+  API was renamed from `createFileAtomic` to `createAtomicFile`.
 
-- Added a `dontwait` receive flag to the `zio.ev` socket operations, which completes with
-  `error.WouldBlock` instead of parking when nothing is queued; backends advertise it with
-  `supports_recv_dontwait`, currently true on all of them.
+- Added `File.prepRead`, `prepWrite`, `prepReadStreaming`, `prepWriteStreaming`,
+  `prepStat`, and `prepSync` for preparing operations for a `CompletionQueue` or
+  `zio.ev.Group`; `File.Reader`, `File.Writer`, and `File.Mode` are now available as
+  nested names.
 
-- The `poll` backend now tries a socket operation once on submit and only waits for
-  readiness on `WouldBlock`, like the `epoll` and `kqueue` backends already did.
+- Added `Socket.receiveFromBatch` and the `zio.ev.NetRecvMmsg` operation for receiving up
+  to 64 datagrams at once. `std.Io`'s `receiveManyTimeout` now fills as many supplied
+  message slots as the socket can satisfy after the first datagram arrives, instead of
+  always returning one (#731).
 
-- Darwin no longer arms a kernel timer for realtime deadlines, since XNU converts one to
-  a Mach deadline at arming and never rebases it across a wall-clock step.
+- Added `Runtime.blockingIo()`, a `std.Io` handle whose `async`/`concurrent` work runs on
+  the blocking thread pool. On supported POSIX targets, canceling `spawnBlocking` work
+  can now interrupt zio's cancelable syscalls. `Runtime.fromIo` now safely returns
+  `?*Runtime` for both regular and blocking handles instead of asserting and returning a
+  non-optional pointer.
 
-- Timed `Futex` waits on FreeBSD now use `CLOCK_MONOTONIC` instead of `CLOCK_REALTIME`,
-  where a wall clock step could cut a wait short or stretch it.
+- Added `AutoCancel.setClock` for boot- and realtime-clock deadlines, and exported
+  `Clock`. Re-arming an `AutoCancel` after task migration is now safe. Added `recancel()`
+  for operations that must return a completed result while preserving a pending
+  cancellation for the next cancellation point.
 
-- Fixed a FreeBSD bug where the internal condition variable returned without
-  re-acquiring its mutex, corrupting the thread pool's queue or spinning an idle worker
-  at 100%; `Mutex` and `Condition` are now futex-backed there, like everywhere else.
+- Renamed `ResetEvent` to `Event`, matching `std.Io.Event`; `ResetEvent` remains as a
+  deprecated alias. Renamed `timedWait` to `waitTimeout` on `Event`, `Condition`,
+  `Semaphore`, `Futex`, `Signal`, and `CompletionQueue`, and `Futex.timedWaitClock` to
+  `waitTimeoutClock`; the old names remain as deprecated aliases.
 
-- Renamed `ResetEvent` to `Event`, matching `std.Io.Event`. `zio.ResetEvent` stays as a
-  deprecated alias, so existing code keeps working, but it will be removed in a future
-  release.
+- Channel errors now use the shared `error.Closed` and `error.WouldBlock` names instead
+  of `ChannelClosed`, `ChannelEmpty`, and `ChannelFull`; `Closeable` is exported for the
+  common error set. The stateless `Notify` primitive was removed.
 
-- Renamed `timedWait` to `waitTimeout` on `Event`, `Condition`, `Semaphore`, `Futex`,
-  `Signal` and `CompletionQueue`, matching `std.Io.Event.waitTimeout`. `Futex.timedWaitClock`
-  became `Futex.waitTimeoutClock`. The old names stay as deprecated aliases, so existing code
-  keeps working, but they will be removed in a future release.
+- Fixed races in `select` where a losing arm could still consume a channel or broadcast
+  value, a channel rendezvous could be split between two winning selections, or a
+  notification racing another arm could be lost. Channel close/cancellation and
+  unbuffered channel send/receive selection are now safe, and canceled
+  `BroadcastChannel` consumers no longer reuse a live wait node. This changes the custom
+  future protocol: `asyncWait` now returns readiness/registration states instead of a
+  boolean.
 
-- Fixed relative paths containing `.` or `..` failing on Windows with
-  `unexpected error: .INVALID_NAME` (#714). This affected every path API taking a `Dir`,
-  down to `dir.createDir("./data", ...)`.
+- Fixed I/O starting even though the task already had a pending cancellation. When
+  cancellation loses a race with a completed operation, the result is returned and the
+  cancellation is re-armed instead of being silently consumed.
 
-- Windows path APIs now return `error.BadPathName` for a malformed path, instead of
-  `error.Unexpected` with a stack dump. `DirCreateDirError`, `DirDeleteDirError`,
-  `DirDeleteFileError` and `FileStatError` gained `BadPathName`.
+- Reworked `debug_io`'s stderr locking so tasks may suspend or migrate while holding the
+  lock without deadlocking runtime diagnostics. Logging from tasks, foreign threads, and
+  blocking workers is serialized, and a panic while holding stderr still prints its
+  message.
+
+- Fixed duration timers armed after a long idle poll being backdated against stale
+  cached time and firing immediately. Darwin realtime deadlines are no longer armed as
+  XNU kernel timers, which do not rebase across wall-clock steps.
+
+- Removed automatic I/O-load shedding from the work-stealing scheduler, along with the
+  `sheds` metric; runnable tasks are still balanced by ordinary work stealing. Fixed a
+  busy executor starving cross-thread wakes left in its overflow queue.
+
+- Added a non-parking `dontwait` flag to `zio.ev` receive operations, advertised by
+  `supports_recv_dontwait` and supported by every backend. The `poll` backend now also
+  tries socket operations on submission and waits for readiness only on `WouldBlock`,
+  matching `epoll` and `kqueue`.
+
+- Fixed IOCP readiness polling consuming queued UDP datagrams. Oversized datagram
+  receives now complete exactly once with `error.MessageOversize` instead of being
+  misclassified or double-completed.
+
+- `Server.accept` and the `std.Io` accept path now retry connections that abort while in
+  the listen queue, while preserving the original timeout deadline and cancellation.
+
+- `HostName.validate` now enforces the DNS wire-format limit: 253 characters without a
+  trailing root dot, or 254 with one. POSIX DNS lookup also safely drops an unusably long
+  canonical name instead of overrunning its destination buffer.
+
+- Fixed relative paths containing `.` or `..` failing on Windows (#714), including paths
+  relative to a drive-root handle. Malformed paths now return `error.BadPathName` instead
+  of `error.Unexpected`; the affected create, delete, open, rename, stat, access, and
+  real-path error sets include `BadPathName`.
+
+- Timed `Futex` waits on FreeBSD now use `CLOCK_MONOTONIC`. `Mutex` and `Condition` are
+  futex-backed there as on other platforms, fixing waits that returned without
+  re-acquiring the mutex and could corrupt the thread pool queue or spin an idle worker.
+
+- `RuntimeOptions.stack_pool.prewarm` now also works on the individually mapped stack
+  path used by Windows, 32-bit targets, OpenBSD, and configurations with slabs disabled.
 
 ## [0.17.0] - 2026-08-05
 

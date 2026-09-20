@@ -2,7 +2,7 @@
 
 This guide will help you get started with ZIO in a new Zig project.
 
-We will start completely from scratch, so you will just need to have Zig 0.15 installed. See the [Zig installation guide](https://ziglang.org/learn/getting-started/) for more information on that.
+We will start completely from scratch, so you will just need to have Zig 0.16.0 installed. See the [Zig installation guide](https://ziglang.org/learn/getting-started/) for more information on that.
 
 ## Setup
 
@@ -20,7 +20,7 @@ info: see `zig build --help` for a menu of options
 Then add ZIO as a dependency to the project:
 
 ```sh
-$ zig fetch --save "git+https://github.com/lalinsky/zio#v0.17.0"
+$ zig fetch --save "git+https://github.com/lalinsky/zio#v0.18.0"
 info: resolved to commit 0000000000000000000000000000000000000000
 ```
 
@@ -53,9 +53,9 @@ Hello, world!
 ```
 
 This example is a simple program that prints "Hello, world!" to the console.
-It shows how to initialize the runtime, access stdout, and write to it using the [`std.Io.Writer`](https://ziglang.org/documentation/0.15.2/std/#std.Io.Writer) interface.
+It shows how to initialize the runtime, access stdout, and write to it using the [`std.Io.Writer`](https://ziglang.org/documentation/0.16.0/std/#std.Io.Writer) interface.
 
-The code looks simple, but when you call [`writeAll()`](https://ziglang.org/documentation/0.15.2/std/#std.Io.Writer.writeAll), it will actually
+The code looks simple, but when you call [`writeAll()`](https://ziglang.org/documentation/0.16.0/std/#std.Io.Writer.writeAll), it will actually
 submit a write operation to the event loop, and suspend the current task
 until the operation is complete, so the execution model behind it is more
 complex than it seems.

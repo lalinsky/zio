@@ -83,7 +83,7 @@ The `handleClient` function processes a single client connection:
 This function:
 
 1. Creates a reader and writer for the stream, each with their own buffer
-2. Reads lines from the client using [`takeDelimiterInclusive()`](https://ziglang.org/documentation/0.15.2/std/#std.Io.Reader.takeDelimiterInclusive)
+2. Reads lines from the client using [`takeDelimiterInclusive()`](https://ziglang.org/documentation/0.16.0/std/#std.Io.Reader.takeDelimiterInclusive)
 3. When `EndOfStream` is received, the loop breaks and the connection closes
 4. For each line, it sleeps for 1 second (to demonstrate async behavior - multiple clients can be served concurrently during this delay)
 5. Echoes the line back to the client
@@ -106,6 +106,6 @@ In our example, the `defer group.cancel()` ensures that when `main` exits, all a
 
 ### Async I/O
 
-All I/O operations in ZIO are asynchronous under the hood. When you call [`writeAll()`](https://ziglang.org/documentation/0.15.2/std/#std.Io.Writer.writeAll) or read operations, they submit the operation to the event loop and suspend the current task. When the operation completes, the task is resumed automatically.
+All I/O operations in ZIO are asynchronous under the hood. When you call [`writeAll()`](https://ziglang.org/documentation/0.16.0/std/#std.Io.Writer.writeAll) or read operations, they submit the operation to the event loop and suspend the current task. When the operation completes, the task is resumed automatically.
 
 This gives you the simplicity of synchronous-looking code with the performance of asynchronous I/O.

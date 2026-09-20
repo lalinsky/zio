@@ -46,7 +46,7 @@ A runtime can run single-threaded, or multi-threaded in one of two modes. With w
 1) Add zio as a dependency in your `build.zig.zon`:
 
 ```bash
-zig fetch --save "git+https://github.com/lalinsky/zio#v0.17.0"
+zig fetch --save "git+https://github.com/lalinsky/zio#v0.18.0"
 ```
 
 2) In your `build.zig`, add the `zio` module as a dependency to your program:
