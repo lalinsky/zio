@@ -359,8 +359,6 @@ pub const metrics_enabled = zio_options.scheduler_metrics;
 /// `metrics_enabled` false the per-executor storage is zero-bit and the
 /// summed snapshot is all zeros.
 pub const SchedulerMetrics = struct {
-    /// Parks with the doze cap (the steal-free grace park).
-    parks_doze: u64 = 0,
     /// Indefinite parks.
     parks_full: u64 = 0,
     /// Park exits where a pusher had claimed this executor's idle bit.
@@ -446,11 +444,6 @@ pub const Executor = struct {
     // Quanta left until the next clock checkpoint (cheaper than a modulo on
     // the hot path).
     tick_checkpoint_countdown: u32 = checkpoint_interval,
-
-    // Whether this executor has already spent its doze (the steal-free grace
-    // park, see parkAndSearch) since it last had local work. Reset by any
-    // local work; while set, empty passes go straight to the full park.
-    dozed: bool = false,
 
     // Scheduler event counters; written only by this executor's thread.
     metrics: MetricsStorage = metrics_storage_init,
@@ -653,15 +646,6 @@ pub const Executor = struct {
     /// workloads; also tokio's max tasks per global-queue interval.
     const checkpoint_interval = 127;
 
-    /// How long the first idle park (the "doze") waits before this executor
-    /// concludes it is genuinely idle and stealing is worth the churn. An I/O
-    /// completion typically re-readies the very tasks that just ran here (their
-    /// ops are homed on this loop), so the loop gets this long to produce local
-    /// work before any task is dragged to another executor. The idle bit is set
-    /// while dozing, so a searcher wake still cuts the doze short — excess work
-    /// elsewhere reaches this executor within a wake, not within doze_wait.
-    const doze_wait: Duration = .fromMicroseconds(100);
-
     /// True while the current tick may keep spending quanta without polling.
     inline fn tickBudgetLeft(self: *const Executor) bool {
         return self.tick_task_count < self.tick_task_budget and !self.tick_expired;
@@ -725,10 +709,6 @@ pub const Executor = struct {
         // Process deferred cleanup (e.g. main task's park/reschedule)
         self.processCleanup();
 
-        // Entering the run loop means the main task just ran (or this executor
-        // just started): that was productive work, a fresh doze is due.
-        self.dozed = false;
-
         // When entered with the tick budget already spent (e.g. the main task
         // yielded because its slice ran out), ready tasks must get one
         // fresh-budget batch after the next poll before control can return to
@@ -748,13 +728,6 @@ pub const Executor = struct {
                 self.current_task = null;
                 self.processCleanup();
             }
-
-            // Quanta spent this cycle mean tasks ran here, which re-arms the
-            // doze grace window (see parkAndSearch). Same bookkeeping family
-            // as the tick budget, but consulted here rather than in the
-            // retune below: the park decision runs between the two, and it
-            // must see the fresh value.
-            if (self.tick_task_count > 0) self.dozed = false;
 
             // Exit if loop is stopped
             if (self.loop.stopped()) {
@@ -805,17 +778,14 @@ pub const Executor = struct {
     }
 
     /// One idle step per call; the run loop re-checks stopped/main-ready/local
-    /// work between calls and resets `dozed` whenever any of those produce
-    /// work.
+    /// work between calls.
     ///
-    /// The first empty pass after productive work probes the loop with a
-    /// non-blocking poll and, if that yields nothing, dozes: a park capped at
-    /// doze_wait whose work check is local-only. Together they give this
-    /// executor's own event loop a grace window to hand back the tasks that
-    /// just ran here before any stealing churn is paid. Every later pass
-    /// parks indefinitely with stealing folded into the pre-park check — by
-    /// then idleness is proven and the steal is also what makes the park's
-    /// wake protocol sound (see park).
+    /// With stealing active, the loop is probed with a non-blocking poll
+    /// first: the ops the tasks just submitted go to the kernel here, and
+    /// whatever completes inline (the common case right after a drain) puts
+    /// this executor straight back on the busy path without touching
+    /// idle_mask or inviting a spurious searcher election. Only a probe that
+    /// yields nothing leads to the park, whose pre-check steals.
     fn parkAndSearch(self: *Executor, check_ready: bool) !void {
         if (comptime !zio_options.task_migration) {
             self.bump("parks_full", 1);
@@ -824,43 +794,29 @@ pub const Executor = struct {
             return;
         }
 
-        if (!self.dozed) {
-            self.dozed = true;
-            // With nobody to steal from (or to) the probe and doze would only
-            // delay the real park; skip both.
-            if (self.runtime.stealingActive()) {
-                // Probe: one non-blocking poll before publishing any idleness.
-                // Completions that already arrived (the common case right
-                // after a drain) put this executor straight back on the busy
-                // path without touching idle_mask or inviting a spurious
-                // searcher election.
-                try self.loop.poll(.zero);
-                self.drainDispatched();
-                if (self.checkLocalWork(check_ready)) return;
-                self.bump("parks_doze", 1);
-                return self.park(check_ready, doze_wait, .local_only);
-            }
+        if (self.runtime.stealingActive()) {
+            try self.loop.poll(.zero);
+            self.drainDispatched();
+            if (self.checkLocalWork(check_ready)) return;
         }
         self.bump("parks_full", 1);
-        return self.park(check_ready, .max, .steal);
+        return self.park(check_ready);
     }
 
-    const ParkSearch = enum { local_only, steal };
-
-    /// One park episode: publish the idle bit, give the event loop one poll
-    /// bounded by `wait_cap`, withdraw the bit. If armSearcher elected this
+    /// One park episode: publish the idle bit, give the event loop one
+    /// indefinite poll, withdraw the bit. If armSearcher elected this
     /// executor as the searcher meanwhile, run the searcher-token protocol:
     /// consume the token by finding work, or release it and steal on the
     /// pusher's behalf.
     ///
-    /// With `search == .steal` the pre-park work check extends to the other
-    /// executors' rings. That is what makes an indefinite park sound: the bit
-    /// is published before the check while a pusher publishes its task before
-    /// reading idle_mask (both seq_cst), so either the pusher sees the bit and
-    /// wakes us, or this check sees the pushed task — including one sitting in
-    /// the pusher's own ring. A `.local_only` check (the doze) reopens that
-    /// window, but only for doze_wait: the cap itself is the rescue.
-    fn park(self: *Executor, check_ready: bool, wait_cap: Duration, search: ParkSearch) !void {
+    /// The pre-park work check extends to the other executors' rings. That is
+    /// what makes an indefinite park sound: the bit is published before the
+    /// check while a pusher publishes its task before reading idle_mask (both
+    /// seq_cst), so either the pusher sees the bit and wakes us, or this check
+    /// sees the pushed task — including one sitting in the pusher's own ring.
+    /// Without the steal here, a lost announce would strand a task behind a
+    /// non-yielding task on its owner's executor with no rescue.
+    fn park(self: *Executor, check_ready: bool) !void {
         const my_bit = @as(usize, 1) << self.id;
         // seq_cst: pairs with armSearcher's idle_mask load (see there). The bit
         // must be globally visible before the work check below, or a concurrent
@@ -874,8 +830,8 @@ pub const Executor = struct {
         }
 
         var found_work = self.checkLocalWork(check_ready);
-        if (!found_work and search == .steal) found_work = self.stealWork();
-        try self.loop.poll(if (found_work) .zero else wait_cap);
+        if (!found_work) found_work = self.stealWork();
+        try self.loop.poll(if (found_work) .zero else .max);
         // Drain before withdrawing the bit, so the post-park work checks
         // below see the woken batch.
         self.drainDispatched();
@@ -957,10 +913,10 @@ pub const Executor = struct {
     }
 
     /// Steal half of a random victim's ring into ours. Reached only from
-    /// park() — the indefinite park's pre-check and the searcher-token path —
-    /// never while this executor still has plausible local work and never
-    /// before the doze has elapsed, since migrating a task also re-homes its
-    /// I/O and the home loop usually hands work back within doze_wait.
+    /// park() — the pre-park check and the searcher-token path — never while
+    /// this executor still has plausible local work, and only after its own
+    /// loop has been probed (see parkAndSearch), since migrating a task also
+    /// moves where its next I/O is submitted.
     fn stealWork(self: *Executor) bool {
         if (!self.runtime.stealingActive()) return false;
         const executors = self.runtime.executors.items;
@@ -1580,8 +1536,7 @@ pub const Runtime = struct {
                 var delta = total;
                 delta.sub(last);
                 last = total;
-                log.info("scheduler: parks doze={d} full={d} elections={d} steals={d}/{d} hint_hits={d} drains={d} woken={d} batch_claims={d}", .{
-                    delta.parks_doze,
+                log.info("scheduler: parks={d} elections={d} steals={d}/{d} hint_hits={d} drains={d} woken={d} batch_claims={d}", .{
                     delta.parks_full,
                     delta.park_elections,
                     delta.steal_hits,
@@ -1957,7 +1912,7 @@ test "Runtime: scheduler metrics count parks and drained wakes" {
     const m = runtime.schedulerMetrics();
     try std.testing.expect(m.drain_woken >= 1);
     try std.testing.expect(m.drain_batches >= 1);
-    try std.testing.expect(m.parks_doze + m.parks_full >= 1);
+    try std.testing.expect(m.parks_full >= 1);
 }
 
 test "Runtime: metrics monitor thread starts and stops" {

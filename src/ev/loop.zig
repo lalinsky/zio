@@ -1384,7 +1384,7 @@ pub const Loop = struct {
     /// completions, run callbacks. `wait_cap` bounds how long the backend poll
     /// may block: `.zero` never blocks (and skips the poll syscall entirely
     /// when nothing is in flight), `.max` waits for the next event, anything
-    /// in between caps the wait at that duration (the executor's idle doze).
+    /// in between caps the wait at that duration.
     /// Timer deadlines, pending completions, and the loop's `max_wait` option
     /// can all shorten the wait; they never lengthen it.
     pub fn poll(self: *Loop, wait_cap: Duration) !void {
