@@ -2,12 +2,6 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
-
-- Removed the 100us steal-free "doze" from the executor idle path: an idle executor now
-  probes its own loop once and then parks, instead of first sleeping on a timer that on a
-  server that is not busy woke it to nothing on every request (#739).
-
 ## [0.18.0] - 2026-09-20
 
 - `CompletionQueue` is now usable as a long-lived, thread-safe dispatcher. `submit` may
