@@ -28,6 +28,7 @@ const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const getCurrentTaskOrNull = @import("../runtime.zig").getCurrentTaskOrNull;
+const maybeYield = @import("../runtime.zig").maybeYield;
 const Group = @import("../group.zig").Group;
 const Cancelable = @import("../common.zig").Cancelable;
 const WaitNode = @import("../utils/wait_queue.zig").WaitNode;
@@ -298,13 +299,17 @@ test "Mutex cancellation while parked under churn" {
                 try mtx.lock();
                 n.* += 1;
                 mtx.unlock();
+                try maybeYield();
             }
         }
         fn victim(mtx: *Mutex) !void {
             // Parks over and over so cancellation keeps racing unlock's pop.
+            // Yields cooperatively: see the generations test below for why a
+            // lock/unlock loop without a yield point keeps the lock.
             while (true) {
                 try mtx.lock();
                 mtx.unlock();
+                try maybeYield();
             }
         }
     };
@@ -332,18 +337,19 @@ test "Mutex cancellation while parked under churn" {
 test "Mutex repeated cancellation generations under churn" {
     if (@import("builtin").single_threaded) return error.SkipZigTest;
 
-    // Regression stress for lost wakeups on weakly ordered CPUs (both found
-    // via this test hanging or stalling on Apple Silicon in release mode):
+    // Regression stress for lost wakeups on weakly ordered CPUs (found via
+    // this test hanging or stalling on Apple Silicon in release mode):
+    // yield's cancel-error path used to clear the awaken bit with a blind
+    // store, erasing a wake token set by unlock's pop+signal; the no_cancel
+    // wait in lockSlow's cancel path then read a stale signal count and
+    // parked forever with no wake left in flight.
     //
-    // 1. yield's cancel-error path used to clear the awaken bit with a blind
-    //    store, erasing a wake token set by unlock's pop+signal; the
-    //    no_cancel wait in lockSlow's cancel path then read a stale signal
-    //    count and parked forever with no wake left in flight.
-    // 2. the scheduler's idle/searcher announce handshake used
-    //    weaker-than-seq_cst orderings, so a pusher could drop its announce
-    //    while the idle executor's final work check predated the push,
-    //    stranding a runnable task until an unrelated poll timeout (~60s
-    //    stalls under this churn pattern).
+    // Churners and victims yield cooperatively. Mutex is barging, so a task
+    // that loops on lock/unlock without ever reaching a yield point re-wins
+    // the lock before the waiter its unlock readied, onto its own ring, gets
+    // to run: it keeps its executor and that waiter to itself. The scheduler
+    // only invites help at a tick end, and a tick never ends inside such a
+    // loop. That is the runtime's contract, not a bug.
     //
     // Every canceled victim is one roll of the dice, so cancel victims in
     // many short generations instead of once. On a buggy runtime a victim
@@ -395,12 +401,14 @@ test "Mutex repeated cancellation generations under churn" {
             while (!stop_flag.load(.monotonic)) {
                 try mtx.lock();
                 mtx.unlock();
+                try maybeYield();
             }
         }
         fn victim(mtx: *Mutex) !void {
             while (true) {
                 try mtx.lock();
                 mtx.unlock();
+                try maybeYield();
             }
         }
     };

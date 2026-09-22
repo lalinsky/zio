@@ -10,11 +10,10 @@
 //! FIFO order avoids the LIFO "a yielder jumps ahead of ready tasks" unfairness a
 //! stack has.
 //!
-//! When the ring is full, half of it plus the new task spill to an `OverflowQueue`
-//! (Go's `runqputslow` → global queue). Which overflow queue is chosen by the
-//! `enable_task_migration` flag, via the `overflow` pointer set at init:
-//!   * migration on  -> the shared runtime global queue (load-balanced across all).
-//!   * migration off -> this executor's own queue (tasks never leave home).
+//! When the ring is full, half of it plus the new task spill to the owning
+//! executor's `OverflowQueue` (Go's `runqputslow`, but per executor rather than
+//! global). Cross-thread pushes land there too. The owner refills its ring from
+//! it; with task migration on, an invited helper may take from it as well.
 //!
 //! Concurrency (stealable queues): `head` is CAS'd by the owner pop and (phase 2)
 //! stealers; `tail` is written only by the owning thread (store-release) and read
@@ -252,6 +251,12 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
         /// and the tail is published once, so this costs strictly less than a pop
         /// followed by a push.
         pub fn refill(self: *Self, max: usize, comptime lock_mode: LockMode) usize {
+            return self.refillFrom(self.overflow, max, lock_mode);
+        }
+
+        /// `refill` from an arbitrary overflow queue: a thief taking another
+        /// executor's backlog straight into its own ring.
+        pub fn refillFrom(self: *Self, src: *OverflowQueue(T), max: usize, comptime lock_mode: LockMode) usize {
             const t = self.ownTail();
             const h = self.loadHead();
             const space: usize = capacity - (t -% h);
@@ -261,7 +266,7 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
             const want = @min(contiguous, @min(space, @min(max, max_batch)));
             if (want == 0) return 0;
 
-            const got = self.overflow.popBatch(self.buffer[start .. start + want], lock_mode);
+            const got = src.popBatch(self.buffer[start .. start + want], lock_mode);
             if (got > 0) self.storeTail(t +% @as(u32, @intCast(got)));
             return got;
         }

@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Work stealing is now an exceptional operation: an executor no longer announces every
+  task it readies, and instead invites idle executors only when it ends a tick with more
+  queued work than it can run, or when its park cap (`RuntimeOptions.idle_park_interval`,
+  default 10ms) expires and it looks around on its own.
+
+- The shared global run queue is gone: spawns and cross-thread wakes go to the home
+  executor's own overflow queue, which is also the first place an invited helper takes
+  from, so a spawned task starts on its round-robin home instead of wherever the shared
+  queue happened to be drained.
+
+- `Mutex` fairness under a holder that never yields was provided by work stealing and no
+  longer is: a task looping on lock/unlock without reaching a yield point keeps the lock
+  from the waiters it readied onto its own executor until it yields.
+
 - Removed the 100us steal-free "doze" from the executor idle path: an idle executor now
   probes its own loop once and then parks, instead of first sleeping on a timer that on a
   server that is not busy woke it to nothing on every request (#739).

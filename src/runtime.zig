@@ -141,6 +141,18 @@ pub const RuntimeOptions = struct {
     /// otherwise.
     metrics_log_interval: Duration = .zero,
 
+    /// How long an idle executor parks before waking on its own to look for
+    /// work on the other executors' queues. Backlog normally reaches an idle
+    /// executor by invitation, at the end of a tick that left work behind;
+    /// the timed wake is the backstop for backlog whose owner never gets to
+    /// a tick end. It starts at `idle_park_interval` and doubles after every
+    /// wake that found nothing anywhere, up to `idle_park_interval_max`, so a
+    /// busy machine keeps its idle executors close while a quiet one costs
+    /// about one wake per executor per `idle_park_interval_max`. A wake that
+    /// found work, or an invitation, resets it.
+    idle_park_interval: Duration = .fromMilliseconds(10),
+    idle_park_interval_max: Duration = .fromSeconds(1),
+
     /// Total number of executors to run.
     /// When enable_main_executor is true (default), this includes the main executor on the calling thread.
     /// When enable_main_executor is false, all executors run as background worker threads.
@@ -361,8 +373,12 @@ pub const metrics_enabled = zio_options.scheduler_metrics;
 pub const SchedulerMetrics = struct {
     /// Indefinite parks.
     parks_full: u64 = 0,
-    /// Park exits where a pusher had claimed this executor's idle bit.
+    /// Park exits where an inviter had claimed this executor's idle bit.
     park_elections: u64 = 0,
+    /// Sleepers invited by tick ends that left backlog behind.
+    tick_invites: u64 = 0,
+    /// Steals served from a victim's overflow queue rather than its ring.
+    overflow_steals: u64 = 0,
     /// stealWork scans that ran / that took work.
     steal_attempts: u64 = 0,
     steal_hits: u64 = 0,
@@ -408,16 +424,14 @@ pub const Executor = struct {
     steal_prng: std.Random.DefaultPrng,
 
     // Per-executor local run queue: bounded FIFO ring buffer (Go runq / Tokio
-    // style). Overflow and cross-thread wakes go to `run_queue.overflow`, which
-    // is wired at init to either the runtime global queue (migration on) or this
-    // executor's own `overflow` queue below (migration off).
+    // style). Ring overflow and cross-thread pushes go to `run_queue.overflow`,
+    // this executor's own `overflow` queue below.
     run_queue: LocalRunQueue(WaitNode, zio_options.task_migration) = .{},
 
-    // This executor's own overflow queue, used ONLY when task migration is
-    // disabled — cross-thread wakes and ring overflow for this executor land here
-    // and are drained only by this executor, so tasks never leave their home.
-    // When migration is enabled, the runtime global queue is used instead and
-    // this stays empty.
+    // This executor's overflow queue: cross-thread wakes, spawns homed here,
+    // and ring overflow. Drained into the ring by this executor. With task
+    // migration on it is also the first place an invited helper takes from,
+    // since everything in it is work this executor has not got to.
     overflow: OverflowQueue(WaitNode) = .{},
 
     // Scheduling quanta (task runs, yield fast-paths, maybeYield checks) spent
@@ -448,14 +462,16 @@ pub const Executor = struct {
     // Scheduler event counters; written only by this executor's thread.
     metrics: MetricsStorage = metrics_storage_init,
 
-    // True while drainDispatched signals a batch of task wakes:
-    // scheduleTaskLocal skips the per-push announce, the drain announces
-    // once at the end.
-    draining_wakes: bool = false,
+    // Current cap on an idle park (see RuntimeOptions.idle_park_interval).
+    park_wait: Duration = .zero,
 
-    // Where the pusher that elected this executor as searcher has surplus
-    // work; armSearcher writes it just before the wake, stealWork consumes
-    // it as the scan's starting victim. `no_steal_hint` means none.
+    // Whether a task-context push already invited helpers this tick, so a
+    // burst of pushes past the budget costs one invite, not one per push.
+    invited_this_tick: bool = false,
+
+    // Where the executor that invited this one has backlog; claimAndWake
+    // writes it just before the wake, stealWork consumes it as the scan's
+    // starting victim. `no_steal_hint` means none.
     steal_hint: std.atomic.Value(u32) = .init(no_steal_hint),
 
     // Deferred cleanup for the task that just yielded away from this executor.
@@ -519,15 +535,9 @@ pub const Executor = struct {
             .shutdown = ev.Async.init(),
         };
 
-        // Wire the run queue's overflow target: the shared global queue when task
-        // migration is on (load-balanced across executors), or this executor's own
-        // overflow queue when off (tasks stay on their home executor). Worker
-        // executors live in a pre-sized, non-reallocating list, so &self.overflow
-        // is a stable address.
-        self.run_queue.overflow = if (runtime.options.enable_task_migration)
-            &runtime.global_overflow
-        else
-            &self.overflow;
+        // Worker executors live in a pre-sized, non-reallocating list, so
+        // &self.overflow stays valid for the executor's life.
+        self.run_queue.overflow = &self.overflow;
 
         // Initialize main_task - this serves as both the scheduler context and
         // the task context for async operations called from main.
@@ -560,6 +570,7 @@ pub const Executor = struct {
             .loop_group = &self.runtime.loop_group,
         });
         errdefer self.loop.deinit();
+        self.park_wait = runtime.options.idle_park_interval;
 
         // Register shutdown handle to keep loop active and enable cross-thread shutdown
         self.shutdown.c.callback = shutdownCallback;
@@ -739,6 +750,17 @@ pub const Executor = struct {
 
             const has_work = self.checkLocalWork(check_ready);
             if (has_work) {
+                // Backlog: work in the overflow queue, or a ring the budget
+                // ran out on, is more than this executor runs before its
+                // next poll. This is the one place local work invites help,
+                // and it repeats every tick the backlog persists, which is
+                // what makes a missed or wasted invite harmless. Issued
+                // before the poll so the helpers' wakes overlap the syscall.
+                if (self.runtime.stealingActive()) {
+                    var backlog: usize = self.run_queue.overflow.len();
+                    if (!self.tickBudgetLeft()) backlog += self.run_queue.len();
+                    if (backlog != 0) self.inviteHelpers(backlog);
+                }
                 try self.loop.poll(.zero);
             } else {
                 try self.parkAndSearch(check_ready);
@@ -764,6 +786,7 @@ pub const Executor = struct {
             self.tick_started_at = tick_now;
             self.tick_task_count = 0;
             self.tick_expired = false;
+            self.invited_this_tick = false;
             self.tick_checkpoint_countdown = checkpoint_interval;
             if (need_fresh_drain) {
                 need_fresh_drain = false;
@@ -777,6 +800,19 @@ pub const Executor = struct {
         }
     }
 
+    /// Invite sleepers for `backlog` queued tasks, hinted at this executor.
+    /// Each helper takes about half of what it finds, so log2 of the backlog
+    /// over one tick's worth covers it; more would only race each other.
+    fn inviteHelpers(self: *Executor, backlog: usize) void {
+        var helpers: usize = 1;
+        var covered: usize = @max(self.tick_task_budget, 1);
+        while (covered < backlog and helpers < self.runtime.executors.items.len) : (covered *= 2) helpers += 1;
+        while (helpers > 0) : (helpers -= 1) {
+            if (!self.runtime.claimAndWake(self.id, self.id)) return;
+            self.bump("tick_invites", 1);
+        }
+    }
+
     /// One idle step per call; the run loop re-checks stopped/main-ready/local
     /// work between calls.
     ///
@@ -784,8 +820,7 @@ pub const Executor = struct {
     /// first: the ops the tasks just submitted go to the kernel here, and
     /// whatever completes inline (the common case right after a drain) puts
     /// this executor straight back on the busy path without touching
-    /// idle_mask or inviting a spurious searcher election. Only a probe that
-    /// yields nothing leads to the park, whose pre-check steals.
+    /// idle_mask. Only a probe that yields nothing leads to the park.
     fn parkAndSearch(self: *Executor, check_ready: bool) !void {
         if (comptime !zio_options.task_migration) {
             self.bump("parks_full", 1);
@@ -804,78 +839,54 @@ pub const Executor = struct {
     }
 
     /// One park episode: publish the idle bit, give the event loop one
-    /// indefinite poll, withdraw the bit. If armSearcher elected this
-    /// executor as the searcher meanwhile, run the searcher-token protocol:
-    /// consume the token by finding work, or release it and steal on the
-    /// pusher's behalf.
+    /// indefinite poll, withdraw the bit. If an inviter claimed the bit
+    /// meanwhile, this executor was elected to help: it takes from the
+    /// inviter's overflow queue or ring.
     ///
-    /// The pre-park work check extends to the other executors' rings. That is
-    /// what makes an indefinite park sound: the bit is published before the
-    /// check while a pusher publishes its task before reading idle_mask (both
-    /// seq_cst), so either the pusher sees the bit and wakes us, or this check
-    /// sees the pushed task — including one sitting in the pusher's own ring.
-    /// Without the steal here, a lost announce would strand a task behind a
-    /// non-yielding task on its owner's executor with no rescue.
+    /// The pre-park check is local only. Nothing in the park protocol has to
+    /// catch a push that raced with it: a push to this executor's own queue
+    /// wakes its loop directly, and backlog on another executor is
+    /// re-invited at every tick end while it lasts, so a missed invite costs
+    /// one tick. Backlog whose owner never reaches a tick end, a task that
+    /// never yields, is found by the periodic sweep an executor makes when
+    /// its park cap expires (idle_park_interval), and no sooner: this is a
+    /// cooperative runtime.
     fn park(self: *Executor, check_ready: bool) !void {
         const my_bit = @as(usize, 1) << self.id;
-        // seq_cst: pairs with armSearcher's idle_mask load (see there). The bit
-        // must be globally visible before the work check below, or a concurrent
-        // pusher can both miss the bit and have its push missed by the check.
-        _ = self.runtime.idle_mask.fetchOr(my_bit, .seq_cst);
-        errdefer {
-            const previous_bit = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel);
-            if (previous_bit & my_bit == 0) {
-                _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
-            }
-        }
+        _ = self.runtime.idle_mask.fetchOr(my_bit, .acq_rel);
+        errdefer _ = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel);
 
-        var found_work = self.checkLocalWork(check_ready);
-        if (!found_work) found_work = self.stealWork();
-        try self.loop.poll(if (found_work) .zero else .max);
+        const found_work = self.checkLocalWork(check_ready);
+        try self.loop.poll(if (found_work) .zero else self.park_wait);
         // Drain before withdrawing the bit, so the post-park work checks
         // below see the woken batch.
         self.drainDispatched();
 
         const previous_bit = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel);
-
-        if (previous_bit & my_bit == 0) {
-            self.bump("park_elections", 1);
-            if (found_work or (check_ready and self.main_task.state.load(.acquire).tag == .ready) or !self.run_queue.isEmpty()) {
-                _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
-                return;
-            }
-
-            const pending = self.run_queue.overflow.len();
-            if (pending != 0) {
-                const batch = if (self.runtime.options.enable_task_migration)
-                    pending / @max(self.runtime.executors.items.len, 1) + 1
-                else
-                    pending;
-                if (self.run_queue.refill(batch, .block) > 0) {
-                    _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
-                    if (!self.run_queue.overflow.isEmpty()) self.runtime.armSearcher(null);
-                    return;
+        if (previous_bit & my_bit != 0) {
+            // Woke on our own: a completion, a push to our queue, or the
+            // park cap. With nothing local, look around once: this is the
+            // periodic sweep that finds backlog nobody invited help for. An
+            // empty sweep backs the cap off, a productive one resets it.
+            if (!found_work and !self.checkLocalWork(check_ready)) {
+                if (self.stealWork()) {
+                    self.park_wait = self.runtime.options.idle_park_interval;
+                } else {
+                    self.park_wait = .fromNanoseconds(@min(self.park_wait.toNanoseconds() * 2, self.runtime.options.idle_park_interval_max.toNanoseconds()));
                 }
             }
-
-            // Release the token before the final recheck. A concurrent
-            // pusher that sees searchers == 0 can arm a fresh search instead of
-            // being blocked behind a token we're about to give up anyway.
-            // seq_cst: pairs with armSearcher's searchers load. The release must
-            // be globally visible before the recheck below, or a pusher can
-            // both read the stale token (skipping its announce) and have its
-            // push missed by this recheck - a dropped wake with no retry.
-            _ = self.runtime.searchers.cmpxchgStrong(1, 0, .seq_cst, .monotonic);
-            if (self.stealWork()) return;
-            // No main-ready here: only queued (stealable) work justifies
-            // arming a fresh searcher.
-            if (self.checkLocalWork(false)) self.runtime.armSearcher(self.id);
+            return;
         }
+
+        self.bump("park_elections", 1);
+        self.park_wait = self.runtime.options.idle_park_interval;
+        if (found_work or self.checkLocalWork(check_ready)) return;
+        _ = self.stealWork();
     }
 
     /// Local work check: the main task (when `check_main_ready`), the ring,
-    /// and a refill from the overflow queue. Deliberately never steals — see
-    /// parkAndSearch for when remote work is taken.
+    /// and a refill from the overflow queue. Deliberately never steals — only
+    /// an invited executor does (see park).
     fn checkLocalWork(self: *Executor, check_main_ready: bool) bool {
         // Task wakes can enter the dispatched queue outside any poll: an
         // operation that completes inline during loop.add finishes on this
@@ -889,33 +900,25 @@ pub const Executor = struct {
             // completion stream) never empties: it exits the run loop's drain on
             // tick budget instead. Its overflow queue would then hold cross-thread
             // wakes indefinitely, with no other rescue — the sole drainer is this
-            // executor, stealing takes from rings rather than from here, and
-            // armSearcher is a no-op while nobody is idle. One task per check
-            // bounds that wait to a tick without displacing local work.
+            // executor and stealing takes from rings rather than from here.
+            // One task per check bounds that wait to a tick without
+            // displacing local work.
             _ = self.run_queue.refill(1, .try_only);
             return true;
         }
-        // Ring empty: pull a fair batch from the overflow queue (global when
-        // migration is on, this executor's own when off) back into it. Overflow
-        // work counts as work, so a local ring spill (which doesn't wake the
-        // loop) can't put this executor to sleep.
+        // Ring empty: pull the overflow queue back into it, as much as fits.
+        // Overflow work counts as work, so a local ring spill (which doesn't
+        // wake the loop) can't put this executor to sleep.
         const pending = self.run_queue.overflow.len();
         if (pending == 0) return false;
-        // With migration on the overflow is the shared global queue, so take
-        // only a fair ~1/n_exec slice to avoid monopolizing it. With migration
-        // off it is this executor's own private queue and we are its sole
-        // drainer, so take as much as fits (refill caps it).
-        const batch = if (self.runtime.options.enable_task_migration)
-            pending / @max(self.runtime.executors.items.len, 1) + 1
-        else
-            pending;
-        return self.run_queue.refill(batch, .block) > 0;
+        return self.run_queue.refill(pending, .block) > 0;
     }
 
-    /// Steal half of a random victim's ring into ours. Reached only from
-    /// park() — the pre-park check and the searcher-token path — never while
-    /// this executor still has plausible local work, and only after its own
-    /// loop has been probed (see parkAndSearch), since migrating a task also
+    /// Take work from another executor: half of its overflow queue if it has
+    /// one, else half of its ring. Reached by an invited executor, whose hint
+    /// names the inviter, and by the periodic sweep of an executor whose park
+    /// cap expired; the walk past the hint covers a hint that emptied before
+    /// we arrived. Never a routine operation, since migrating a task also
     /// moves where its next I/O is submitted.
     fn stealWork(self: *Executor) bool {
         if (!self.runtime.stealingActive()) return false;
@@ -940,13 +943,23 @@ pub const Executor = struct {
             const victim_idle = self.runtime.idle_mask.load(.acquire) & victim_bit != 0;
             if (victim_idle) continue;
 
+            // The overflow queue is the victim's backlog and the coldest work
+            // on the machine: take half of it first. try_only: never wait on
+            // the owner's lock, the ring is the fallback.
+            const backlog = victim.run_queue.overflow.len();
+            if (backlog != 0) {
+                if (self.run_queue.refillFrom(victim.run_queue.overflow, backlog - backlog / 2, .try_only) > 0) {
+                    self.bump("steal_hits", 1);
+                    self.bump("overflow_steals", 1);
+                    if (hint_start and i == 0) self.bump("steal_hint_hits", 1);
+                    return true;
+                }
+            }
+
             if (self.run_queue.steal(&victim.run_queue)) |node| {
                 _ = self.run_queue.push(node);
                 self.bump("steal_hits", 1);
                 if (hint_start and i == 0) self.bump("steal_hint_hits", 1);
-                // The rest of the loaded ring is still at the victim; point
-                // the next searcher straight at it.
-                self.runtime.armSearcher(victim.id);
                 return true;
             }
         }
@@ -984,28 +997,32 @@ pub const Executor = struct {
 
         std.debug.assert(getCurrentExecutorOrNull() == self);
 
-        // A first task pushed onto an empty ring from scheduler context (an
-        // I/O completion wake) needs no searcher: this executor is inside its
-        // run loop and pops it right after completion processing — no thief
-        // can beat that, an announcement can only drag the task (and its I/O
-        // home) to another executor for nothing. Wakes from a running task
-        // still announce, since the waker may keep the executor busy.
-        const was_empty = self.run_queue.push(&task.awaitable.wait_node);
-        if (self.draining_wakes) return; // one batched announce after the drain
-        if (!was_empty or self.current_task != null) {
-            self.runtime.armSearcher(self.id);
+        // A pushed task is local until proven otherwise: this executor runs
+        // it in its next drain. Announcing every push would drag the task,
+        // and the I/O it submits next, to another executor for the sake of a
+        // few microseconds. The exception is the push that puts more in the
+        // queues than this tick has budget left to run: that is backlog now,
+        // and the tick end would only discover it later. A running task that
+        // readies a burst pays one invite per tick for it.
+        _ = self.run_queue.push(&task.awaitable.wait_node);
+        if (self.current_task != null and !self.invited_this_tick and self.runtime.stealingActive()) {
+            const budget_left: usize = if (self.tickBudgetLeft()) self.tick_task_budget - self.tick_task_count else 0;
+            const queued: usize = @as(usize, self.run_queue.len()) + self.run_queue.overflow.len();
+            if (queued > budget_left) {
+                self.invited_this_tick = true;
+                self.inviteHelpers(queued - budget_left);
+            }
         }
     }
 
     /// Drain the completions the loop handed out instead of calling (null
-    /// callback, see finishCompletion): signal every waiter with per-push
-    /// announces suppressed, then wake sleepers once for the whole batch.
-    /// Runs after every poll and from checkLocalWork, so no park decision
-    /// can miss a pending wake.
+    /// callback, see finishCompletion): signal every waiter, then invite
+    /// sleepers for the part of the batch this tick cannot run. Runs after
+    /// every poll and from checkLocalWork, so no park decision can miss a
+    /// pending wake.
     fn drainDispatched(self: *Executor) void {
         var first = self.loop.nextDispatched() orelse return;
 
-        self.draining_wakes = true;
         var count: usize = 0;
         while (true) {
             const c = first;
@@ -1021,26 +1038,30 @@ pub const Executor = struct {
             }
             first = self.loop.nextDispatched() orelse break;
         }
-        self.draining_wakes = false;
 
         if (count > 0) {
             self.bump("drain_batches", 1);
             self.bump("drain_woken", count);
-            const claims = self.runtime.batchWakeSleepers(self.run_queue.len(), self.id);
-            self.bump("batch_wake_claims", claims);
+            // What this tick can still run stays here; only the excess is a
+            // burst worth spreading, and each helper takes half of what it
+            // finds, so log2 of the excess covers it.
+            const budget_left: usize = if (self.tickBudgetLeft()) self.tick_task_budget - self.tick_task_count else 0;
+            const queued = self.run_queue.len();
+            if (queued > budget_left) {
+                const claims = self.runtime.batchWakeSleepers(queued - budget_left, self.id);
+                self.bump("batch_wake_claims", claims);
+            }
         }
     }
 
-    /// Schedule a task from another thread (or no executor context) onto its home
-    /// executor, and wake that executor's loop. Goes to the home executor's
-    /// `overflow` queue — the shared global one (migration on, any executor may
-    /// run it) or the home executor's own (migration off, stays home).
+    /// Schedule a task from another thread (or no executor context) onto its
+    /// home executor's overflow queue and wake that executor's loop. The home
+    /// runs it, or, if the home is behind, invites help at its next tick end.
     fn scheduleTaskRemote(self: *Executor, task: *AnyTask) void {
         std.debug.assert(task != &self.main_task);
 
         self.run_queue.overflow.push(&task.awaitable.wait_node);
         self.loop.wake();
-        self.runtime.armSearcher(null);
     }
 
     /// Schedule a task for execution.
@@ -1402,12 +1423,7 @@ pub const Runtime = struct {
 
     executors: std.ArrayList(*Executor) = .empty,
     executors_stealable: std.atomic.Value(bool) = .init(false),
-    // Shared global run queue (used when task migration is on): external
-    // submissions, cross-thread wakes, and per-executor ring overflow land here,
-    // and every executor drains a fair batch from it once per tick.
-    global_overflow: OverflowQueue(WaitNode) = .{},
     idle_mask: IdleMask = idle_mask_init,
-    searchers: std.atomic.Value(u32) = .init(0),
     loop_group: ev.LoopGroup = .{},
     main_executor: Executor,
     next_executor_index: std.atomic.Value(usize) = .init(0),
@@ -1536,12 +1552,14 @@ pub const Runtime = struct {
                 var delta = total;
                 delta.sub(last);
                 last = total;
-                log.info("scheduler: parks={d} elections={d} steals={d}/{d} hint_hits={d} drains={d} woken={d} batch_claims={d}", .{
+                log.info("scheduler: parks={d} elections={d} invites={d} steals={d}/{d} hint_hits={d} overflow_steals={d} drains={d} woken={d} batch_claims={d}", .{
                     delta.parks_full,
                     delta.park_elections,
+                    delta.tick_invites,
                     delta.steal_hits,
                     delta.steal_attempts,
                     delta.steal_hint_hits,
+                    delta.overflow_steals,
                     delta.drain_batches,
                     delta.drain_woken,
                     delta.batch_wake_claims,
@@ -1743,31 +1761,14 @@ pub const Runtime = struct {
         return zio_options.task_migration and self.options.enable_task_migration and self.executors_stealable.load(.acquire);
     }
 
-    fn armSearcher(self: *Runtime, hint: ?ExecutorId) void {
-        if (comptime !zio_options.task_migration) return;
-
-        // The two early-return loads pair with the parker: an executor sets its
-        // idle bit (seq_cst RMW) and only then makes its final work check, while
-        // a pusher publishes the task and only then reads idle_mask/searchers
-        // here. Both sides run store-then-load, so with anything weaker than
-        // seq_cst each can read the other's stale value on a weakly ordered CPU
-        // and the announce is dropped: the task then sits in a queue no awake
-        // executor looks at until some poll timeout (observed as ~60s stalls on
-        // Apple Silicon). seq_cst loads are enough on the pusher side; the
-        // parker's RMWs anchor the total order.
-        if (!self.stealingActive() or (self.idle_mask.load(.seq_cst) == 0) or (self.searchers.load(.seq_cst) != 0)) return;
-        if (self.searchers.cmpxchgStrong(0, 1, .seq_cst, .monotonic)) |_| return;
-
-        if (!self.claimAndWake(hint, null)) {
-            _ = self.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
-        }
-    }
-
-    /// Claim one parked executor from the idle mask (skipping `exclude`),
-    /// deliver the hint, and wake it. The bit-clear is the claim: exactly one
-    /// caller wins a given bit, and only the winner writes the hint. Returns
-    /// false if no executor could be claimed.
+    /// Invite one parked executor: claim its bit from the idle mask (skipping
+    /// `exclude`), deliver the hint, and wake it. The bit-clear is the claim:
+    /// exactly one caller wins a given bit, and only the winner writes the
+    /// hint. Returns false if nobody is parked. Callers that must not miss a
+    /// helper retry, they never spin here: a tick end re-invites while its
+    /// backlog lasts, a global-queue push wakes the home loop regardless.
     fn claimAndWake(self: *Runtime, hint: ?ExecutorId, exclude: ?ExecutorId) bool {
+        if (comptime !zio_options.task_migration) return false;
         var candidates = self.idle_mask.load(.acquire);
         if (exclude) |id| candidates &= ~(@as(usize, 1) << id);
         while (candidates != 0) {
@@ -1787,21 +1788,16 @@ pub const Runtime = struct {
         return false;
     }
 
-    /// Wake several sleepers at once for `ready` freshly woken tasks in the
-    /// calling executor's ring (Go's injectglist). Bypasses the
-    /// single-searcher token: the token throttles speculative announces, and
-    /// a counted batch is not speculative. Each claimed searcher steals half
-    /// of what remains, so log2(ready) searchers cover the batch; more would
-    /// just race.
-    ///
-    /// A claimed searcher's park exit may release a token it never took;
-    /// that lets one extra election through, it never loses a wake.
-    /// Returns the number of sleepers actually woken.
-    fn batchWakeSleepers(self: *Runtime, ready: usize, hint: ExecutorId) u64 {
+    /// Wake several sleepers at once for `excess` freshly woken tasks beyond
+    /// what the calling executor's tick can run (Go's injectglist). Each
+    /// helper steals half of what remains, so log2(excess) helpers cover it;
+    /// more would just race. Returns the number of sleepers actually woken.
+    fn batchWakeSleepers(self: *Runtime, excess: usize, hint: ExecutorId) u64 {
         if (comptime !zio_options.task_migration) return 0;
 
-        if (!self.stealingActive() or ready < 2) return 0;
-        if (self.idle_mask.load(.seq_cst) == 0) return 0;
+        if (!self.stealingActive() or excess < 2) return 0;
+        if (self.idle_mask.load(.acquire) == 0) return 0;
+        const ready = excess;
 
         var wakes: usize = 0;
         var covered: usize = 2; // wakes = ceil(log2(ready))
