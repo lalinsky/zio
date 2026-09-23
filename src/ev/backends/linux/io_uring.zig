@@ -1267,11 +1267,17 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
     };
     const flags: u32 = linux.IORING_ENTER_GETEVENTS | linux.IORING_ENTER_EXT_ARG;
 
+    // Waits for one completion, or the timeout. A zero timeout waits for none:
+    // GETEVENTS still runs the deferred task work that posts completions, but
+    // the kernel then returns instead of arming a timer for a deadline that
+    // has already passed and scheduling out until it fires.
+    const min_complete: u32 = if (effective_timeout.value == 0) 0 else 1;
+
     // Submit and wait using io_uring_enter2 with timeout
     _ = linux_os.io_uring_enter2(
         self.ring.fd,
         to_submit,
-        1, // min_complete = 1 to wait for at least one completion or timeout
+        min_complete,
         flags,
         &arg,
         @sizeOf(linux_os.io_uring_getevents_arg),
