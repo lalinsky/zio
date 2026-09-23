@@ -835,11 +835,34 @@ test "Waiter: cancelable futex park returns Canceled via the bound token" {
 /// region. Inline execution is uncancelable - it never binds a `syscall_cancel`
 /// token, so a cancel cannot interrupt it.
 ///
+/// The work joins the pool's queue like any other job, so it can wait there
+/// behind jobs that are already running. Use `blockInPlaceReserved` when the
+/// calling task holds something other tasks are waiting for.
+///
 /// Usage:
 /// ```zig
 /// const result = zio.blockInPlace(expensiveComputation, .{arg1, arg2});
 /// ```
 pub fn blockInPlace(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) meta.ReturnType(func) {
+    return blockInPlaceImpl(func, args, false);
+}
+
+/// Like `blockInPlace`, but the work is guaranteed a worker: an idle one if
+/// there is one, otherwise a new one, even beyond `max_threads` (see
+/// `Work.reserve_thread`), so it does not wait in the queue behind jobs that
+/// are already running. If the new thread cannot be spawned, the work falls
+/// back to waiting in the queue.
+///
+/// Use it when the calling task holds a resource while it waits, such as a
+/// pooled connection, so that a slow job on the only worker cannot keep the
+/// resource held until it finishes. Every call that finds no idle worker adds
+/// a thread, so it is not meant for fanning out many jobs at once. The extra
+/// workers exit after the pool's idle timeout like any other.
+pub fn blockInPlaceReserved(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) meta.ReturnType(func) {
+    return blockInPlaceImpl(func, args, true);
+}
+
+fn blockInPlaceImpl(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func)), reserve_thread: bool) meta.ReturnType(func) {
     const Args = @TypeOf(args);
     const Result = meta.ReturnType(func);
 
@@ -863,6 +886,7 @@ pub fn blockInPlace(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) meta
     var token: os.syscall_cancel.Token = .{};
     var work = ev.Work.init(Context.workFn, &ctx);
     work.cancel_token = &token;
+    work.reserve_thread = reserve_thread;
 
     // Submit to the thread pool and wait through the event loop. The loop owns
     // completion delivery — it finalizes work.c and signals the waiter on the
@@ -903,6 +927,43 @@ test "blockInPlace: basic computation" {
 
     const result = blockInPlace(double, .{21});
     try std.testing.expectEqual(42, result);
+}
+
+test "blockInPlaceReserved: runs while another job holds the only worker" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    // The first job occupies the pool's only worker until the gate opens, and
+    // only the reserved job opens it. With default options one busy worker and
+    // one queued job do not spawn a second worker, so a plain blockInPlace
+    // would wait in the queue behind the first job forever.
+    const Jobs = struct {
+        fn hold(started: *std.atomic.Value(bool), gate: *os.ResetEvent) void {
+            started.store(true, .release);
+            gate.wait();
+        }
+
+        fn release(gate: *os.ResetEvent) void {
+            gate.set();
+        }
+
+        fn holder(started: *std.atomic.Value(bool), gate: *os.ResetEvent) void {
+            blockInPlace(hold, .{ started, gate });
+        }
+    };
+
+    var started = std.atomic.Value(bool).init(false);
+    var gate = os.ResetEvent.init();
+    defer gate.deinit();
+
+    var handle = try rt.spawn(Jobs.holder, .{ &started, &gate });
+
+    while (!started.load(.acquire)) try rt.sleep(.fromMicroseconds(100));
+    blockInPlaceReserved(Jobs.release, .{&gate});
+
+    handle.join();
 }
 
 test "blockInPlace: cancellation interrupts a blocking syscall on the worker" {

@@ -8,6 +8,9 @@ All notable changes to this project will be documented in this file.
   schedules out when nothing has completed yet, which cut server CPU per short-lived
   connection by about 14%.
 
+- Added `blockInPlaceReserved`, a `blockInPlace` whose work is guaranteed a worker instead
+  of waiting in the queue behind jobs that are already running (#745).
+
 ## [0.18.0] - 2026-09-20
 
 - `CompletionQueue` is now usable as a long-lived, thread-safe dispatcher. `submit` may
