@@ -849,9 +849,11 @@ pub fn blockInPlace(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) meta
 
 /// Like `blockInPlace`, but the work is guaranteed a worker: an idle one if
 /// there is one, otherwise a new one, even beyond `max_threads` (see
-/// `Work.reserve_thread`), so it does not wait in the queue behind jobs that
-/// are already running. If the new thread cannot be spawned, the work falls
-/// back to waiting in the queue.
+/// `Work.reserve_thread`), so it does not wait in the queue behind other
+/// jobs. If the new thread cannot be spawned, the work waits for the next free
+/// worker. A pool with `max_threads` of zero, or a single-threaded build, has
+/// no workers, and the work runs inline on the calling thread as it does for
+/// `blockInPlace`.
 ///
 /// Use it when the calling task holds a resource while it waits, such as a
 /// pooled connection, so that a slow job on the only worker cannot keep the
