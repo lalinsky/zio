@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- **Breaking:** compile-time options now come from a `pub const zio_options: zio.Options`
+  declaration in the root module instead of `b.dependency` build options, and
+  `.scheduling` (`.single_executor`, `.pinned` or `.work_stealing`) replaces the
+  `task-migration` build option and `RuntimeOptions.enable_task_migration`. The default is
+  `.single_executor`, where the runtime always uses one executor, so multi-threaded
+  programs need to opt in with `.scheduling = .work_stealing`.
+
 - A non-blocking poll on the io_uring backend no longer arms a kernel timer and
   schedules out when nothing has completed yet, which cut server CPU per short-lived
   connection by about 14%.

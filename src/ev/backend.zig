@@ -1,41 +1,14 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const options = @import("zio_options");
+const zio_options = @import("../options.zig").options;
 
-pub const BackendType = enum {
-    poll,
-    linux,
-    epoll,
-    kqueue,
-    io_uring,
-    iocp,
-};
+pub const BackendType = @import("../options.zig").BackendType;
 
-pub const backend = blk: {
-    if (options.backend) |backend_name| {
-        if (std.mem.eql(u8, backend_name, "linux")) {
-            break :blk BackendType.linux;
-        } else if (std.mem.eql(u8, backend_name, "epoll")) {
-            break :blk BackendType.epoll;
-        } else if (std.mem.eql(u8, backend_name, "poll")) {
-            break :blk BackendType.poll;
-        } else if (std.mem.eql(u8, backend_name, "kqueue")) {
-            break :blk BackendType.kqueue;
-        } else if (std.mem.eql(u8, backend_name, "io_uring")) {
-            break :blk BackendType.io_uring;
-        } else if (std.mem.eql(u8, backend_name, "iocp")) {
-            break :blk BackendType.iocp;
-        } else {
-            @compileError("Unknown backend: " ++ backend_name);
-        }
-    }
-
-    switch (builtin.os.tag) {
-        .linux => break :blk BackendType.linux,
-        .macos, .ios, .tvos, .visionos, .watchos, .freebsd, .netbsd, .openbsd, .dragonfly => break :blk BackendType.kqueue,
-        .windows => break :blk BackendType.iocp,
-        else => break :blk BackendType.poll,
-    }
+pub const backend: BackendType = zio_options.backend orelse switch (builtin.os.tag) {
+    .linux => .linux,
+    .macos, .ios, .tvos, .visionos, .watchos, .freebsd, .netbsd, .openbsd, .dragonfly => .kqueue,
+    .windows => .iocp,
+    else => .poll,
 };
 
 pub const Backend = switch (backend) {

@@ -7,32 +7,21 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const backend = b.option(
-        []const u8,
-        "backend",
-        "Override the default event loop backend (linux, io_uring, epoll, kqueue, iocp, poll)",
-    );
+    // Defaults for the compile-time options in src/options.zig. A root module's
+    // `zio_options` declaration wins over these.
+    const backend = b.option(BuildOptions.Backend, "backend", "Override the default event loop backend");
+    const scheduling = b.option(BuildOptions.Scheduling, "scheduling", "Scheduling discipline: single_executor, pinned or work_stealing (default single_executor, work_stealing for tests)");
+    const resolve_beneath_mode = b.option(BuildOptions.ResolveBeneathMode, "resolve-beneath-mode", "How to handle resolve_beneath on platforms without kernel support: strict (error.Unsupported) or best_effort (log warning, continue)");
+    const no_hacks = b.option(bool, "no-hacks", "Avoid unsafe performance tricks (bool smuggling, etc.)");
+    const scheduler_metrics = b.option(bool, "scheduler_metrics", "Count scheduler events (parks, steals, wake batches) in per-executor counters readable via Runtime.schedulerMetrics (default true)");
 
-    const ResolveBeneathMode = enum { strict, best_effort };
-    const resolve_beneath_mode = b.option(
-        ResolveBeneathMode,
-        "resolve-beneath-mode",
-        "How to handle resolve_beneath on platforms without kernel support: strict (error.Unsupported) or best_effort (log warning, continue)",
-    ) orelse .strict;
-
-    const no_hacks = b.option(bool, "no-hacks", "Avoid unsafe performance tricks (bool smuggling, etc.)") orelse false;
-
-    const task_migration = b.option(bool, "task-migration", "Compile in task migration / work-stealing support. When false, tasks are pinned to their home executor and the scheduler can drop the machinery it needs (default true)") orelse true;
-
-    const scheduler_metrics = b.option(bool, "scheduler_metrics", "Count scheduler events (parks, steals, wake batches) in per-executor counters readable via Runtime.schedulerMetrics (default true; the counters sit on executor-local paths and cost one plain increment per event)") orelse true;
-
-    // Create options for backend selection
-    var options = b.addOptions();
-    options.addOption(?[]const u8, "backend", backend);
-    options.addOption(ResolveBeneathMode, "resolve_beneath_mode", resolve_beneath_mode);
-    options.addOption(bool, "no_hacks", no_hacks);
-    options.addOption(bool, "task_migration", task_migration);
-    options.addOption(bool, "scheduler_metrics", scheduler_metrics);
+    const build_options: BuildOptions = .{
+        .backend = backend,
+        .scheduling = scheduling orelse .single_executor,
+        .resolve_beneath_mode = resolve_beneath_mode orelse .strict,
+        .no_hacks = no_hacks orelse false,
+        .scheduler_metrics = scheduler_metrics orelse true,
+    };
 
     const zio = b.addModule("zio", .{
         .root_source_file = b.path("src/zio.zig"),
@@ -40,7 +29,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = target.result.os.tag != .freestanding,
     });
-    zio.addOptions("zio_options", options);
+    zio.addOptions("zio_build_options", build_options.create(b));
 
     const zio_lib = b.addLibrary(.{
         .name = "zio",
@@ -120,8 +109,20 @@ pub fn build(b: *std.Build) void {
     const emit_test_bin = b.option(bool, "emit-test-bin", "Build test binary without running") orelse false;
     const test_filter = b.option([]const u8, "test-filter", "Filter for test names");
 
+    // zio's own suite exercises multi-executor scheduling, so it gets its own
+    // copy of the module with work stealing as the default.
+    const zio_test = b.createModule(.{
+        .root_source_file = b.path("src/zio.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = target.result.os.tag != .freestanding,
+    });
+    var test_options = build_options;
+    if (scheduling == null) test_options.scheduling = .work_stealing;
+    zio_test.addOptions("zio_build_options", test_options.create(b));
+
     const lib_unit_tests = b.addTest(.{
-        .root_module = zio,
+        .root_module = zio_test,
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
         .filters = if (test_filter) |f| &.{f} else &.{},
     });
@@ -135,3 +136,27 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_lib_unit_tests.step);
     }
 }
+
+const BuildOptions = struct {
+    const Backend = enum { poll, linux, epoll, kqueue, io_uring, iocp };
+    const Scheduling = enum { single_executor, pinned, work_stealing };
+    const ResolveBeneathMode = enum { strict, best_effort };
+
+    backend: ?Backend,
+    scheduling: Scheduling,
+    resolve_beneath_mode: ResolveBeneathMode,
+    no_hacks: bool,
+    scheduler_metrics: bool,
+
+    // Enums are passed as tag names and mapped back to zio's own types in
+    // src/options.zig.
+    fn create(self: BuildOptions, b: *std.Build) *std.Build.Step.Options {
+        const options = b.addOptions();
+        options.addOption(?[]const u8, "backend", if (self.backend) |v| @tagName(v) else null);
+        options.addOption([]const u8, "scheduling", @tagName(self.scheduling));
+        options.addOption([]const u8, "resolve_beneath_mode", @tagName(self.resolve_beneath_mode));
+        options.addOption(bool, "no_hacks", self.no_hacks);
+        options.addOption(bool, "scheduler_metrics", self.scheduler_metrics);
+        return options;
+    }
+};

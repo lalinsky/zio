@@ -25,6 +25,7 @@
 //! ```
 
 const std = @import("std");
+const zio_options = @import("../options.zig").options;
 const Runtime = @import("../runtime.zig").Runtime;
 const Executor = @import("../runtime.zig").Executor;
 const getCurrentTaskOrNull = @import("../runtime.zig").getCurrentTaskOrNull;
@@ -285,6 +286,10 @@ test "Mutex mixed tasks and threads" {
 }
 
 test "Mutex cancellation while parked under churn" {
+    // Needs real contention: with one executor every lock is uncontended and
+    // never suspends, so the churners and victims spin without yielding back
+    // to the main task.
+    if (!zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
@@ -330,7 +335,8 @@ test "Mutex cancellation while parked under churn" {
 }
 
 test "Mutex repeated cancellation generations under churn" {
-    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    // Needs real contention, see "Mutex cancellation while parked under churn".
+    if (!zio_options.scheduling.multiExecutor()) return error.SkipZigTest;
 
     // Regression stress for lost wakeups on weakly ordered CPUs (both found
     // via this test hanging or stalling on Apple Silicon in release mode):
