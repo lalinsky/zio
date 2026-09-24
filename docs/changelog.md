@@ -11,6 +11,9 @@ All notable changes to this project will be documented in this file.
   `.single_executor`, where the runtime always uses one executor, so multi-threaded
   programs need to opt in with `.scheduling = .work_stealing`.
 
+- With `.pinned` scheduling, cross-executor wakes no longer take a mutex; each executor's
+  overflow queue is now a lock-free stack drained only by its owner.
+
 - A non-blocking poll on the io_uring backend no longer arms a kernel timer and
   schedules out when nothing has completed yet, which cut server CPU per short-lived
   connection by about 14%.

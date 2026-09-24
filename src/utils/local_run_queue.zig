@@ -10,11 +10,12 @@
 //! FIFO order avoids the LIFO "a yielder jumps ahead of ready tasks" unfairness a
 //! stack has.
 //!
-//! When the ring is full, half of it plus the new task spill to an `OverflowQueue`
-//! (Go's `runqputslow` → global queue). Which overflow queue is chosen by the
-//! `zio_options.scheduling`, via the `overflow` pointer set at init:
-//!   * work stealing -> the shared runtime global queue (load-balanced across all).
-//!   * otherwise     -> this executor's own queue (tasks never leave home).
+//! When the ring is full, half of it plus the new task spill to the overflow
+//! queue (Go's `runqputslow` → global queue), which also takes cross-thread wakes:
+//!   * stealable     -> a `GlobalOverflowQueue` shared by the whole runtime and
+//!                      drained by every executor (load-balanced across all).
+//!   * non-stealable -> a `LocalOverflowQueue` embedded in the ring, drained only
+//!                      by its owner (tasks never leave home).
 //!
 //! Concurrency (stealable queues): `head` is CAS'd by the owner pop and (phase 2)
 //! stealers; `tail` is written only by the owning thread (store-release) and read
@@ -33,12 +34,13 @@ const OsMutex = @import("../os/thread.zig").Mutex;
 /// blocking would park a runnable executor in a futex.
 pub const LockMode = enum { block, try_only };
 
-/// Thread-safe FIFO overflow queue: a mutex-guarded intrusive list plus an atomic
-/// length so the drain fast-path can skip the lock when empty. `count` is mutated
-/// only while holding the mutex, so it always equals the queue length whenever the
-/// lock is free; lock-free readers (isEmpty/len) may see a momentarily stale value
-/// but never one that lets a drainer's fetchSub underflow.
-pub fn OverflowQueue(comptime T: type) type {
+/// Thread-safe FIFO overflow queue with any number of producers and consumers: a
+/// mutex-guarded intrusive list plus an atomic length so the drain fast-path can
+/// skip the lock when empty. `count` is mutated only while holding the mutex, so
+/// it always equals the queue length whenever the lock is free; lock-free readers
+/// (isEmpty/len) may see a momentarily stale value but never one that lets a
+/// drainer's fetchSub underflow.
+pub fn GlobalOverflowQueue(comptime T: type) type {
     return struct {
         const Self = @This();
 
@@ -89,12 +91,102 @@ pub fn OverflowQueue(comptime T: type) type {
     };
 }
 
+/// Lock-free FIFO overflow queue with any number of producers and a single
+/// consumer (the owning executor).
+///
+/// Producers push onto a Treiber stack with one CAS per push or batch. The
+/// consumer never pops single nodes off the shared stack: it detaches the whole
+/// stack with one swap, which leaves no ABA window, and reverses it into a
+/// private list it then drains without atomics. The private list is always
+/// older than anything on the stack, so draining it first keeps FIFO order.
+pub fn LocalOverflowQueue(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        // Each on its own cache line: every remote push writes `stack`, and
+        // that must not keep invalidating the owner's line.
+
+        /// Pushed nodes, newest first.
+        stack: std.atomic.Value(?*T) align(std.atomic.cache_line) = .init(null),
+        /// Detached nodes in FIFO order. Owner only.
+        private: ?*T align(std.atomic.cache_line) = null,
+
+        /// Push a single task (cross-thread wake). Thread-safe.
+        pub fn push(self: *Self, node: *T) void {
+            markPushed(node);
+            self.pushChain(node, node);
+        }
+
+        /// Push a batch (ring overflow) with a single CAS. Thread-safe.
+        pub fn pushSlice(self: *Self, nodes: []*T) void {
+            if (nodes.len == 0) return;
+            // Newest first, like individual pushes would leave them.
+            for (nodes, 0..) |node, i| {
+                markPushed(node);
+                if (i > 0) node.next = nodes[i - 1];
+            }
+            self.pushChain(nodes[nodes.len - 1], nodes[0]);
+        }
+
+        fn pushChain(self: *Self, first: *T, last: *T) void {
+            var head = self.stack.load(.monotonic);
+            while (true) {
+                last.next = head;
+                // release: publishes the nodes' links to the consumer's swap.
+                head = self.stack.cmpxchgWeak(head, first, .release, .monotonic) orelse return;
+            }
+        }
+
+        /// Pop up to `out.len` tasks into `out`; returns how many were taken.
+        /// Owner only. Never blocks, so `lock_mode` is ignored.
+        pub fn popBatch(self: *Self, out: []*T, comptime lock_mode: LockMode) usize {
+            _ = lock_mode;
+            var i: usize = 0;
+            while (i < out.len) : (i += 1) {
+                const node = self.private orelse self.detach() orelse break;
+                self.private = node.next;
+                node.next = null;
+                if (std.debug.runtime_safety) node.in_list = false;
+                out[i] = node;
+            }
+            return i;
+        }
+
+        /// Move the shared stack into the private list, oldest first.
+        fn detach(self: *Self) ?*T {
+            // Cheap load first: most drains find the stack empty.
+            if (self.stack.load(.monotonic) == null) return null;
+            var node = self.stack.swap(null, .acquire);
+            var reversed: ?*T = null;
+            while (node) |n| {
+                node = n.next;
+                n.next = reversed;
+                reversed = n;
+            }
+            return reversed;
+        }
+
+        /// Owner only.
+        pub fn isEmpty(self: *const Self) bool {
+            return self.private == null and self.stack.load(.monotonic) == null;
+        }
+
+        fn markPushed(node: *T) void {
+            if (std.debug.runtime_safety) {
+                std.debug.assert(!node.in_list);
+                node.in_list = true;
+            }
+        }
+    };
+}
+
 /// `stealable` selects the concurrency model:
 ///   * true  -> another thread (a phase-2 thief) may race the owner on the ring,
 ///              so the cursors are touched through atomic builtins.
-///   * false -> the ring is owned by a single thread (task migration compiled
-///              out), so the cursors are plain scalars and no atomics are emitted;
-///              `steal` becomes a compile error since it can never be called.
+///   * false -> the ring is owned by a single thread (no work stealing), so the
+///              cursors are plain scalars and no atomics are emitted, the overflow
+///              queue is the lock-free single-consumer one, and `steal` becomes a
+///              compile error since it can never be called.
 pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
     return struct {
         const Self = @This();
@@ -110,8 +202,9 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
         // a single-owner queue pays no atomic cost.
         head: u32 = 0,
         tail: u32 = 0,
-        /// Set once, at executor init, to the global or the executor-local queue.
-        overflow: *OverflowQueue(T) = undefined,
+        /// Stealable: set once, at executor init, to the runtime's shared queue.
+        /// Non-stealable: this ring's own queue.
+        overflow: if (stealable) *GlobalOverflowQueue(T) else LocalOverflowQueue(T) = if (stealable) undefined else .{},
 
         // --- cursor accessors --------------------------------------------------
         // Cross-thread reads acquire; the owner publishes `tail` with a release
@@ -146,7 +239,8 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
                 @cmpxchgStrong(u32, &self.head, expected, new, .acq_rel, .acquire) == null;
         }
 
-        pub fn init(overflow: *OverflowQueue(T)) Self {
+        pub fn init(overflow: *GlobalOverflowQueue(T)) Self {
+            if (!stealable) @compileError("init() wires a shared overflow queue; a non-stealable queue owns its own");
             return .{ .overflow = overflow };
         }
 
@@ -295,7 +389,8 @@ const TestNode = struct {
 
 const TestQueue = LocalRunQueue(TestNode, true);
 const TestLocalQueue = LocalRunQueue(TestNode, false);
-const TestOverflow = OverflowQueue(TestNode);
+const TestOverflow = GlobalOverflowQueue(TestNode);
+const TestLocalOverflow = LocalOverflowQueue(TestNode);
 
 test "LocalRunQueue: FIFO push and pop within capacity" {
     var ov: TestOverflow = .{};
@@ -401,8 +496,8 @@ test "LocalRunQueue: non-stealable variant pushes, pops, and overflows" {
     // The single-owner build uses plain cursors (no atomics) and has no steal.
     const cap = TestLocalQueue.capacity;
     const total = cap + cap / 2; // force a spill
-    var ov: TestOverflow = .{};
-    var q = TestLocalQueue.init(&ov);
+    var q: TestLocalQueue = .{};
+    const ov = &q.overflow;
 
     const nodes = try testing.allocator.alloc(TestNode, total);
     defer testing.allocator.free(nodes);
@@ -426,7 +521,7 @@ test "LocalRunQueue: non-stealable variant pushes, pops, and overflows" {
 
 test "LocalRunQueue: refill writes directly on both sides of ring wrap" {
     var ov: TestOverflow = .{};
-    var q = TestLocalQueue.init(&ov);
+    var q = TestQueue.init(&ov);
     var nodes: [270]TestNode = undefined;
 
     // Advance both cursors near the physical end while leaving the ring empty.
@@ -675,7 +770,7 @@ test "LocalRunQueue: multiple concurrent stealers lose or duplicate no task" {
     }
 }
 
-test "OverflowQueue: push and popBatch are FIFO" {
+test "GlobalOverflowQueue: push and popBatch are FIFO" {
     var ov: TestOverflow = .{};
     var nodes: [5]TestNode = undefined;
     for (&nodes, 0..) |*n, i| {
@@ -694,4 +789,123 @@ test "OverflowQueue: push and popBatch are FIFO" {
     try testing.expectEqual(2, ov.popBatch(&buf2, .block));
     try testing.expect(ov.isEmpty());
     try testing.expectEqual(0, ov.popBatch(&buf2, .block));
+}
+
+test "LocalOverflowQueue: pushes and batches drain in FIFO order" {
+    var ov: TestLocalOverflow = .{};
+    var nodes: [10]TestNode = undefined;
+    for (&nodes, 0..) |*n, i| n.* = .{ .id = i };
+    try testing.expect(ov.isEmpty());
+
+    ov.push(&nodes[0]);
+    var batch = [_]*TestNode{ &nodes[1], &nodes[2], &nodes[3] };
+    ov.pushSlice(&batch);
+    ov.push(&nodes[4]);
+
+    // A partial drain detaches everything pushed so far into the private list.
+    var buf: [2]*TestNode = undefined;
+    try testing.expectEqual(2, ov.popBatch(&buf, .block));
+    try testing.expectEqual(0, buf[0].id);
+    try testing.expectEqual(1, buf[1].id);
+
+    // Later pushes queue behind the detached remainder.
+    for (nodes[5..]) |*n| ov.push(n);
+
+    var rest: [16]*TestNode = undefined;
+    try testing.expectEqual(8, ov.popBatch(&rest, .block));
+    for (rest[0..8], 2..) |n, id| try testing.expectEqual(id, n.id);
+    try testing.expect(ov.isEmpty());
+    try testing.expectEqual(0, ov.popBatch(&rest, .block));
+}
+
+test "LocalRunQueue: non-stealable spill and refill keep FIFO order" {
+    const cap = TestLocalQueue.capacity;
+    const total = cap + cap / 2;
+    var q: TestLocalQueue = .{};
+
+    const nodes = try testing.allocator.alloc(TestNode, total);
+    defer testing.allocator.free(nodes);
+    for (nodes, 0..) |*n, i| {
+        n.* = .{ .id = i };
+        _ = q.push(n);
+    }
+
+    var order: std.ArrayList(usize) = .empty;
+    defer order.deinit(testing.allocator);
+    while (true) {
+        while (q.pop()) |n| try order.append(testing.allocator, n.id);
+        if (q.refill(std.math.maxInt(usize), .block) == 0) break;
+    }
+
+    // The first push past capacity spilled the ring's oldest half plus itself,
+    // so the ring (the newer tasks) drains first, then the spilled ones. Each
+    // part keeps its order.
+    try testing.expectEqual(total, order.items.len);
+    try testing.expect(q.overflow.isEmpty());
+    const spilled = cap / 2 + 1;
+    const from_ring = order.items[0 .. total - spilled];
+    const from_overflow = order.items[total - spilled ..];
+    for (from_ring[1..], from_ring[0 .. from_ring.len - 1]) |id, prev| try testing.expect(id > prev);
+    for (from_overflow[1..], from_overflow[0 .. from_overflow.len - 1]) |id, prev| try testing.expect(id > prev);
+    try testing.expectEqual(0, from_overflow[0]);
+    try testing.expectEqual(cap, from_overflow[from_overflow.len - 1]);
+}
+
+test "LocalOverflowQueue: concurrent producers lose, duplicate or reorder no task" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const n_producers = 4;
+    const per_producer = 20_000;
+    const N = n_producers * per_producer;
+    const nodes = try testing.allocator.alloc(TestNode, N);
+    defer testing.allocator.free(nodes);
+    for (nodes, 0..) |*n, i| n.* = .{ .id = i };
+
+    var ov: TestLocalOverflow = .{};
+
+    const Producer = struct {
+        fn run(q: *TestLocalOverflow, mine: []TestNode) void {
+            var i: usize = 0;
+            while (i < mine.len) {
+                // Mix single pushes with batches, like wakes and ring spills.
+                if (i % 7 == 0 and i + 5 <= mine.len) {
+                    var batch: [5]*TestNode = undefined;
+                    for (&batch, mine[i .. i + 5]) |*b, *n| b.* = n;
+                    q.pushSlice(&batch);
+                    i += 5;
+                } else {
+                    q.push(&mine[i]);
+                    i += 1;
+                }
+            }
+        }
+    };
+
+    var threads: [n_producers]std.Thread = undefined;
+    for (&threads, 0..) |*th, p| {
+        th.* = try std.Thread.spawn(.{}, Producer.run, .{ &ov, nodes[p * per_producer .. (p + 1) * per_producer] });
+    }
+
+    const seen = try testing.allocator.alloc(bool, N);
+    defer testing.allocator.free(seen);
+    @memset(seen, false);
+    var next_expected: [n_producers]usize = undefined;
+    for (&next_expected, 0..) |*e, p| e.* = p * per_producer;
+
+    var count: usize = 0;
+    var buf: [64]*TestNode = undefined;
+    while (count < N) {
+        const got = ov.popBatch(&buf, .block);
+        for (buf[0..got]) |n| {
+            try testing.expect(!seen[n.id]);
+            seen[n.id] = true;
+            // Each producer's tasks come out in the order it pushed them.
+            const p = n.id / per_producer;
+            try testing.expectEqual(next_expected[p], n.id);
+            next_expected[p] += 1;
+        }
+        count += got;
+    }
+    for (&threads) |*th| th.join();
+    try testing.expect(ov.isEmpty());
 }
