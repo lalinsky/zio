@@ -56,6 +56,24 @@ pub fn Queue(comptime T: type) type {
             }
         }
 
+        /// Enqueue a new element to the front of the queue, so the next `pop`
+        /// returns it.
+        pub fn pushFront(self: *Self, v: *T) void {
+            assert(v.next == null);
+            assert(v.prev == null);
+
+            if (self.head) |head| {
+                // If we have elements in the queue, then we add a new head.
+                head.prev = v;
+                v.next = head;
+                self.head = v;
+            } else {
+                // No elements in the queue we setup the initial state.
+                self.head = v;
+                self.tail = v;
+            }
+        }
+
         /// Dequeue the next element from the queue.
         pub fn pop(self: *Self) ?*T {
             // The next element is in "head".
@@ -183,6 +201,25 @@ test Queue {
     try std.testing.expect(q.pop().? == &elems[0]);
     try std.testing.expect(q.pop().? == &elems[1]);
     try std.testing.expect(q.pop() == null);
+
+    // Push to front
+    q.push(&elems[0]);
+    q.pushFront(&elems[1]);
+    q.push(&elems[2]);
+    q.pushFront(&elems[3]);
+    try std.testing.expect(q.pop().? == &elems[3]);
+    try std.testing.expect(q.pop().? == &elems[1]);
+    try std.testing.expect(q.pop().? == &elems[0]);
+    try std.testing.expect(q.pop().? == &elems[2]);
+    try std.testing.expect(q.pop() == null);
+
+    // Push to front of an empty queue, then remove it
+    q.pushFront(&elems[0]);
+    q.push(&elems[1]);
+    try std.testing.expect(q.remove(&elems[0]));
+    try std.testing.expect(q.pop().? == &elems[1]);
+    try std.testing.expect(q.pop() == null);
+    try std.testing.expect(q.empty());
 
     // Remove single element
     q.push(&elems[0]);

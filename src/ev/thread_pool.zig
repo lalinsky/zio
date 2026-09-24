@@ -203,7 +203,11 @@ pub const ThreadPool = struct {
             self.queue_mutex.unlock();
             return;
         }
-        self.queue.push(&work.c);
+        // Reserved work goes to the front: the worker spawned for it, or the
+        // idle one counted for it, must take this job and not an older regular
+        // one, which may be the very job waiting on it. Reserved jobs are LIFO
+        // among themselves, which only shows once a spawn has failed.
+        if (work.reserve_thread) self.queue.pushFront(&work.c) else self.queue.push(&work.c);
         self.queue_size += 1;
         const queued = self.queue_size;
 

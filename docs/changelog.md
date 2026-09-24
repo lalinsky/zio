@@ -8,6 +8,15 @@ All notable changes to this project will be documented in this file.
   schedules out when nothing has completed yet, which cut server CPU per short-lived
   connection by about 14%.
 
+- Added `blockInPlaceReserved`, a `blockInPlace` whose work is guaranteed a worker instead
+  of waiting in the queue behind jobs that are already running (#745).
+
+- Reserved thread pool work, which backs `std.Io.concurrent` on the blocking Io and
+  `blockInPlaceReserved`, now goes to the front of the queue. The worker spawned for a
+  reservation used to take the head of the queue instead, so a reserved job could wait
+  behind an older job, and deadlock if that job was waiting on it. Reserved jobs are now
+  LIFO among themselves.
+
 - Debug builds no longer print an "unexpected error" stack trace for every coroutine
   stack on Linux kernels built without transparent huge pages.
 

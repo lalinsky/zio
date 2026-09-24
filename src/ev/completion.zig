@@ -645,9 +645,12 @@ pub const Work = struct {
     /// When set, the pool guarantees a worker will pick this job up: at submit it
     /// reuses an idle worker if one is free, and only spawns a new worker (beyond
     /// `max_threads` if needed) when idle workers can't cover every outstanding
-    /// reserved job. Used to honor std.Io's `concurrent` guarantee from a
+    /// reserved job. The job goes to the front of the queue, so the spare worker
+    /// takes it rather than an older regular job; reserved jobs are therefore
+    /// LIFO among themselves. Used to honor std.Io's `concurrent` guarantee from a
     /// saturated pool without deadlocking — a job queued behind blocked workers
-    /// that are themselves waiting on it. See issue #567.
+    /// that are themselves waiting on it. See issue #567. Also backs
+    /// `blockInPlaceReserved` (#745).
     reserve_thread: bool = false,
 
     /// Intrusive link + membership key for the loop's cancel-resend list
