@@ -82,8 +82,9 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
 
     // Advise kernel not to use transparent huge pages (Linux-specific optimization)
     // THP can cause memory bloat for small/sparse stack allocations
+    // Only a hint; kernels without THP reject it with EINVAL.
     if (@hasDecl(posix.MADV, "NOHUGEPAGE")) {
-        posix.madvise(allocation, posix.MADV.NOHUGEPAGE) catch {};
+        _ = posix.sys.madvise(allocation.ptr, allocation.len, posix.MADV.NOHUGEPAGE);
     }
 
     // Guard page stays as PROT_NONE (first page)
@@ -212,7 +213,7 @@ pub fn slabReserve(len: usize) error{OutOfMemory}![]align(page_size) u8 {
 
     // One madvise for the whole slab instead of one per stack.
     if (@hasDecl(posix.MADV, "NOHUGEPAGE")) {
-        posix.madvise(allocation, posix.MADV.NOHUGEPAGE) catch {};
+        _ = posix.sys.madvise(allocation.ptr, allocation.len, posix.MADV.NOHUGEPAGE);
     }
 
     // Commit the header page for the slab bookkeeping.

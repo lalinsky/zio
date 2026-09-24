@@ -8,6 +8,9 @@ All notable changes to this project will be documented in this file.
   schedules out when nothing has completed yet, which cut server CPU per short-lived
   connection by about 14%.
 
+- Debug builds no longer print an "unexpected error" stack trace for every coroutine
+  stack on Linux kernels built without transparent huge pages.
+
 ## [0.18.0] - 2026-09-20
 
 - `CompletionQueue` is now usable as a long-lived, thread-safe dispatcher. `submit` may
