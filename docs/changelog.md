@@ -8,6 +8,9 @@ All notable changes to this project will be documented in this file.
   schedules out when nothing has completed yet, which cut server CPU per short-lived
   connection by about 14%.
 
+- Debug builds no longer print an "unexpected error" stack trace for every coroutine
+  stack on Linux kernels built without transparent huge pages.
+
 - Coroutine stacks now work on aarch64 Linux kernels with 16K or 64K pages (e.g. Asahi,
   Raspberry Pi 5). Every stack allocation used to fail with `OutOfMemory` there.
 
