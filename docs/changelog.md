@@ -8,8 +8,7 @@ All notable changes to this project will be documented in this file.
   declaration in the root module instead of `b.dependency` build options, and
   `.scheduling` (`.single_executor`, `.pinned` or `.work_stealing`) replaces the
   `task-migration` build option and `RuntimeOptions.enable_task_migration`. The default is
-  `.single_executor`, where the runtime always uses one executor, so multi-threaded
-  programs need to opt in with `.scheduling = .work_stealing`.
+  `.work_stealing`, as before.
 
 - With `.pinned` scheduling, cross-executor wakes no longer take a mutex; each executor's
   overflow queue is now a lock-free stack drained only by its owner.

@@ -54,7 +54,7 @@ pub const ResolveBeneathMode = enum {
 };
 
 pub const Options = struct {
-    /// Defaults to `.single_executor`.
+    /// Defaults to `.work_stealing`.
     scheduling: Scheduling = buildEnum(Scheduling, build_options.scheduling),
     /// Event loop backend. Null picks the best one for the target.
     backend: ?BackendType = if (build_options.backend) |name| buildEnum(BackendType, name) else null,
