@@ -2769,18 +2769,22 @@ pub const ReadLinkError = error{
 
 /// Read a symbolic link using readlinkat() syscall
 pub fn dirReadLink(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, buffer: []u8) ReadLinkError!usize {
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
+    defer allocator.free(path_z);
+
+    return dirReadLinkZ(dir, path_z, buffer);
+}
+
+pub fn dirReadLinkZ(dir: fd_t, path: [*:0]const u8, buffer: []u8) ReadLinkError!usize {
     if (builtin.os.tag == .windows) {
         // TODO: Implement Windows readlink via DeviceIoControl with FSCTL_GET_REPARSE_POINT
         return error.Unexpected;
     }
 
-    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
-    defer allocator.free(path_z);
-
     const sc = try syscall_cancel.Syscall.begin();
     defer sc.finish();
     while (true) {
-        const rc = posix.system.readlinkat(dir, path_z.ptr, buffer.ptr, buffer.len);
+        const rc = posix.system.readlinkat(dir, path, buffer.ptr, buffer.len);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
             .INTR => {
@@ -3241,11 +3245,17 @@ pub fn dirRealPathFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
     defer allocator.free(path_z);
 
+    return dirRealPathFileZ(dir, path_z, buffer);
+}
+
+/// POSIX only; Windows paths have to be converted to UTF-16 first, which
+/// `dirRealPathFile` does.
+pub fn dirRealPathFileZ(dir: fd_t, path: [*:0]const u8, buffer: []u8) DirRealPathFileError!usize {
     // On non-Linux with libc, we can use realpath() directly for AT_FDCWD
     if (builtin.os.tag != .linux and builtin.link_libc and dir == posix.AT.FDCWD) {
         if (buffer.len < posix.PATH_MAX) return error.NameTooLong;
         while (true) {
-            if (std.c.realpath(path_z, buffer.ptr)) |_| {
+            if (std.c.realpath(path, buffer.ptr)) |_| {
                 return std.mem.indexOfScalar(u8, buffer, 0) orelse buffer.len;
             }
             const err: posix.system.E = @enumFromInt(std.c._errno().*);
@@ -3259,7 +3269,7 @@ pub fn dirRealPathFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8
     if (@hasField(posix.system.O, "PATH")) open_flags.PATH = true;
 
     const file_fd: fd_t = while (true) {
-        const rc = posix.system.openat(dir, path_z.ptr, open_flags, @as(mode_t, 0));
+        const rc = posix.system.openat(dir, path, open_flags, @as(mode_t, 0));
         switch (posix.errno(rc)) {
             .SUCCESS => break @intCast(rc),
             .INTR => continue,

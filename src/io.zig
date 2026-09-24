@@ -1718,16 +1718,20 @@ fn fileMemoryMapWriteImpl(_: ?*anyopaque, _: *Io.File.MemoryMap) Io.File.WritePo
     @panic("fileMemoryMapWrite: not supported");
 }
 
+/// The allocator for temporary buffers in vtable calls that also have to work
+/// through `debug_io`, which has no runtime behind it.
+fn scratchAllocator(userdata: ?*anyopaque) std.mem.Allocator {
+    const rt: *Runtime = @ptrCast(@alignCast(userdata orelse return std.heap.c_allocator));
+    return rt.allocator;
+}
+
 fn processExecutableOpenImpl(_: ?*anyopaque, _: Io.Dir.OpenFileOptions) std.process.OpenExecutableError!Io.File {
     @panic("processExecutableOpen: not supported");
 }
 
-fn processExecutablePathImpl(userdata: ?*anyopaque, buffer: []u8) std.process.ExecutablePathError!usize {
+fn processExecutablePathImpl(_: ?*anyopaque, buffer: []u8) std.process.ExecutablePathError!usize {
     switch (builtin.os.tag) {
-        .linux, .macos, .ios, .tvos, .watchos, .visionos => {
-            const rt: *Runtime = @ptrCast(@alignCast(userdata));
-            return os_process.getExecutablePath(rt.allocator, buffer);
-        },
+        .linux, .macos, .ios, .tvos, .watchos, .visionos => return os_process.getExecutablePath(buffer),
         // Windows (PEB), the BSDs (sysctl), and the argv0-only systems still go
         // through std until they are implemented natively.
         else => {
@@ -1750,8 +1754,7 @@ fn unlockStderrImpl(_: ?*anyopaque) void {
 }
 
 fn processCurrentPathImpl(userdata: ?*anyopaque, buffer: []u8) std.process.CurrentPathError!usize {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    return os_process.getCurrentPath(rt.allocator, buffer) catch |err| switch (err) {
+    return os_process.getCurrentPath(scratchAllocator(userdata), buffer) catch |err| switch (err) {
         error.NameTooLong => error.NameTooLong,
         error.CurrentDirUnlinked => error.CurrentDirUnlinked,
         error.Canceled => error.Canceled,
@@ -1764,8 +1767,7 @@ fn processCurrentPathImpl(userdata: ?*anyopaque, buffer: []u8) std.process.Curre
 }
 
 fn processSetCurrentDirImpl(userdata: ?*anyopaque, dir: Io.Dir) std.process.SetCurrentDirError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    return os_process.setCurrentDir(rt.allocator, stdIoHandleToZio(dir.handle)) catch |err| switch (err) {
+    return os_process.setCurrentDir(scratchAllocator(userdata), stdIoHandleToZio(dir.handle)) catch |err| switch (err) {
         error.AccessDenied => error.AccessDenied,
         error.NotDir => error.NotDir,
         error.InputOutput => error.FileSystem,
@@ -2917,6 +2919,17 @@ test "io: processExecutablePath returns a non-empty path" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const len = try std.process.executablePath(io, &buf);
     try std.testing.expect(len > 0);
+}
+
+test "io: debug_io answers process paths without a runtime" {
+    // std asks debug_io for the executable path while it symbolizes a panic
+    // trace, which can happen before any runtime exists.
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try std.process.executablePath(debug_io, &buf);
+    try std.testing.expect(len > 0);
+
+    const cwd_len = try std.process.currentPath(debug_io, &buf);
+    try std.testing.expect(cwd_len > 0);
 }
 
 test "io: processCurrentPath agrees with the working directory" {

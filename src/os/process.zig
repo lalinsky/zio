@@ -231,11 +231,14 @@ pub fn errnoToSetCurrentDirError(errno: posix.system.E) SetCurrentDirError {
 /// The zio error sets returned below are deliberately subsets of
 /// `std.process.ExecutablePathError`, so they coerce on return without an
 /// explicit remap.
-pub fn getExecutablePath(allocator: std.mem.Allocator, buffer: []u8) std.process.ExecutablePathError!usize {
+///
+/// Does not allocate, because std calls this through `debug_io` while it
+/// symbolizes a panic trace, where there may be no runtime to allocate from.
+pub fn getExecutablePath(buffer: []u8) std.process.ExecutablePathError!usize {
     switch (builtin.os.tag) {
         .linux => {
             // procfs exposes the executable image as a symlink at /proc/self/exe.
-            return fs.dirReadLink(allocator, fs.cwd(), "/proc/self/exe", buffer);
+            return fs.dirReadLinkZ(fs.cwd(), "/proc/self/exe", buffer);
         },
         .macos, .ios, .tvos, .watchos, .visionos => {
             // _NSGetExecutablePath can hand back a path that is itself a symlink
@@ -243,8 +246,8 @@ pub fn getExecutablePath(allocator: std.mem.Allocator, buffer: []u8) std.process
             var symlink_buf: [posix.PATH_MAX + 1]u8 = undefined;
             var symlink_len: u32 = symlink_buf.len;
             if (std.c._NSGetExecutablePath(&symlink_buf, &symlink_len) != 0) return error.NameTooLong;
-            const symlink_path = std.mem.sliceTo(&symlink_buf, 0);
-            return fs.dirRealPathFile(allocator, fs.cwd(), symlink_path, buffer);
+            const symlink_path: [*:0]const u8 = @ptrCast(&symlink_buf);
+            return fs.dirRealPathFileZ(fs.cwd(), symlink_path, buffer);
         },
         else => return error.OperationUnsupported,
     }
@@ -257,7 +260,7 @@ test "getExecutablePath returns an absolute path to the test binary" {
     }
 
     var buf: [posix.PATH_MAX]u8 = undefined;
-    const len = try getExecutablePath(std.testing.allocator, &buf);
+    const len = try getExecutablePath(&buf);
     try std.testing.expect(len > 0);
     try std.testing.expect(buf[0] == '/');
 }
