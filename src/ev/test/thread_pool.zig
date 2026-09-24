@@ -99,6 +99,66 @@ test "ev.ThreadPool: reserved work runs even when the pool is saturated" {
     blocker.gate.set();
 }
 
+test "ev.ThreadPool: reserved work is taken ahead of older regular work" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var thread_pool: ev.ThreadPool = undefined;
+    try thread_pool.init(std.testing.allocator, .{
+        .min_threads = 0,
+        .max_threads = 1,
+    });
+    defer thread_pool.deinit();
+    defer thread_pool.stop();
+
+    // Both regular jobs wait on the gate: the first occupies the only worker,
+    // the second waits in the queue. Only the reserved job opens the gate.
+    const Waiter = struct {
+        started: ResetEvent,
+        done: ResetEvent,
+        gate: *ResetEvent,
+        pub fn main(work: *ev.Work) void {
+            const self: *@This() = @ptrCast(@alignCast(work.userdata));
+            self.started.set();
+            self.gate.wait();
+            self.done.set();
+        }
+    };
+    const Opener = struct {
+        gate: *ResetEvent,
+        pub fn main(work: *ev.Work) void {
+            const self: *@This() = @ptrCast(@alignCast(work.userdata));
+            self.gate.set();
+        }
+    };
+
+    var gate = ResetEvent.init();
+    defer gate.deinit();
+
+    var first: Waiter = .{ .started = .init(), .done = .init(), .gate = &gate };
+    defer first.started.deinit();
+    defer first.done.deinit();
+    var first_work = ev.Work.init(&Waiter.main, @ptrCast(&first));
+    thread_pool.submit(&first_work);
+    first.started.wait();
+
+    var queued: Waiter = .{ .started = .init(), .done = .init(), .gate = &gate };
+    defer queued.started.deinit();
+    defer queued.done.deinit();
+    var queued_work = ev.Work.init(&Waiter.main, @ptrCast(&queued));
+    thread_pool.submit(&queued_work);
+
+    // The reservation spawns a second worker. If that worker took the queue
+    // head it would run `queued`, which waits on the gate, and nothing would
+    // ever open it.
+    var opener: Opener = .{ .gate = &gate };
+    var opener_work = ev.Work.init(&Opener.main, @ptrCast(&opener));
+    opener_work.reserve_thread = true;
+    thread_pool.submit(&opener_work);
+
+    first.done.wait();
+    queued.done.wait();
+}
+
 test "ev.ThreadPool: reserved work reuses an idle worker instead of spawning" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
