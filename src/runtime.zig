@@ -301,7 +301,7 @@ pub fn JoinHandle(comptime T: type) type {
 const WaitNode = @import("utils/wait_queue.zig").WaitNode;
 const SimpleQueue = @import("utils/simple_queue.zig").SimpleQueue;
 const LocalRunQueue = @import("utils/local_run_queue.zig").LocalRunQueue;
-const OverflowQueue = @import("utils/local_run_queue.zig").OverflowQueue;
+const GlobalOverflowQueue = @import("utils/local_run_queue.zig").GlobalOverflowQueue;
 const OsMutex = @import("os/thread.zig").Mutex;
 
 comptime {
@@ -424,17 +424,10 @@ pub const Executor = struct {
     random_state: random_mod.RandomState,
 
     // Per-executor local run queue: bounded FIFO ring buffer (Go runq / Tokio
-    // style). Overflow and cross-thread wakes go to `run_queue.overflow`, which
-    // is wired at init to either the runtime global queue (migration on) or this
-    // executor's own `overflow` queue below (migration off).
+    // style). Overflow and cross-thread wakes go to `run_queue.overflow`: the
+    // runtime's shared queue when tasks migrate, or the ring's own lock-free
+    // queue, drained only by this executor, when they don't.
     run_queue: LocalRunQueue(WaitNode, migrates) = .{},
-
-    // This executor's own overflow queue, used ONLY when task migration is
-    // disabled — cross-thread wakes and ring overflow for this executor land here
-    // and are drained only by this executor, so tasks never leave their home.
-    // When migration is enabled, the runtime global queue is used instead and
-    // this stays empty.
-    overflow: OverflowQueue(WaitNode) = .{},
 
     // Scheduling quanta (task runs, yield fast-paths, maybeYield checks) spent
     // since the last event loop tick. Once it reaches tick_task_budget the
@@ -531,15 +524,9 @@ pub const Executor = struct {
             .shutdown = ev.Async.init(),
         };
 
-        // Wire the run queue's overflow target: the shared global queue when task
-        // migration is on (load-balanced across executors), or this executor's own
-        // overflow queue when off (tasks stay on their home executor). Worker
-        // executors live in a pre-sized, non-reallocating list, so &self.overflow
-        // is a stable address.
-        self.run_queue.overflow = if (migrates)
-            &runtime.stealing.global_overflow
-        else
-            &self.overflow;
+        // With migration, overflow goes to the shared queue that every executor
+        // drains; otherwise the ring keeps its own.
+        if (migrates) self.run_queue.overflow = &runtime.stealing.global_overflow;
 
         // Initialize main_task - this serves as both the scheduler context and
         // the task context for async operations called from main.
@@ -894,12 +881,8 @@ pub const Executor = struct {
                 return;
             }
 
-            const pending = self.run_queue.overflow.len();
-            if (pending != 0) {
-                const batch = if (migrates)
-                    pending / @max(self.runtime.executors.items.len, 1) + 1
-                else
-                    pending;
+            const batch = self.overflowBatch();
+            if (batch != 0) {
                 if (self.run_queue.refill(batch, .block) > 0) {
                     _ = self.runtime.stealing.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
                     if (!self.run_queue.overflow.isEmpty()) self.runtime.armSearcher(null);
@@ -944,21 +927,25 @@ pub const Executor = struct {
             _ = self.run_queue.refill(1, .try_only);
             return true;
         }
-        // Ring empty: pull a fair batch from the overflow queue (global when
-        // migration is on, this executor's own when off) back into it. Overflow
-        // work counts as work, so a local ring spill (which doesn't wake the
-        // loop) can't put this executor to sleep.
-        const pending = self.run_queue.overflow.len();
-        if (pending == 0) return false;
-        // With migration on the overflow is the shared global queue, so take
-        // only a fair ~1/n_exec slice to avoid monopolizing it. With migration
-        // off it is this executor's own private queue and we are its sole
-        // drainer, so take as much as fits (refill caps it).
-        const batch = if (migrates)
-            pending / @max(self.runtime.executors.items.len, 1) + 1
-        else
-            pending;
+        // Ring empty: pull a batch from the overflow queue back into it.
+        // Overflow work counts as work, so a local ring spill (which doesn't
+        // wake the loop) can't put this executor to sleep.
+        const batch = self.overflowBatch();
+        if (batch == 0) return false;
         return self.run_queue.refill(batch, .block) > 0;
+    }
+
+    /// How many tasks an empty ring should pull from the overflow queue, or 0
+    /// if it is empty. The shared queue is split into fair ~1/n_exec slices so
+    /// no executor monopolizes it; a private one is drained as far as the ring
+    /// fits (refill caps it).
+    fn overflowBatch(self: *Executor) usize {
+        if (migrates) {
+            const pending = self.run_queue.overflow.len();
+            if (pending == 0) return 0;
+            return pending / @max(self.runtime.executors.items.len, 1) + 1;
+        }
+        return if (self.run_queue.overflow.isEmpty()) 0 else std.math.maxInt(usize);
     }
 
     /// Steal half of a random victim's ring into ours. Reached only from
@@ -1082,8 +1069,8 @@ pub const Executor = struct {
 
     /// Schedule a task from another thread (or no executor context) onto its home
     /// executor, and wake that executor's loop. Goes to the home executor's
-    /// `overflow` queue — the shared global one (migration on, any executor may
-    /// run it) or the home executor's own (migration off, stays home).
+    /// overflow queue: the shared one (migration on, any executor may run it) or
+    /// the home executor's own (migration off, stays home).
     fn scheduleTaskRemote(self: *Executor, task: *AnyTask) void {
         std.debug.assert(task != &self.main_task);
 
@@ -1476,7 +1463,7 @@ pub const Runtime = struct {
         /// Shared global run queue: external submissions, cross-thread wakes,
         /// and per-executor ring overflow land here, and every executor drains
         /// a fair batch from it once per tick.
-        global_overflow: OverflowQueue(WaitNode) = .{},
+        global_overflow: GlobalOverflowQueue(WaitNode) = .{},
         /// One bit per parked executor.
         idle_mask: std.atomic.Value(usize) = .init(0),
         /// The single-searcher token, see armSearcher.
