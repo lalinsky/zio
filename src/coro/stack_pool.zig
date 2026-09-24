@@ -116,7 +116,8 @@ pub const StackPool = struct {
     pub fn init(config: Config) StackPool {
         // Same slot layout as stackAllocPosix: usable size rounded to pages,
         // plus the (never committed) guard page, at least two pages total.
-        const aligned_max = std.mem.alignForward(usize, config.maximum_size, stack.page_size);
+        const ps = stack.pageSize();
+        const aligned_max = std.mem.alignForward(usize, config.maximum_size, ps);
         return .{
             .config = config,
             .mutex = .init(),
@@ -125,7 +126,7 @@ pub const StackPool = struct {
             .pool_size = 0,
             .slabs = null,
             .partial = null,
-            .slot_size = @max(aligned_max + stack.page_size, stack.page_size * 2),
+            .slot_size = @max(aligned_max + ps, ps * 2),
             .in_use = 0,
             .epoch_peak = 0,
             .retain_target = 0,
@@ -388,11 +389,12 @@ pub const StackPool = struct {
     /// The new slot is counted as in use on its slab; the caller accounts
     /// the pool-wide acquire.
     fn carveSlotLocked(self: *StackPool) ?StackInfo {
+        const ps = stack.pageSize();
         const slab = blk: {
             if (self.slabs) |s| {
                 if (s.carved < self.config.slab_slots) break :blk s;
             }
-            const len = stack.page_size + self.config.slab_slots * self.slot_size;
+            const len = ps + self.config.slab_slots * self.slot_size;
             const mem = stack.slabReserve(len) catch return null;
             const s: *Slab = @ptrCast(@alignCast(mem.ptr));
             s.* = .{ .next = self.slabs, .memory = mem, .carved = 0, .in_use = 0, .free = null, .partial_prev = null, .partial_next = null };
@@ -400,7 +402,7 @@ pub const StackPool = struct {
             break :blk s;
         };
 
-        const offset = stack.page_size + slab.carved * self.slot_size;
+        const offset = ps + slab.carved * self.slot_size;
         const slot: []align(stack.page_size) u8 = @alignCast(slab.memory[offset .. offset + self.slot_size]);
         var stack_info: StackInfo = undefined;
         stack.stackInitSlot(&stack_info, slot, self.config.committed_size, @intFromPtr(slab)) catch return null;
