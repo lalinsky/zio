@@ -12,6 +12,13 @@ const log = @import("../common.zig").log;
 
 pub const page_size = if (builtin.os.tag == .freestanding) 1 else std.heap.page_size_min;
 
+/// The page size the kernel actually uses, which can be larger than
+/// `page_size` (e.g. 16K or 64K pages on aarch64 Linux).
+pub inline fn pageSize() usize {
+    if (builtin.os.tag == .freestanding) return page_size;
+    return std.heap.pageSize();
+}
+
 // Signal type changed from c_int to enum in Zig 0.16
 const is_pre_016 = builtin.zig_version.major == 0 and builtin.zig_version.minor < 16;
 const SigInt = if (is_pre_016) c_int else posix.SIG;
@@ -45,10 +52,11 @@ pub fn stackAlloc(info: *StackInfo, maximum_size: usize, committed_size: usize) 
 }
 
 fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize) error{OutOfMemory}!void {
+    const ps = pageSize();
     // Round maximum_size up to page boundary, then add guard page
-    const aligned_max = std.mem.alignForward(usize, maximum_size, page_size);
+    const aligned_max = std.mem.alignForward(usize, maximum_size, ps);
     // Ensure we allocate at least 2 pages (guard + usable space)
-    const size = @max(aligned_max + page_size, page_size * 2);
+    const size = @max(aligned_max + ps, ps * 2);
 
     // OpenBSD needs a different allocation strategy entirely (MAP_STACK, fully
     // committed up front, no on-demand growth). See stackAllocOpenBSD.
@@ -91,11 +99,11 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
     // Round committed size up to page boundary; commit at least one page so
     // the owner-tag word below and the pool's FreeNode always have committed
     // memory to live in.
-    const commit_size = @max(std.mem.alignForward(usize, committed_size, page_size), page_size);
+    const commit_size = @max(std.mem.alignForward(usize, committed_size, ps), ps);
 
     // Validate that committed size doesn't exceed available space (minus guard page)
-    if (commit_size > size - page_size) {
-        log.err("Committed size ({d}) exceeds maximum size ({d}) after alignment", .{ commit_size, size - page_size });
+    if (commit_size > size - ps) {
+        log.err("Committed size ({d}) exceeds maximum size ({d}) after alignment", .{ commit_size, size - ps });
         return error.OutOfMemory;
     }
 
@@ -175,8 +183,9 @@ fn stackAllocOpenBSD(info: *StackInfo, size: usize) error{OutOfMemory}!void {
 
     // Turn the lowest page into a PROT_NONE guard page. The rest of the mapping
     // keeps its MAP_STACK flag, so the stack pointer stays valid for syscalls.
+    const ps = pageSize();
     const guard: [*]align(page_size) u8 = allocation.ptr;
-    posix.mprotect(guard[0..page_size], posix.PROT.NONE) catch |err| {
+    posix.mprotect(guard[0..ps], posix.PROT.NONE) catch |err| {
         log.err("Failed to mprotect OpenBSD stack guard page: {}", .{err});
         return error.OutOfMemory;
     };
@@ -187,7 +196,7 @@ fn stackAllocOpenBSD(info: *StackInfo, size: usize) error{OutOfMemory}!void {
     info.* = .{
         .allocation_ptr = allocation.ptr,
         .base = alloc_base + size,
-        .limit = alloc_base + page_size,
+        .limit = alloc_base + ps,
         .allocation_len = allocation.len,
     };
 }
@@ -216,7 +225,8 @@ pub fn slabReserve(len: usize) error{OutOfMemory}![]align(page_size) u8 {
     }
 
     // Commit the header page for the slab bookkeeping.
-    posix.mprotect(allocation.ptr[0..page_size], posix.PROT.READ | posix.PROT.WRITE) catch |err| {
+    const ps = pageSize();
+    posix.mprotect(allocation.ptr[0..ps], posix.PROT.READ | posix.PROT.WRITE) catch |err| {
         log.err("Failed to commit stack slab header page: {}", .{err});
         return error.OutOfMemory;
     };
@@ -235,9 +245,10 @@ pub fn slabFree(mem: []align(page_size) u8) void {
 /// detection, and pooling treat both kinds identically. One mprotect per
 /// cold slot; a recycled slot pays no syscalls at all.
 pub fn stackInitSlot(info: *StackInfo, slot: []align(page_size) u8, committed_size: usize, owner_tag: usize) error{OutOfMemory}!void {
+    const ps = pageSize();
     // Commit at least one page so the pool's FreeNode always fits.
-    const commit_size = @max(std.mem.alignForward(usize, committed_size, page_size), page_size);
-    if (commit_size > slot.len - page_size) {
+    const commit_size = @max(std.mem.alignForward(usize, committed_size, ps), ps);
+    if (commit_size > slot.len - ps) {
         log.err("Committed size ({d}) exceeds slab slot size ({d})", .{ commit_size, slot.len });
         return error.OutOfMemory;
     }
@@ -336,7 +347,8 @@ fn stackExtendPosix(info: *StackInfo, mode: StackExtendMode) error{StackOverflow
     // cannot be grown via mprotect), so there is nothing to extend.
     if (builtin.os.tag == .openbsd) return;
 
-    const guard_end = @intFromPtr(info.allocation_ptr) + page_size;
+    const ps = pageSize();
+    const guard_end = @intFromPtr(info.allocation_ptr) + ps;
 
     // Calculate new limit based on mode
     const new_limit = switch (mode) {
@@ -373,7 +385,7 @@ fn stackExtendPosix(info: *StackInfo, mode: StackExtendMode) error{StackOverflow
     }
 
     // Commit the memory region
-    const commit_start = std.mem.alignBackward(usize, new_limit, page_size);
+    const commit_start = std.mem.alignBackward(usize, new_limit, ps);
     const commit_size = info.limit - commit_start;
     const addr: [*]align(page_size) u8 = @ptrFromInt(commit_start);
     posix.mprotect(addr[0..commit_size], posix.PROT.READ | posix.PROT.WRITE) catch {
@@ -599,7 +611,7 @@ fn stackFaultHandler(sig: SigInt, info: *const posix.siginfo_t, ctx: ?*anyopaque
 
     // Stack layout: [guard_page][uncommitted][committed]
     const stack_base = @intFromPtr(stack_info.allocation_ptr);
-    const guard_page_end = stack_base + page_size;
+    const guard_page_end = stack_base + pageSize();
     const uncommitted_start = guard_page_end;
     const uncommitted_end = stack_info.limit;
 
@@ -631,7 +643,7 @@ fn abortOnStackOverflow(fault_addr: usize, stack_info: *const StackInfo) noretur
     const stack_base = @intFromPtr(stack_info.allocation_ptr);
     const stack_size = stack_info.allocation_len;
     const committed = stack_info.base - stack_info.limit;
-    const is_guard_page_fault = fault_addr >= stack_base and fault_addr < stack_base + page_size;
+    const is_guard_page_fault = fault_addr >= stack_base and fault_addr < stack_base + pageSize();
 
     const msg = std.fmt.bufPrint(
         &buf,

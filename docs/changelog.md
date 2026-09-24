@@ -8,6 +8,9 @@ All notable changes to this project will be documented in this file.
   schedules out when nothing has completed yet, which cut server CPU per short-lived
   connection by about 14%.
 
+- Coroutine stacks now work on aarch64 Linux kernels with 16K or 64K pages (e.g. Asahi,
+  Raspberry Pi 5). Every stack allocation used to fail with `OutOfMemory` there.
+
 ## [0.18.0] - 2026-09-20
 
 - `CompletionQueue` is now usable as a long-lived, thread-safe dispatcher. `submit` may
