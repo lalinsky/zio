@@ -27,6 +27,9 @@ All notable changes to this project will be documented in this file.
   behind an older job, and deadlock if that job was waiting on it. Reserved jobs are now
   LIFO among themselves.
 
+- Fixed `debug_io` crashing on a null runtime when std asked it for the executable path,
+  which made an error returned from `main` hang and a panic lose its stack trace (#744).
+
 - Debug builds no longer print an "unexpected error" stack trace for every coroutine
   stack on Linux kernels built without transparent huge pages.
 
