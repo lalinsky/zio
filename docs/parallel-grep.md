@@ -42,7 +42,13 @@ First, notice how we initialize the runtime:
 var rt = try zio.Runtime.init(gpa, .{ .executors = .auto });
 ```
 
-The `.executors = .auto` option tells ZIO to create one executor (OS thread) per CPU core. This means our tasks can truly run in parallel across multiple cores, not just concurrently on a single core.
+The `.executors = .auto` option tells ZIO to create one executor (OS thread) per CPU core. Running more than one executor has to be enabled at compile time, so the example also declares this in its root module:
+
+```zig
+pub const zio_options: zio.Options = .{ .scheduling = .work_stealing };
+```
+
+Without it, the runtime always uses a single executor. This means our tasks can truly run in parallel across multiple cores, not just concurrently on a single core.
 
 In the previous examples, we didn't specify this option, so the runtime defaulted to a single executor. That was fine for I/O-bound network servers where tasks spend most of their time waiting. But for this CPU-bound workload (searching file contents), using multiple cores gives us real parallelism.
 
@@ -139,7 +145,7 @@ The worker allocates memory for each matching line, sends ownership through the 
 
 ### Multi-threaded Execution
 
-ZIO's runtime can use multiple OS threads (executors) to run tasks in parallel:
+ZIO's runtime can use multiple OS threads (executors) to run tasks in parallel, once `zio_options.scheduling` is set to `.work_stealing` or `.pinned`:
 
 - `.executors = .auto` - auto-detect based on CPU count (good for CPU-bound work)
 - `.executors = .exact(1)` - single-threaded (default, good for I/O-bound work)

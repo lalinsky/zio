@@ -4,6 +4,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const options = @import("options.zig");
+/// Compile-time configuration; declare `pub const zio_options: zio.Options`
+/// in your root module to set it.
+pub const Options = options.Options;
+pub const Scheduling = options.Scheduling;
+
 const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;
 pub const RuntimeOptions = runtime.RuntimeOptions;

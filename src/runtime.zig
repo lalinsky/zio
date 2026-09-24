@@ -5,7 +5,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
-const zio_options = @import("zio_options");
+const zio_options = @import("options.zig").options;
+const multi_executor = zio_options.scheduling.multiExecutor();
+const migrates = zio_options.scheduling.migrates();
 
 const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
@@ -99,7 +101,7 @@ const mod = @This();
 
 /// Number of executor threads to run (including main).
 pub const ExecutorCount = enum(u8) {
-    /// Auto-detect based on CPU count
+    /// Auto-detect based on CPU count.
     auto = 0,
     _,
 
@@ -109,7 +111,9 @@ pub const ExecutorCount = enum(u8) {
         return @enumFromInt(n);
     }
 
+    /// Always 1 under `.single_executor` scheduling.
     pub fn resolve(self: ExecutorCount) u8 {
+        if (!multi_executor) return 1;
         return switch (self) {
             .auto => autoDetect(),
             _ => @intFromEnum(self),
@@ -141,7 +145,8 @@ pub const RuntimeOptions = struct {
     /// otherwise.
     metrics_log_interval: Duration = .zero,
 
-    /// Total number of executors to run.
+    /// Total number of executors to run. Always one unless `zio_options.scheduling`
+    /// is `.pinned` or `.work_stealing`.
     /// When enable_main_executor is true (default), this includes the main executor on the calling thread.
     /// When enable_main_executor is false, all executors run as background worker threads.
     executors: ExecutorCount = .exact(1),
@@ -149,11 +154,6 @@ pub const RuntimeOptions = struct {
     /// Set to false when creating runtimes in background threads that should not block
     /// the creating thread in an event loop. Requires executors >= 1 to have any workers.
     enable_main_executor: bool = true,
-    /// Allow tasks to migrate between executors when true. Requires migration
-    /// support to be compiled in (the `task-migration` build option, default on);
-    /// enabling it in a build compiled without support is an error at init.
-    /// Defaults to whether support is compiled in.
-    enable_task_migration: bool = zio_options.task_migration,
     /// DNS resolver configuration.
     dns: DnsOptions = .{},
 };
@@ -318,14 +318,14 @@ comptime {
 // the per-dispatch re-publish is skipped entirely (it would only rewrite the same
 // value), making parent_context_ptr effectively write-once.
 inline fn storeParentContext(field: **Context, ctx: *Context) void {
-    if (zio_options.task_migration) {
+    if (migrates) {
         @atomicStore(*Context, field, ctx, .release);
     } else {
         field.* = ctx;
     }
 }
 inline fn updateParentContext(task: *AnyTask, ctx: *Context) void {
-    if (zio_options.task_migration) {
+    if (migrates) {
         @atomicStore(*Context, &task.coro.parent_context_ptr, ctx, .release);
     } else {
         // Pinned task: parent_context_ptr is constant, so there is nothing to
@@ -335,7 +335,7 @@ inline fn updateParentContext(task: *AnyTask, ctx: *Context) void {
     }
 }
 inline fn loadParentContext(field: *const *Context) *Context {
-    return if (zio_options.task_migration)
+    return if (migrates)
         @atomicLoad(*Context, field, .acquire)
     else
         field.*;
@@ -345,6 +345,8 @@ pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
     if (rt.shutting_down.load(.acquire)) {
         return error.RuntimeShutdown;
     }
+
+    if (!multi_executor) return rt.executors.items[0];
 
     const index = rt.next_executor_index.fetchAdd(1, .monotonic);
     return rt.executors.items[index % rt.executors.items.len];
@@ -390,8 +392,6 @@ pub const SchedulerMetrics = struct {
 
 const MetricsStorage = if (metrics_enabled) SchedulerMetrics else void;
 const metrics_storage_init: MetricsStorage = if (metrics_enabled) .{} else {};
-const IdleMask = if (zio_options.task_migration) std.atomic.Value(usize) else void;
-const idle_mask_init: IdleMask = if (zio_options.task_migration) .init(0) else {};
 
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
@@ -399,21 +399,35 @@ pub const Executor = struct {
 
     const no_steal_hint = std.math.maxInt(u32);
 
+    /// Per-executor work-stealing state; empty unless tasks migrate.
+    const Stealing = if (migrates) struct {
+        /// Cheap PRNG for steal victim selection; the CSPRNG is for user-facing
+        /// random() and too heavy for the park/steal path.
+        prng: std.Random.DefaultPrng = undefined,
+
+        /// Whether this executor has already spent its doze (the steal-free
+        /// grace park, see parkAndSearch) since it last had local work. Reset
+        /// by any local work; while set, empty passes go straight to the full
+        /// park.
+        dozed: bool = false,
+
+        /// Where the pusher that elected this executor as searcher has surplus
+        /// work; armSearcher writes it just before the wake, stealWork consumes
+        /// it as the scan's starting victim. `no_steal_hint` means none.
+        hint: std.atomic.Value(u32) = .init(no_steal_hint),
+    } else struct {};
+
     id: ExecutorId,
     loop: ev.Loop,
 
     /// Per-executor random state (non-secure CSPRNG; later the secure-path fd/handle).
     random_state: random_mod.RandomState,
 
-    /// Cheap PRNG for steal victim selection; the CSPRNG is for user-facing
-    /// random() and too heavy for the park/steal path.
-    steal_prng: std.Random.DefaultPrng,
-
     // Per-executor local run queue: bounded FIFO ring buffer (Go runq / Tokio
     // style). Overflow and cross-thread wakes go to `run_queue.overflow`, which
     // is wired at init to either the runtime global queue (migration on) or this
     // executor's own `overflow` queue below (migration off).
-    run_queue: LocalRunQueue(WaitNode, zio_options.task_migration) = .{},
+    run_queue: LocalRunQueue(WaitNode, migrates) = .{},
 
     // This executor's own overflow queue, used ONLY when task migration is
     // disabled — cross-thread wakes and ring overflow for this executor land here
@@ -447,11 +461,6 @@ pub const Executor = struct {
     // the hot path).
     tick_checkpoint_countdown: u32 = checkpoint_interval,
 
-    // Whether this executor has already spent its doze (the steal-free grace
-    // park, see parkAndSearch) since it last had local work. Reset by any
-    // local work; while set, empty passes go straight to the full park.
-    dozed: bool = false,
-
     // Scheduler event counters; written only by this executor's thread.
     metrics: MetricsStorage = metrics_storage_init,
 
@@ -460,10 +469,7 @@ pub const Executor = struct {
     // once at the end.
     draining_wakes: bool = false,
 
-    // Where the pusher that elected this executor as searcher has surplus
-    // work; armSearcher writes it just before the wake, stealWork consumes
-    // it as the scan's starting victim. `no_steal_hint` means none.
-    steal_hint: std.atomic.Value(u32) = .init(no_steal_hint),
+    stealing: Stealing = .{},
 
     // Deferred cleanup for the task that just yielded away from this executor.
     // Processed by the next coroutine to run (at landing sites: startFn, yield resume, run loop).
@@ -520,7 +526,6 @@ pub const Executor = struct {
             .id = id,
             .loop = undefined,
             .random_state = undefined,
-            .steal_prng = undefined,
             .current_task = undefined,
             .runtime = runtime,
             .shutdown = ev.Async.init(),
@@ -531,8 +536,8 @@ pub const Executor = struct {
         // overflow queue when off (tasks stay on their home executor). Worker
         // executors live in a pre-sized, non-reallocating list, so &self.overflow
         // is a stable address.
-        self.run_queue.overflow = if (runtime.options.enable_task_migration)
-            &runtime.global_overflow
+        self.run_queue.overflow = if (migrates)
+            &runtime.stealing.global_overflow
         else
             &self.overflow;
 
@@ -559,7 +564,7 @@ pub const Executor = struct {
 
         // Initialize this executor's random state from OS entropy.
         try random_mod.setup(&self.random_state);
-        self.steal_prng = std.Random.DefaultPrng.init(self.random_state.csprng.random().int(u64));
+        if (migrates) self.stealing.prng = .init(self.random_state.csprng.random().int(u64));
 
         try self.loop.init(.{
             .allocator = self.runtime.allocator,
@@ -727,7 +732,7 @@ pub const Executor = struct {
 
         // Entering the run loop means the main task just ran (or this executor
         // just started): that was productive work, a fresh doze is due.
-        self.dozed = false;
+        if (migrates) self.stealing.dozed = false;
 
         // When entered with the tick budget already spent (e.g. the main task
         // yielded because its slice ran out), ready tasks must get one
@@ -754,7 +759,7 @@ pub const Executor = struct {
             // as the tick budget, but consulted here rather than in the
             // retune below: the park decision runs between the two, and it
             // must see the fresh value.
-            if (self.tick_task_count > 0) self.dozed = false;
+            if (migrates and self.tick_task_count > 0) self.stealing.dozed = false;
 
             // Exit if loop is stopped
             if (self.loop.stopped()) {
@@ -817,15 +822,15 @@ pub const Executor = struct {
     /// then idleness is proven and the steal is also what makes the park's
     /// wake protocol sound (see park).
     fn parkAndSearch(self: *Executor, check_ready: bool) !void {
-        if (comptime !zio_options.task_migration) {
+        if (!migrates) {
             self.bump("parks_full", 1);
             try self.loop.poll(.max);
             self.drainDispatched();
             return;
         }
 
-        if (!self.dozed) {
-            self.dozed = true;
+        if (!self.stealing.dozed) {
+            self.stealing.dozed = true;
             // With nobody to steal from (or to) the probe and doze would only
             // delay the real park; skip both.
             if (self.runtime.stealingActive()) {
@@ -865,11 +870,11 @@ pub const Executor = struct {
         // seq_cst: pairs with armSearcher's idle_mask load (see there). The bit
         // must be globally visible before the work check below, or a concurrent
         // pusher can both miss the bit and have its push missed by the check.
-        _ = self.runtime.idle_mask.fetchOr(my_bit, .seq_cst);
+        _ = self.runtime.stealing.idle_mask.fetchOr(my_bit, .seq_cst);
         errdefer {
-            const previous_bit = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel);
+            const previous_bit = self.runtime.stealing.idle_mask.fetchAnd(~my_bit, .acq_rel);
             if (previous_bit & my_bit == 0) {
-                _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
+                _ = self.runtime.stealing.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
             }
         }
 
@@ -880,23 +885,23 @@ pub const Executor = struct {
         // below see the woken batch.
         self.drainDispatched();
 
-        const previous_bit = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel);
+        const previous_bit = self.runtime.stealing.idle_mask.fetchAnd(~my_bit, .acq_rel);
 
         if (previous_bit & my_bit == 0) {
             self.bump("park_elections", 1);
             if (found_work or (check_ready and self.main_task.state.load(.acquire).tag == .ready) or !self.run_queue.isEmpty()) {
-                _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
+                _ = self.runtime.stealing.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
                 return;
             }
 
             const pending = self.run_queue.overflow.len();
             if (pending != 0) {
-                const batch = if (self.runtime.options.enable_task_migration)
+                const batch = if (migrates)
                     pending / @max(self.runtime.executors.items.len, 1) + 1
                 else
                     pending;
                 if (self.run_queue.refill(batch, .block) > 0) {
-                    _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
+                    _ = self.runtime.stealing.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
                     if (!self.run_queue.overflow.isEmpty()) self.runtime.armSearcher(null);
                     return;
                 }
@@ -909,7 +914,7 @@ pub const Executor = struct {
             // be globally visible before the recheck below, or a pusher can
             // both read the stale token (skipping its announce) and have its
             // push missed by this recheck - a dropped wake with no retry.
-            _ = self.runtime.searchers.cmpxchgStrong(1, 0, .seq_cst, .monotonic);
+            _ = self.runtime.stealing.searchers.cmpxchgStrong(1, 0, .seq_cst, .monotonic);
             if (self.stealWork()) return;
             // No main-ready here: only queued (stealable) work justifies
             // arming a fresh searcher.
@@ -949,7 +954,7 @@ pub const Executor = struct {
         // only a fair ~1/n_exec slice to avoid monopolizing it. With migration
         // off it is this executor's own private queue and we are its sole
         // drainer, so take as much as fits (refill caps it).
-        const batch = if (self.runtime.options.enable_task_migration)
+        const batch = if (migrates)
             pending / @max(self.runtime.executors.items.len, 1) + 1
         else
             pending;
@@ -969,19 +974,19 @@ pub const Executor = struct {
         // A pending hint points at the electing pusher's loaded ring; start
         // the scan there. Stale hints are harmless: the circular sweep just
         // continues past them.
-        const hinted = self.steal_hint.swap(no_steal_hint, .acquire);
+        const hinted = self.stealing.hint.swap(no_steal_hint, .acquire);
         const hint_start = hinted != no_steal_hint and hinted < executors.len;
         const start = if (hint_start)
             hinted
         else
-            self.steal_prng.random().uintLessThan(usize, executors.len);
+            self.stealing.prng.random().uintLessThan(usize, executors.len);
         self.bump("steal_attempts", 1);
         for (0..executors.len) |i| {
             const victim = executors[(start + i) % executors.len];
             if (victim == self) continue;
 
             const victim_bit = @as(usize, 1) << victim.id;
-            const victim_idle = self.runtime.idle_mask.load(.acquire) & victim_bit != 0;
+            const victim_idle = self.runtime.stealing.idle_mask.load(.acquire) & victim_bit != 0;
             if (victim_idle) continue;
 
             if (self.run_queue.steal(&victim.run_queue)) |node| {
@@ -1142,7 +1147,7 @@ pub const Executor = struct {
             // spawns and round-robin homes (migration off). Only already-running
             // tasks may migrate to the current executor (cache locality with the
             // waker).
-            if (zio_options.task_migration and old.tag != .new and current_exec.runtime == home_exec.runtime and home_exec.runtime.options.enable_task_migration) {
+            if (migrates and old.tag != .new and current_exec.runtime == home_exec.runtime) {
                 // Migrate to the current executor
                 current_exec.scheduleTaskLocal(task);
                 return;
@@ -1445,13 +1450,7 @@ pub const Runtime = struct {
     options: RuntimeOptions,
 
     executors: std.ArrayList(*Executor) = .empty,
-    executors_stealable: std.atomic.Value(bool) = .init(false),
-    // Shared global run queue (used when task migration is on): external
-    // submissions, cross-thread wakes, and per-executor ring overflow land here,
-    // and every executor drains a fair batch from it once per tick.
-    global_overflow: OverflowQueue(WaitNode) = .{},
-    idle_mask: IdleMask = idle_mask_init,
-    searchers: std.atomic.Value(u32) = .init(0),
+    stealing: Stealing = .{},
     loop_group: ev.LoopGroup = .{},
     main_executor: Executor,
     next_executor_index: std.atomic.Value(usize) = .init(0),
@@ -1468,6 +1467,21 @@ pub const Runtime = struct {
     own_self: bool = false,
 
     resolver: ?dns.Resolver = null,
+
+    /// Runtime-wide work-stealing state; empty unless tasks migrate.
+    const Stealing = if (migrates) struct {
+        /// Whether executors may steal from each other. False with a single
+        /// executor and during shutdown.
+        active: std.atomic.Value(bool) = .init(false),
+        /// Shared global run queue: external submissions, cross-thread wakes,
+        /// and per-executor ring overflow land here, and every executor drains
+        /// a fair batch from it once per tick.
+        global_overflow: OverflowQueue(WaitNode) = .{},
+        /// One bit per parked executor.
+        idle_mask: std.atomic.Value(usize) = .init(0),
+        /// The single-searcher token, see armSearcher.
+        searchers: std.atomic.Value(u32) = .init(0),
+    } else struct {};
 
     const Worker = struct {
         thread: std.Thread = undefined,
@@ -1486,11 +1500,6 @@ pub const Runtime = struct {
     }
 
     pub fn initStatic(self: *Runtime, allocator: Allocator, options: RuntimeOptions) !void {
-        // Task migration can only be enabled at runtime if it was compiled in.
-        if (!zio_options.task_migration and options.enable_task_migration) {
-            return error.TaskMigrationNotCompiledIn;
-        }
-
         const num_executors = options.executors.resolve();
         const num_workers = if (options.enable_main_executor) num_executors - 1 else num_executors;
 
@@ -1553,7 +1562,7 @@ pub const Runtime = struct {
             }
             // With no workers there is nobody to steal from or to; leaving this
             // false lets single-executor runtimes skip the steal machinery.
-            if (num_workers > 0) self.executors_stealable.store(true, .release);
+            if (migrates and num_workers > 0) self.stealing.active.store(true, .release);
         }
 
         if (options.metrics_log_interval.value > 0) {
@@ -1597,7 +1606,7 @@ pub const Runtime = struct {
 
     /// Stop worker executors and join threads. Used by deinit() and init() error path.
     fn shutdownWorkers(self: *Runtime) void {
-        self.executors_stealable.store(false, .release);
+        if (migrates) self.stealing.active.store(false, .release);
         // Wait for all workers to finish initialization, then stop their event loops.
         // Workers that failed to initialize (err != null) don't have valid executors.
         for (self.workers.items) |*worker| {
@@ -1785,11 +1794,11 @@ pub const Runtime = struct {
 
     /// Whether other executors can currently steal from this runtime's queues.
     pub inline fn stealingActive(self: *Runtime) bool {
-        return zio_options.task_migration and self.options.enable_task_migration and self.executors_stealable.load(.acquire);
+        return migrates and self.stealing.active.load(.acquire);
     }
 
     fn armSearcher(self: *Runtime, hint: ?ExecutorId) void {
-        if (comptime !zio_options.task_migration) return;
+        if (!migrates) return;
 
         // The two early-return loads pair with the parker: an executor sets its
         // idle bit (seq_cst RMW) and only then makes its final work check, while
@@ -1800,11 +1809,11 @@ pub const Runtime = struct {
         // executor looks at until some poll timeout (observed as ~60s stalls on
         // Apple Silicon). seq_cst loads are enough on the pusher side; the
         // parker's RMWs anchor the total order.
-        if (!self.stealingActive() or (self.idle_mask.load(.seq_cst) == 0) or (self.searchers.load(.seq_cst) != 0)) return;
-        if (self.searchers.cmpxchgStrong(0, 1, .seq_cst, .monotonic)) |_| return;
+        if (!self.stealingActive() or (self.stealing.idle_mask.load(.seq_cst) == 0) or (self.stealing.searchers.load(.seq_cst) != 0)) return;
+        if (self.stealing.searchers.cmpxchgStrong(0, 1, .seq_cst, .monotonic)) |_| return;
 
         if (!self.claimAndWake(hint, null)) {
-            _ = self.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
+            _ = self.stealing.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
         }
     }
 
@@ -1813,17 +1822,17 @@ pub const Runtime = struct {
     /// caller wins a given bit, and only the winner writes the hint. Returns
     /// false if no executor could be claimed.
     fn claimAndWake(self: *Runtime, hint: ?ExecutorId, exclude: ?ExecutorId) bool {
-        var candidates = self.idle_mask.load(.acquire);
+        var candidates = self.stealing.idle_mask.load(.acquire);
         if (exclude) |id| candidates &= ~(@as(usize, 1) << id);
         while (candidates != 0) {
             const id: ExecutorId = @intCast(@ctz(candidates));
             const bit = @as(usize, 1) << id;
-            const previous_mask = self.idle_mask.fetchAnd(~bit, .acq_rel);
+            const previous_mask = self.stealing.idle_mask.fetchAnd(~bit, .acq_rel);
             if (previous_mask & bit != 0) {
                 const target = self.executors.items[id];
                 // Deliver (or clear) the hint before the wake; the wake edge
                 // publishes it. Exclusive: only the bit winner writes.
-                target.steal_hint.store(hint orelse Executor.no_steal_hint, .release);
+                target.stealing.hint.store(hint orelse Executor.no_steal_hint, .release);
                 target.loop.wake();
                 return true;
             }
@@ -1843,10 +1852,10 @@ pub const Runtime = struct {
     /// that lets one extra election through, it never loses a wake.
     /// Returns the number of sleepers actually woken.
     fn batchWakeSleepers(self: *Runtime, ready: usize, hint: ExecutorId) u64 {
-        if (comptime !zio_options.task_migration) return 0;
+        if (!migrates) return 0;
 
         if (!self.stealingActive() or ready < 2) return 0;
-        if (self.idle_mask.load(.seq_cst) == 0) return 0;
+        if (self.stealing.idle_mask.load(.seq_cst) == 0) return 0;
 
         var wakes: usize = 0;
         var covered: usize = 2; // wakes = ceil(log2(ready))
@@ -2313,14 +2322,11 @@ test "runtime: sleep from main allows tasks to run" {
     try std.testing.expectEqual(10, counter);
 }
 
-test "runtime: enabling task migration at runtime errors when compiled out" {
-    // Only meaningful in a build without migration support; a normal build
-    // compiles migration in, so there is nothing to reject.
-    if (zio_options.task_migration) return error.SkipZigTest;
-    try std.testing.expectError(
-        error.TaskMigrationNotCompiledIn,
-        Runtime.init(std.testing.allocator, .{ .enable_task_migration = true }),
-    );
+test "runtime: executor count is one under single_executor scheduling" {
+    if (multi_executor) return error.SkipZigTest;
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
+    defer runtime.deinit();
+    try std.testing.expectEqual(1, runtime.executors.items.len);
 }
 
 test "runtime: multi-threaded execution with 2 executors" {
@@ -2351,27 +2357,24 @@ test "runtime: multi-threaded execution with 2 executors" {
     try std.testing.expectEqual(4, TestContext.counter);
 }
 
-test "runtime: local ring overflow spills and drains with task migration disabled" {
-    // With migration disabled, spawn far more ready tasks than the local ring
+test "runtime: local ring overflow spills and drains with pinned scheduling" {
+    // With pinned scheduling, spawn far more ready tasks than the local ring
     // holds (capacity 256) so the ring spills into the executor's own overflow
     // queue (the runqputslow path) and must drain every task back out. All are
     // spawned before any drain, so the ring genuinely overflows. Two executors
     // also covers the remote sub-path: tasks whose round-robin home is the other
     // executor go straight to that executor's overflow queue.
-    if (builtin.single_threaded) return error.SkipZigTest;
+    if (zio_options.scheduling != .pinned) return error.SkipZigTest;
 
     const H = struct {
-        const n_tasks = 2 * LocalRunQueue(WaitNode, zio_options.task_migration).capacity; // 512 >> 256
+        const n_tasks = 2 * LocalRunQueue(WaitNode, migrates).capacity; // 512 >> 256
 
         fn child(counter: *std.atomic.Value(u32)) void {
             _ = counter.fetchAdd(1, .monotonic);
         }
     };
 
-    const runtime = try Runtime.init(std.testing.allocator, .{
-        .executors = .exact(2),
-        .enable_task_migration = false,
-    });
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
     defer runtime.deinit();
 
     var counter = std.atomic.Value(u32).init(0);
@@ -2389,6 +2392,7 @@ test "runtime: local ring overflow spills and drains with task migration disable
 }
 
 test "runtime: multi-threaded execution with max executors" {
+    if (!multi_executor) return error.SkipZigTest;
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(Executor.max_executors) });
     defer runtime.deinit();
 

@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const posix = @import("posix.zig");
 const darwin = @import("darwin.zig");
 const w = @import("windows.zig");
-const options = @import("zio_options");
+const options = @import("../options.zig").options;
 
 const unexpectedError = @import("base.zig").unexpectedError;
 const syscall_cancel = @import("syscall_cancel.zig");
