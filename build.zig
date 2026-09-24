@@ -10,14 +10,14 @@ pub fn build(b: *std.Build) void {
     // Defaults for the compile-time options in src/options.zig. A root module's
     // `zio_options` declaration wins over these.
     const backend = b.option(BuildOptions.Backend, "backend", "Override the default event loop backend");
-    const scheduling = b.option(BuildOptions.Scheduling, "scheduling", "Scheduling discipline: single_executor, pinned or work_stealing (default single_executor, work_stealing for tests)");
+    const scheduling = b.option(BuildOptions.Scheduling, "scheduling", "Scheduling discipline: single_executor, pinned or work_stealing (default work_stealing)");
     const resolve_beneath_mode = b.option(BuildOptions.ResolveBeneathMode, "resolve-beneath-mode", "How to handle resolve_beneath on platforms without kernel support: strict (error.Unsupported) or best_effort (log warning, continue)");
     const no_hacks = b.option(bool, "no-hacks", "Avoid unsafe performance tricks (bool smuggling, etc.)");
     const scheduler_metrics = b.option(bool, "scheduler_metrics", "Count scheduler events (parks, steals, wake batches) in per-executor counters readable via Runtime.schedulerMetrics (default true)");
 
     const build_options: BuildOptions = .{
         .backend = backend,
-        .scheduling = scheduling orelse .single_executor,
+        .scheduling = scheduling orelse .work_stealing,
         .resolve_beneath_mode = resolve_beneath_mode orelse .strict,
         .no_hacks = no_hacks orelse false,
         .scheduler_metrics = scheduler_metrics orelse true,
@@ -109,20 +109,8 @@ pub fn build(b: *std.Build) void {
     const emit_test_bin = b.option(bool, "emit-test-bin", "Build test binary without running") orelse false;
     const test_filter = b.option([]const u8, "test-filter", "Filter for test names");
 
-    // zio's own suite exercises multi-executor scheduling, so it gets its own
-    // copy of the module with work stealing as the default.
-    const zio_test = b.createModule(.{
-        .root_source_file = b.path("src/zio.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = target.result.os.tag != .freestanding,
-    });
-    var test_options = build_options;
-    if (scheduling == null) test_options.scheduling = .work_stealing;
-    zio_test.addOptions("zio_build_options", test_options.create(b));
-
     const lib_unit_tests = b.addTest(.{
-        .root_module = zio_test,
+        .root_module = zio,
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
         .filters = if (test_filter) |f| &.{f} else &.{},
     });
