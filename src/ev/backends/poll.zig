@@ -412,13 +412,15 @@ pub fn hasInflight(self: *const Self) bool {
 
 /// Submit a completion to the backend - infallible.
 /// On error, completes the operation immediately with error.Unexpected.
-pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
+/// `op` is `c.op`, passed at compile time so each op compiles to its own
+/// specialized submit with no runtime dispatch on the op.
+pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) void {
     // Counted for every accepted op (sync completers decrement right back via
     // markCompletedFromBackend), mirroring the decrInflight in every completion
     // path so the balance needs no per-path reasoning.
     self.inflight += 1;
 
-    switch (c.op) {
+    switch (op) {
         .group, .timer, .async, .work => unreachable, // Managed by the loop
 
         // Synchronous operations - complete immediately
@@ -523,7 +525,7 @@ pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
         },
         // Streaming file I/O is routed here by the loop only when the fd is
         // pollable (non-seekable), so it is handled exactly like pipe read/write.
-        inline .file_read_streaming, .file_write_streaming => |op| {
+        .file_read_streaming, .file_write_streaming => {
             if (builtin.os.tag == .windows) {
                 c.setError(error.Unexpected);
                 state.markCompletedFromBackend(c);

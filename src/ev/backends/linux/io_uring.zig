@@ -472,23 +472,27 @@ pub fn hasInflight(self: *const Self) bool {
 
 /// Submit a completion to the backend - infallible.
 /// On error, completes the operation immediately with error.Unexpected.
-pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
+/// `op` is `c.op`, passed at compile time so each op compiles to its own
+/// specialized submit with no runtime dispatch on the op.
+pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) void {
     // Counted once per accepted op (sync completers decrement right back via
     // markCompletedFromBackend); EINTR resubmissions go through resubmit and
     // stay counted from their first submit.
     self.inflight += 1;
-    self.submitInner(state, c, true);
+    self.submitInner(state, op, c, true);
 }
 
 fn resubmit(self: *Self, state: *LoopState, c: *Completion) void {
     std.debug.assert(c.loadState().phase == .running);
-    self.submitInner(state, c, false);
+    switch (c.op) {
+        inline else => |op| self.submitInner(state, op, c, false),
+    }
 }
 
 /// `is_new` distinguishes the first submission (allocate op-owned resources)
 /// from an EINTR/SQ-full resubmission (reuse them).
-fn submitInner(self: *Self, state: *LoopState, c: *Completion, is_new: bool) void {
-    switch (c.op) {
+fn submitInner(self: *Self, state: *LoopState, comptime op: Op, c: *Completion, is_new: bool) void {
+    switch (op) {
         .group, .timer, .async, .work => unreachable, // Managed by the loop
 
         // Synchronous operations (no io_uring support or always immediate)
