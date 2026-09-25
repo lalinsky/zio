@@ -684,7 +684,8 @@ pub fn TaskLocal(comptime T: type) type {
     };
 }
 
-const getNextExecutor = @import("runtime.zig").getNextExecutor;
+const getPlacementExecutor = @import("runtime.zig").getPlacementExecutor;
+const Placement = @import("runtime.zig").Placement;
 
 /// Ready-queue length past which a spawning task yields to let new tasks start.
 const spawn_yield_threshold = 13;
@@ -745,12 +746,13 @@ pub fn spawnTask(
     context_alignment: std.mem.Alignment,
     start: Closure.Start,
     group: ?*Group,
+    placement: Placement,
 ) !*AnyTask {
-    // New tasks are homed round-robin and scheduled through the global queue
-    // with a wake of the home executor. Initial spread matters: on epoll and
-    // kqueue backends a socket is pinned to the loop that registers it, so a
-    // task's first executor decides where its I/O lives.
-    const executor = try getNextExecutor(rt);
+    // With `.auto` placement, new tasks are homed round-robin and scheduled
+    // through the global queue with a wake of the home executor. Initial spread
+    // matters: on epoll and kqueue backends a socket is pinned to the loop that
+    // registers it, so a task's first executor decides where its I/O lives.
+    const executor = try getPlacementExecutor(rt, placement);
 
     const task = try AnyTask.create(
         executor,

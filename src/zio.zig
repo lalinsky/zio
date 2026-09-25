@@ -14,9 +14,12 @@ const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;
 pub const RuntimeOptions = runtime.RuntimeOptions;
 pub const JoinHandle = runtime.JoinHandle;
+pub const Placement = runtime.Placement;
+pub const ExecutorId = runtime.ExecutorId;
 
 // Standalone task functions
 pub const spawn = runtime.spawn;
+pub const spawnInto = runtime.spawnInto;
 pub const spawnBlocking = runtime.spawnBlocking;
 pub const yield = runtime.yield;
 pub const maybeYield = runtime.maybeYield;

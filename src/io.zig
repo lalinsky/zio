@@ -320,7 +320,7 @@ fn concurrentImpl(
     if (userdata == null) return error.ConcurrencyUnavailable;
     const rt, const mode = decodeUserdata(userdata);
     const awaitable = switch (mode) {
-        .regular => &(spawnTask(rt, result_len, result_alignment, context, context_alignment, .{ .regular = start }, null) catch
+        .regular => &(spawnTask(rt, result_len, result_alignment, context, context_alignment, .{ .regular = start }, null, .auto) catch
             return error.ConcurrencyUnavailable).awaitable,
         .blocking => &(spawnBlockingTask(rt, result_len, result_alignment, context, context_alignment, .{ .regular = start }, null, .{ .reserve_thread = true }) catch
             return error.ConcurrencyUnavailable).awaitable,
@@ -364,7 +364,7 @@ fn groupAsyncImpl(
     const rt, const mode = decodeUserdata(userdata);
     const g = Group.fromStd(group);
     switch (mode) {
-        .regular => groupSpawnTask(g, rt, context, context_alignment, start) catch {
+        .regular => groupSpawnTask(g, rt, context, context_alignment, start, .auto) catch {
             start(context.ptr);
         },
         .blocking => groupSpawnBlockingTask(g, rt, context, context_alignment, start, .{ .reserve_thread = true }) catch {
@@ -385,7 +385,7 @@ fn groupConcurrentImpl(
     const rt, const mode = decodeUserdata(userdata);
     const g = Group.fromStd(group);
     switch (mode) {
-        .regular => groupSpawnTask(g, rt, context, context_alignment, start) catch
+        .regular => groupSpawnTask(g, rt, context, context_alignment, start, .auto) catch
             return error.ConcurrencyUnavailable,
         .blocking => groupSpawnBlockingTask(g, rt, context, context_alignment, start, .{ .reserve_thread = true }) catch
             return error.ConcurrencyUnavailable,
