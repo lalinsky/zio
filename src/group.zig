@@ -13,6 +13,7 @@ const beginShield = @import("runtime.zig").beginShield;
 const endShield = @import("runtime.zig").endShield;
 const sleep = @import("runtime.zig").sleep;
 const JoinHandle = @import("runtime.zig").JoinHandle;
+const Placement = @import("runtime.zig").Placement;
 const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const spawnTask = @import("task.zig").spawnTask;
@@ -115,6 +116,11 @@ pub const Group = struct {
     }
 
     pub fn spawn(self: *Group, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
+        return self.spawnInto(.auto, func, args);
+    }
+
+    /// Spawn a task in the group on the executor chosen by `placement`.
+    pub fn spawnInto(self: *Group, placement: Placement, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
         const rt = getCurrentExecutor().runtime;
         const Args = @TypeOf(args);
         const ReturnType = @typeInfo(@TypeOf(func)).@"fn".return_type.?;
@@ -139,7 +145,7 @@ pub const Group = struct {
         };
 
         const context: Context = .{ .group = self, .args = args };
-        return groupSpawnTask(self, rt, std.mem.asBytes(&context), .fromByteUnits(@alignOf(Context)), &Wrapper.start);
+        return groupSpawnTask(self, rt, std.mem.asBytes(&context), .fromByteUnits(@alignOf(Context)), &Wrapper.start, placement);
     }
 
     pub fn spawnBlocking(self: *Group, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
@@ -321,8 +327,9 @@ pub fn groupSpawnTask(
     context: []const u8,
     context_alignment: std.mem.Alignment,
     start: *const fn (context: *const anyopaque) void,
+    placement: Placement,
 ) !void {
-    _ = try spawnTask(rt, 0, .@"1", context, context_alignment, .{ .group = start }, group);
+    _ = try spawnTask(rt, 0, .@"1", context, context_alignment, .{ .group = start }, group, placement);
 }
 
 /// Spawn a blocking task in the group with raw context bytes and start function.

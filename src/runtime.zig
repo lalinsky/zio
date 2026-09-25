@@ -41,7 +41,7 @@ const common = @import("common.zig");
 const Waiter = common.Waiter;
 const random_mod = @import("random.zig");
 
-const ExecutorId = switch (@sizeOf(usize)) {
+pub const ExecutorId = switch (@sizeOf(usize)) {
     4 => u5,
     8 => u6,
     else => @compileError("Unsupported architecture"),
@@ -350,6 +350,46 @@ pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
 
     const index = rt.next_executor_index.fetchAdd(1, .monotonic);
     return rt.executors.items[index % rt.executors.items.len];
+}
+
+/// Where `spawnInto` places a new task.
+///
+/// Only `.auto` is valid with `.work_stealing` scheduling. The other
+/// placements promise the task stays on the chosen executor for its whole
+/// life, which holds only when tasks never migrate, so there they fail with
+/// `error.InvalidPlacement`.
+pub const Placement = union(enum) {
+    /// Let the runtime pick the executor. This is what `spawn` does.
+    auto,
+    /// The executor of the calling thread. Fails with `error.InvalidPlacement`
+    /// when called from a thread that is not an executor of this runtime.
+    local,
+    /// The executor with the given index, from zero up to the executor count.
+    executor: ExecutorId,
+};
+
+pub const PlacementError = error{ RuntimeShutdown, InvalidPlacement };
+
+pub fn getPlacementExecutor(rt: *Runtime, placement: Placement) PlacementError!*Executor {
+    if (placement == .auto) return getNextExecutor(rt);
+    if (migrates) return error.InvalidPlacement;
+
+    if (rt.shutting_down.load(.acquire)) {
+        return error.RuntimeShutdown;
+    }
+
+    switch (placement) {
+        .auto => unreachable,
+        .local => {
+            const executor = getCurrentExecutorOrNull() orelse return error.InvalidPlacement;
+            if (executor.runtime != rt) return error.InvalidPlacement;
+            return executor;
+        },
+        .executor => |id| {
+            if (id >= rt.executors.items.len) return error.InvalidPlacement;
+            return rt.executors.items[id];
+        },
+    }
 }
 
 /// Whether scheduler event counters are compiled in (build option
@@ -1364,6 +1404,13 @@ pub fn spawn(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !JoinHandle
     return rt.spawn(func, args);
 }
 
+/// Spawn a task on the current runtime, on the executor chosen by `placement`.
+/// Panics if called outside of a task context.
+pub fn spawnInto(placement: Placement, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !JoinHandle(meta.ReturnType(func)) {
+    const rt = getCurrentExecutor().runtime;
+    return rt.spawnInto(placement, func, args);
+}
+
 /// Spawn a blocking task on the current runtime.
 /// Panics if called outside of a task context.
 pub fn spawnBlocking(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !JoinHandle(meta.ReturnType(func)) {
@@ -1672,6 +1719,11 @@ pub const Runtime = struct {
 
     // High-level public API
     pub fn spawn(self: *Runtime, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !JoinHandle(meta.ReturnType(func)) {
+        return self.spawnInto(.auto, func, args);
+    }
+
+    /// Spawn a task on the executor chosen by `placement`.
+    pub fn spawnInto(self: *Runtime, placement: Placement, func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !JoinHandle(meta.ReturnType(func)) {
         const Result = meta.ReturnType(func);
         const Args = @TypeOf(args);
 
@@ -1691,6 +1743,7 @@ pub const Runtime = struct {
             .fromByteUnits(@alignOf(Args)),
             .{ .regular = &Wrapper.start },
             null,
+            placement,
         );
 
         return JoinHandle(Result){
@@ -2376,6 +2429,93 @@ test "runtime: local ring overflow spills and drains with pinned scheduling" {
     try group.wait();
     try std.testing.expect(!group.hasFailed());
     try std.testing.expectEqual(@as(u32, H.n_tasks), counter.load(.monotonic));
+}
+
+test "runtime: spawnInto rejects fixed placements with work stealing" {
+    if (!migrates) return error.SkipZigTest;
+
+    const H = struct {
+        fn child() void {}
+    };
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    defer runtime.deinit();
+
+    try std.testing.expectError(error.InvalidPlacement, runtime.spawnInto(.local, H.child, .{}));
+    try std.testing.expectError(error.InvalidPlacement, runtime.spawnInto(.{ .executor = 0 }, H.child, .{}));
+
+    var group: Group = .init;
+    defer group.cancel();
+    try std.testing.expectError(error.InvalidPlacement, group.spawnInto(.local, H.child, .{}));
+
+    var handle = try runtime.spawnInto(.auto, H.child, .{});
+    handle.join();
+}
+
+test "runtime: spawnInto keeps tasks on the chosen executor" {
+    if (migrates) return error.SkipZigTest;
+
+    const H = struct {
+        fn currentId() ExecutorId {
+            return getCurrentExecutor().id;
+        }
+
+        fn groupChild(expected: ExecutorId, mismatches: *std.atomic.Value(u32)) void {
+            if (currentId() != expected) _ = mismatches.fetchAdd(1, .monotonic);
+        }
+
+        fn parent(rt: *Runtime, id: ExecutorId) !void {
+            try std.testing.expectEqual(id, currentId());
+
+            var handle = try rt.spawnInto(.local, currentId, .{});
+            try std.testing.expectEqual(id, handle.join());
+
+            var mismatches = std.atomic.Value(u32).init(0);
+            var group: Group = .init;
+            defer group.cancel();
+            for (0..8) |_| {
+                try group.spawnInto(.local, groupChild, .{ id, &mismatches });
+            }
+            try group.wait();
+            try std.testing.expectEqual(0, mismatches.load(.monotonic));
+        }
+    };
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
+    defer runtime.deinit();
+
+    const n: ExecutorId = @intCast(runtime.executors.items.len);
+    for (0..n) |i| {
+        const id: ExecutorId = @intCast(i);
+        var handle = try runtime.spawnInto(.{ .executor = id }, H.parent, .{ runtime, id });
+        try handle.join();
+    }
+
+    try std.testing.expectError(error.InvalidPlacement, runtime.spawnInto(.{ .executor = n }, H.currentId, .{}));
+}
+
+test "runtime: spawnInto local placement from a foreign thread" {
+    if (migrates or builtin.single_threaded) return error.SkipZigTest;
+
+    const H = struct {
+        fn child() void {}
+
+        fn foreign(rt: *Runtime, result: *?anyerror) void {
+            var handle = rt.spawnInto(.local, child, .{}) catch |err| {
+                result.* = err;
+                return;
+            };
+            handle.detach();
+        }
+    };
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    defer runtime.deinit();
+
+    var result: ?anyerror = null;
+    const thread = try std.Thread.spawn(.{}, H.foreign, .{ runtime, &result });
+    thread.join();
+    try std.testing.expectEqual(error.InvalidPlacement, result.?);
 }
 
 test "runtime: multi-threaded execution with max executors" {
