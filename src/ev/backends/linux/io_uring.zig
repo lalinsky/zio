@@ -549,34 +549,46 @@ fn submitInner(self: *Self, state: *LoopState, comptime op: Op, c: *Completion, 
             sqe.prep_accept(data.handle, data.addr, data.addr_len, 0);
             sqe.user_data = @intFromPtr(c);
         },
+        // A single buffer goes through plain RECV/SEND: no msghdr to build
+        // here, and none for the kernel to copy in.
         .net_recv => {
             const data = c.cast(NetRecv);
-            data.internal.msg = .{
-                .name = null,
-                .namelen = 0,
-                .iov = data.buffers.iovecs.ptr,
-                .iovlen = data.buffers.iovecs.len,
-                .control = null,
-                .controllen = 0,
-                .flags = 0,
-            };
             const sqe = self.getSqeOrDefer(c) orelse return;
-            sqe.prep_recvmsg(data.handle, &data.internal.msg, recvFlagsToMsg(data.flags));
+            if (data.buffers.iovecs.len == 1) {
+                const iov = data.buffers.iovecs[0];
+                sqe.prep_recv(data.handle, iov.base[0..iov.len], recvFlagsToMsg(data.flags));
+            } else {
+                data.internal.msg = .{
+                    .name = null,
+                    .namelen = 0,
+                    .iov = data.buffers.iovecs.ptr,
+                    .iovlen = data.buffers.iovecs.len,
+                    .control = null,
+                    .controllen = 0,
+                    .flags = 0,
+                };
+                sqe.prep_recvmsg(data.handle, &data.internal.msg, recvFlagsToMsg(data.flags));
+            }
             sqe.user_data = @intFromPtr(c);
         },
         .net_send => {
             const data = c.cast(NetSend);
-            data.internal.msg = .{
-                .name = null,
-                .namelen = 0,
-                .iov = data.buffer.iovecs.ptr,
-                .iovlen = data.buffer.iovecs.len,
-                .control = null,
-                .controllen = 0,
-                .flags = 0,
-            };
             const sqe = self.getSqeOrDefer(c) orelse return;
-            sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags));
+            if (data.buffer.iovecs.len == 1) {
+                const iov = data.buffer.iovecs[0];
+                sqe.prep_send(data.handle, iov.base[0..iov.len], sendFlagsToMsg(data.flags));
+            } else {
+                data.internal.msg = .{
+                    .name = null,
+                    .namelen = 0,
+                    .iov = data.buffer.iovecs.ptr,
+                    .iovlen = data.buffer.iovecs.len,
+                    .control = null,
+                    .controllen = 0,
+                    .flags = 0,
+                };
+                sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags));
+            }
             sqe.user_data = @intFromPtr(c);
         },
         .net_recvfrom => {
@@ -1387,8 +1399,53 @@ fn drainPending(self: *Self, state: *LoopState) void {
     }
 }
 
-fn storeResult(self: *Self, c: *Completion, res: i32) void {
+/// The ops on the hot I/O path store their result inline; everything else goes
+/// through `storeResultSlow`, kept out of line so the common path doesn't pay
+/// for the frame of its largest arms.
+inline fn storeResult(self: *Self, c: *Completion, res: i32) void {
     switch (c.op) {
+        .net_recv => {
+            if (res < 0) {
+                c.setError(net.errnoToRecvError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.net_recv, @as(usize, @intCast(res)));
+            }
+        },
+        .net_send => {
+            if (res < 0) {
+                c.setError(net.errnoToSendError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.net_send, @as(usize, @intCast(res)));
+            }
+        },
+        .net_accept => {
+            if (res < 0) {
+                c.setError(net.errnoToAcceptError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.net_accept, @as(net.fd_t, @intCast(res)));
+            }
+        },
+        .file_read => {
+            if (res < 0) {
+                c.setError(fs.errnoToFileReadError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_read, @intCast(res));
+            }
+        },
+        .file_write => {
+            if (res < 0) {
+                c.setError(fs.errnoToFileWriteError(@enumFromInt(-res)));
+            } else {
+                c.setResult(.file_write, @intCast(res));
+            }
+        },
+        else => self.storeResultSlow(c, res),
+    }
+}
+
+noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
+    switch (c.op) {
+        .net_recv, .net_send, .net_accept, .file_read, .file_write => unreachable, // storeResult
         .group, .timer, .async, .work => unreachable,
         .net_open => unreachable,
         .net_recvmmsg => unreachable, // handled in reap loop before storeResult
@@ -1434,27 +1491,6 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
                 c.setError(net.errnoToConnectError(@enumFromInt(-res)));
             } else {
                 c.setResult(.net_connect, {});
-            }
-        },
-        .net_accept => {
-            if (res < 0) {
-                c.setError(net.errnoToAcceptError(@enumFromInt(-res)));
-            } else {
-                c.setResult(.net_accept, @as(net.fd_t, @intCast(res)));
-            }
-        },
-        .net_recv => {
-            if (res < 0) {
-                c.setError(net.errnoToRecvError(@enumFromInt(-res)));
-            } else {
-                c.setResult(.net_recv, @as(usize, @intCast(res)));
-            }
-        },
-        .net_send => {
-            if (res < 0) {
-                c.setError(net.errnoToSendError(@enumFromInt(-res)));
-            } else {
-                c.setResult(.net_send, @as(usize, @intCast(res)));
             }
         },
         .net_recvfrom => {
@@ -1545,22 +1581,6 @@ fn storeResult(self: *Self, c: *Completion, res: i32) void {
                 c.setError(fs.errnoToFileCloseError(@enumFromInt(-res)));
             } else {
                 c.setResult(.file_close, {});
-            }
-        },
-
-        .file_read => {
-            if (res < 0) {
-                c.setError(fs.errnoToFileReadError(@enumFromInt(-res)));
-            } else {
-                c.setResult(.file_read, @intCast(res));
-            }
-        },
-
-        .file_write => {
-            if (res < 0) {
-                c.setError(fs.errnoToFileWriteError(@enumFromInt(-res)));
-            } else {
-                c.setResult(.file_write, @intCast(res));
             }
         },
 
