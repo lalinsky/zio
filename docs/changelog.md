@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- On io_uring, socket reads and writes with a single buffer use `RECV`/`SEND` instead of
+  `RECVMSG`/`SENDMSG`, which raised 64-byte TCP echo throughput by about 5%.
+
 - The event loop no longer keeps an atomic count of active completions, which saves two atomic
   counter updates per operation, and `Loop.done()` is no longer public.
 
