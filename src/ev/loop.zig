@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Backend = @import("backend.zig").Backend;
 const Completion = @import("completion.zig").Completion;
+const single_owner = @import("completion.zig").single_owner;
 const Group = @import("completion.zig").Group;
 const Timer = @import("completion.zig").Timer;
 const Async = @import("completion.zig").Async;
@@ -134,6 +135,8 @@ test sendfileLayout {
 
 pub const LoopGroup = struct {
     shared: Backend.SharedState = .{},
+    /// Loops initialized with this group and not yet deinitialized.
+    loops: std.atomic.Value(u32) = .init(0),
 };
 
 fn timerDeadlineLess(_: void, a: *Timer, b: *Timer) bool {
@@ -522,6 +525,13 @@ pub const Loop = struct {
         net.ensureWSAInitialized();
         self.state.updateNow();
 
+        // Grouped loops service and complete each other's operations, which
+        // the plain state transitions of `single_owner` do not allow.
+        if (self.loop_group.loops.fetchAdd(1, .monotonic) != 0 and single_owner) {
+            @panic("zio: .single_executor scheduling allows only one loop per LoopGroup");
+        }
+        errdefer _ = self.loop_group.loops.fetchSub(1, .monotonic);
+
         try self.backend.init(
             options.allocator,
             options.queue_size,
@@ -538,6 +548,7 @@ pub const Loop = struct {
         self.assertOwnThread();
         if (in_debug_mode) current_loop = null;
         self.backend.deinit();
+        _ = self.loop_group.loops.fetchSub(1, .monotonic);
     }
 
     /// Debug-only: assert we're on the thread that owns this loop.
@@ -668,6 +679,11 @@ pub const Loop = struct {
     /// different loop; cross-loop cancels are routed through its cancel queue.
     pub fn cancel(self: *Loop, completion: *Completion) void {
         self.assertOwnThread();
+        if (single_owner) {
+            if (completion.getLoop()) |owner| {
+                if (owner != self) @panic("zio: .single_executor scheduling does not allow canceling another loop's completion");
+            }
+        }
 
         const old = completion.requestCancel();
         // Nothing to route: already requested, too late, or not yet submitted

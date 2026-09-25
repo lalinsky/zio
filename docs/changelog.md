@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- With `.single_executor` scheduling, event loop completions change state with plain loads and
+  stores instead of atomic read-modify-writes, and a `LoopGroup` accepts only one loop.
+
 - On io_uring, socket reads and writes with a single buffer use `RECV`/`SEND` instead of
   `RECVMSG`/`SENDMSG`, which raised 64-byte TCP echo throughput by about 5%.
 

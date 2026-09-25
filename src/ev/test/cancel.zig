@@ -560,6 +560,9 @@ test "cancel: queued work via thread pool cancel" {
 }
 
 test "cancel: cross-thread cancellation" {
+    // Canceling another loop's completion is refused with a single owner.
+    if (@import("../completion.zig").single_owner) return error.SkipZigTest;
+
     // Test cancelling an operation from a different thread/loop
     var loop1: Loop = undefined;
     try loop1.init(.{});
