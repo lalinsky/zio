@@ -924,12 +924,12 @@ pub const Loop = struct {
             .net_send_file => {
                 const op = completion.cast(NetSendFile);
                 switch (comptime Backend.capability(.net_send_file)) {
-                    .yes => self.backend.submit(&self.state, completion),
+                    .yes => self.backend.submit(&self.state, .net_send_file, completion),
                     .no => netSendFileStart(self, op),
                     .maybe => {
                         if (self.backend.supports(.net_send_file, op)) {
                             op.route = .backend;
-                            self.backend.submit(&self.state, completion);
+                            self.backend.submit(&self.state, .net_send_file, completion);
                         } else {
                             op.route = .fallback;
                             netSendFileStart(self, op);
@@ -943,11 +943,11 @@ pub const Loop = struct {
                     inline else => |op| {
                         const op_data = completion.cast(op.toType());
                         switch (comptime Backend.capability(op)) {
-                            .yes => self.backend.submit(&self.state, completion),
+                            .yes => self.backend.submit(&self.state, op, completion),
                             .no => self.submitFileOpToThreadPool(completion),
                             .maybe => if (self.backend.supports(op, op_data)) {
                                 op_data.route = .backend;
-                                self.backend.submit(&self.state, completion);
+                                self.backend.submit(&self.state, op, completion);
                             } else {
                                 op_data.route = .fallback;
                                 self.submitFileOpToThreadPool(completion);

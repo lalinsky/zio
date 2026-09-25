@@ -247,13 +247,13 @@ pub fn Backend(comptime mode: Mode) type {
             };
         }
 
-        pub fn submit(self: *Self, state: *LoopState, completion: *Completion) void {
+        pub fn submit(self: *Self, state: *LoopState, comptime op: Op, completion: *Completion) void {
             switch (mode) {
-                .io_uring => self.engine.io_uring.submit(state, completion),
-                .epoll => self.engine.epoll.submit(state, completion),
+                .io_uring => self.engine.io_uring.submit(state, op, completion),
+                .epoll => self.engine.epoll.submit(state, op, completion),
                 .auto => switch (self.engine) {
-                    .io_uring => |*engine| engine.submit(state, completion),
-                    .epoll => |*engine| engine.submit(state, completion),
+                    .io_uring => |*engine| engine.submit(state, op, completion),
+                    .epoll => |*engine| engine.submit(state, op, completion),
                 },
             }
         }

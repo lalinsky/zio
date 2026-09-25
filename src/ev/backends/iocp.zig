@@ -544,13 +544,17 @@ pub fn hasInflight(self: *const Self) bool {
     return self.shared_state.inflight_io.load(.monotonic) > 0;
 }
 
-pub fn submit(self: *Self, state: *LoopState, c: *Completion) void {
+/// Submit a completion to the backend - infallible.
+/// On error, completes the operation immediately with error.Unexpected.
+/// `op` is `c.op`, passed at compile time so each op compiles to its own
+/// specialized submit with no runtime dispatch on the op.
+pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) void {
     // Counted for every accepted op (sync completers decrement right back via
     // markCompletedFromBackend), mirroring the decrInflight in every completion
     // path so the balance needs no per-path reasoning.
     _ = self.shared_state.inflight_io.fetchAdd(1, .monotonic);
 
-    switch (c.op) {
+    switch (op) {
         .group, .timer, .async, .work => unreachable, // Managed by the loop
 
         // Synchronous operations - complete immediately
