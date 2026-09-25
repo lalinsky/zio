@@ -75,7 +75,7 @@ pub fn Heap(
         /// always real — root only becomes non-null via `insert` (owner thread,
         /// which orders before that thread's own check) and a cross-thread
         /// `remove` can only null it.
-        pub fn isEmpty(self: *Self) bool {
+        pub fn isEmpty(self: *const Self) bool {
             return self.root.load(.acquire) == null;
         }
 

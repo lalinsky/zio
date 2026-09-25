@@ -224,12 +224,9 @@ pub const LoopState = struct {
     running: bool = false,
     stopped: bool = false,
 
-    /// Not-yet-finished completions owned by this loop. The count lives on the
-    /// completion's owning loop (`completion.loop`): incremented at the submit
-    /// sites, decremented in `finishCompletion` routed through
-    /// `completion.loop`, which may run on a different loop's thread (epoll
-    /// single-owner servicing, the shared IOCP port) - hence the atomic.
-    active: std.atomic.Value(usize) = .init(0),
+    /// Thread-pool jobs this loop submitted whose completions it has not yet
+    /// drained from `work_completions`. Owner thread only.
+    pool_inflight: usize = 0,
 
     wake_requested: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
@@ -284,24 +281,6 @@ pub const LoopState = struct {
     pub const wake_async: u32 = 2;
     pub const wake_cancel: u32 = 4;
 
-    /// Increment this loop's active completion counter. Counted by the loop at
-    /// every submit site (backends do no accounting).
-    pub fn incrActive(self: *LoopState) void {
-        _ = self.active.fetchAdd(1, .monotonic);
-    }
-
-    /// Decrement this loop's active completion counter. Callers must invoke
-    /// this on the completion's owning loop (`completion.loop`), not on
-    /// whichever loop happens to run the finish (see `finishCompletion`).
-    pub fn decrActive(self: *LoopState) void {
-        _ = self.active.fetchSub(1, .monotonic);
-    }
-
-    /// Read this loop's active completion counter (any thread).
-    pub fn loadActive(self: *const LoopState) usize {
-        return self.active.load(.monotonic);
-    }
-
     /// Called by backends when an operation they accepted completes. Tells the
     /// backend to drop its inflight count (the backend of the loop running the
     /// completion, whose storage covers the op on every backend) and marks the
@@ -332,10 +311,6 @@ pub const LoopState = struct {
 
     pub fn finishCompletion(self: *LoopState, completion: *Completion) void {
         completion.enterDead();
-        // Route the decrement to the loop that owns the completion: `self` here
-        // can be a different loop (epoll single-owner servicing, the shared
-        // IOCP port, a group finished by the loop that ran its last member).
-        completion.getLoop().?.state.decrActive();
 
         // Both callbacks below can free `completion`, so whichever may free it must
         // run LAST, with nothing touching `completion` afterward. Cache the owner
@@ -587,14 +562,22 @@ pub const Loop = struct {
         return self.state.stopped;
     }
 
-    /// Whether this loop has nothing left to do: every completion it owns
-    /// (`completion.loop == this`) has finished. An op may be *serviced* by
-    /// another loop of the group, but the active count stays with the owning
-    /// loop until the op finishes, so `done()` cannot report true early.
+    /// Whether this loop has nothing left to do: no backend I/O in flight, no
+    /// armed timer, no registered async handle, no thread-pool job outstanding,
+    /// and no finished completion waiting for its callback. On backends whose
+    /// in-flight count is shared by a loop group (epoll, kqueue, IOCP), I/O
+    /// submitted by any loop of the group keeps every loop of the group busy.
     /// Completions handed out via `nextDispatched` are already finished and do
     /// not keep the loop running.
     pub fn done(self: *const Loop) bool {
-        return self.state.stopped or (self.state.loadActive() == 0 and self.state.completions.empty());
+        if (self.state.stopped) return true;
+        if (self.backend.hasInflight()) return false;
+        for (&self.state.timers) |*heap| {
+            if (!heap.isEmpty()) return false;
+        }
+        return self.state.async_handles.empty() and
+            self.state.pool_inflight == 0 and
+            self.state.completions.empty();
     }
 
     /// Get the current monotonic timestamp
@@ -624,8 +607,8 @@ pub const Loop = struct {
         defer self.state.unlockTimers();
         const st = timer.c.loadState();
         // A running timer sits in its owning loop's heap; re-arming it here
-        // would remove it from this loop's heap instead and leak the owner's
-        // active count. Clear it on the owning loop first.
+        // would remove it from this loop's heap instead. Clear it on the owning
+        // loop first.
         std.debug.assert(st.phase != .running or timer.c.getLoop() == self);
         // A running timer with a result set is mid-fire (out of the heap, its
         // markCompleted pending outside this lock); rearm from the callback
@@ -642,7 +625,6 @@ pub const Loop = struct {
             timer.c.err = null;
             timer.c.setLoop(self);
             _ = timer.c.enterRunning();
-            self.state.incrActive();
         }
         self.state.armTimer(timer);
     }
@@ -672,7 +654,6 @@ pub const Loop = struct {
         // sitting in this loop's cancel queue); it owns the finish dispatch.
         if (!timer.c.tryDisarm()) return false;
         self.state.disarmTimer(timer);
-        self.state.decrActive();
         return true;
     }
 
@@ -856,7 +837,6 @@ pub const Loop = struct {
         if (old.phase == .dead) {
             completion.reset();
         }
-        self.state.incrActive();
 
         if (old.cancel_requested) {
             // Groups cannot be canceled before submission
@@ -913,6 +893,7 @@ pub const Loop = struct {
                 work.completion_fn = loopWorkComplete;
                 work.completion_context = @ptrCast(self);
                 if (self.thread_pool) |thread_pool| {
+                    self.state.pool_inflight += 1;
                     thread_pool.submit(work);
                 } else {
                     work.state.store(.completed, .release);
@@ -1136,6 +1117,7 @@ pub const Loop = struct {
     pub fn processCompletions(self: *Loop) void {
         var work_completions = self.state.work_completions.popAll();
         while (work_completions.pop()) |completion| {
+            self.state.pool_inflight -= 1;
             // Drop from the cancel-resend list before finalizing: markCompleted
             // wakes the waiter, whose coroutine may then free the op (and its
             // token). Removing here keeps the sweep from touching freed memory.
@@ -1235,6 +1217,7 @@ pub const Loop = struct {
                 op_data.linked_work.work.completion_fn = loopLinkedWorkComplete;
                 op_data.linked_work.work.completion_context = @ptrCast(&op_data.linked_work.linked_context);
                 op_data.linked_work.work.cancel_token = &op_data.linked_work.token;
+                self.state.pool_inflight += 1;
                 tp.submit(&op_data.linked_work.work);
             },
             else => unreachable,

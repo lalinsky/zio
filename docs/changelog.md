@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- The event loop no longer keeps an atomic count of active completions, which saves two locked
+  instructions per operation; `Loop.done()` now checks pending I/O, timers, async handles and
+  thread-pool jobs directly.
+
 - **Breaking:** compile-time options now come from a `pub const zio_options: zio.Options`
   declaration in the root module instead of `b.dependency` build options, and
   `.scheduling` (`.single_executor`, `.pinned` or `.work_stealing`) replaces the
