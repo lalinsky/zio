@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- The event loop no longer keeps an atomic count of active completions, which saves two atomic
+  counter updates per operation, and `Loop.done()` is no longer public.
+
 - **Breaking:** compile-time options now come from a `pub const zio_options: zio.Options`
   declaration in the root module instead of `b.dependency` build options, and
   `.scheduling` (`.single_executor`, `.pinned` or `.work_stealing`) replaces the
