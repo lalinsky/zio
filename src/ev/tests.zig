@@ -1,6 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Loop = @import("loop.zig").Loop;
+const LoopGroup = @import("loop.zig").LoopGroup;
+const zio_options = @import("../options.zig").options;
 const Timer = @import("completion.zig").Timer;
 const Async = @import("completion.zig").Async;
 const NetClose = @import("completion.zig").NetClose;
@@ -34,6 +36,17 @@ test {
     _ = @import("test/blocking_sockets.zig");
     _ = @import("test/process_wait.zig");
     _ = @import("test/async_stress.zig");
+}
+
+test "Loop: a loop group is only accepted with work stealing" {
+    var group: LoopGroup = .{};
+    var loop: Loop = undefined;
+    if (zio_options.scheduling.migrates()) {
+        try loop.init(.{ .loop_group = &group });
+        loop.deinit();
+    } else {
+        try std.testing.expectError(error.LoopGroupRequiresWorkStealing, loop.init(.{ .loop_group = &group }));
+    }
 }
 
 test "Loop: empty poll(.zero)" {

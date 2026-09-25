@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const zio_options = @import("../options.zig").options;
 const Backend = @import("backend.zig").Backend;
 const Completion = @import("completion.zig").Completion;
 const Group = @import("completion.zig").Group;
@@ -494,12 +495,19 @@ pub const Loop = struct {
     pub const Options = struct {
         allocator: std.mem.Allocator = std.heap.page_allocator,
         thread_pool: ?*ThreadPool = null,
+        /// Share backend state with other loops, which then service and
+        /// complete each other's operations. Only accepted with
+        /// `.work_stealing` scheduling: with `.pinned` and `.single_executor`
+        /// every loop is independent.
         loop_group: ?*LoopGroup = null,
         queue_size: u16 = default_queue_size,
         do_not_call_callbacks: bool = false,
     };
 
     pub fn init(self: *Loop, options: Options) !void {
+        if (options.loop_group != null and !zio_options.scheduling.migrates()) {
+            return error.LoopGroupRequiresWorkStealing;
+        }
         self.* = .{
             .state = .{ .loop = self },
             .backend = undefined,

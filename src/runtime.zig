@@ -11,6 +11,14 @@ const migrates = zio_options.scheduling.migrates();
 
 const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
+
+comptime {
+    // An IOCP handle binds to one completion port for its lifetime. Pinned
+    // executors run independent loops, each with its own port, so a socket
+    // created on one executor could not be used by a task homed on another.
+    if (zio_options.scheduling == .pinned and ev.backend == .iocp)
+        @compileError("zio: .pinned scheduling is not supported on the IOCP backend");
+}
 const cgroup = @import("cgroup.zig");
 
 const meta = @import("meta.zig");
@@ -553,10 +561,14 @@ pub const Executor = struct {
         try random_mod.setup(&self.random_state);
         if (migrates) self.stealing.prng = .init(self.random_state.csprng.random().int(u64));
 
+        // Only migrating executors share a loop group: a migrated task's I/O
+        // stays on the loop that submitted it, so another executor's loop must
+        // be able to service and complete it. Pinned and single-executor loops
+        // are independent.
         try self.loop.init(.{
             .allocator = self.runtime.allocator,
             .thread_pool = &self.runtime.thread_pool,
-            .loop_group = &self.runtime.loop_group,
+            .loop_group = if (migrates) &self.runtime.loop_group else null,
         });
         errdefer self.loop.deinit();
 
@@ -1438,7 +1450,7 @@ pub const Runtime = struct {
 
     executors: std.ArrayList(*Executor) = .empty,
     stealing: Stealing = .{},
-    loop_group: ev.LoopGroup = .{},
+    loop_group: if (migrates) ev.LoopGroup else void = if (migrates) .{} else {},
     main_executor: Executor,
     next_executor_index: std.atomic.Value(usize) = .init(0),
     workers: std.ArrayList(Worker) = .empty,
