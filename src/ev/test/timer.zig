@@ -52,7 +52,6 @@ test "clearTimer before expiration" {
 
     // Should be very fast since there's nothing to wait for
     try std.testing.expect(elapsed.toMilliseconds() < 200);
-    try std.testing.expect(loop.done());
     std.log.info("clearTimer: elapsed={f}", .{elapsed});
 }
 

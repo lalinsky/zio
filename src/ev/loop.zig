@@ -569,7 +569,11 @@ pub const Loop = struct {
     /// submitted by any loop of the group keeps every loop of the group busy.
     /// Completions handed out via `nextDispatched` are already finished and do
     /// not keep the loop running.
-    pub fn done(self: *const Loop) bool {
+    ///
+    /// Only meaningful between polls (`run` and the guard in `poll`): while
+    /// callbacks run, completions detached into a local batch by
+    /// `processCompletions` or `checkTimers` are not visible here.
+    fn done(self: *const Loop) bool {
         if (self.state.stopped) return true;
         if (self.backend.hasInflight()) return false;
         for (&self.state.timers) |*heap| {
