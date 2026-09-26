@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- With work stealing, an executor that runs out of work now waits up to 250µs for its own
+  event loop without announcing itself as idle, so other executors no longer drag it into
+  stealing on every short gap, which cut CPU per event by up to 28% and raised saturated
+  throughput by 18% in a many-stream server benchmark.
+
 - `Loop.wake()` no longer makes a syscall when the target loop isn't blocked in its poll;
   the request is picked up by the loop's next poll instead.
 
