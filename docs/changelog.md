@@ -7,6 +7,10 @@ All notable changes to this project will be documented in this file.
 - With `.single_executor` scheduling, event loop completions change state with plain loads and
   stores instead of atomic read-modify-writes, and a `LoopGroup` accepts only one loop.
 
+- Added `spawnInto` to `Runtime`, `Group` and `zio`, which spawns a task with a `Placement`
+  (`.auto`, `.local` or `.executor = id`); fixed placements need scheduling without
+  migration and otherwise fail with `error.InvalidPlacement`.
+
 - On io_uring, socket reads and writes with a single buffer use `RECV`/`SEND` instead of
   `RECVMSG`/`SENDMSG`, which raised 64-byte TCP echo throughput by about 5%.
 
