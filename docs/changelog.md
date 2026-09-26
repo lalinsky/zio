@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `Loop.wake()` no longer makes a syscall when the target loop isn't blocked in its poll;
+  the request is picked up by the loop's next poll instead.
+
 - Added `spawnInto` to `Runtime`, `Group` and `zio`, which spawns a task with a `Placement`
   (`.auto`, `.local` or `.executor = id`); fixed placements need scheduling without
   migration and otherwise fail with `error.InvalidPlacement`.
