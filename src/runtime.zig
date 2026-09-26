@@ -412,6 +412,10 @@ pub const SchedulerMetrics = struct {
     steal_hits: u64 = 0,
     /// Steals satisfied by the hinted victim on the first probe.
     steal_hint_hits: u64 = 0,
+    /// Indefinite parks capped at baton_tick because this executor held the
+    /// rescue baton / tasks taken from an executor stuck in one task.
+    baton_parks: u64 = 0,
+    rescues: u64 = 0,
     /// Dispatched-queue drains that woke at least one task / tasks woken.
     drain_batches: u64 = 0,
     drain_woken: u64 = 0,
@@ -455,6 +459,14 @@ pub const Executor = struct {
         /// work; armSearcher writes it just before the wake, stealWork consumes
         /// it as the scan's starting victim. `no_steal_hint` means none.
         hint: std.atomic.Value(u32) = .init(no_steal_hint),
+
+        /// Whether this executor holds the rescue baton. Owner-only shadow
+        /// of Runtime.Stealing.baton.
+        holds_baton: bool = false,
+        /// While holding the baton: each executor's ring head at the last
+        /// rescue scan, and when that scan ran (0 for none yet).
+        rescue_heads: [max_executors]u32 = @splat(0),
+        rescue_scan_at: u64 = 0,
     } else struct {};
 
     id: ExecutorId,
@@ -694,6 +706,11 @@ pub const Executor = struct {
     /// work elsewhere reaches it within doze_wait, not within a wake.
     const doze_wait: Duration = .fromMicroseconds(250);
 
+    /// How long the rescue baton holder parks at most, and the minimum time
+    /// between its rescue scans (see park). A task stuck behind a running
+    /// task that doesn't yield is taken within one to two of these.
+    const baton_tick: Duration = .fromMilliseconds(10);
+
     /// True while the current tick may keep spending quanta without polling.
     inline fn tickBudgetLeft(self: *const Executor) bool {
         return self.tick_task_count < self.tick_task_budget and !self.tick_expired;
@@ -786,7 +803,10 @@ pub const Executor = struct {
             // as the tick budget, but consulted here rather than in the
             // retune below: the park decision runs between the two, and it
             // must see the fresh value.
-            if (migrates and self.tick_task_count > 0) self.stealing.dozed = false;
+            if (migrates and self.tick_task_count > 0) {
+                self.stealing.dozed = false;
+                self.releaseBaton();
+            }
 
             // Exit if loop is stopped
             if (self.loop.stopped()) {
@@ -870,11 +890,18 @@ pub const Executor = struct {
             }
         }
         self.bump("parks_full", 1);
-        return self.park(check_ready);
+        try self.park(check_ready);
+        // Leaving a full park with work in hand: if nobody holds the rescue
+        // baton, hand it to a parked executor before running anything, since
+        // the first task may never yield (see Runtime.passBaton).
+        if (!self.run_queue.isEmpty() or (check_ready and self.main_task.state.load(.acquire).tag == .ready)) {
+            self.runtime.passBaton(self.id);
+        }
     }
 
     /// One indefinite park: publish the idle bit, give the event loop one
-    /// unbounded poll, withdraw the bit. If armSearcher elected this executor
+    /// unbounded poll, withdraw the bit. The holder of the rescue baton caps
+    /// that poll at baton_tick instead (see holdBaton). If armSearcher elected this executor
     /// as the searcher meanwhile, run the searcher-token protocol: consume the
     /// token by finding work, or release it and steal on the pusher's behalf.
     ///
@@ -898,7 +925,10 @@ pub const Executor = struct {
 
         var found_work = self.checkLocalWork(check_ready);
         if (!found_work) found_work = self.stealWork();
-        try self.loop.poll(if (found_work) .zero else .max);
+        if (!found_work) found_work = self.rescueStuck();
+        const wait: Duration = if (found_work) .zero else if (self.holdBaton()) baton_tick else .max;
+        if (wait.value == baton_tick.value) self.bump("baton_parks", 1);
+        try self.loop.poll(wait);
         // Drain before withdrawing the bit, so the post-park work checks
         // below see the woken batch.
         self.drainDispatched();
@@ -934,6 +964,59 @@ pub const Executor = struct {
             // arming a fresh searcher.
             if (self.checkLocalWork(false)) self.runtime.armSearcher(self.id);
         }
+    }
+
+    /// Take or keep the rescue baton while some executor is busy, so that one
+    /// parked executor looks for stuck tasks every baton_tick; give it up
+    /// when every executor is parked. Pushes onto an empty ring don't
+    /// announce (see scheduleTaskLocal), so a task queued behind a running
+    /// task that never yields is found only by this scan. A runtime whose
+    /// executors are all parked holds no baton and wakes nobody.
+    fn holdBaton(self: *Executor) bool {
+        if (!migrates) return false;
+        const executors = self.runtime.executors.items.len;
+        const all: usize = if (executors >= @bitSizeOf(usize)) std.math.maxInt(usize) else (@as(usize, 1) << @intCast(executors)) - 1;
+        if (self.runtime.stealing.idle_mask.load(.acquire) & all == all) {
+            self.releaseBaton();
+            return false;
+        }
+        if (self.stealing.holds_baton) return true;
+        if (self.runtime.stealing.baton.cmpxchgStrong(0, @as(u32, self.id) + 1, .acq_rel, .monotonic) != null) return false;
+        self.stealing.holds_baton = true;
+        self.stealing.rescue_scan_at = 0;
+        _ = self.rescueStuck(); // record the heads to compare against
+        return true;
+    }
+
+    fn releaseBaton(self: *Executor) void {
+        if (!migrates or !self.stealing.holds_baton) return;
+        self.stealing.holds_baton = false;
+        self.runtime.stealing.baton.store(0, .release);
+    }
+
+    /// Baton holder only, at most once per baton_tick: take work from an
+    /// executor whose ring held tasks but whose head didn't move since the
+    /// last scan, i.e. which is stuck in a single task. Records every head
+    /// for the next scan.
+    fn rescueStuck(self: *Executor) bool {
+        if (!migrates or !self.stealing.holds_baton) return false;
+        const now_ns = Timestamp.now(.monotonic).toNanoseconds();
+        const first = self.stealing.rescue_scan_at == 0;
+        if (!first and now_ns -| self.stealing.rescue_scan_at < baton_tick.toNanoseconds()) return false;
+        self.stealing.rescue_scan_at = now_ns;
+        for (self.runtime.executors.items) |victim| {
+            if (victim == self) continue;
+            const head = victim.run_queue.headCursor();
+            const previous = self.stealing.rescue_heads[victim.id];
+            self.stealing.rescue_heads[victim.id] = head;
+            if (first or head != previous or victim.run_queue.isEmpty()) continue;
+            if (self.run_queue.steal(&victim.run_queue)) |node| {
+                _ = self.run_queue.push(node);
+                self.bump("rescues", 1);
+                return true;
+            }
+        }
+        return false;
     }
 
     /// Local work check: the main task (when `check_main_ready`), the ring,
@@ -1051,17 +1134,17 @@ pub const Executor = struct {
 
         std.debug.assert(getCurrentExecutorOrNull() == self);
 
-        // A first task pushed onto an empty ring from scheduler context (an
-        // I/O completion wake) needs no searcher: this executor is inside its
-        // run loop and pops it right after completion processing — no thief
-        // can beat that, an announcement can only drag the task (and its I/O
-        // home) to another executor for nothing. Wakes from a running task
-        // still announce, since the waker may keep the executor busy.
+        // Only surplus is announced. A task pushed onto an empty ring is the
+        // one this executor runs next: right after completion processing
+        // when woken from scheduler context, or as soon as the waker blocks
+        // when woken by a running task. An announcement could only drag it
+        // (and its I/O home) to another executor. A second queued task is
+        // work this executor can't get to right away, so that push elects a
+        // searcher. A lone task behind a waker that never yields is taken by
+        // the rescue baton holder (see holdBaton).
         const was_empty = self.run_queue.push(&task.awaitable.wait_node);
         if (self.draining_wakes) return; // one batched announce after the drain
-        if (!was_empty or self.current_task != null) {
-            self.runtime.armSearcher(self.id);
-        }
+        if (!was_empty) self.runtime.armSearcher(self.id);
     }
 
     /// Drain the completions the loop handed out instead of calling (null
@@ -1506,6 +1589,9 @@ pub const Runtime = struct {
         idle_mask: std.atomic.Value(usize) = .init(0),
         /// The single-searcher token, see armSearcher.
         searchers: std.atomic.Value(u32) = .init(0),
+        /// Id + 1 of the executor holding the rescue baton, or 0 (see
+        /// Executor.park).
+        baton: std.atomic.Value(u32) = .init(0),
     } else struct {};
 
     const Worker = struct {
@@ -1614,13 +1700,15 @@ pub const Runtime = struct {
                 var delta = total;
                 delta.sub(last);
                 last = total;
-                log.info("scheduler: parks doze={d} full={d} elections={d} steals={d}/{d} hint_hits={d} drains={d} woken={d} batch_claims={d}", .{
+                log.info("scheduler: parks doze={d} full={d} baton={d} elections={d} steals={d}/{d} hint_hits={d} rescues={d} drains={d} woken={d} batch_claims={d}", .{
                     delta.parks_doze,
                     delta.parks_full,
+                    delta.baton_parks,
                     delta.park_elections,
                     delta.steal_hits,
                     delta.steal_attempts,
                     delta.steal_hint_hits,
+                    delta.rescues,
                     delta.drain_batches,
                     delta.drain_woken,
                     delta.batch_wake_claims,
@@ -1846,6 +1934,18 @@ pub const Runtime = struct {
         if (!self.claimAndWake(hint, null)) {
             _ = self.stealing.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
         }
+    }
+
+    /// Called by an executor leaving a full park with work: if nobody holds
+    /// the rescue baton and some executor is parked, wake one to take it. The
+    /// baton is released whenever every executor is parked, so this is the
+    /// wake that brings it back when work starts after full idleness; while a
+    /// holder exists it is one load.
+    fn passBaton(self: *Runtime, from: ExecutorId) void {
+        if (!migrates) return;
+        if (self.stealing.baton.load(.monotonic) != 0) return;
+        if (self.stealing.idle_mask.load(.monotonic) == 0) return;
+        _ = self.claimAndWake(null, from);
     }
 
     /// Claim one parked executor from the idle mask (skipping `exclude`),
@@ -2386,6 +2486,50 @@ test "runtime: multi-threaded execution with 2 executors" {
     try std.testing.expect(!group.hasFailed());
 
     try std.testing.expectEqual(4, TestContext.counter);
+}
+
+test "runtime: a task stuck behind a waker that never yields is rescued" {
+    if (!migrates) return error.SkipZigTest;
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    defer runtime.deinit();
+
+    const Channel = @import("sync/channel.zig").Channel;
+
+    const Ctx = struct {
+        wake: Channel(u32),
+        waiting: std.atomic.Value(bool) = .init(false),
+        ran: std.atomic.Value(bool) = .init(false),
+
+        fn waiter(ctx: *@This()) !void {
+            ctx.waiting.store(true, .release);
+            _ = try ctx.wake.receive();
+            ctx.ran.store(true, .release);
+        }
+
+        // Lets every executor park, then wakes the waiter, which queues on
+        // this executor without an announce, and keeps the executor busy
+        // without yielding: the waiter runs only if another executor takes it.
+        fn spinner(ctx: *@This()) !void {
+            while (!ctx.waiting.load(.acquire)) try yield();
+            try sleep(.fromMilliseconds(20));
+            try ctx.wake.send(1);
+            const deadline = Timestamp.now(.monotonic).addDuration(.fromSeconds(2));
+            while (!ctx.ran.load(.acquire)) {
+                if (Timestamp.now(.monotonic).toNanoseconds() >= deadline.toNanoseconds()) return error.Timeout;
+                std.atomic.spinLoopHint();
+            }
+        }
+    };
+    var ctx: Ctx = .{ .wake = .init(&.{}) };
+
+    var group: Group = .init;
+    defer group.cancel();
+    try group.spawn(Ctx.waiter, .{&ctx});
+    try group.spawn(Ctx.spinner, .{&ctx});
+    try group.wait();
+    try std.testing.expect(!group.hasFailed());
+    try std.testing.expect(ctx.ran.load(.acquire));
 }
 
 test "runtime: local ring overflow spills and drains with pinned scheduling" {
