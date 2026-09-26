@@ -692,7 +692,7 @@ pub const Executor = struct {
     /// work before any task is dragged to another executor. The doze is not
     /// announced in idle_mask, so no pusher elects a dozing executor: excess
     /// work elsewhere reaches it within doze_wait, not within a wake.
-    const doze_wait: Duration = .fromMicroseconds(100);
+    const doze_wait: Duration = .fromMicroseconds(250);
 
     /// True while the current tick may keep spending quanta without polling.
     inline fn tickBudgetLeft(self: *const Executor) bool {
