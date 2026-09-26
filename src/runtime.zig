@@ -689,9 +689,9 @@ pub const Executor = struct {
     /// concludes it is genuinely idle and stealing is worth the churn. An I/O
     /// completion typically re-readies the very tasks that just ran here (their
     /// ops are homed on this loop), so the loop gets this long to produce local
-    /// work before any task is dragged to another executor. The idle bit is set
-    /// while dozing, so a searcher wake still cuts the doze short — excess work
-    /// elsewhere reaches this executor within a wake, not within doze_wait.
+    /// work before any task is dragged to another executor. The doze is not
+    /// announced in idle_mask, so no pusher elects a dozing executor: excess
+    /// work elsewhere reaches it within doze_wait, not within a wake.
     const doze_wait: Duration = .fromMicroseconds(100);
 
     /// True while the current tick may keep spending quanta without polling.
@@ -840,14 +840,16 @@ pub const Executor = struct {
     /// work between calls and resets `dozed` whenever any of those produce
     /// work.
     ///
-    /// The first empty pass after productive work probes the loop with a
-    /// non-blocking poll and, if that yields nothing, dozes: a park capped at
-    /// doze_wait whose work check is local-only. Together they give this
+    /// The first empty pass after productive work dozes: a plain loop poll
+    /// capped at doze_wait, with the idle bit left clear. It gives this
     /// executor's own event loop a grace window to hand back the tasks that
-    /// just ran here before any stealing churn is paid. Every later pass
-    /// parks indefinitely with stealing folded into the pre-park check — by
-    /// then idleness is proven and the steal is also what makes the park's
-    /// wake protocol sound (see park).
+    /// just ran here before any stealing churn is paid; completions that have
+    /// already arrived return it to the busy path without a wait. Wakes for
+    /// tasks homed here still arrive through loop.wake(), and the cap bounds
+    /// how long work pushed elsewhere can go unstolen. Every later pass parks
+    /// indefinitely with stealing folded into the pre-park check — by then
+    /// idleness is proven and the steal is also what makes the park's wake
+    /// protocol sound (see park).
     fn parkAndSearch(self: *Executor, check_ready: bool) !void {
         if (!migrates) {
             self.bump("parks_full", 1);
@@ -858,41 +860,30 @@ pub const Executor = struct {
 
         if (!self.stealing.dozed) {
             self.stealing.dozed = true;
-            // With nobody to steal from (or to) the probe and doze would only
-            // delay the real park; skip both.
+            // With nobody to steal from (or to) the doze would only delay
+            // the real park; skip it.
             if (self.runtime.stealingActive()) {
-                // Probe: one non-blocking poll before publishing any idleness.
-                // Completions that already arrived (the common case right
-                // after a drain) put this executor straight back on the busy
-                // path without touching idle_mask or inviting a spurious
-                // searcher election.
-                try self.loop.poll(.zero);
-                self.drainDispatched();
-                if (self.checkLocalWork(check_ready)) return;
                 self.bump("parks_doze", 1);
-                return self.park(check_ready, doze_wait, .local_only);
+                try self.loop.poll(doze_wait);
+                self.drainDispatched();
+                return;
             }
         }
         self.bump("parks_full", 1);
-        return self.park(check_ready, .max, .steal);
+        return self.park(check_ready);
     }
 
-    const ParkSearch = enum { local_only, steal };
-
-    /// One park episode: publish the idle bit, give the event loop one poll
-    /// bounded by `wait_cap`, withdraw the bit. If armSearcher elected this
-    /// executor as the searcher meanwhile, run the searcher-token protocol:
-    /// consume the token by finding work, or release it and steal on the
-    /// pusher's behalf.
+    /// One indefinite park: publish the idle bit, give the event loop one
+    /// unbounded poll, withdraw the bit. If armSearcher elected this executor
+    /// as the searcher meanwhile, run the searcher-token protocol: consume the
+    /// token by finding work, or release it and steal on the pusher's behalf.
     ///
-    /// With `search == .steal` the pre-park work check extends to the other
-    /// executors' rings. That is what makes an indefinite park sound: the bit
-    /// is published before the check while a pusher publishes its task before
-    /// reading idle_mask (both seq_cst), so either the pusher sees the bit and
-    /// wakes us, or this check sees the pushed task — including one sitting in
-    /// the pusher's own ring. A `.local_only` check (the doze) reopens that
-    /// window, but only for doze_wait: the cap itself is the rescue.
-    fn park(self: *Executor, check_ready: bool, wait_cap: Duration, search: ParkSearch) !void {
+    /// The pre-park work check extends to the other executors' rings. That is
+    /// what makes the indefinite park sound: the bit is published before the
+    /// check while a pusher publishes its task before reading idle_mask (both
+    /// seq_cst), so either the pusher sees the bit and wakes us, or this check
+    /// sees the pushed task — including one sitting in the pusher's own ring.
+    fn park(self: *Executor, check_ready: bool) !void {
         const my_bit = @as(usize, 1) << self.id;
         // seq_cst: pairs with armSearcher's idle_mask load (see there). The bit
         // must be globally visible before the work check below, or a concurrent
@@ -906,8 +897,8 @@ pub const Executor = struct {
         }
 
         var found_work = self.checkLocalWork(check_ready);
-        if (!found_work and search == .steal) found_work = self.stealWork();
-        try self.loop.poll(if (found_work) .zero else wait_cap);
+        if (!found_work) found_work = self.stealWork();
+        try self.loop.poll(if (found_work) .zero else .max);
         // Drain before withdrawing the bit, so the post-park work checks
         // below see the woken batch.
         self.drainDispatched();

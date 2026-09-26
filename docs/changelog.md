@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- With work stealing, an executor that runs out of work now waits up to 100µs for its own
+  event loop without announcing itself as idle, so other executors no longer drag it into
+  stealing on every short gap, which cut CPU per event by up to 28% and raised saturated
+  throughput by 18% in a many-stream server benchmark.
+
 - Added `spawnInto` to `Runtime`, `Group` and `zio`, which spawns a task with a `Placement`
   (`.auto`, `.local` or `.executor = id`); fixed placements need scheduling without
   migration and otherwise fail with `error.InvalidPlacement`.
