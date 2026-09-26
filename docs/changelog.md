@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- With `.single_executor` scheduling, event loop completions change state with plain loads and
+  stores instead of atomic read-modify-writes, and a `LoopGroup` accepts only one loop.
+
 - Added `spawnInto` to `Runtime`, `Group` and `zio`, which spawns a task with a `Placement`
   (`.auto`, `.local` or `.executor = id`); fixed placements need scheduling without
   migration and otherwise fail with `error.InvalidPlacement`.

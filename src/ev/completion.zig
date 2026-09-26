@@ -1,5 +1,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const zio_options = @import("../options.zig").options;
+
+/// With `.single_executor` scheduling each completion is only ever touched by
+/// its own loop's thread: `Loop.init` allows one loop per group, and
+/// `Loop.cancel` refuses completions owned by another loop. State transitions
+/// are then plain loads and stores instead of atomic read-modify-writes.
+pub const single_owner = zio_options.scheduling == .single_executor;
 const posix = @import("../os/posix.zig");
 
 const Loop = @import("loop.zig").Loop;
@@ -362,7 +369,7 @@ pub const Completion = struct {
                 .phase = .running,
                 .cancel_requested = old.cancel_requested and old.phase == .new,
             };
-            old = c.state.cmpxchgWeak(old, new_state, .acq_rel, .monotonic) orelse return old;
+            old = c.casState(old, new_state) orelse return old;
         }
     }
 
@@ -374,7 +381,7 @@ pub const Completion = struct {
             std.debug.assert(old.phase == .running);
             var new_state = old;
             new_state.phase = .completed;
-            old = c.state.cmpxchgWeak(old, new_state, .acq_rel, .monotonic) orelse return old;
+            old = c.casState(old, new_state) orelse return old;
         }
     }
 
@@ -399,7 +406,7 @@ pub const Completion = struct {
             std.debug.assert(old.phase == .running);
             if (old.cancel_inflight) return false;
             const new_state: State = .{ .phase = .new, .cancel_requested = old.cancel_requested };
-            old = c.state.cmpxchgWeak(old, new_state, .acq_rel, .monotonic) orelse return true;
+            old = c.casState(old, new_state) orelse return true;
         }
     }
 
@@ -415,7 +422,7 @@ pub const Completion = struct {
             var new_state = old;
             new_state.cancel_requested = true;
             new_state.cancel_inflight = old.phase == .running;
-            old = c.state.cmpxchgWeak(old, new_state, .acq_rel, .monotonic) orelse return old;
+            old = c.casState(old, new_state) orelse return old;
         }
     }
 
@@ -423,8 +430,26 @@ pub const Completion = struct {
     /// previous state: phase `.completed` means the completion finished during
     /// the pass and the caller owns its dispatch.
     pub fn finishCancelPass(c: *Completion) State {
+        if (single_owner) {
+            const old = c.loadState();
+            var new_state = old;
+            new_state.cancel_inflight = false;
+            c.state.store(new_state, .monotonic);
+            return old;
+        }
         const mask: u8 = @bitCast(State{ .cancel_inflight = true });
         return @bitCast(@atomicRmw(u8, @as(*u8, @ptrCast(&c.state.raw)), .And, ~mask, .acq_rel));
+    }
+
+    /// Compare-and-set of the state word; returns null on success, like
+    /// `cmpxchgWeak`. With a single owner nothing else writes the word, so it
+    /// is a plain store that always succeeds.
+    inline fn casState(c: *Completion, old: State, new_state: State) ?State {
+        if (single_owner) {
+            c.state.store(new_state, .monotonic);
+            return null;
+        }
+        return c.state.cmpxchgWeak(old, new_state, .acq_rel, .monotonic);
     }
 
     /// Clear per-incarnation fields when re-adding a dead completion.
