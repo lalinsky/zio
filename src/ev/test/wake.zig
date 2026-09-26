@@ -43,7 +43,7 @@ test "Loop: wakes from another thread always end the poll they race with" {
         loop: Loop = undefined,
         ready: std.atomic.Value(bool) = .init(false),
         stop: std.atomic.Value(bool) = .init(false),
-        polls: std.atomic.Value(u64) = .init(0),
+        polls: std.atomic.Value(u32) = .init(0),
         wake_done: std.atomic.Value(bool) = .init(false),
         keep_alive: Timer = .init(.{ .duration = .zero }),
 

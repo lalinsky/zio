@@ -283,8 +283,9 @@ pub const LoopState = struct {
     pub const wake_loop: u32 = 1;
     pub const wake_async: u32 = 2;
     pub const wake_cancel: u32 = 4;
-    /// Set by the loop just before a blocking backend poll.
-    pub const sleeping: u32 = 8;
+    /// Set by the loop just before a blocking backend poll. The top bit,
+    /// apart from the request bits below it.
+    pub const sleeping: u32 = 1 << 31;
     const wake_mask: u32 = wake_loop | wake_async | wake_cancel;
 
     /// Record a wake request. Returns true if the caller must also wake the
