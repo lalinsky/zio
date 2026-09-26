@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- With work stealing, a task woken onto an executor's empty run queue no longer wakes an idle
+  executor to steal it, since its own executor runs it next; one parked executor instead
+  checks every 10ms for a task stuck behind another task that never yields.
+
 - With work stealing, an executor that runs out of work now waits up to 250µs for its own
   event loop without announcing itself as idle, so other executors no longer drag it into
   stealing on every short gap, which cut CPU per event by up to 28% and raised saturated
