@@ -228,6 +228,9 @@ pub const LoopState = struct {
     /// drained from `work_completions`. Owner thread only.
     pool_inflight: usize = 0,
 
+    /// Wake requests (`wake_loop`, `wake_async`, `wake_cancel`) plus the
+    /// `sleeping` bit the loop sets before a blocking backend poll. Cleared
+    /// as a whole after every poll. See `requestWake`.
     wake_requested: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     /// Cached "now" per wall clock, indexed by `clockIndex`. `awake` is
@@ -280,6 +283,20 @@ pub const LoopState = struct {
     pub const wake_loop: u32 = 1;
     pub const wake_async: u32 = 2;
     pub const wake_cancel: u32 = 4;
+    /// Set by the loop just before a blocking backend poll.
+    pub const sleeping: u32 = 8;
+    const wake_mask: u32 = wake_loop | wake_async | wake_cancel;
+
+    /// Record a wake request. Returns true if the caller must also wake the
+    /// backend: the loop is blocked in (or about to enter) its poll and no
+    /// other request has woken it yet. A loop that isn't sleeping picks the
+    /// request up at its next poll without any syscall. Both sides do a single
+    /// read-modify-write on this one word, so they are totally ordered: either
+    /// the loop's `sleeping` comes first and the requester sees it, or the
+    /// request comes first and the loop sees it and doesn't block.
+    pub fn requestWake(self: *LoopState, bit: u32) bool {
+        return self.wake_requested.fetchOr(bit, .acq_rel) == sleeping;
+    }
 
     /// Called by backends when an operation they accepted completes. Tells the
     /// backend to drop its inflight count (the backend of the loop running the
@@ -589,20 +606,15 @@ pub const Loop = struct {
         return self.state.now[0];
     }
 
-    /// Wake up the loop from another thread (thread-safe)
+    /// Wake up the loop from another thread (thread-safe). Costs a syscall
+    /// only when the loop is sleeping in its poll and nobody has woken it yet.
     pub fn wake(self: *Loop) void {
-        // If we're the first to request a wake since the last poll, do the syscall.
-        // Subsequent wakers see true and skip - the syscall is already pending.
-        if (self.state.wake_requested.fetchOr(LoopState.wake_loop, .acq_rel) == 0) {
-            self.backend.wake(&self.state);
-        }
+        if (self.state.requestWake(LoopState.wake_loop)) self.backend.wake(&self.state);
     }
 
     /// Wake up the loop to process async handles (thread-safe)
     pub fn wakeAsync(self: *Loop) void {
-        if (self.state.wake_requested.fetchOr(LoopState.wake_async, .acq_rel) == 0) {
-            self.backend.wake(&self.state);
-        }
+        if (self.state.requestWake(LoopState.wake_async)) self.backend.wake(&self.state);
     }
 
     /// Set or reset a timer with a new timeout (works immediately, no completion required)
@@ -689,9 +701,7 @@ pub const Loop = struct {
                 head = target.cancel_queue.cmpxchgWeak(head, completion, .release, .acquire) orelse break;
             }
 
-            if (target.state.wake_requested.fetchOr(LoopState.wake_cancel, .acq_rel) == 0) {
-                target.backend.wake(&target.state);
-            }
+            if (target.state.requestWake(LoopState.wake_cancel)) target.backend.wake(&target.state);
         }
     }
 
@@ -1411,8 +1421,17 @@ pub const Loop = struct {
         // Skip the backend poll when not waiting and there's nothing to retrieve.
         // This avoids syscall overhead for pure CPU-bound workloads.
         const should_poll = wait or self.backend.hasInflight();
+        if (should_poll and timeout.value != 0) {
+            // Announce the sleep, so wakers know a syscall is needed from
+            // here on. A request that got in first means there is no sleep.
+            if (self.state.wake_requested.fetchOr(LoopState.sleeping, .acq_rel) & LoopState.wake_mask != 0) {
+                timeout = .zero;
+            }
+        }
+        const timed_out = if (should_poll) try self.backend.poll(&self.state, timeout) else false;
+        // Awake again: take the requests, including any that arrived during
+        // the poll, and clear `sleeping`.
         const wake_flags = self.state.wake_requested.swap(0, .acq_rel);
-        const timed_out = if (should_poll) try self.backend.poll(&self.state, if (wake_flags != 0) .zero else timeout) else false;
 
         // The backend poll is the only place the loop sleeps, so the snapshot
         // is stale by the whole sleep here. Refresh before anything that can
