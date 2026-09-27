@@ -891,10 +891,12 @@ pub const Executor = struct {
         }
         self.bump("parks_full", 1);
         try self.park(check_ready);
-        // Leaving a full park with work in hand: if nobody holds the rescue
-        // baton, hand it to a parked executor before running anything, since
-        // the first task may never yield (see Runtime.passBaton).
+        // Leaving a full park with work in hand: a busy executor can't watch
+        // for stuck tasks, so give up the rescue baton if held, and if nobody
+        // holds it, hand it to a parked executor before running anything,
+        // since the first task may never yield (see Runtime.passBaton).
         if (!self.run_queue.isEmpty() or (check_ready and self.main_task.state.load(.acquire).tag == .ready)) {
+            self.releaseBaton();
             self.runtime.passBaton(self.id);
         }
     }
@@ -933,7 +935,9 @@ pub const Executor = struct {
         // below see the woken batch.
         self.drainDispatched();
 
-        const previous_bit = self.runtime.stealing.idle_mask.fetchAnd(~my_bit, .acq_rel);
+        // seq_cst: pairs with the baton holder's release and re-check (see
+        // holdBaton), ahead of this executor's baton load in passBaton.
+        const previous_bit = self.runtime.stealing.idle_mask.fetchAnd(~my_bit, .seq_cst);
 
         if (previous_bit & my_bit == 0) {
             self.bump("park_elections", 1);
@@ -977,8 +981,14 @@ pub const Executor = struct {
         const executors = self.runtime.executors.items.len;
         const all: usize = if (executors >= @bitSizeOf(usize)) std.math.maxInt(usize) else (@as(usize, 1) << @intCast(executors)) - 1;
         if (self.runtime.stealing.idle_mask.load(.acquire) & all == all) {
+            if (!self.stealing.holds_baton) return false;
             self.releaseBaton();
-            return false;
+            // An executor may be leaving its park right now, having read the
+            // baton before the release above. seq_cst, pairing with the idle
+            // bit clear and baton load in park and passBaton: either it sees
+            // the release and passes the baton on, or this sees its cleared
+            // bit and takes the baton back.
+            if (self.runtime.stealing.idle_mask.load(.seq_cst) & all == all) return false;
         }
         if (self.stealing.holds_baton) return true;
         if (self.runtime.stealing.baton.cmpxchgStrong(0, @as(u32, self.id) + 1, .acq_rel, .monotonic) != null) return false;
@@ -991,7 +1001,8 @@ pub const Executor = struct {
     fn releaseBaton(self: *Executor) void {
         if (!migrates or !self.stealing.holds_baton) return;
         self.stealing.holds_baton = false;
-        self.runtime.stealing.baton.store(0, .release);
+        // seq_cst: see holdBaton.
+        self.runtime.stealing.baton.store(0, .seq_cst);
     }
 
     /// Baton holder only, at most once per baton_tick: take work from an
@@ -1004,8 +1015,13 @@ pub const Executor = struct {
         const first = self.stealing.rescue_scan_at == 0;
         if (!first and now_ns -| self.stealing.rescue_scan_at < baton_tick.toNanoseconds()) return false;
         self.stealing.rescue_scan_at = now_ns;
-        for (self.runtime.executors.items) |victim| {
-            if (victim == self) continue;
+        // Only executors that aren't parked can be stuck in a task; a parked
+        // one may just be taking the task its own completions queued.
+        const executors = self.runtime.executors.items;
+        const all: usize = if (executors.len >= @bitSizeOf(usize)) std.math.maxInt(usize) else (@as(usize, 1) << @intCast(executors.len)) - 1;
+        var busy = all & ~self.runtime.stealing.idle_mask.load(.acquire) & ~(@as(usize, 1) << self.id);
+        while (busy != 0) : (busy &= busy - 1) {
+            const victim = executors[@ctz(busy)];
             const head = victim.run_queue.headCursor();
             const previous = self.stealing.rescue_heads[victim.id];
             self.stealing.rescue_heads[victim.id] = head;
@@ -1943,7 +1959,8 @@ pub const Runtime = struct {
     /// holder exists it is one load.
     fn passBaton(self: *Runtime, from: ExecutorId) void {
         if (!migrates) return;
-        if (self.stealing.baton.load(.monotonic) != 0) return;
+        // seq_cst: pairs with the holder's release (see Executor.holdBaton).
+        if (self.stealing.baton.load(.seq_cst) != 0) return;
         if (self.stealing.idle_mask.load(.monotonic) == 0) return;
         _ = self.claimAndWake(null, from);
     }
