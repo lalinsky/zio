@@ -370,6 +370,13 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
         pub fn isEmpty(self: *const Self) bool {
             return self.loadHead() == self.loadTail();
         }
+
+        /// The head cursor, which moves on every pop and steal. Readable from
+        /// any thread; a value unchanged over time with the ring non-empty
+        /// means nothing was taken from it meanwhile.
+        pub fn headCursor(self: *const Self) u32 {
+            return self.loadHead();
+        }
     };
 }
 
