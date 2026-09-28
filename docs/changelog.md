@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- With `.single_executor` scheduling, event loop completions change state with plain loads and
+  stores instead of atomic read-modify-writes, and a `LoopGroup` accepts only one loop.
+
 - With work stealing, a task woken onto an executor's empty run queue no longer wakes an idle
   executor to steal it, since its own executor runs it next; one parked executor instead
   checks every 10ms for a task stuck behind another task that never yields.
