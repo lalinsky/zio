@@ -7,6 +7,18 @@ All notable changes to this project will be documented in this file.
 - With `.single_executor` scheduling, event loop completions change state with plain loads and
   stores instead of atomic read-modify-writes, and a `LoopGroup` accepts only one loop.
 
+- With work stealing, a task woken onto an executor's empty run queue no longer wakes an idle
+  executor to steal it, since its own executor runs it next; one parked executor instead
+  checks every 10ms for a task stuck behind another task that never yields.
+
+- With work stealing, an executor that runs out of work now waits up to 250µs for its own
+  event loop without announcing itself as idle, so other executors no longer drag it into
+  stealing on every short gap, which cut CPU per event by up to 28% and raised saturated
+  throughput by 18% in a many-stream server benchmark.
+
+- `Loop.wake()` no longer makes a syscall when the target loop isn't blocked in its poll;
+  the request is picked up by the loop's next poll instead.
+
 - Added `spawnInto` to `Runtime`, `Group` and `zio`, which spawns a task with a `Placement`
   (`.auto`, `.local` or `.executor = id`); fixed placements need scheduling without
   migration and otherwise fail with `error.InvalidPlacement`.
