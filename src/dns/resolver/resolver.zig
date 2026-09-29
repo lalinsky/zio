@@ -119,6 +119,29 @@ pub const Resolver = struct {
         return &self.dedup_buckets[@as(usize, @truncate(key.hash)) & (num_dedup_buckets - 1)];
     }
 
+    /// Whether a lookup for `key` is in flight. Call with the bucket mutex held.
+    fn hasActive(bucket: *Bucket, key: *const CacheKey) bool {
+        var it = bucket.waiters.head;
+        while (it) |n| : (it = n.next) {
+            if (n.is_active and n.key.eql(key)) return true;
+        }
+        return false;
+    }
+
+    /// Promotes the first joiner waiting on the same lookup as `node` to be its
+    /// active requester, so the lookup survives `node` giving up; the other
+    /// joiners keep waiting on the promoted one. Call with the bucket mutex held.
+    fn handOff(bucket: *Bucket, node: *const WaiterNode) void {
+        var it = bucket.waiters.head;
+        while (it) |n| : (it = n.next) {
+            if (n != node and !n.is_active and !n.done and n.key.eql(&node.key)) {
+                n.is_active = true;
+                n.cond.signal();
+                return;
+            }
+        }
+    }
+
     fn nextQueryId(self: *Resolver) u16 {
         self.prng_mutex.lockUncancelable();
         defer self.prng_mutex.unlock();
@@ -276,28 +299,29 @@ pub const Resolver = struct {
 
         try bucket.mutex.lock();
 
-        var it = bucket.waiters.head;
-        while (it) |n| : (it = n.next) {
-            if (n.is_active and n.key.eql(&key)) {
-                // An identical lookup is already in flight — join it.
-                var node: WaiterNode = .{
-                    .key = key,
-                    .is_active = false,
-                    .storage = storage,
-                    .canonical_name_buffer = options.canonical_name_buffer,
-                };
-                bucket.waiters.push(&node);
+        var node: WaiterNode = .{
+            .key = key,
+            .is_active = !hasActive(bucket, &key),
+            .storage = storage,
+            .canonical_name_buffer = options.canonical_name_buffer,
+        };
+        bucket.waiters.push(&node);
 
-                while (!node.done) {
-                    node.cond.wait(&bucket.mutex) catch |err| {
-                        if (!node.done) {
-                            _ = bucket.waiters.remove(&node);
-                            bucket.mutex.unlock();
-                            return err;
-                        }
-                        break;
-                    };
-                }
+        if (!node.is_active) {
+            // An identical lookup is already in flight — join it. If its
+            // requester is canceled, it may promote this node to active instead.
+            while (!node.done and !node.is_active) {
+                node.cond.wait(&bucket.mutex) catch |err| {
+                    if (!node.done) {
+                        if (node.is_active) handOff(bucket, &node);
+                        _ = bucket.waiters.remove(&node);
+                        bucket.mutex.unlock();
+                        return err;
+                    }
+                    break;
+                };
+            }
+            if (node.done) {
                 _ = bucket.waiters.remove(&node);
                 bucket.mutex.unlock();
 
@@ -306,14 +330,6 @@ pub const Resolver = struct {
                 return .{ .count = node.count, .canonical_name_len = node.canonical_name_len };
             }
         }
-
-        // No in-flight lookup for this name+shape — become the active requester.
-        var active_node: WaiterNode = .{
-            .key = key,
-            .is_active = true,
-            .storage = storage,
-        };
-        bucket.waiters.push(&active_node);
         bucket.mutex.unlock();
 
         // Always resolve into an internal buffer sized for the full answer, so
@@ -327,11 +343,16 @@ pub const Resolver = struct {
             self.cacheInsert(options.name, shape, tmp[0..r.count], r.truncated, r.ttl, now_updated);
         } else |_| {}
 
-        // Notify all joiners, then remove the active node.
+        // Notify all joiners, then remove the active node. A cancellation is
+        // this requester's own, not an answer: pass the lookup on to a joiner.
         bucket.mutex.lockUncancelable();
-        var wit = bucket.waiters.head;
-        while (wit) |n| : (wit = n.next) {
-            if (!n.is_active and !n.done and n.key.eql(&key)) {
+        const canceled = if (result) |_| false else |err| err == error.Canceled;
+        if (canceled) {
+            handOff(bucket, &node);
+        } else {
+            var wit = bucket.waiters.head;
+            while (wit) |n| : (wit = n.next) {
+                if (n.is_active or n.done or !n.key.eql(&key)) continue;
                 if (result) |r| {
                     const c = @min(r.count, n.storage.len);
                     @memcpy(n.storage[0..c], tmp[0..c]);
@@ -349,7 +370,7 @@ pub const Resolver = struct {
                 n.cond.signal();
             }
         }
-        _ = bucket.waiters.remove(&active_node);
+        _ = bucket.waiters.remove(&node);
         bucket.mutex.unlock();
 
         const r = result catch |err| return err;
@@ -947,6 +968,8 @@ fn loadResolvConf(allocator: std.mem.Allocator, mtime_out: *i64) ResolvConf {
 // -- Tests --------------------------------------------------------------------
 
 const Runtime = @import("../../runtime.zig").Runtime;
+const yield = @import("../../runtime.zig").yield;
+const Event = @import("../../sync/Event.zig");
 
 /// Builds a DNS response for `query` with `num_answers` records of `qtype`,
 /// each answer's name a compression pointer to the question. Addresses are
@@ -1086,4 +1109,79 @@ test "queryBatch: dual-stack answers interleave IPv6-first" {
         try std.testing.expectEqual(family, entry.address.getFamily());
     }
     try server_task.join();
+}
+
+/// Counts the queries it receives, signals `first_received` on the first one
+/// and never answers it, then answers every later A query with one record.
+const DroppingDnsServer = struct {
+    fn run(sock: net.Socket, received: *usize, first_received: *Event) !void {
+        var qbuf: [512]u8 = undefined;
+        var rbuf: [4096]u8 = undefined;
+        while (true) {
+            const r = try sock.receiveFrom(&qbuf, .none);
+            received.* += 1;
+            if (received.* == 1) {
+                first_received.set();
+                continue;
+            }
+            const len = buildTestResponse(&rbuf, qbuf[0..r.len], 1, .a);
+            _ = try sock.sendTo(r.from, rbuf[0..len], .none);
+        }
+    }
+};
+
+fn lookupDedupTest(resolver: *Resolver) !usize {
+    var storage: [4]dns.LookupResult = undefined;
+    return resolver.lookup(&storage, .{ .name = "dedup.test.", .port = 80, .family = .ipv4 });
+}
+
+fn countJoiners(bucket: *Bucket, key: *const CacheKey) !usize {
+    try bucket.mutex.lock();
+    defer bucket.mutex.unlock();
+    var count: usize = 0;
+    var it = bucket.waiters.head;
+    while (it) |n| : (it = n.next) {
+        if (!n.is_active and n.key.eql(key)) count += 1;
+    }
+    return count;
+}
+
+test "lookup: canceling the active requester hands the lookup to one joiner" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const bind_addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    const sock = try bind_addr.bind(.{});
+    defer sock.close();
+
+    var received: usize = 0;
+    var first_received: Event = .init;
+    var server_task = try rt.spawn(DroppingDnsServer.run, .{ sock, &received, &first_received });
+    defer server_task.cancel();
+
+    var resolver = Resolver.init(std.testing.allocator);
+    defer resolver.deinit();
+    var servers = [_]net.IpAddress{sock.address.ip};
+    resolver.conf.servers = &servers;
+
+    var key: CacheKey = undefined;
+    CacheKey.init(&key, "dedup.test.", resolver.hash_seed, .ipv4);
+    const bucket = resolver.getDedupBucket(&key);
+
+    var active = try rt.spawn(lookupDedupTest, .{&resolver});
+    defer active.cancel();
+    try first_received.wait();
+
+    var joiner1 = try rt.spawn(lookupDedupTest, .{&resolver});
+    defer joiner1.cancel();
+    var joiner2 = try rt.spawn(lookupDedupTest, .{&resolver});
+    defer joiner2.cancel();
+    while (try countJoiners(bucket, &key) < 2) try yield();
+
+    active.cancel();
+    try std.testing.expectError(error.Canceled, active.join());
+
+    try std.testing.expectEqual(1, try joiner1.join());
+    try std.testing.expectEqual(1, try joiner2.join());
+    try std.testing.expectEqual(2, received);
 }
