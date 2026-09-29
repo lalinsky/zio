@@ -4,7 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-- POSIX file reads now return `error.IsDir` when the descriptor refers to a directory.
+- POSIX file reads now return `error.IsDir` instead of `error.Unexpected` when the system refuses
+  to read a directory.
 
 - Fixed the built-in DNS resolver ignoring a cancellation that arrived while it was reloading
   `/etc/hosts` or `/etc/resolv.conf`.
