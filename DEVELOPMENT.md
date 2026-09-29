@@ -15,6 +15,12 @@ Testing:
 - Use `./check.sh --target riscv64-linux --qemu` to cross-compile and test via QEMU
 - Use `./check.sh --full` to build all tests, but also build examples (at least once before creating a PR)
 
+Cancellation:
+- If an operation completes and gets canceled at the same time, return `error.Canceled` when the result
+  can be cheaply discarded, so cancellation propagates as quickly as possible
+- If the result owns resources that need to be handled (file descriptors, allocations, etc.),
+  call `recancel()` and return the result, so the next cancellation point reports the cancellation
+
 Random notes on Zig usage:
 - We are using Zig 0.16+, so modules like `std.posix`, `std.Thread`, `std.fs`, `std.net` no longer exist or are mostly empty, look at `src/os/` for replacements.
 - Use `zig env` to get the path to the Zig standard library and read the source code, if you need to check something.
