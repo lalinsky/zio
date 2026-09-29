@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 - Fixed the built-in DNS resolver failing concurrent lookups of the same name with
   `error.Canceled` when the task that started the lookup was canceled.
 
+- Fixed a DNS lookup that joined another task's in-flight query losing its own cancellation
+  when the answer arrived at the same time.
+
 - With `.single_executor` scheduling, event loop completions change state with plain loads and
   stores instead of atomic read-modify-writes, and a `LoopGroup` accepts only one loop.
 

@@ -312,13 +312,10 @@ pub const Resolver = struct {
             // requester is canceled, it may promote this node to active instead.
             while (!node.done and !node.is_active) {
                 node.cond.wait(&bucket.mutex) catch |err| {
-                    if (!node.done) {
-                        if (node.is_active) handOff(bucket, &node);
-                        _ = bucket.waiters.remove(&node);
-                        bucket.mutex.unlock();
-                        return err;
-                    }
-                    break;
+                    if (node.is_active) handOff(bucket, &node);
+                    _ = bucket.waiters.remove(&node);
+                    bucket.mutex.unlock();
+                    return err;
                 };
             }
             if (node.done) {
