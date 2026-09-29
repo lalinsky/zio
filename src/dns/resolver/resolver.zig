@@ -81,6 +81,9 @@ pub const Resolver = struct {
     conf_next_check: std.atomic.Value(u32),
     conf_reloading: std.atomic.Value(bool),
 
+    loaded: std.atomic.Value(bool),
+    load_mutex: Mutex,
+
     cache: Cache,
     hash_seed: u64,
     rotate_index: std.atomic.Value(u32) = .init(0),
@@ -91,23 +94,22 @@ pub const Resolver = struct {
     dedup_buckets: [num_dedup_buckets]Bucket,
 
     pub fn init(allocator: std.mem.Allocator) Resolver {
-        var hosts_mtime: i64 = 0;
-        var conf_mtime: i64 = 0;
         const now = getCurrentTime();
-        const next_check_s: u32 = @as(u32, @truncate(now.toSeconds())) +% check_interval_secs;
         var prng = std.Random.DefaultPrng.init(now.value);
         const hash_seed = prng.random().int(u64);
         return .{
             .allocator = allocator,
             .lock = .init,
-            .hosts = loadHosts(allocator, &hosts_mtime) catch .{ .arena = .init(allocator), .by_name = .empty },
-            .hosts_mtime = hosts_mtime,
-            .hosts_next_check = .init(next_check_s),
+            .hosts = .{ .arena = .init(allocator), .by_name = .empty },
+            .hosts_mtime = 0,
+            .hosts_next_check = .init(0),
             .hosts_reloading = .init(false),
-            .conf = loadResolvConf(allocator, &conf_mtime) catch .{ .arena = .init(allocator), .servers = &.{}, .search = &.{}, .parse_error = true },
-            .conf_mtime = conf_mtime,
-            .conf_next_check = .init(next_check_s),
+            .conf = .{ .arena = .init(allocator), .servers = &.{}, .search = &.{} },
+            .conf_mtime = 0,
+            .conf_next_check = .init(0),
             .conf_reloading = .init(false),
+            .loaded = .init(false),
+            .load_mutex = .init,
             .cache = .init(),
             .hash_seed = hash_seed,
             .prng_mutex = .init,
@@ -165,6 +167,7 @@ pub const Resolver = struct {
         if (options.name.len > net.HostName.max_len) return error.UnknownHostName;
 
         const now = getCurrentTime();
+        try self.ensureLoaded(now);
         try self.maybeReloadHosts(now);
         try self.maybeReloadResolvConf(now);
 
@@ -510,6 +513,34 @@ pub const Resolver = struct {
         self.lock.lockUncancelable();
         defer self.lock.unlock();
         self.cache.put(&key, addrs[0..results.len], now.addDuration(.fromSeconds(ttl_secs)), now);
+    }
+
+    /// Loads /etc/hosts and /etc/resolv.conf on first use. Concurrent first
+    /// lookups wait for it; if the loading task is canceled, the next one loads.
+    fn ensureLoaded(self: *Resolver, now: Timestamp) Cancelable!void {
+        if (self.loaded.load(.acquire)) return;
+
+        try self.load_mutex.lock();
+        defer self.load_mutex.unlock();
+        if (self.loaded.load(.monotonic)) return;
+
+        var hosts_mtime: i64 = 0;
+        var hosts = try loadHosts(self.allocator, &hosts_mtime);
+        errdefer hosts.deinit();
+        var conf_mtime: i64 = 0;
+        const conf = try loadResolvConf(self.allocator, &conf_mtime);
+
+        self.hosts.deinit();
+        self.hosts = hosts;
+        self.hosts_mtime = hosts_mtime;
+        self.conf.deinit();
+        self.conf = conf;
+        self.conf_mtime = conf_mtime;
+
+        const next_check_s: u32 = @as(u32, @truncate(now.toSeconds())) +% check_interval_secs;
+        self.hosts_next_check.store(next_check_s, .monotonic);
+        self.conf_next_check.store(next_check_s, .monotonic);
+        self.loaded.store(true, .release);
     }
 
     fn maybeReloadHosts(self: *Resolver, now: Timestamp) Cancelable!void {
@@ -1126,6 +1157,17 @@ test "queryBatch: dual-stack answers interleave IPv6-first" {
     try server_task.join();
 }
 
+/// Points the resolver at `servers` with one attempt, and keeps the system
+/// files from being loaded or reloaded over it.
+fn useTestConfig(resolver: *Resolver, servers: []net.IpAddress, timeout: Duration) void {
+    resolver.conf.servers = servers;
+    resolver.conf.timeout = timeout;
+    resolver.conf.attempts = 1;
+    resolver.hosts_next_check.store(std.math.maxInt(u32), .monotonic);
+    resolver.conf_next_check.store(std.math.maxInt(u32), .monotonic);
+    resolver.loaded.store(true, .monotonic);
+}
+
 /// Drops the first query, answers every later one with one A record.
 const DroppingDnsServer = struct {
     fn run(sock: net.Socket, received: *std.atomic.Value(usize), first_received: *Event) !void {
@@ -1175,9 +1217,7 @@ test "lookup: canceling the active requester hands the lookup to one joiner" {
     var resolver = Resolver.init(std.testing.allocator);
     defer resolver.deinit();
     var servers = [_]net.IpAddress{sock.address.ip};
-    resolver.conf.servers = &servers;
-    resolver.conf.timeout = .fromSeconds(60);
-    resolver.conf.attempts = 1;
+    useTestConfig(&resolver, &servers, .fromSeconds(60));
 
     var key: CacheKey = undefined;
     CacheKey.init(&key, "dedup.test.", resolver.hash_seed, .ipv4);
@@ -1218,13 +1258,27 @@ test "lookup: cancellation during a config reload is propagated" {
     var resolver = Resolver.init(std.testing.allocator);
     defer resolver.deinit();
     var servers = [_]net.IpAddress{sock.address.ip};
-    resolver.conf.servers = &servers;
-    resolver.conf.timeout = .fromSeconds(1);
-    resolver.conf.attempts = 1;
-
+    useTestConfig(&resolver, &servers, .fromSeconds(1));
     resolver.hosts_next_check.store(0, .monotonic);
 
     var task = try rt.spawn(lookupReloadTest, .{&resolver});
     task.cancel();
     try std.testing.expectError(error.Canceled, task.join());
+}
+
+test "lookup: cancellation during the first config load is propagated" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var resolver = Resolver.init(std.testing.allocator);
+    defer resolver.deinit();
+
+    var task = try rt.spawn(lookupReloadTest, .{&resolver});
+    task.cancel();
+    try std.testing.expectError(error.Canceled, task.join());
+    try std.testing.expect(!resolver.loaded.load(.monotonic));
+
+    var storage: [1]dns.LookupResult = undefined;
+    try std.testing.expectEqual(1, try resolver.lookup(&storage, .{ .name = "127.0.0.1", .port = 80 }));
+    try std.testing.expect(resolver.loaded.load(.monotonic));
 }
