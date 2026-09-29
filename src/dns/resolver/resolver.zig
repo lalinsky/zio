@@ -72,6 +72,7 @@ pub const Resolver = struct {
     lock: RwLock,
 
     hosts: Hosts,
+    hosts_path: []const u8,
     hosts_mtime: i64,
     hosts_next_check: std.atomic.Value(u32),
     hosts_reloading: std.atomic.Value(bool),
@@ -101,6 +102,7 @@ pub const Resolver = struct {
             .allocator = allocator,
             .lock = .init,
             .hosts = .{ .arena = .init(allocator), .by_name = .empty },
+            .hosts_path = "/etc/hosts",
             .hosts_mtime = 0,
             .hosts_next_check = .init(0),
             .hosts_reloading = .init(false),
@@ -524,8 +526,13 @@ pub const Resolver = struct {
         defer self.load_mutex.unlock();
         if (self.loaded.load(.monotonic)) return;
 
+        // Without a previous table to keep, a failed load starts empty; mtime 0
+        // makes the next check retry it.
         var hosts_mtime: i64 = 0;
-        var hosts = try loadHosts(self.allocator, &hosts_mtime);
+        var hosts = loadHosts(self.allocator, self.hosts_path, &hosts_mtime) catch |err| switch (err) {
+            error.Canceled => |e| return e,
+            error.LoadFailed => Hosts{ .arena = .init(self.allocator), .by_name = .empty },
+        };
         errdefer hosts.deinit();
         var conf_mtime: i64 = 0;
         const conf = try loadResolvConf(self.allocator, &conf_mtime);
@@ -552,14 +559,18 @@ pub const Resolver = struct {
 
         self.hosts_next_check.store(now_s +% check_interval_secs, .monotonic);
 
-        const info = fs.stat("/etc/hosts") catch |err| switch (err) {
+        const info = fs.stat(self.hosts_path) catch |err| switch (err) {
             error.Canceled => |e| return e,
             else => return,
         };
         if (info.mtime == self.hosts_mtime) return;
 
+        // A failed load keeps the current table and mtime, so the next check retries.
         var new_mtime: i64 = 0;
-        const new_hosts = try loadHosts(self.allocator, &new_mtime);
+        const new_hosts = loadHosts(self.allocator, self.hosts_path, &new_mtime) catch |err| switch (err) {
+            error.Canceled => |e| return e,
+            error.LoadFailed => return,
+        };
 
         self.lock.lockUncancelable();
         const old_hosts = self.hosts;
@@ -957,28 +968,32 @@ fn exchangeTcp(
     return recv_buf[0..resp_len];
 }
 
-fn loadHosts(allocator: std.mem.Allocator, mtime_out: *i64) Cancelable!Hosts {
-    const file = fs.openFile("/etc/hosts") catch |err| switch (err) {
+/// Reads and parses the hosts file at `path`, setting `mtime_out` only on success.
+fn loadHosts(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i64) (Cancelable || error{LoadFailed})!Hosts {
+    const file = fs.openFile(path) catch |err| switch (err) {
         error.Canceled => |e| return e,
         else => {
-            log.warn("dns: failed to open /etc/hosts: {}", .{err});
-            return .{ .arena = .init(allocator), .by_name = .empty };
+            log.warn("dns: failed to open {s}: {}", .{ path, err });
+            return error.LoadFailed;
         },
     };
     defer file.close();
+    var mtime: i64 = 0;
     if (file.stat()) |info| {
-        mtime_out.* = info.mtime;
+        mtime = info.mtime;
     } else |err| switch (err) {
         error.Canceled => |e| return e,
         else => {},
     }
     var buf: [4096]u8 = undefined;
     var reader = file.reader(&buf);
-    return Hosts.parse(allocator, &reader.interface) catch |err| {
+    const hosts = Hosts.parse(allocator, &reader.interface) catch |err| {
         if (reader.err) |read_err| if (read_err == error.Canceled) return error.Canceled;
-        log.warn("dns: failed to parse /etc/hosts: {}", .{err});
-        return .{ .arena = .init(allocator), .by_name = .empty };
+        log.warn("dns: failed to parse {s}: {}", .{ path, err });
+        return error.LoadFailed;
     };
+    mtime_out.* = mtime;
+    return hosts;
 }
 
 fn loadResolvConf(allocator: std.mem.Allocator, mtime_out: *i64) Cancelable!ResolvConf {
@@ -1281,4 +1296,52 @@ test "lookup: cancellation during the first config load is propagated" {
     var storage: [1]dns.LookupResult = undefined;
     try std.testing.expectEqual(1, try resolver.lookup(&storage, .{ .name = "127.0.0.1", .port = 80 }));
     try std.testing.expect(resolver.loaded.load(.monotonic));
+}
+
+fn writeTestFile(dir: fs.Dir, name: []const u8, contents: []const u8) !void {
+    const file = try dir.createFile(name, .{ .truncate = true });
+    defer file.close();
+    try std.testing.expectEqual(contents.len, try file.write(contents, 0));
+}
+
+fn expectHostsEntry(resolver: *Resolver) !void {
+    var storage: [4]dns.LookupResult = undefined;
+    const n = try resolver.lookup(&storage, .{ .name = "foo.test", .port = 80, .family = .ipv4 });
+    try std.testing.expectEqual(1, n);
+    try std.testing.expect(sameEndpoint(storage[0].address, try net.IpAddress.parseIp4("10.1.2.3", 80)));
+}
+
+test "lookup: a failed hosts reload keeps the current table" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const parent = try fs.Dir.cwd().openDir(".", .{});
+    defer parent.close();
+    var temp = try parent.createTempDir(.{ .prefix = "zio_test_" });
+    defer temp.deinit();
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/hosts", .{temp.name()});
+
+    try writeTestFile(temp.dir, "hosts", "10.1.2.3 foo.test\n");
+
+    // A server that never answers, so a lookup that falls through to DNS fails.
+    const bind_addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    const sock = try bind_addr.bind(.{});
+    defer sock.close();
+
+    var resolver = Resolver.init(std.testing.allocator);
+    defer resolver.deinit();
+    var servers = [_]net.IpAddress{sock.address.ip};
+    useTestConfig(&resolver, &servers, .fromMilliseconds(100));
+    resolver.hosts_path = path;
+
+    resolver.hosts_next_check.store(0, .monotonic);
+    try expectHostsEntry(&resolver);
+
+    // A line longer than the read buffer makes the load fail.
+    try writeTestFile(temp.dir, "hosts", &(@as([5000]u8, @splat('x')) ++ "\n".*));
+
+    resolver.hosts_mtime = 0;
+    resolver.hosts_next_check.store(0, .monotonic);
+    try expectHostsEntry(&resolver);
 }

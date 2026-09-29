@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed the built-in DNS resolver emptying its `/etc/hosts` table when reloading the file failed.
+
 - POSIX file reads now return `error.IsDir` instead of `error.Unexpected` when the system refuses
   to read a directory.
 
