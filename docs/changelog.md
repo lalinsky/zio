@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 - POSIX file reads now return `error.IsDir` when the descriptor refers to a directory.
 
+- Fixed the built-in DNS resolver ignoring a cancellation that arrived while it was reloading
+  `/etc/hosts` or `/etc/resolv.conf`.
+
 - Fixed the built-in DNS resolver failing concurrent lookups of the same name with
   `error.Canceled` when the task that started the lookup was canceled.
 
