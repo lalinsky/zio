@@ -14,6 +14,9 @@ Testing:
 - Use `./check.sh --target x86_64-windows --wine` to cross-compile and test via Wine
 - Use `./check.sh --target riscv64-linux --qemu` to cross-compile and test via QEMU
 - Use `./check.sh --full` to build all tests, but also build examples (at least once before creating a PR)
+- If tests may be hanging, run `./check.sh --verbose --no-log-capture --timeout <seconds>` and don't pipe the output
+  anywhere, so each test name is printed before it runs and a hang shows which test it is; the timeout
+  applies to running the tests, not to compiling them
 
 Cancellation:
 - If an operation completes and gets canceled at the same time, return `error.Canceled` when the result
