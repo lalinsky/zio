@@ -1894,6 +1894,7 @@ pub fn errnoToFileReadError(err: E) FileReadError {
                 .ACCES => error.AccessDenied,
                 .AGAIN => error.WouldBlock,
                 .IO => error.InputOutput,
+                .ISDIR => error.IsDir,
                 .CANCELED => error.Canceled,
                 .PIPE => error.BrokenPipe,
                 .NOMEM => error.SystemResources,

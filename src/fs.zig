@@ -1834,6 +1834,18 @@ test {
     _ = access;
 }
 
+test "File: reading a directory returns IsDir" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var t = try TestDirFixture.init();
+    defer t.deinit();
+
+    var file = try t.dir.openFile(".", .{ .allow_directory = true });
+    defer file.close();
+    var buffer: [1]u8 = undefined;
+    try std.testing.expectError(error.IsDir, file.read(&buffer, 0));
+}
+
 test "File: basic read and write" {
     var t = try TestDirFixture.init();
     defer t.deinit();
