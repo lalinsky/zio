@@ -1836,6 +1836,7 @@ test {
 
 test "File: reading a directory returns IsDir" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .netbsd) return error.SkipZigTest; // FFS allows read(2) on directories
 
     var t = try TestDirFixture.init();
     defer t.deinit();
