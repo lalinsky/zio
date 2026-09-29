@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed the built-in DNS resolver emptying its `/etc/hosts` table when reloading the file failed.
+
 - POSIX file reads now return `error.IsDir` when the descriptor refers to a directory.
 
 - Fixed the built-in DNS resolver ignoring a cancellation that arrived while it was reloading
