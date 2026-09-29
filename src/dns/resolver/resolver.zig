@@ -674,7 +674,8 @@ fn queryBatch(
                 .ipv4 => .ipv4,
                 .ipv6 => .ipv6,
             };
-            var sock = net.Socket.open(.dgram, domain, .ip) catch {
+            var sock = net.Socket.open(.dgram, domain, .ip) catch |err| {
+                if (err == error.Canceled) return error.Canceled;
                 last_err = error.TemporaryNameServerFailure;
                 continue;
             };
@@ -1111,16 +1112,14 @@ test "queryBatch: dual-stack answers interleave IPv6-first" {
     try server_task.join();
 }
 
-/// Counts the queries it receives, signals `first_received` on the first one
-/// and never answers it, then answers every later A query with one record.
+/// Drops the first query, answers every later one with one A record.
 const DroppingDnsServer = struct {
-    fn run(sock: net.Socket, received: *usize, first_received: *Event) !void {
+    fn run(sock: net.Socket, received: *std.atomic.Value(usize), first_received: *Event) !void {
         var qbuf: [512]u8 = undefined;
         var rbuf: [4096]u8 = undefined;
         while (true) {
             const r = try sock.receiveFrom(&qbuf, .none);
-            received.* += 1;
-            if (received.* == 1) {
+            if (received.fetchAdd(1, .monotonic) == 0) {
                 first_received.set();
                 continue;
             }
@@ -1154,7 +1153,7 @@ test "lookup: canceling the active requester hands the lookup to one joiner" {
     const sock = try bind_addr.bind(.{});
     defer sock.close();
 
-    var received: usize = 0;
+    var received: std.atomic.Value(usize) = .init(0);
     var first_received: Event = .init;
     var server_task = try rt.spawn(DroppingDnsServer.run, .{ sock, &received, &first_received });
     defer server_task.cancel();
@@ -1163,6 +1162,8 @@ test "lookup: canceling the active requester hands the lookup to one joiner" {
     defer resolver.deinit();
     var servers = [_]net.IpAddress{sock.address.ip};
     resolver.conf.servers = &servers;
+    resolver.conf.timeout = .fromSeconds(60);
+    resolver.conf.attempts = 1;
 
     var key: CacheKey = undefined;
     CacheKey.init(&key, "dedup.test.", resolver.hash_seed, .ipv4);
@@ -1183,5 +1184,5 @@ test "lookup: canceling the active requester hands the lookup to one joiner" {
 
     try std.testing.expectEqual(1, try joiner1.join());
     try std.testing.expectEqual(1, try joiner2.join());
-    try std.testing.expectEqual(2, received);
+    try std.testing.expectEqual(2, received.load(.monotonic));
 }
