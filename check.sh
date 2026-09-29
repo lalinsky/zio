@@ -17,10 +17,11 @@ USE_QEMU=false
 NO_EXEC=false
 COVERAGE=false
 TIMEOUT=""
+NO_LOG_CAPTURE=false
 
 # Parse arguments
 usage() {
-  echo "Usage: $0 [--filter \"test name\"] [--target <target>] [--backend <backend>] [--scheduling <mode>] [--wine] [--qemu] [--no-exec] [--coverage] [--ci] [--full] [--release] [--verbose] [--timeout <seconds>]"
+  echo "Usage: $0 [--filter \"test name\"] [--target <target>] [--backend <backend>] [--scheduling <mode>] [--wine] [--qemu] [--no-exec] [--coverage] [--ci] [--full] [--release] [--verbose] [--no-log-capture] [--timeout <seconds>]"
 }
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -76,6 +77,10 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=true
             shift
             ;;
+        --no-log-capture)
+            NO_LOG_CAPTURE=true
+            shift
+            ;;
         --timeout)
             [[ $# -ge 2 ]] || { echo "--timeout requires an argument"; usage; exit 1; }
             TIMEOUT="$2"; shift 2
@@ -87,6 +92,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [ -n "$TIMEOUT" ] && [ "$USE_QEMU" = true ]; then
+    echo "--timeout is not supported with --qemu"
+    exit 1
+fi
 
 echo "=== Formatting code ==="
 if [ "$CI_MODE" = true ]; then
@@ -116,13 +126,16 @@ if [ -n "$BACKEND" ]; then
     echo "Backend: $BACKEND"
     BUILD_ARGS+=("-Dbackend=$BACKEND")
 fi
-if [ "$USE_WINE" = true ]; then
-    BUILD_ARGS+=(-Demit-test-bin)
-fi
 if [ "$USE_QEMU" = true ]; then
     BUILD_ARGS+=(-fqemu)
 fi
-if [ "$NO_EXEC" = true ] || [ "$COVERAGE" = true ]; then
+# With a timeout, build the test binary and run it below, so the timeout
+# doesn't include compilation.
+RUN_TEST_BIN=false
+if [ -n "$TIMEOUT" ] && [ "$USE_WINE" = false ] && [ "$NO_EXEC" = false ] && [ "$COVERAGE" = false ]; then
+    RUN_TEST_BIN=true
+fi
+if [ "$USE_WINE" = true ] || [ "$NO_EXEC" = true ] || [ "$COVERAGE" = true ] || [ "$RUN_TEST_BIN" = true ]; then
     BUILD_ARGS+=(-Demit-test-bin)
 fi
 if [ "$RELEASE_MODE" = true ]; then
@@ -132,21 +145,40 @@ fi
 if [ "$VERBOSE" = true ]; then
     export TEST_VERBOSE=true
 fi
+if [ "$NO_LOG_CAPTURE" = true ]; then
+    export TEST_LOG_CAPTURE=false
+fi
+
+TIMEOUT_CMD=()
 if [ -n "$TIMEOUT" ]; then
-    timeout "$TIMEOUT" zig build "${BUILD_ARGS[@]}" --summary all
-else
-    zig build "${BUILD_ARGS[@]}" --summary all
+    TIMEOUT_CMD=(timeout "$TIMEOUT")
+fi
+run_tests() {
+    local status=0
+    ${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} "$@" || status=$?
+    if [ "$status" -eq 124 ] && [ -n "$TIMEOUT" ]; then
+        echo "Tests timed out after ${TIMEOUT}s"
+    fi
+    return "$status"
+}
+
+zig build "${BUILD_ARGS[@]}" --summary all
+
+if [ "$RUN_TEST_BIN" = true ]; then
+    TEST_BIN=zig-out/bin/test
+    [ -f "$TEST_BIN" ] || TEST_BIN=zig-out/bin/test.exe
+    run_tests "$TEST_BIN"
 fi
 
 if [ "$USE_WINE" = true ]; then
     echo "=== Running tests with Wine ==="
-    wine zig-out/bin/test.exe
+    run_tests wine zig-out/bin/test.exe
 fi
 
 if [ "$COVERAGE" = true ]; then
     echo "=== Running coverage ==="
     rm -rf zig-out/coverage
-    kcov --include-pattern=src/ zig-out/coverage/ zig-out/bin/test
+    run_tests kcov --include-pattern=src/ zig-out/coverage/ zig-out/bin/test
     echo "Coverage report: zig-out/coverage/index.html"
 fi
 
