@@ -401,7 +401,8 @@ pub const metrics_enabled = zio_options.scheduler_metrics;
 /// `metrics_enabled` false the per-executor storage is zero-bit and the
 /// summed snapshot is all zeros.
 pub const SchedulerMetrics = struct {
-    /// Parks with the doze cap (the steal-free grace park).
+    /// Idle probes: a non-blocking poll of the loop before an indefinite park.
+    /// Named for the capped park the probe replaced.
     parks_doze: u64 = 0,
     /// Indefinite parks.
     parks_full: u64 = 0,
@@ -448,12 +449,6 @@ pub const Executor = struct {
         /// Cheap PRNG for steal victim selection; the CSPRNG is for user-facing
         /// random() and too heavy for the park/steal path.
         prng: std.Random.DefaultPrng = undefined,
-
-        /// Whether this executor has already spent its doze (the steal-free
-        /// grace park, see parkAndSearch) since it last had local work. Reset
-        /// by any local work; while set, empty passes go straight to the full
-        /// park.
-        dozed: bool = false,
 
         /// Where the pusher that elected this executor as searcher has surplus
         /// work; armSearcher writes it just before the wake, stealWork consumes
@@ -697,15 +692,6 @@ pub const Executor = struct {
     /// workloads; also tokio's max tasks per global-queue interval.
     const checkpoint_interval = 127;
 
-    /// How long the first idle park (the "doze") waits before this executor
-    /// concludes it is genuinely idle and stealing is worth the churn. An I/O
-    /// completion typically re-readies the very tasks that just ran here (their
-    /// ops are homed on this loop), so the loop gets this long to produce local
-    /// work before any task is dragged to another executor. The doze is not
-    /// announced in idle_mask, so no pusher elects a dozing executor: excess
-    /// work elsewhere reaches it within doze_wait, not within a wake.
-    const doze_wait: Duration = .fromMicroseconds(250);
-
     /// How long the rescue baton holder parks at most, and the minimum time
     /// between its rescue scans (see park). A task stuck behind a running
     /// task that doesn't yield is taken within one to two of these.
@@ -774,10 +760,6 @@ pub const Executor = struct {
         // Process deferred cleanup (e.g. main task's park/reschedule)
         self.processCleanup();
 
-        // Entering the run loop means the main task just ran (or this executor
-        // just started): that was productive work, a fresh doze is due.
-        if (migrates) self.stealing.dozed = false;
-
         // When entered with the tick budget already spent (e.g. the main task
         // yielded because its slice ran out), ready tasks must get one
         // fresh-budget batch after the next poll before control can return to
@@ -798,15 +780,9 @@ pub const Executor = struct {
                 self.processCleanup();
             }
 
-            // Quanta spent this cycle mean tasks ran here, which re-arms the
-            // doze grace window (see parkAndSearch). Same bookkeeping family
-            // as the tick budget, but consulted here rather than in the
-            // retune below: the park decision runs between the two, and it
-            // must see the fresh value.
-            if (migrates and self.tick_task_count > 0) {
-                self.stealing.dozed = false;
-                self.releaseBaton();
-            }
+            // Quanta spent this cycle mean tasks ran here: a busy executor
+            // can't watch for stuck tasks, so it gives up the rescue baton.
+            if (migrates and self.tick_task_count > 0) self.releaseBaton();
 
             // Exit if loop is stopped
             if (self.loop.stopped()) {
@@ -857,19 +833,16 @@ pub const Executor = struct {
     }
 
     /// One idle step per call; the run loop re-checks stopped/main-ready/local
-    /// work between calls and resets `dozed` whenever any of those produce
-    /// work.
+    /// work between calls.
     ///
-    /// The first empty pass after productive work dozes: a plain loop poll
-    /// capped at doze_wait, with the idle bit left clear. It gives this
-    /// executor's own event loop a grace window to hand back the tasks that
-    /// just ran here before any stealing churn is paid; completions that have
-    /// already arrived return it to the busy path without a wait. Wakes for
-    /// tasks homed here still arrive through loop.wake(), and the cap bounds
-    /// how long work pushed elsewhere can go unstolen. Every later pass parks
-    /// indefinitely with stealing folded into the pre-park check — by then
-    /// idleness is proven and the steal is also what makes the park's wake
-    /// protocol sound (see park).
+    /// Each empty pass first probes the loop with a non-blocking poll, without
+    /// touching idle_mask: completions that have already arrived usually
+    /// re-ready the tasks that just ran here (their I/O is homed on this
+    /// loop), and they go back on the busy path without inviting a searcher
+    /// or paying for a steal. Only when the probe finds nothing does the
+    /// executor park indefinitely, with stealing folded into the pre-park
+    /// check, which is also what makes the park's wake protocol sound (see
+    /// park).
     fn parkAndSearch(self: *Executor, check_ready: bool) !void {
         if (!migrates) {
             self.bump("parks_full", 1);
@@ -878,27 +851,31 @@ pub const Executor = struct {
             return;
         }
 
-        if (!self.stealing.dozed) {
-            self.stealing.dozed = true;
-            // With nobody to steal from (or to) the doze would only delay
-            // the real park; skip it.
-            if (self.runtime.stealingActive()) {
-                self.bump("parks_doze", 1);
-                try self.loop.poll(doze_wait);
-                self.drainDispatched();
-                return;
-            }
+        // With nobody to steal from (or to), the probe would only delay the
+        // real park; skip it.
+        if (self.runtime.stealingActive()) {
+            self.bump("parks_doze", 1);
+            try self.loop.poll(.zero);
+            self.drainDispatched();
+            if (self.checkLocalWork(check_ready)) return self.leaveIdle();
         }
         self.bump("parks_full", 1);
         try self.park(check_ready);
-        // Leaving a full park with work in hand: a busy executor can't watch
-        // for stuck tasks, so give up the rescue baton if held, and if nobody
-        // holds it, hand it to a parked executor before running anything,
-        // since the first task may never yield (see Runtime.passBaton).
         if (!self.run_queue.isEmpty() or (check_ready and self.main_task.state.load(.acquire).tag == .ready)) {
-            self.releaseBaton();
-            self.runtime.passBaton(self.id);
+            self.leaveIdle();
         }
+    }
+
+    /// Leaving the idle path with work in hand, from the probe or a full
+    /// park: a busy executor can't watch for stuck tasks, so give up the
+    /// rescue baton if held, and if nobody holds it, hand it to a parked
+    /// executor before running anything, since the first task may never
+    /// yield (see Runtime.passBaton). The probe needs this as much as the
+    /// park: a park can return with nothing runnable and its work turn up in
+    /// the next pass's probe, and that work may be a task that never yields.
+    fn leaveIdle(self: *Executor) void {
+        self.releaseBaton();
+        self.runtime.passBaton(self.id);
     }
 
     /// One indefinite park: publish the idle bit, give the event loop one
@@ -1081,8 +1058,8 @@ pub const Executor = struct {
     /// Steal half of a random victim's ring into ours. Reached only from
     /// park() — the indefinite park's pre-check and the searcher-token path —
     /// never while this executor still has plausible local work and never
-    /// before the doze has elapsed, since migrating a task also re-homes its
-    /// I/O and the home loop usually hands work back within doze_wait.
+    /// before its own loop has been probed, since migrating a task also
+    /// re-homes its I/O and the home loop often has work ready to hand back.
     fn stealWork(self: *Executor) bool {
         if (!self.runtime.stealingActive()) return false;
         const executors = self.runtime.executors.items;
@@ -1716,7 +1693,7 @@ pub const Runtime = struct {
                 var delta = total;
                 delta.sub(last);
                 last = total;
-                log.info("scheduler: parks doze={d} full={d} baton={d} elections={d} steals={d}/{d} hint_hits={d} rescues={d} drains={d} woken={d} batch_claims={d}", .{
+                log.info("scheduler: parks probe={d} full={d} baton={d} elections={d} steals={d}/{d} hint_hits={d} rescues={d} drains={d} woken={d} batch_claims={d}", .{
                     delta.parks_doze,
                     delta.parks_full,
                     delta.baton_parks,
@@ -1952,11 +1929,11 @@ pub const Runtime = struct {
         }
     }
 
-    /// Called by an executor leaving a full park with work: if nobody holds
-    /// the rescue baton and some executor is parked, wake one to take it. The
-    /// baton is released whenever every executor is parked, so this is the
-    /// wake that brings it back when work starts after full idleness; while a
-    /// holder exists it is one load.
+    /// Called by an executor leaving the idle path with work (see
+    /// Executor.leaveIdle): if nobody holds the rescue baton and some executor
+    /// is parked, wake one to take it. The baton is released whenever every
+    /// executor is parked, so this is the wake that brings it back when work
+    /// starts after full idleness; while a holder exists it is one load.
     fn passBaton(self: *Runtime, from: ExecutorId) void {
         if (!migrates) return;
         // seq_cst: pairs with the holder's release (see Executor.holdBaton).
