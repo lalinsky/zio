@@ -240,3 +240,23 @@ test "spawn leaves the SIGIO disposition alone" {
     os.posix.sigaction(os.posix.SIG.IO, null, &current);
     try std.testing.expect(current.handler.handler == S.handler);
 }
+
+test "replace keeps the environment" {
+    if (!std.process.can_replace or !builtin.link_libc) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    if (std.c.getenv("ZIO_TEST_REPLACE") != null) {
+        return std.process.replace(io, .{
+            .argv = &.{ "sh", "-c", "test \"$ZIO_TEST_REPLACE_MARKER\" = ok" },
+        });
+    }
+
+    const term = try runTestBinary(io, "replace keeps the environment", &.{
+        .{ "ZIO_TEST_REPLACE", "1" },
+        .{ "ZIO_TEST_REPLACE_MARKER", "ok" },
+    });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
+}

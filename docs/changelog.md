@@ -30,6 +30,9 @@ All notable changes to this project will be documented in this file.
 - Fixed `std.Io` TCP connect never timing out when given a deadline on the `.real` or
   `.boot` clock.
 
+- Fixed `std.process.replace` without an `environ_map` starting the new program with an empty
+  environment and resolving `argv[0]` against a default `PATH` instead of the process's own.
+
 - `std.Progress.start` no longer panics; zio reads the parent's progress pipe from `ZIG_PROGRESS`
   like `std.Io.Threaded` does. On Windows, and on POSIX builds without libc, the variable is not
   read yet and progress is drawn to the terminal as if there were no parent. A child spawned with

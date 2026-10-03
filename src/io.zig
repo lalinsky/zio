@@ -1854,8 +1854,10 @@ fn processSetCurrentPathImpl(userdata: ?*anyopaque, path: []const u8) std.proces
 }
 
 // TODO: implement using our own execve wrapper
-fn processReplaceImpl(_: ?*anyopaque, options: std.process.ReplaceOptions) std.process.ReplaceError {
-    const io = globalIo();
+fn processReplaceImpl(userdata: ?*anyopaque, options: std.process.ReplaceOptions) std.process.ReplaceError {
+    var threaded = processThreaded(scratchAllocator(userdata));
+    defer threaded.deinit();
+    const io = threaded.io();
     return io.vtable.processReplace(io.userdata, options);
 }
 
