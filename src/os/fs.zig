@@ -2083,7 +2083,7 @@ pub fn errnoToDirRenameError(errno: posix.system.E) DirRenameError {
         .NOENT => error.FileNotFound,
         .NOMEM => error.SystemResources,
         .NOTDIR => error.NotDir,
-        .EXIST => error.Unexpected, // PathAlreadyExists mapped to Unexpected for RenameError (use RenamePreserve for non-overwriting)
+        .EXIST => error.DirNotEmpty,
         .NOSPC => error.NoSpaceLeft,
         .ROFS => error.ReadOnlyFileSystem,
         .XDEV => error.CrossDevice,

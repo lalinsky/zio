@@ -115,6 +115,9 @@ All notable changes to this project will be documented in this file.
 - Fixed the built-in DNS resolver failing concurrent lookups of the same name with
   `error.Canceled` when the task that started the lookup was canceled.
 
+- POSIX renames now return `error.DirNotEmpty` instead of `error.Unexpected` when the system
+  reports `EEXIST` for a non-empty target directory.
+
 - Setting a file timestamp to `.now` through `std.Io` now passes `UTIME_NOW` to the system
   instead of the current time, so it works for non-owners with write permission. The native
   `FileTimestamps` fields are now a `SetTimestamp` union (`.unchanged`, `.now` or
