@@ -897,7 +897,7 @@ fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Oper
                 const result = data.net_receive.op.getResult() catch |err| break :blk .{ recvMsgErrToReceiveErr(err), 0 };
                 // Populate the message buffer with received data
                 data.net_receive.message_buffer.* = .{
-                    .from = zioIpToStdIo(zio_net.Address.fromPosix(&data.net_receive.addr_storage.any, data.net_receive.addr_len).ip),
+                    .from = senderAddrToStdIo(&data.net_receive.addr_storage.any, data.net_receive.addr_len),
                     .data = data.net_receive.data_buffer[0..result.len],
                     .control = data.net_receive.message_buffer.control[0..result.controllen],
                     .flags = decodeIncomingFlags(result.flags),
@@ -1950,6 +1950,14 @@ fn zioIpToStdIo(addr: zio_net.IpAddress) Io.net.IpAddress {
     };
 }
 
+fn senderAddrToStdIo(addr: *const os_net.sockaddr, len: os_net.socklen_t) Io.net.IpAddress {
+    const sender = zio_net.Address.fromPosix(addr, len);
+    return switch (sender.any.family) {
+        os_net.AF.INET, os_net.AF.INET6 => zioIpToStdIo(sender.ip),
+        else => .{ .ip4 = .loopback(0) },
+    };
+}
+
 fn sockAddrLen(addr: *const os_net.sockaddr) os_net.socklen_t {
     return switch (addr.family) {
         std.posix.AF.INET => @sizeOf(os_net.sockaddr.in),
@@ -2506,7 +2514,7 @@ fn netReceiveMmsg(
 
     for (0..count) |i| {
         o.message_buffer[i] = .{
-            .from = zioIpToStdIo(zio_net.Address.fromPosix(@ptrCast(&slots[i].addr), slots[i].addr_len).ip),
+            .from = senderAddrToStdIo(@ptrCast(&slots[i].addr), slots[i].addr_len),
             .data = slots[i].data[0..slots[i].received_len],
             .control = &.{},
             .flags = decodeIncomingFlags(slots[i].msg_flags),
@@ -2601,7 +2609,7 @@ fn netReceiveImpl(
         else => |e| return recvMsgErrToReceiveErr(e),
     };
     message.* = .{
-        .from = zioIpToStdIo(zio_net.Address.fromPosix(&storage.any, addr_len).ip),
+        .from = senderAddrToStdIo(&storage.any, addr_len),
         // When flags.trunc is set on Linux, result.len is the full datagram
         // length — which may exceed data_buffer.len. We slice verbatim to
         // match std.Io.Threaded; callers that enable .trunc are responsible
@@ -3401,6 +3409,31 @@ test "io: net Unix listen/connect/accept round-trip" {
 
     var handle = try rt.spawn(Worker.run, .{rt.io()});
     try handle.join();
+}
+
+test "io: net receive on a Unix datagram socket" {
+    if (!zio_net.has_unix_sockets or builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const fds = try os_net.socketpair(.unix, .dgram, .ip, .{ .nonblocking = true });
+    defer for (fds) |fd| os_net.close(fd);
+
+    const path = "test_io_net_unix_dgram.sock";
+    (Io.Dir.cwd()).deleteFile(io, path) catch {};
+    defer (Io.Dir.cwd()).deleteFile(io, path) catch {};
+    const sender_addr = try zio_net.UnixAddress.init(path);
+    try os_net.bind(fds[0], &sender_addr.any, @sizeOf(os_net.sockaddr.un));
+
+    const iov = os_net.iovecConstFromSlice("hello");
+    _ = try os_net.send(fds[0], (&iov)[0..1], .{});
+
+    const socket: Io.net.Socket = .{ .handle = fds[1], .address = .{ .ip4 = .loopback(0) } };
+    var buf: [16]u8 = undefined;
+    const message = try socket.receive(io, &buf);
+    try std.testing.expectEqualStrings("hello", message.data);
 }
 
 test "io: net UDP bind assigns ephemeral port" {

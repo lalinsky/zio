@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed a crash when receiving through `std.Io` on a socket whose sender has a non-IP
+  address, such as a bound Unix datagram socket; the sender is now reported as the
+  IPv4 loopback placeholder, like `std.Io.Threaded` does.
+
 - Socket sends now report `error.ConnectionRefused`, `error.AddressFamilyUnsupported`,
   `error.FastOpenAlreadyInProgress` and `error.SystemResources` (for `ENOMEM`) instead of
   `error.Unexpected`, and sends and connects report an unreachable host as
