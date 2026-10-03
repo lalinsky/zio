@@ -115,6 +115,9 @@ All notable changes to this project will be documented in this file.
 - Fixed the built-in DNS resolver failing concurrent lookups of the same name with
   `error.Canceled` when the task that started the lookup was canceled.
 
+- Fixed leaving a timestamp unchanged when setting file timestamps on macOS and the BSDs,
+  which used Linux's `UTIME_OMIT` value.
+
 - Renames on Windows now return `error.CrossDevice`, `error.DirNotEmpty` and `error.NotDir`
   instead of `error.Unexpected` for the corresponding system errors.
 

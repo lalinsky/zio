@@ -2081,6 +2081,13 @@ test "File: setTimestamps" {
     const info = try t.file.stat();
     try std.testing.expectEqual(atime, info.atime);
     try std.testing.expectEqual(mtime, info.mtime);
+
+    const new_mtime: i96 = 1600000000 * std.time.ns_per_s; // 2020-09-13
+    try t.file.setTimestamps(.{ .mtime = new_mtime });
+
+    const new_info = try t.file.stat();
+    try std.testing.expectEqual(atime, new_info.atime);
+    try std.testing.expectEqual(new_mtime, new_info.mtime);
 }
 
 test "File: reader and writer interface" {

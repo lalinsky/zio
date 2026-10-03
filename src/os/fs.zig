@@ -2593,17 +2593,15 @@ pub fn fileSetTimestamps(fd: fd_t, timestamps: FileTimestamps) FileSetTimestamps
         return;
     }
 
-    const UTIME_OMIT = 0x3ffffffe;
-
     const times: [2]posix.system.timespec = .{
         if (timestamps.atime) |ns|
             .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) }
         else
-            .{ .sec = 0, .nsec = UTIME_OMIT },
+            posix.system.UTIME.OMIT,
         if (timestamps.mtime) |ns|
             .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) }
         else
-            .{ .sec = 0, .nsec = UTIME_OMIT },
+            posix.system.UTIME.OMIT,
     };
 
     const sc = try syscall_cancel.Syscall.begin();
@@ -2703,17 +2701,15 @@ pub fn dirSetFileTimestamps(allocator: std.mem.Allocator, dir: fd_t, path: []con
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.Unexpected;
     defer allocator.free(path_z);
 
-    const UTIME_OMIT = 0x3ffffffe;
-
     const times: [2]posix.system.timespec = .{
         if (timestamps.atime) |ns|
             .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) }
         else
-            .{ .sec = 0, .nsec = UTIME_OMIT },
+            posix.system.UTIME.OMIT,
         if (timestamps.mtime) |ns|
             .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) }
         else
-            .{ .sec = 0, .nsec = UTIME_OMIT },
+            posix.system.UTIME.OMIT,
     };
 
     const at_flags: u32 = if (!flags.follow_symlinks) posix.AT.SYMLINK_NOFOLLOW else 0;
