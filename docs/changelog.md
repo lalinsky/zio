@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed `Socket.receiveFromBatch` and `std.Io`'s `receiveManyTimeout` on io_uring dropping
+  the first received message when receiving the rest failed with an error other than
+  `WouldBlock`. The message is now returned; `receiveManyTimeout` reports the error with it,
+  while `receiveFromBatch` drops the error, which the socket may not report again.
+
 - Fixed `std.Io` datagram receives with the `trunc` flag panicking with an out-of-bounds
   slice when the datagram was larger than the buffer; the data is now clamped to the buffer
   and the message's `trunc` flag reports the truncation.
