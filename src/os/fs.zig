@@ -823,7 +823,8 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
         const access_mask: w.DWORD = w.GENERIC_READ;
 
         // FILE_FLAG_BACKUP_SEMANTICS is required to open directory handles
-        const file_flags: w.DWORD = w.FILE_ATTRIBUTE_NORMAL | w.FILE_FLAG_BACKUP_SEMANTICS;
+        var file_flags: w.DWORD = w.FILE_ATTRIBUTE_NORMAL | w.FILE_FLAG_BACKUP_SEMANTICS;
+        if (!flags.follow_symlinks) file_flags |= w.FILE_FLAG_OPEN_REPARSE_POINT;
 
         const handle = w.CreateFileW(
             path_w.ptr,
@@ -844,6 +845,14 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
                 else => |err| return unexpectedError(err),
             };
         }
+        errdefer _ = w.CloseHandle(handle);
+
+        // FILE_FLAG_BACKUP_SEMANTICS opens regular files too.
+        var info: w.BY_HANDLE_FILE_INFORMATION = undefined;
+        if (w.GetFileInformationByHandle(handle, &info) == w.FALSE) {
+            return unexpectedError(w.GetLastError());
+        }
+        if (info.dwFileAttributes & w.FILE_ATTRIBUTE_DIRECTORY == 0) return error.NotDir;
 
         return handle;
     }

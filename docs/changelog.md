@@ -115,6 +115,13 @@ All notable changes to this project will be documented in this file.
 - Fixed the built-in DNS resolver failing concurrent lookups of the same name with
   `error.Canceled` when the task that started the lookup was canceled.
 
+- Opening a regular file as a directory on Windows now fails with `error.NotDir` instead of
+  returning a handle.
+
+- Fixed `deleteTree` on Windows following a directory symlink or junction inside the tree
+  and deleting the contents of its target. Opening a directory with
+  `follow_symlinks = false` now opens the link itself, as std does.
+
 - Fixed directory reads on Windows reporting the wrong kind and inode for entries with long
   non-ASCII names.
 

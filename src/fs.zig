@@ -2814,6 +2814,51 @@ test "Dir: deleteTree" {
     try std.testing.expectError(error.FileNotFound, cwd.openDir(root_path, .{}));
 }
 
+test "Dir: deleteTree removes a directory symlink without following it" {
+    var t = try TestDirFixture.init();
+    defer t.deinit();
+
+    const cwd = t.dir;
+    try cwd.createDir("outside", 0o755);
+    (try cwd.createFile("outside/keep.txt", .{})).close();
+    try cwd.createDir("tree", 0o755);
+    {
+        const tree = try cwd.openDir("tree", .{});
+        defer tree.close();
+        if (builtin.os.tag == .windows) {
+            const CreateSymbolicLinkW = struct {
+                extern "kernel32" fn CreateSymbolicLinkW(
+                    lpSymlinkFileName: [*:0]const u16,
+                    lpTargetFileName: [*:0]const u16,
+                    dwFlags: u32,
+                ) callconv(.winapi) u8;
+            }.CreateSymbolicLinkW;
+            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const tree_path = try tree.realPath(&path_buf);
+            const link_path = try std.fmt.allocPrint(std.testing.allocator, "{s}\\link", .{tree_path});
+            defer std.testing.allocator.free(link_path);
+            const link_w = try std.unicode.wtf8ToWtf16LeAllocZ(std.testing.allocator, link_path);
+            defer std.testing.allocator.free(link_w);
+            const directory_flag = 0x1;
+            const allow_unprivileged_flag = 0x2;
+            if (CreateSymbolicLinkW(link_w, std.unicode.wtf8ToWtf16LeStringLiteral("..\\outside"), directory_flag | allow_unprivileged_flag) == 0) {
+                return error.SkipZigTest;
+            }
+            // Wine reports success without creating the link.
+            tree.access("link", .{}) catch |err| switch (err) {
+                error.FileNotFound => return error.SkipZigTest,
+                else => |e| return e,
+            };
+        } else {
+            try tree.symLink("../outside", "link", .{ .is_directory = true });
+        }
+    }
+
+    try cwd.deleteTree("tree");
+    try std.testing.expectError(error.FileNotFound, cwd.access("tree", .{}));
+    try cwd.access("outside/keep.txt", .{});
+}
+
 test "Dir: deleteTree on a file and on a missing path" {
     var t = try TestDirFixture.init();
     defer t.deinit();

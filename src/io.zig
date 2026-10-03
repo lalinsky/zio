@@ -4139,6 +4139,21 @@ test "io: deleteFile on a directory returns IsDir" {
     try std.testing.expectError(error.IsDir, dir.deleteFile(io, dir_path));
 }
 
+test "io: openDir on a file returns NotDir" {
+    var t = try TestDirFixture.init();
+    defer t.deinit();
+    const io = t.rt.io();
+
+    const dir = t.stdDir();
+    const file_path = "test_io_opendir_on_file";
+
+    var file = try dir.createFile(io, file_path, .{});
+    file.close(io);
+
+    try std.testing.expectError(error.NotDir, dir.openDir(io, file_path, .{}));
+    try std.testing.expectError(error.NotDir, dir.openDir(io, file_path, .{ .iterate = true }));
+}
+
 test "io: dir createDirPath creates nested directories" {
     var t = try TestDirFixture.init();
     defer t.deinit();
