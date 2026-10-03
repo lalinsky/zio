@@ -59,6 +59,9 @@ All notable changes to this project will be documented in this file.
   (an empty label, a label over 63 bytes, or more than 255 bytes in all) with
   `error.UnknownHostName` instead of `error.Unexpected`.
 
+- `lockStderr` without a terminal mode now detects one for stderr, honoring `NO_COLOR` and
+  `CLICOLOR_FORCE`, like `Io.Threaded`, instead of always disabling colors.
+
 - Fixed `unlockStderr` leaving the stderr writer pointing at the caller's buffer, so after a
   failed write the next `lockStderr` could write out stale bytes from a dead stack frame.
 

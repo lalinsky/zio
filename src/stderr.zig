@@ -35,6 +35,7 @@
 //! only happens while a task actually holds the user lock.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 
 const Mutex = @import("sync/Mutex.zig");
@@ -43,6 +44,7 @@ const AnyTask = @import("task.zig").AnyTask;
 const Cancelable = @import("common.zig").Cancelable;
 const runtime = @import("runtime.zig");
 const zio_fs = @import("fs.zig");
+const os_fs = @import("os/fs.zig");
 const zioFileToStd = @import("io.zig").zioFileToStd;
 
 /// Who holds a sink. The distinction matters because only a task can park
@@ -195,11 +197,35 @@ pub const Lock = struct {
     }
 };
 
+/// Which of the variables that override terminal color detection are set.
+const ColorEnv = struct {
+    no_color: bool = false,
+    clicolor_force: bool = false,
+
+    fn get() ColorEnv {
+        return .{
+            .no_color = envExists("NO_COLOR"),
+            .clicolor_force = envExists("CLICOLOR_FORCE"),
+        };
+    }
+
+    fn envExists(comptime key: [:0]const u8) bool {
+        if (builtin.os.tag == .windows) {
+            const environ: std.process.Environ = .{ .block = .global };
+            return environ.getWindows(comptime std.unicode.wtf8ToWtf16LeStringLiteral(key)) != null;
+        }
+        if (builtin.link_libc) return std.c.getenv(key) != null;
+        return false;
+    }
+};
+
 /// A lock and the writer it protects.
 const Sink = struct {
     lock: Lock = .init,
     writer: Io.File.Writer = undefined,
     writer_ready: bool = false,
+    /// What callers that pass no terminal mode get, detected on first use.
+    detected_mode: ?Io.Terminal.Mode = null,
 
     fn locked(self: *Sink, io: Io, terminal_mode: ?Io.Terminal.Mode) Io.LockedStderr {
         if (!self.writer_ready) {
@@ -212,10 +238,26 @@ const Sink = struct {
             self.writer = .initStreaming(zioFileToStd(zio_fs.stderr()), io, &.{});
             self.writer_ready = true;
         }
+        var mode = terminal_mode orelse self.detectMode(io);
+        if (builtin.os.tag == .windows) {
+            // A detected mode may come from another caller's `Io`.
+            if (mode == .windows_api) mode.windows_api.io = io;
+        }
         return .{
             .file_writer = &self.writer,
-            .terminal_mode = terminal_mode orelse .no_color,
+            .terminal_mode = mode,
         };
+    }
+
+    fn detectMode(self: *Sink, io: Io) Io.Terminal.Mode {
+        if (self.detected_mode) |mode| return mode;
+        return self.detectModeWithEnv(io, .get());
+    }
+
+    fn detectModeWithEnv(self: *Sink, io: Io, env: ColorEnv) Io.Terminal.Mode {
+        const mode = Io.Terminal.Mode.detect(io, self.writer.file, env.no_color, env.clicolor_force) catch return .no_color;
+        self.detected_mode = mode;
+        return mode;
     }
 
     fn flush(self: *Sink) void {
@@ -507,4 +549,44 @@ test "stderr lock: unlock drops the caller's buffer after a failed write" {
     try std.testing.expectEqual(0, user_sink.writer.interface.end);
     try std.testing.expectEqual(0, user_sink.writer.interface.buffer.len);
     try std.testing.expectEqual(null, user_sink.writer.err);
+}
+
+test "stderr lock: the terminal mode is detected when not given" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const rt = try runtime.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const tty_handle = os_fs.openat(std.testing.allocator, os_fs.cwd(), "/dev/ptmx", .{ .mode = .read_write }) catch
+        return error.SkipZigTest;
+    const tty_file: Io.File = .{ .handle = tty_handle, .flags = .{ .nonblocking = false } };
+    defer tty_file.close(io);
+
+    var sink: Sink = .{ .writer = .initStreaming(tty_file, io, &.{}), .writer_ready = true };
+    try std.testing.expectEqual(Io.Terminal.Mode.escape_codes, sink.detectModeWithEnv(io, .{}));
+    try std.testing.expectEqual(Io.Terminal.Mode.escape_codes, sink.locked(io, null).terminal_mode);
+    try std.testing.expectEqual(Io.Terminal.Mode.no_color, sink.locked(io, .no_color).terminal_mode);
+}
+
+test "stderr lock: NO_COLOR and CLICOLOR_FORCE override detection" {
+    const rt = try runtime.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const fds = try os_fs.pipe();
+    const read_file: Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = true } };
+    const write_file: Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = true } };
+    defer read_file.close(io);
+    defer write_file.close(io);
+
+    var plain: Sink = .{ .writer = .initStreaming(write_file, io, &.{}), .writer_ready = true };
+    try std.testing.expectEqual(Io.Terminal.Mode.no_color, plain.detectModeWithEnv(io, .{}));
+
+    var forced: Sink = .{ .writer = .initStreaming(write_file, io, &.{}), .writer_ready = true };
+    try std.testing.expectEqual(Io.Terminal.Mode.escape_codes, forced.detectModeWithEnv(io, .{ .clicolor_force = true }));
+    try std.testing.expectEqual(Io.Terminal.Mode.escape_codes, forced.detectMode(io));
+
+    var disabled: Sink = .{ .writer = .initStreaming(write_file, io, &.{}), .writer_ready = true };
+    try std.testing.expectEqual(Io.Terminal.Mode.no_color, disabled.detectModeWithEnv(io, .{ .no_color = true, .clicolor_force = true }));
 }
