@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- A batched `std.Io` streaming file read into only empty buffers completes right away with
+  0 bytes, matching a single read, instead of waiting for a pipe to become readable and
+  then failing with `error.EndOfStream`.
+
 - The `std.Io` `netWriteFile` vtable entry returns `error.NetworkDown` instead of panicking,
   like the std evented backends.
 

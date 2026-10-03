@@ -691,6 +691,18 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
         const submission = storage.submission;
         const next_index = submission.node.next;
 
+        if (isEmptyStreamingRead(submission.operation)) {
+            storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = .{ .file_read_streaming = 0 } } };
+            if (batch.completed.tail != .none) {
+                batch.storage[batch.completed.tail.toIndex()].completion.node.next = index;
+            } else {
+                batch.completed.head = index;
+            }
+            batch.completed.tail = index;
+            index = next_index;
+            continue;
+        }
+
         // Allocate completion data from pool
         const data = state.pool.create() catch return error.ConcurrencyUnavailable;
 
@@ -748,6 +760,18 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
                 return error.Canceled;
             },
         };
+    }
+}
+
+fn isEmptyStreamingRead(operation: Io.Operation) bool {
+    switch (operation) {
+        .file_read_streaming => |o| {
+            for (o.data) |buf| {
+                if (buf.len != 0) return false;
+            }
+            return true;
+        },
+        else => return false,
     }
 }
 
@@ -4772,6 +4796,38 @@ test "io: batch awaitConcurrent with two net_receive operations" {
 
     // Clean up
     batch.cancel(io);
+}
+
+test "io: batch awaitConcurrent file_read_streaming into empty buffers returns 0" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const fds = try os_fs.pipe();
+    var read_file: Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = true } };
+    var write_file: Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = true } };
+    defer read_file.close(io);
+    defer write_file.close(io);
+
+    var storage: [2]Io.Operation.Storage = undefined;
+    var batch: Io.Batch = .init(&storage);
+    defer batch.cancel(io);
+
+    var empty: [0]u8 = .{};
+    const data: []const []u8 = &.{&empty};
+    _ = batch.add(.{ .file_read_streaming = .{ .file = read_file, .data = data } });
+    _ = batch.add(.{ .file_read_streaming = .{ .file = read_file, .data = data } });
+
+    var completed: usize = 0;
+    while (completed < 2) {
+        try batch.awaitConcurrent(io, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+        while (batch.next()) |completion| {
+            try std.testing.expectEqual(0, try completion.result.file_read_streaming);
+            completed += 1;
+        }
+    }
 }
 
 test "io: batch awaitConcurrent times out when no data arrives" {
