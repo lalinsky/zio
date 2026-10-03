@@ -30,6 +30,9 @@ All notable changes to this project will be documented in this file.
 - Fixed `std.Io` TCP connect never timing out when given a deadline on the `.real` or
   `.boot` clock.
 
+- Spawning a process no longer installs and restores process-wide SIGIO and SIGPIPE handlers,
+  which concurrent spawns could leave permanently replaced.
+
 - `std.process.spawnPath` and `std.process.replacePath` return `error.OperationUnsupported`
   instead of hitting the `@panic("TODO")` in `std.Io.Threaded` they were delegated to.
 

@@ -1875,10 +1875,23 @@ fn processEnviron() std.process.Environ {
     return .empty;
 }
 
+/// An `Io.Threaded` to delegate process operations to. Unlike
+/// `Io.Threaded.init`, this does not install process-wide SIGIO and SIGPIPE
+/// handlers.
+// TODO(zig-0.17): use `Io.Threaded.init` if it no longer installs signal
+// handlers, or drop this once process operations are implemented natively.
+fn processThreaded(allocator: std.mem.Allocator) Io.Threaded {
+    const environ = processEnviron();
+    var threaded: Io.Threaded = .init_single_threaded;
+    threaded.allocator = allocator;
+    threaded.environ_initialized = environ.block.isEmpty();
+    threaded.environ = .{ .process_environ = environ };
+    return threaded;
+}
+
 // TODO: implement using our own posix_spawn/fork+exec wrapper
 fn processSpawnImpl(userdata: ?*anyopaque, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
-    const rt, _ = decodeUserdata(userdata);
-    var threaded: Io.Threaded = .init(rt.allocator, .{ .environ = processEnviron() });
+    var threaded = processThreaded(scratchAllocator(userdata));
     defer threaded.deinit();
     const io = threaded.io();
     var child = try io.vtable.processSpawn(io.userdata, options);

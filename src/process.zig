@@ -137,3 +137,47 @@ test "replacePath returns OperationUnsupported" {
     const err = std.process.replacePath(rt.io(), .cwd(), .{ .argv = argv_exit0 });
     try std.testing.expectEqual(error.OperationUnsupported, err);
 }
+
+test "spawn leaves the SIGIO disposition alone" {
+    if (builtin.os.tag == .windows or !@hasField(os.posix.SIG, "IO")) return error.SkipZigTest;
+
+    const S = struct {
+        fn handler(_: os.posix.SIG) callconv(.c) void {}
+
+        fn spawnMany(io: std.Io, first_err: *std.atomic.Value(u16)) void {
+            for (0..16) |_| {
+                var child = std.process.spawn(io, .{ .argv = argv_exit0 }) catch |err| return fail(first_err, err);
+                _ = childWait(&child) catch |err| return fail(first_err, err);
+            }
+        }
+
+        fn fail(first_err: *std.atomic.Value(u16), err: anyerror) void {
+            _ = first_err.cmpxchgStrong(0, @intFromError(err), .monotonic, .monotonic);
+        }
+    };
+
+    const act: os.posix.Sigaction = .{
+        .handler = .{ .handler = S.handler },
+        .mask = os.posix.sigemptyset(),
+        .flags = 0,
+    };
+    var old: os.posix.Sigaction = undefined;
+    os.posix.sigaction(os.posix.SIG.IO, &act, &old);
+    defer os.posix.sigaction(os.posix.SIG.IO, &old, null);
+
+    const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
+    defer rt.deinit();
+    const io = rt.io();
+
+    var first_err: std.atomic.Value(u16) = .init(0);
+    var group: std.Io.Group = .init;
+    defer group.cancel(io);
+    for (0..4) |_| try group.concurrent(io, S.spawnMany, .{ io, &first_err });
+    try group.await(io);
+    const err_int = first_err.load(.monotonic);
+    if (err_int != 0) return @errorFromInt(err_int);
+
+    var current: os.posix.Sigaction = undefined;
+    os.posix.sigaction(os.posix.SIG.IO, null, &current);
+    try std.testing.expect(current.handler.handler == S.handler);
+}
