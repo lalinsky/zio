@@ -892,16 +892,7 @@ fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Oper
                 else => |e| e,
             };
         } },
-        .device_io_control => .{ .device_io_control = blk: {
-            if (builtin.os.tag == .windows) {
-                break :blk data.device_io_control.op.getResult() catch .{
-                    .u = .{ .Status = .CANCELLED },
-                    .Information = 0,
-                };
-            } else {
-                break :blk data.device_io_control.op.getResult() catch 0;
-            }
-        } },
+        .device_io_control => .{ .device_io_control = data.device_io_control.op.getResult() catch unreachable },
         .net_receive => .{
             .net_receive = blk: {
                 const result = data.net_receive.op.getResult() catch |err| break :blk .{ recvMsgErrToReceiveErr(err), 0 };
