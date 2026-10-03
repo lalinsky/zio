@@ -422,9 +422,11 @@ pub const DirEntryIterator = struct {
     }
 
     /// Get next directory entry, skipping "." and "..".
-    /// Returns null when no more entries, or if buffer space exhausted (Windows).
+    /// Returns null when no more entries, or if buffer space exhausted (Windows),
+    /// in which case `hasPending()` is still true.
     pub fn next(self: *DirEntryIterator) ?DirEntry {
         while (self.index < self.end) {
+            const start = self.index;
             const entry = self.nextRaw() orelse return null;
 
             // Skip . and ..
@@ -438,9 +440,7 @@ pub const DirEntryIterator = struct {
 
             const name = self.extractName(entry) orelse {
                 // On Windows, null means no buffer space - backtrack and stop
-                if (builtin.os.tag == .windows) {
-                    self.backtrack(entry);
-                }
+                self.index = start;
                 return null;
             };
 
@@ -451,6 +451,11 @@ pub const DirEntryIterator = struct {
             };
         }
         return null;
+    }
+
+    /// Whether unparsed entries remain in the buffer.
+    pub fn hasPending(self: *const DirEntryIterator) bool {
+        return self.index < self.end;
     }
 
     fn nextRaw(self: *DirEntryIterator) ?*align(1) const RawEntry {
@@ -469,19 +474,6 @@ pub const DirEntryIterator = struct {
         };
 
         return entry;
-    }
-
-    fn backtrack(self: *DirEntryIterator, entry: *align(1) const RawEntry) void {
-        // Revert to where this entry started
-        self.index -= switch (builtin.os.tag) {
-            .linux, .macos, .ios, .tvos, .watchos, .visionos, .freebsd, .netbsd, .openbsd => entry.reclen,
-            .dragonfly => entry.reclen(),
-            .windows => if (entry.NextEntryOffset != 0)
-                entry.NextEntryOffset
-            else
-                0, // Was last entry, index is already at end
-            else => @compileError("unsupported OS"),
-        };
     }
 
     fn extractName(self: *DirEntryIterator, entry: *align(1) const RawEntry) ?[]const u8 {
@@ -564,6 +556,39 @@ pub const DirEntryIterator = struct {
         };
     }
 };
+
+test "DirEntryIterator: a Windows name that doesn't fit is left for the next batch" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const Info = w.FILE_BOTH_DIR_INFORMATION;
+    const entry_size = comptime std.mem.alignForward(usize, @offsetOf(Info, "FileName") + w.NAME_MAX * 2, @alignOf(Info));
+    var buffer: [DirEntryIterator.reserved_len + 2 * entry_size]u8 align(@alignOf(Info)) = undefined;
+    const raw = DirEntryIterator.getUnreservedBuffer(&buffer);
+    for (0..2) |i| {
+        const info: *Info = @ptrCast(@alignCast(raw[i * entry_size ..].ptr));
+        info.* = std.mem.zeroes(Info);
+        info.NextEntryOffset = if (i == 0) entry_size else 0;
+        info.FileIndex = @intCast(100 + i);
+        info.FileAttributes = .{ .DIRECTORY = true };
+        info.FileNameLength = w.NAME_MAX * 2;
+        const name: [*]u16 = @ptrCast(&info.FileName);
+        @memset(name[0..w.NAME_MAX], @intCast(0x4e00 + i));
+    }
+
+    var it = DirEntryIterator.init(&buffer, 0, 2 * entry_size);
+    const first = it.next().?;
+    try std.testing.expectEqual(w.NAME_MAX * 3, first.name.len);
+    try std.testing.expectEqualStrings("\u{4e00}", first.name[0..3]);
+    try std.testing.expect(it.next() == null);
+    try std.testing.expect(it.hasPending());
+
+    it = DirEntryIterator.init(&buffer, it.index, it.end);
+    const second = it.next().?;
+    try std.testing.expectEqual(w.NAME_MAX * 3, second.name.len);
+    try std.testing.expectEqualStrings("\u{4e01}", second.name[0..3]);
+    try std.testing.expect(it.next() == null);
+    try std.testing.expect(!it.hasPending());
+}
 
 pub const FileSizeError = error{
     AccessDenied,

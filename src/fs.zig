@@ -470,7 +470,6 @@ pub const Dir = struct {
         // index/end are positions in the raw-entry (unreserved) region.
         index: usize = 0,
         end: usize = 0,
-        name_index: usize = 0,
         started: bool = false,
         finished: bool = false,
 
@@ -496,21 +495,17 @@ pub const Dir = struct {
                     }
                     self.index = 0;
                     self.end = n;
-                    self.name_index = 0;
                 }
 
                 // Reconstruct the parser each call (rather than storing it) so the
                 // Iterator holds no slice into its own buffer and stays movable.
                 var it = os.fs.DirEntryIterator.init(&self.buffer, self.index, self.end);
-                it.name_index = self.name_index;
                 const entry = it.next() orelse {
+                    std.debug.assert(!it.hasPending());
                     self.index = it.index;
-                    self.end = it.end;
-                    self.name_index = it.name_index;
                     continue;
                 };
                 self.index = it.index;
-                self.name_index = it.name_index;
                 return entry;
             }
         }

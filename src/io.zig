@@ -1382,7 +1382,10 @@ fn dirReadImpl(_: ?*anyopaque, r: *Io.Dir.Reader, entries: []Io.Dir.Entry) Io.Di
 
         const entry = it.next() orelse {
             r.index = it.index;
-            r.end = it.end;
+            if (it.hasPending()) {
+                std.debug.assert(entry_index > 0);
+                break;
+            }
             continue;
         };
         r.index = it.index;
