@@ -59,6 +59,9 @@ All notable changes to this project will be documented in this file.
   (an empty label, a label over 63 bytes, or more than 255 bytes in all) with
   `error.UnknownHostName` instead of `error.Unexpected`.
 
+- Fixed `unlockStderr` leaving the stderr writer pointing at the caller's buffer, so after a
+  failed write the next `lockStderr` could write out stale bytes from a dead stack frame.
+
 - Fixed the built-in DNS resolver treating a truncated UDP response whose last record was cut
   off as a server failure instead of retrying the query over TCP.
 

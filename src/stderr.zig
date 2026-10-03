@@ -221,6 +221,8 @@ const Sink = struct {
     fn flush(self: *Sink) void {
         if (self.writer.err == null) self.writer.interface.flush() catch {};
         self.writer.err = null;
+        self.writer.interface.end = 0;
+        self.writer.interface.buffer = &.{};
     }
 };
 
@@ -489,4 +491,20 @@ test "stderr lock: a task waits for another task and is handed the lock" {
 
     try std.testing.expectEqual([2]u8{ 1, 2 }, shared.order);
     try std.testing.expect(shared.l.owner == null);
+}
+
+test "stderr lock: unlock drops the caller's buffer after a failed write" {
+    const rt = try runtime.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var buffer: [64]u8 = undefined;
+    const locked = try io.lockStderr(&buffer, .no_color);
+    try locked.file_writer.interface.writeAll("never flushed");
+    locked.file_writer.err = error.BrokenPipe;
+    io.unlockStderr();
+
+    try std.testing.expectEqual(0, user_sink.writer.interface.end);
+    try std.testing.expectEqual(0, user_sink.writer.interface.buffer.len);
+    try std.testing.expectEqual(null, user_sink.writer.err);
 }
