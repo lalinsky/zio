@@ -584,11 +584,17 @@ const BatchCompletionData = union(Io.Operation.Tag) {
     }
 };
 
+/// Flags stored in the low bits of the `BatchCompletionData` pointer in `pending.userdata[0]`.
+const batch_ready_flag: usize = 1;
+const batch_canceled_flag: usize = 2;
+const batch_flags_mask: usize = batch_ready_flag | batch_canceled_flag;
+
 comptime {
     const Userdata = Io.Operation.Storage.Pending.Userdata;
     const Result = Io.Operation.Result;
     std.debug.assert(@sizeOf(Result) <= @sizeOf(Userdata) - @sizeOf(usize));
     std.debug.assert(@alignOf(Result) <= @alignOf(usize));
+    std.debug.assert(@alignOf(BatchCompletionData) > batch_flags_mask);
 }
 
 /// State for concurrent batch operations, stored in batch.userdata.
@@ -694,14 +700,14 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
 
         // Move from submitted to pending
         // userdata layout:
-        //   [0]: data pointer (BatchCompletionData*) with low bit as ready flag
-        //   [1..]: result (Io.Operation.Result)
+        //   [0]: data pointer (BatchCompletionData*) with `batch_flags_mask` bits as flags
+        //   [1..]: result (Io.Operation.Result), unset if canceled
         storage.* = .{ .pending = .{
             .node = .{ .prev = batch.pending.tail, .next = .none },
             .tag = submission.operation,
             .userdata = undefined,
         } };
-        @as(*usize, @ptrCast(&storage.pending.userdata[0])).* = @intFromPtr(data); // low bit 0 = not ready
+        @as(*usize, @ptrCast(&storage.pending.userdata[0])).* = @intFromPtr(data); // no flags = not ready
 
         if (batch.pending.tail != .none) {
             batch.storage[batch.pending.tail.toIndex()].pending.node.next = index;
@@ -832,7 +838,8 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
 }
 
 /// Callback when a batch operation completes.
-/// Stores result in userdata, sets ready flag (low bit of data pointer), signals waiter via futex.
+/// Stores result in userdata, sets ready flag (and canceled flag if the operation was
+/// canceled) in the data pointer, signals waiter via futex.
 fn batchCompletionCallback(_: *ev.Loop, completion: *ev.Completion) void {
     const state: *BatchState = @ptrCast(@alignCast(completion.userdata.?));
     const batch = state.batch;
@@ -842,16 +849,21 @@ fn batchCompletionCallback(_: *ev.Loop, completion: *ev.Completion) void {
     const storage = &batch.storage[batch_index];
     const userdata = &storage.pending.userdata;
 
-    // Get completion data and extract result
     const data_ptr = @as(*const usize, @ptrCast(&userdata[0])).*;
-    const data: *BatchCompletionData = @ptrFromInt(data_ptr);
-    const result = extractBatchResult(data, storage.pending.tag);
+    const canceled = if (completion.err) |err| err == error.Canceled else false;
 
-    // Store result in userdata[1..] (after data pointer)
-    @as(*Io.Operation.Result, @ptrCast(@alignCast(&userdata[1]))).* = result;
+    var flags = batch_ready_flag;
+    if (canceled) {
+        flags |= batch_canceled_flag;
+    } else {
+        // Store result in userdata[1..] (after data pointer)
+        const data: *BatchCompletionData = @ptrFromInt(data_ptr);
+        const result = extractBatchResult(data, storage.pending.tag);
+        @as(*Io.Operation.Result, @ptrCast(@alignCast(&userdata[1]))).* = result;
+    }
 
-    // Set ready flag by setting low bit of data pointer (release to ensure result is visible)
-    @atomicStore(usize, @as(*usize, @ptrCast(&userdata[0])), data_ptr | 1, .release);
+    // Set flags in the data pointer (release to ensure result is visible)
+    @atomicStore(usize, @as(*usize, @ptrCast(&userdata[0])), data_ptr | flags, .release);
 
     // Signal waiter
     _ = state.ready_count.fetchAdd(1, .release);
@@ -900,7 +912,8 @@ fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Oper
     };
 }
 
-/// Drain ready items: scan pending list, move ready items to completed.
+/// Drain ready items: scan pending list, move ready items to completed, and canceled
+/// items to unused, since canceled operations are not reported by `Io.Batch.next`.
 /// Called only from the await thread, so no lock needed for list manipulation.
 fn batchDrainReady(batch: *Io.Batch, state: *BatchState) void {
     var index = batch.pending.head;
@@ -909,19 +922,16 @@ fn batchDrainReady(batch: *Io.Batch, state: *BatchState) void {
         const userdata = &storage.pending.userdata;
         const next_index = storage.pending.node.next;
 
-        // Check ready flag (low bit of data pointer, acquire to see result)
+        // Check ready flag (acquire to see result)
         const data_ptr = @atomicLoad(usize, @as(*usize, @ptrCast(&userdata[0])), .acquire);
-        if (data_ptr & 1 == 0) {
+        if (data_ptr & batch_ready_flag == 0) {
             index = next_index;
             continue;
         }
 
-        // Get data pointer (mask off ready bit) and free it
-        const data: *BatchCompletionData = @ptrFromInt(data_ptr & ~@as(usize, 1));
+        // Get data pointer (mask off flags) and free it
+        const data: *BatchCompletionData = @ptrFromInt(data_ptr & ~batch_flags_mask);
         state.pool.destroy(data);
-
-        // Get result from userdata[1..]
-        const result = @as(*const Io.Operation.Result, @ptrCast(@alignCast(&userdata[1]))).*;
 
         // Remove from pending list
         const pending = &storage.pending;
@@ -935,6 +945,24 @@ fn batchDrainReady(batch: *Io.Batch, state: *BatchState) void {
         } else {
             batch.pending.tail = pending.node.prev;
         }
+
+        if (data_ptr & batch_canceled_flag != 0) {
+            // Add to unused list
+            const tail_index = batch.unused.tail;
+            if (tail_index != .none) {
+                batch.storage[tail_index.toIndex()].unused.next = index;
+            } else {
+                batch.unused.head = index;
+            }
+            storage.* = .{ .unused = .{ .prev = tail_index, .next = .none } };
+            batch.unused.tail = index;
+
+            index = next_index;
+            continue;
+        }
+
+        // Get result from userdata[1..]
+        const result = @as(*const Io.Operation.Result, @ptrCast(@alignCast(&userdata[1]))).*;
 
         // Add to completed list
         storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = result } };
@@ -960,9 +988,9 @@ fn batchCancelPending(batch: *Io.Batch, state: *BatchState) void {
     while (index != .none) {
         const storage = &batch.storage[index.toIndex()];
         const userdata = &storage.pending.userdata;
-        // Only cancel if not already ready (check low bit)
+        // Only cancel if not already ready
         const data_ptr = @atomicLoad(usize, @as(*usize, @ptrCast(&userdata[0])), .acquire);
-        if (data_ptr & 1 == 0) {
+        if (data_ptr & batch_ready_flag == 0) {
             const data: *BatchCompletionData = @ptrFromInt(data_ptr);
             const completion = data.getCompletion();
             executor.loopCancel(completion);
@@ -4670,6 +4698,59 @@ test "io: batch awaitConcurrent times out when no data arrives" {
 
     // Should timeout since no data arrives
     try std.testing.expectError(error.Timeout, batch.awaitConcurrent(io, .{ .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake } }));
+}
+
+test "io: batch cancel does not report canceled operations" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var sock1 = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sock1.close(io);
+    var sock2 = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sock2.close(io);
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+
+    var storage: [2]Io.Operation.Storage = undefined;
+    var batch: Io.Batch = .init(&storage);
+    defer batch.cancel(io);
+
+    var msg1: Io.net.IncomingMessage = .init;
+    var buf1: [16]u8 = undefined;
+    var msg2: Io.net.IncomingMessage = .init;
+    var buf2: [16]u8 = undefined;
+
+    for (0..2) |_| {
+        batch.addAt(0, .{ .net_receive = .{
+            .socket_handle = sock1.handle,
+            .message_buffer = (&msg1)[0..1],
+            .data_buffer = &buf1,
+            .flags = .{},
+        } });
+        batch.addAt(1, .{ .net_receive = .{
+            .socket_handle = sock2.handle,
+            .message_buffer = (&msg2)[0..1],
+            .data_buffer = &buf2,
+            .flags = .{},
+        } });
+
+        // Only the first socket gets data
+        try sender.send(io, &sock1.address, "hello");
+        try batch.awaitConcurrent(io, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+
+        const completion = batch.next().?;
+        try std.testing.expectEqual(0, completion.index);
+        const err, const n = completion.result.net_receive;
+        try std.testing.expectEqual(null, err);
+        try std.testing.expectEqual(1, n);
+        try std.testing.expectEqualStrings("hello", msg1.data);
+
+        // The second operation is canceled, so it must not show up, and both
+        // slots must be available to `addAt` again
+        batch.cancel(io);
+        try std.testing.expect(batch.next() == null);
+    }
 }
 
 test "io: concurrent cross-executor cancel of N blocked recvmsg fibers is UAF-free" {
