@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `std.Io`'s `receiveManyTimeout` no longer truncates a follow-up datagram that doesn't fit
+  in the rest of the data buffer; it leaves it queued for the next call. When less than
+  64 KiB of buffer is left, this costs an extra peek syscall per follow-up datagram (on
+  Linux, one that copies no data). On Windows, which can't detect the truncation, follow-ups
+  stop once less than 64 KiB is left.
+
 - Fixed `std.Io`'s `receiveManyTimeout` truncating datagrams to an equal share of the data
   buffer, e.g. to 187 bytes with 8 message slots and a 1500-byte buffer, even when only
   one datagram arrived. The first datagram now gets the whole buffer. Receiving several

@@ -479,7 +479,7 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout, clock: time.Cloc
                         error.Timeout => |e| return e,
                     };
                 }
-                netReceiveImpl(o.socket_handle, &o.message_buffer[0], o.data_buffer, o.flags, false, timeout, clock) catch |err| switch (err) {
+                _ = netReceiveImpl(o.socket_handle, &o.message_buffer[0], o.data_buffer, o.flags, false, timeout, clock) catch |err| switch (err) {
                     error.Canceled => |e| return e,
                     error.Timeout => |e| return e,
                     error.WouldBlock => unreachable, // only with dontwait
@@ -2491,15 +2491,16 @@ fn netReceiveMmsg(
 /// Returns the `net_receive` result for a first message that has already
 /// landed in `message_buffer[0]`.
 ///
-/// Each message gets the whole remaining data buffer, as in std.Io.Threaded,
-/// so a datagram larger than what is left is truncated; sizing the buffer is
-/// the caller's job. The loop stops when the slots or the buffer run out or
-/// the queue is empty. A message already received must be reported, so an
-/// error after that point rides along in the tuple with the count, and a
-/// cancellation is re-armed for the next cancellation point instead of being
-/// returned. Peeking is excluded, since every slot would see the same
-/// datagram, and so is `trunc`: it reports the full datagram length, which
-/// the ever-shorter tail cannot hold and the caller could not have sized for.
+/// Each message gets the whole remaining data buffer. Unlike std.Io.Threaded,
+/// a datagram that doesn't fit in what is left is normally left queued for the
+/// next call instead of being truncated, see `netReceiveQueued`. The loop stops
+/// when the slots run out, the queue is empty or the next datagram doesn't
+/// fit. A message already received must be reported, so an error after that
+/// point rides along in the tuple with the count, and a cancellation is
+/// re-armed for the next cancellation point instead of being returned.
+/// Peeking is excluded, since every slot would see the same datagram, and so
+/// is `trunc`: it reports the full datagram length, which the ever-shorter
+/// tail cannot hold and the caller could not have sized for.
 fn netReceiveMore(o: *const Io.Operation.NetReceive) Io.Operation.NetReceive.Result {
     if (!ev.Backend.supports_recv_dontwait or o.flags.peek or o.flags.trunc) return .{ null, 1 };
     const extra = netReceiveMoreLoop(o, 1);
@@ -2513,7 +2514,7 @@ fn netReceiveMoreLoop(o: *const Io.Operation.NetReceive, start: usize) Io.Operat
     for (o.message_buffer[start..]) |*message| {
         const remaining = o.data_buffer[data_i..];
         if (remaining.len == 0) break;
-        netReceiveImpl(o.socket_handle, message, remaining, o.flags, true, .none, .awake) catch |err| switch (err) {
+        netReceiveQueued(o, message, remaining) catch |err| switch (err) {
             error.WouldBlock => break,
             error.Canceled => {
                 runtime_mod.recancel();
@@ -2528,10 +2529,41 @@ fn netReceiveMoreLoop(o: *const Io.Operation.NetReceive, start: usize) Io.Operat
     return .{ null, count };
 }
 
+/// Receive a queued datagram into `buffer` without waiting, only if it fits.
+/// When `buffer` might be too small for a UDP datagram, the datagram is peeked
+/// first, and one that would be truncated is reported as `error.WouldBlock`.
+/// On Linux, the peek asks for the length with MSG_TRUNC and copies nothing;
+/// elsewhere it copies the datagram into `buffer` and checks for truncation.
+/// Windows doesn't report truncation in the message flags, so there the
+/// datagram is left alone whenever `buffer` might be too small. The peek and
+/// the receive are separate calls, so another receiver on the same socket can
+/// take the peeked datagram in between, and the receive then gets the next
+/// one, which may not fit.
+fn netReceiveQueued(
+    o: *const Io.Operation.NetReceive,
+    message: *Io.net.IncomingMessage,
+    buffer: []u8,
+) (Io.net.Socket.ReceiveError || error{WouldBlock} || common.Timeoutable)!void {
+    if (buffer.len < max_datagram_len) {
+        if (builtin.os.tag == .windows) return error.WouldBlock;
+        var peeked: Io.net.IncomingMessage = .init;
+        if (builtin.os.tag == .linux) {
+            const len = try netReceiveImpl(o.socket_handle, &peeked, buffer[0..0], .{ .peek = true, .trunc = true, .oob = o.flags.oob }, true, .none, .awake);
+            if (len > buffer.len) return error.WouldBlock;
+        } else {
+            _ = try netReceiveImpl(o.socket_handle, &peeked, buffer, .{ .peek = true, .oob = o.flags.oob }, true, .none, .awake);
+            if (peeked.flags.trunc) return error.WouldBlock;
+        }
+    }
+    _ = try netReceiveImpl(o.socket_handle, message, buffer, o.flags, true, .none, .awake);
+}
+
 /// Receive a single datagram, filling `message` with its metadata and returning
 /// the received bytes as a sub-slice of `data_buffer`. Mirrors std.Io.Threaded's
 /// netReceivePosix: one recvmsg per call. With `dontwait` the operation reports
 /// an empty queue as `error.WouldBlock` instead of waiting for readiness.
+/// Returns the length the system reported, which with `flags.trunc` on Linux
+/// is the full datagram length and can exceed `data_buffer.len`.
 fn netReceiveImpl(
     socket_handle: Io.net.Socket.Handle,
     message: *Io.net.IncomingMessage,
@@ -2540,7 +2572,7 @@ fn netReceiveImpl(
     dontwait: bool,
     timeout: time.Timeout,
     clock: time.Clock,
-) (Io.net.Socket.ReceiveError || error{WouldBlock} || common.Timeoutable)!void {
+) (Io.net.Socket.ReceiveError || error{WouldBlock} || common.Timeoutable)!usize {
     const zio_flags: os_net.RecvFlags = .{
         .peek = flags.peek,
         .oob = flags.oob,
@@ -2572,6 +2604,7 @@ fn netReceiveImpl(
         .control = if (has_control) message.control[0..result.controllen] else message.control,
         .flags = decodeIncomingFlags(result.flags),
     };
+    return result.len;
 }
 
 fn netReadImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, data: [][]u8) Io.net.Stream.Reader.Error!usize {
@@ -4526,6 +4559,35 @@ test "io: receiveManyTimeout splits a large buffer between datagrams" {
             seen += 1;
         }
     }
+}
+
+test "io: receiveManyTimeout leaves a datagram that doesn't fit queued" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+    var receiver = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer receiver.close(io);
+
+    const first: [60]u8 = @splat('a');
+    const second: [60]u8 = @splat('b');
+    try sender.send(io, &receiver.address, &first);
+    try sender.send(io, &receiver.address, &second);
+
+    var messages: [4]Io.net.IncomingMessage = @splat(.init);
+    var buf: [100]u8 = undefined;
+    const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } };
+    const err, const n = receiver.receiveManyTimeout(io, &messages, &buf, .{}, timeout);
+    try std.testing.expectEqual(null, err);
+    try std.testing.expectEqual(1, n);
+    try std.testing.expectEqualSlices(u8, &first, messages[0].data);
+
+    const err2, const n2 = receiver.receiveManyTimeout(io, &messages, &buf, .{}, timeout);
+    try std.testing.expectEqual(null, err2);
+    try std.testing.expectEqual(1, n2);
+    try std.testing.expectEqualSlices(u8, &second, messages[0].data);
 }
 
 test "io: operateTimeout net_receive times out when no data arrives" {
