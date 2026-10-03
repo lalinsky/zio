@@ -121,3 +121,19 @@ test "childWait: spawn nonexistent binary returns FileNotFound" {
     const result = std.process.spawn(rt.io(), .{ .argv = &.{"definitely-not-a-real-binary-xyz123"} });
     try std.testing.expectError(error.FileNotFound, result);
 }
+
+test "spawnPath returns OperationUnsupported" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const result = std.process.spawnPath(rt.io(), .cwd(), .{ .argv = argv_exit0 });
+    try std.testing.expectError(error.OperationUnsupported, result);
+}
+
+test "replacePath returns OperationUnsupported" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const err = std.process.replacePath(rt.io(), .cwd(), .{ .argv = argv_exit0 });
+    try std.testing.expectEqual(error.OperationUnsupported, err);
+}

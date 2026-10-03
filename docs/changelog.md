@@ -30,6 +30,9 @@ All notable changes to this project will be documented in this file.
 - Fixed `std.Io` TCP connect never timing out when given a deadline on the `.real` or
   `.boot` clock.
 
+- `std.process.spawnPath` and `std.process.replacePath` return `error.OperationUnsupported`
+  instead of hitting the `@panic("TODO")` in `std.Io.Threaded` they were delegated to.
+
 - Fixed `Runtime.blockingIo()` panicking on misaligned userdata in process spawning,
   getting and setting the current path, `Batch.awaitConcurrent` and host name lookups.
 

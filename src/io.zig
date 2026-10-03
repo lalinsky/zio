@@ -1860,9 +1860,8 @@ fn processReplaceImpl(_: ?*anyopaque, options: std.process.ReplaceOptions) std.p
 }
 
 // TODO: implement using our own execve wrapper
-fn processReplacePathImpl(_: ?*anyopaque, dir: Io.Dir, options: std.process.ReplaceOptions) std.process.ReplaceError {
-    const io = globalIo();
-    return io.vtable.processReplacePath(io.userdata, dir, options);
+fn processReplacePathImpl(_: ?*anyopaque, _: Io.Dir, _: std.process.ReplaceOptions) std.process.ReplaceError {
+    return error.OperationUnsupported;
 }
 
 fn processEnviron() std.process.Environ {
@@ -1888,14 +1887,8 @@ fn processSpawnImpl(userdata: ?*anyopaque, options: std.process.SpawnOptions) st
 }
 
 // TODO: implement using our own posix_spawn/fork+exec wrapper
-fn processSpawnPathImpl(userdata: ?*anyopaque, dir: Io.Dir, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
-    const rt, _ = decodeUserdata(userdata);
-    var threaded: Io.Threaded = .init(rt.allocator, .{ .environ = processEnviron() });
-    defer threaded.deinit();
-    const io = threaded.io();
-    var child = try io.vtable.processSpawnPath(io.userdata, dir, options);
-    setChildPipesNonblocking(&child);
-    return child;
+fn processSpawnPathImpl(_: ?*anyopaque, _: Io.Dir, _: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
+    return error.OperationUnsupported;
 }
 
 fn setChildPipesNonblocking(child: *std.process.Child) void {
