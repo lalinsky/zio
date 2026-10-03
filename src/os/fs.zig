@@ -432,9 +432,9 @@ pub const DirEntryIterator = struct {
             // Skip . and ..
             if (self.isDotOrDotDot(entry)) continue;
 
-            // On NetBSD/OpenBSD a zero fileno marks an invalid or deleted entry
-            // still present in the directory block; skip it (matches std).
-            if (builtin.os.tag == .netbsd or builtin.os.tag == .openbsd) {
+            // On Darwin/NetBSD/OpenBSD a zero inode marks an invalid or deleted
+            // entry still present in the directory block; skip it (matches std).
+            if (builtin.os.tag.isDarwin() or builtin.os.tag == .netbsd or builtin.os.tag == .openbsd) {
                 if (self.extractInode(entry) == 0) continue;
             }
 

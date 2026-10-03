@@ -115,6 +115,9 @@ All notable changes to this project will be documented in this file.
 - Fixed the built-in DNS resolver failing concurrent lookups of the same name with
   `error.Canceled` when the task that started the lookup was canceled.
 
+- Directory iteration on macOS now skips entries with a zero inode, which mark deleted
+  entries, like std does.
+
 - POSIX renames now return `error.DirNotEmpty` instead of `error.Unexpected` when the system
   reports `EEXIST` for a non-empty target directory.
 
