@@ -49,6 +49,7 @@
 const std = @import("std");
 const Runtime = @import("../runtime.zig").Runtime;
 const Group = @import("../group.zig").Group;
+const yield = @import("../runtime.zig").yield;
 const Cancelable = @import("../common.zig").Cancelable;
 const Mutex = @import("Mutex.zig");
 const Condition = @import("Condition.zig");
@@ -86,8 +87,9 @@ pub fn init(count: usize) Barrier {
 /// Returns `error.BrokenBarrier` if the barrier has been broken by a cancellation
 /// of another waiting task. Once broken, the barrier cannot be used again.
 ///
-/// Returns `error.Canceled` if this task is cancelled while waiting. This will
-/// also break the barrier for all other waiting tasks.
+/// Returns `error.Canceled` if this task is cancelled while waiting. Unless the
+/// barrier has already released this task, this also breaks the barrier for all
+/// other waiting tasks.
 pub fn wait(self: *Barrier) (Cancelable || error{BrokenBarrier})!bool {
     try self.mutex.lock();
     defer self.mutex.unlock();
@@ -110,6 +112,8 @@ pub fn wait(self: *Barrier) (Cancelable || error{BrokenBarrier})!bool {
         // Wait for the barrier to be released
         while (self.generation == local_gen and !self.broken) {
             self.cond.wait(&self.mutex) catch |err| {
+                // The barrier already released this generation, there is nothing to break
+                if (self.generation != local_gen) return err;
                 // On cancellation: break the barrier and wake all waiters
                 self.current -= 1;
                 self.broken = true;
@@ -317,4 +321,50 @@ test "Barrier: many coroutines" {
     for (final_counts) |count| {
         try std.testing.expectEqual(5, count);
     }
+}
+
+test "Barrier: a waiter canceled after the barrier released it does not break it" {
+    // The leader releases the parked waiter, and only then is the waiter
+    // canceled, so it sees the cancellation after its generation completed.
+    // That must leave the barrier intact for the next generation.
+    //
+    // One executor, and the release before the cancel, so the waiter cannot
+    // run in between: that pins the race every time.
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(1) });
+    defer runtime.deinit();
+
+    const Tasks = struct {
+        fn waiter(b: *Barrier, entered: *std.atomic.Value(bool), out: *?anyerror) !void {
+            entered.store(true, .release);
+            _ = b.wait() catch |err| {
+                out.* = err;
+            };
+        }
+    };
+
+    var barrier = Barrier.init(2);
+    var entered = std.atomic.Value(bool).init(false);
+    var result: ?anyerror = null;
+
+    var handle = try runtime.spawn(Tasks.waiter, .{ &barrier, &entered, &result });
+    while (!entered.load(.acquire)) try yield();
+    try yield(); // let the waiter park
+
+    try std.testing.expect(try barrier.wait());
+    handle.cancel();
+    try handle.join();
+
+    try std.testing.expectEqual(@as(?anyerror, error.Canceled), result);
+    try std.testing.expect(!barrier.broken);
+    try std.testing.expectEqual(0, barrier.current);
+
+    entered.store(false, .release);
+    result = null;
+    var next = try runtime.spawn(Tasks.waiter, .{ &barrier, &entered, &result });
+    while (!entered.load(.acquire)) try yield();
+    try yield(); // let the waiter park
+
+    try std.testing.expect(try barrier.wait());
+    try next.join();
+    try std.testing.expectEqual(@as(?anyerror, null), result);
 }

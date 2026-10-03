@@ -11,6 +11,9 @@ All notable changes to this project will be documented in this file.
 - Fixed `Condition.wait` and `Condition.waitTimeout` losing a signal when the task was canceled
   while reacquiring the mutex after being woken; the signal is now passed to another waiter.
 
+- Fixed `Barrier.wait` underflowing its arrival count and breaking the next generation when a
+  waiter was canceled after the barrier had already released it.
+
 - The built-in DNS resolver now answers `localhost` and names under it (RFC 6761) with the
   loopback addresses when `/etc/hosts` does not list them, instead of querying DNS, like
   `Io.Threaded`.
