@@ -2564,19 +2564,50 @@ pub fn errnoToFileSetOwnerError(errno: posix.system.E) FileSetOwnerError {
     };
 }
 
+/// New value of a single file timestamp
+pub const SetTimestamp = union(enum) {
+    /// Keep the timestamp unchanged
+    unchanged,
+    /// Set the timestamp to the current time
+    now,
+    /// Nanoseconds since Unix epoch
+    new: i96,
+};
+
 /// Timestamps for fileSetTimestamps
 pub const FileTimestamps = struct {
-    /// Access time in nanoseconds since Unix epoch, or null to keep unchanged
-    atime: ?i96 = null,
-    /// Modification time in nanoseconds since Unix epoch, or null to keep unchanged
-    mtime: ?i96 = null,
+    /// Access time
+    atime: SetTimestamp = .unchanged,
+    /// Modification time
+    mtime: SetTimestamp = .unchanged,
 };
+
+fn setTimestampToTimespec(timestamp: SetTimestamp) posix.system.timespec {
+    return switch (timestamp) {
+        .unchanged => posix.system.UTIME.OMIT,
+        .now => posix.system.UTIME.NOW,
+        .new => |ns| .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) },
+    };
+}
+
+fn setTimestampToFileTime(timestamp: SetTimestamp, now: w.FILETIME) ?w.FILETIME {
+    return switch (timestamp) {
+        .unchanged => null,
+        .now => now,
+        .new => |ns| w.nanosToFileTime(ns),
+    };
+}
 
 /// Set file timestamps
 pub fn fileSetTimestamps(fd: fd_t, timestamps: FileTimestamps) FileSetTimestampsError!void {
     if (builtin.os.tag == .windows) {
-        const atime: ?w.FILETIME = if (timestamps.atime) |ns| w.nanosToFileTime(ns) else null;
-        const mtime: ?w.FILETIME = if (timestamps.mtime) |ns| w.nanosToFileTime(ns) else null;
+        const now_ticks: u64 = if (timestamps.atime == .now or timestamps.mtime == .now)
+            @bitCast(w.RtlGetSystemTimePrecise())
+        else
+            0;
+        const now: w.FILETIME = .{ .dwLowDateTime = @truncate(now_ticks), .dwHighDateTime = @truncate(now_ticks >> 32) };
+        const atime = setTimestampToFileTime(timestamps.atime, now);
+        const mtime = setTimestampToFileTime(timestamps.mtime, now);
 
         if (w.SetFileTime(
             fd,
@@ -2594,14 +2625,8 @@ pub fn fileSetTimestamps(fd: fd_t, timestamps: FileTimestamps) FileSetTimestamps
     }
 
     const times: [2]posix.system.timespec = .{
-        if (timestamps.atime) |ns|
-            .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) }
-        else
-            posix.system.UTIME.OMIT,
-        if (timestamps.mtime) |ns|
-            .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) }
-        else
-            posix.system.UTIME.OMIT,
+        setTimestampToTimespec(timestamps.atime),
+        setTimestampToTimespec(timestamps.mtime),
     };
 
     const sc = try syscall_cancel.Syscall.begin();
@@ -2702,14 +2727,8 @@ pub fn dirSetFileTimestamps(allocator: std.mem.Allocator, dir: fd_t, path: []con
     defer allocator.free(path_z);
 
     const times: [2]posix.system.timespec = .{
-        if (timestamps.atime) |ns|
-            .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) }
-        else
-            posix.system.UTIME.OMIT,
-        if (timestamps.mtime) |ns|
-            .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) }
-        else
-            posix.system.UTIME.OMIT,
+        setTimestampToTimespec(timestamps.atime),
+        setTimestampToTimespec(timestamps.mtime),
     };
 
     const at_flags: u32 = if (!flags.follow_symlinks) posix.AT.SYMLINK_NOFOLLOW else 0;

@@ -2076,14 +2076,14 @@ test "File: setTimestamps" {
     const atime: i96 = 1000000000 * std.time.ns_per_s; // 2001-09-09
     const mtime: i96 = 1500000000 * std.time.ns_per_s; // 2017-07-14
 
-    try t.file.setTimestamps(.{ .atime = atime, .mtime = mtime });
+    try t.file.setTimestamps(.{ .atime = .{ .new = atime }, .mtime = .{ .new = mtime } });
 
     const info = try t.file.stat();
     try std.testing.expectEqual(atime, info.atime);
     try std.testing.expectEqual(mtime, info.mtime);
 
     const new_mtime: i96 = 1600000000 * std.time.ns_per_s; // 2020-09-13
-    try t.file.setTimestamps(.{ .mtime = new_mtime });
+    try t.file.setTimestamps(.{ .mtime = .{ .new = new_mtime } });
 
     const new_info = try t.file.stat();
     try std.testing.expectEqual(atime, new_info.atime);
@@ -2198,7 +2198,7 @@ test "Dir: setFileTimestamps" {
     const atime: i96 = 1000000000 * std.time.ns_per_s; // 2001-09-09
     const mtime: i96 = 1500000000 * std.time.ns_per_s; // 2017-07-14
 
-    try dir.setFileTimestamps(file_path, .{ .atime = atime, .mtime = mtime }, .{});
+    try dir.setFileTimestamps(file_path, .{ .atime = .{ .new = atime }, .mtime = .{ .new = mtime } }, .{});
 
     const info = try dir.statPath(file_path);
     try std.testing.expectEqual(atime, info.atime);

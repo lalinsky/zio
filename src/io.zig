@@ -1067,14 +1067,11 @@ fn permissionsToZioMode(permissions: Io.File.Permissions) os_fs.mode_t {
     return permissions.toMode();
 }
 
-/// Resolve a `std.Io.File.SetTimestamp` union into the `?i96` nanoseconds
-/// representation expected by `os_fs.FileTimestamps` (null == UTIME_OMIT).
-/// `.now` is evaluated against the realtime clock at call time.
-fn resolveSetTimestamp(t: Io.File.SetTimestamp) ?i96 {
+fn resolveSetTimestamp(t: Io.File.SetTimestamp) os_fs.SetTimestamp {
     return switch (t) {
-        .unchanged => null,
-        .now => @intCast(time.Timestamp.now(.realtime).toNanoseconds()),
-        .new => |ts| ts.nanoseconds,
+        .unchanged => .unchanged,
+        .now => .now,
+        .new => |ts| .{ .new = ts.nanoseconds },
     };
 }
 
@@ -4445,6 +4442,30 @@ test "io: dir setTimestamps round-trip" {
         .access_timestamp = .now,
         .modify_timestamp = .now,
     });
+}
+
+test "io: setting timestamps to now needs only write permission" {
+    // macOS refuses futimens on a /dev/null the caller doesn't own, even with
+    // UTIME_NOW, and there is no other file a non-root test can write but not own.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (std.os.linux.geteuid() == 0) return error.SkipZigTest;
+
+    var t = try TestDirFixture.init();
+    defer t.deinit();
+    const io = t.rt.io();
+
+    const cwd = Io.Dir.cwd();
+    cwd.setTimestamps(io, "/dev/null", .{
+        .access_timestamp = .now,
+        .modify_timestamp = .now,
+    }) catch |err| switch (err) {
+        error.AccessDenied, error.ReadOnlyFileSystem => return error.SkipZigTest,
+        else => |e| return e,
+    };
+
+    var file = try cwd.openFile(io, "/dev/null", .{ .mode = .write_only });
+    defer file.close(io);
+    try file.setTimestampsNow(io);
 }
 
 test "io: dir realPath and realPathFile" {
