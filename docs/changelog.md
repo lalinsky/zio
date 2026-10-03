@@ -30,6 +30,9 @@ All notable changes to this project will be documented in this file.
 - Fixed `std.Io` TCP connect never timing out when given a deadline on the `.real` or
   `.boot` clock.
 
+- Fixed `Runtime.blockingIo()` panicking on misaligned userdata in process spawning,
+  getting and setting the current path, `Batch.awaitConcurrent` and host name lookups.
+
 - Fixed a use-after-free in `Io.Batch` with work stealing, where an operation completing on
   another executor could still touch the batch state after `cancel` had freed it.
 

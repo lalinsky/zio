@@ -669,7 +669,7 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
     // Nothing to do if no submissions and nothing pending
     if (batch.submitted.head == .none and batch.pending.head == .none) return;
 
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const rt, _ = decodeUserdata(userdata);
 
     // Get or create batch state (stored in batch.userdata)
     const state: *BatchState = if (batch.userdata) |ptr|
@@ -1780,7 +1780,8 @@ fn fileMemoryMapWriteImpl(_: ?*anyopaque, _: *Io.File.MemoryMap) Io.File.WritePo
 /// The allocator for temporary buffers in vtable calls that also have to work
 /// through `debug_io`, which has no runtime behind it.
 fn scratchAllocator(userdata: ?*anyopaque) std.mem.Allocator {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata orelse return std.heap.c_allocator));
+    if (userdata == null) return std.heap.c_allocator;
+    const rt, _ = decodeUserdata(userdata);
     return rt.allocator;
 }
 
@@ -1838,8 +1839,7 @@ fn processSetCurrentDirImpl(userdata: ?*anyopaque, dir: Io.Dir) std.process.SetC
 }
 
 fn processSetCurrentPathImpl(userdata: ?*anyopaque, path: []const u8) std.process.SetCurrentPathError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    return os_process.setCurrentPath(rt.allocator, path) catch |err| switch (err) {
+    return os_process.setCurrentPath(scratchAllocator(userdata), path) catch |err| switch (err) {
         error.AccessDenied => error.AccessDenied,
         error.SymLinkLoop => error.SymLinkLoop,
         error.NameTooLong => error.NameTooLong,
@@ -1878,7 +1878,7 @@ fn processEnviron() std.process.Environ {
 
 // TODO: implement using our own posix_spawn/fork+exec wrapper
 fn processSpawnImpl(userdata: ?*anyopaque, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const rt, _ = decodeUserdata(userdata);
     var threaded: Io.Threaded = .init(rt.allocator, .{ .environ = processEnviron() });
     defer threaded.deinit();
     const io = threaded.io();
@@ -1889,7 +1889,7 @@ fn processSpawnImpl(userdata: ?*anyopaque, options: std.process.SpawnOptions) st
 
 // TODO: implement using our own posix_spawn/fork+exec wrapper
 fn processSpawnPathImpl(userdata: ?*anyopaque, dir: Io.Dir, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const rt, _ = decodeUserdata(userdata);
     var threaded: Io.Threaded = .init(rt.allocator, .{ .environ = processEnviron() });
     defer threaded.deinit();
     const io = threaded.io();
@@ -2771,7 +2771,7 @@ fn netLookupImpl(
     resolved: *Io.Queue(Io.net.HostName.LookupResult),
     options: Io.net.HostName.LookupOptions,
 ) Io.net.HostName.LookupError!void {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
+    const rt, _ = decodeUserdata(userdata);
     const io = fromRuntime(rt, .regular);
     defer resolved.close(io);
 
@@ -5015,4 +5015,99 @@ test "io: fromIo round-trips through blockingIo" {
 
     const aio = rt.io();
     try std.testing.expectEqual(rt, Runtime.fromIo(aio).?);
+}
+
+test "io: blockingIo gets and sets the current path" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
+    const bio = rt.blockingIo();
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try std.process.currentPath(bio, &buf);
+    try std.testing.expect(len > 0);
+    try std.process.setCurrentPath(bio, buf[0..len]);
+}
+
+test "io: debug_io gets and sets the current path" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try std.process.currentPath(debug_io, &buf);
+    try std.testing.expect(len > 0);
+    try std.process.setCurrentPath(debug_io, buf[0..len]);
+}
+
+test "io: blockingIo spawns a child process" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
+    const bio = rt.blockingIo();
+
+    const argv: []const []const u8 = if (builtin.os.tag == .windows)
+        &.{ "cmd.exe", "/c", "exit 0" }
+    else
+        &.{"true"};
+    var child = try std.process.spawn(bio, .{ .argv = argv });
+    const term = try child.wait(bio);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
+}
+
+test "io: blockingIo batch awaitConcurrent with two operations" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
+    const bio = rt.blockingIo();
+
+    var sock1 = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, bio, .{ .mode = .dgram });
+    defer sock1.close(bio);
+    var sock2 = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, bio, .{ .mode = .dgram });
+    defer sock2.close(bio);
+    try sock1.send(bio, &sock2.address, "hello");
+
+    var storage: [2]Io.Operation.Storage = undefined;
+    var batch: Io.Batch = .init(&storage);
+    defer batch.cancel(bio);
+
+    var msg1: Io.net.IncomingMessage = .init;
+    var buf1: [16]u8 = undefined;
+    _ = batch.add(.{ .net_receive = .{
+        .socket_handle = sock1.handle,
+        .message_buffer = (&msg1)[0..1],
+        .data_buffer = &buf1,
+        .flags = .{},
+    } });
+    var msg2: Io.net.IncomingMessage = .init;
+    var buf2: [16]u8 = undefined;
+    _ = batch.add(.{ .net_receive = .{
+        .socket_handle = sock2.handle,
+        .message_buffer = (&msg2)[0..1],
+        .data_buffer = &buf2,
+        .flags = .{},
+    } });
+
+    try batch.awaitConcurrent(bio, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+    const completion = batch.next() orelse return error.TestUnexpectedResult;
+    const err, const n = completion.result.net_receive;
+    try std.testing.expectEqual(null, err);
+    try std.testing.expectEqual(1, n);
+    try std.testing.expectEqualStrings("hello", msg2.data);
+}
+
+test "io: blockingIo netLookup resolves numeric IPv4" {
+    const rt = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer rt.deinit();
+    const bio = rt.blockingIo();
+
+    const host: Io.net.HostName = try .init("127.0.0.1");
+    var buf: [32]Io.net.HostName.LookupResult = undefined;
+    var queue: Io.Queue(Io.net.HostName.LookupResult) = .init(&buf);
+    try Io.net.HostName.lookup(host, bio, &queue, .{ .port = 8080 });
+
+    var got_address = false;
+    while (queue.getOneUncancelable(bio)) |entry| switch (entry) {
+        .address => |addr| {
+            got_address = true;
+            try std.testing.expectEqual(@as(u16, 8080), addr.getPort());
+        },
+        .canonical_name => {},
+    } else |err| switch (err) {
+        error.Closed => {},
+    }
+    try std.testing.expect(got_address);
 }
