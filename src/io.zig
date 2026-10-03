@@ -2195,6 +2195,7 @@ fn connectErrToConnectErr(err: ConnectOrCancel) Io.net.IpAddress.ConnectError {
         error.ConnectionResetByPeer => error.ConnectionResetByPeer,
         error.Timeout => error.Timeout,
         error.NetworkUnreachable => error.NetworkUnreachable,
+        error.HostUnreachable => error.HostUnreachable,
         error.NetworkDown => error.NetworkDown,
         error.SystemResources => error.SystemResources,
         error.Canceled => error.Canceled,
@@ -2307,6 +2308,7 @@ fn netConnectUnixImpl(
         error.ConnectionResetByPeer,
         error.Timeout,
         error.NetworkUnreachable,
+        error.HostUnreachable,
         error.FileDescriptorNotASocket,
         error.NameTooLong,
         error.Unexpected,
@@ -2341,7 +2343,11 @@ fn sendErrToSocketSendErr(err: ev.NetSendMsg.Error) Io.net.Socket.SendError {
         error.MessageTooBig => error.MessageOversize,
         error.SystemResources => error.SystemResources,
         error.NetworkUnreachable => error.NetworkUnreachable,
+        error.HostUnreachable => error.HostUnreachable,
         error.NetworkDown => error.NetworkDown,
+        error.ConnectionRefused => error.ConnectionRefused,
+        error.AddressFamilyUnsupported => error.AddressFamilyUnsupported,
+        error.FastOpenAlreadyInProgress => error.FastOpenAlreadyInProgress,
         error.ConnectionResetByPeer, error.ConnectionAborted => error.ConnectionResetByPeer,
         // std.Io has no send error for a kernel connection timeout (ETIMEDOUT);
         // surface the dead connection as a reset, the actionable signal for callers.
@@ -2387,7 +2393,7 @@ fn netSendImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, messages: []Io.net.
 
 fn recvErrToReadErr(err: ev.NetRecv.Error) Io.net.Stream.Reader.Error {
     return switch (err) {
-        error.ConnectionResetByPeer => error.ConnectionResetByPeer,
+        error.ConnectionResetByPeer, error.ConnectionAborted => error.ConnectionResetByPeer,
         // ETIMEDOUT means the connection died (retransmits exhausted), not that a
         // read deadline elapsed; std.Io.Stream.Reader has no timed-out-connection
         // variant, so report it as a broken connection rather than a Timeout.
@@ -2398,7 +2404,6 @@ fn recvErrToReadErr(err: ev.NetRecv.Error) Io.net.Stream.Reader.Error {
         error.Canceled => error.Canceled,
         error.WouldBlock,
         error.ConnectionRefused,
-        error.ConnectionAborted,
         error.FileDescriptorNotASocket,
         error.OperationNotSupported,
         error.MessageOversize,
@@ -2630,7 +2635,11 @@ fn sendErrToWriteErr(err: ev.NetSend.Error) Io.net.Stream.Writer.Error {
         error.ConnectionTimedOut => error.ConnectionResetByPeer,
         error.SocketNotConnected, error.BrokenPipe => error.SocketUnconnected,
         error.NetworkUnreachable => error.NetworkUnreachable,
+        error.HostUnreachable => error.HostUnreachable,
         error.NetworkDown => error.NetworkDown,
+        error.ConnectionRefused => error.ConnectionRefused,
+        error.AddressFamilyUnsupported => error.AddressFamilyUnsupported,
+        error.FastOpenAlreadyInProgress => error.FastOpenAlreadyInProgress,
         error.SystemResources => error.SystemResources,
         error.Canceled => error.Canceled,
         error.WouldBlock,
@@ -3428,6 +3437,19 @@ test "io: net UDP send single datagram succeeds" {
     defer receiver.close(io);
 
     try sender.send(io, &receiver.address, "hello");
+}
+
+test "io: net UDP send to an address of another family fails with AddressFamilyUnsupported" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+
+    try std.testing.expectError(error.AddressFamilyUnsupported, sender.send(io, &.{ .ip6 = .loopback(9) }, "hello"));
 }
 
 test "io: net UDP sendMany delivers multiple datagrams" {

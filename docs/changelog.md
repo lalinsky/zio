@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Socket sends now report `error.ConnectionRefused`, `error.AddressFamilyUnsupported`,
+  `error.FastOpenAlreadyInProgress` and `error.SystemResources` (for `ENOMEM`) instead of
+  `error.Unexpected`, and sends and connects report an unreachable host as
+  `error.HostUnreachable` instead of `error.NetworkUnreachable`. A `std.Io` stream read
+  reports an aborted connection as `error.ConnectionResetByPeer`, like writes do.
+
 - Fixed `std.Io` TCP connect never timing out when given a deadline on the `.real` or
   `.boot` clock.
 
