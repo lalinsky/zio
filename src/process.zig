@@ -138,6 +138,65 @@ test "replacePath returns OperationUnsupported" {
     try std.testing.expectEqual(error.OperationUnsupported, err);
 }
 
+/// Runs this test binary again with only the test `name` selected, which relies
+/// on test_runner.zig honoring TEST_FILTER, and the given extra environment.
+fn runTestBinary(io: std.Io, name: []const u8, env: []const [2][]const u8) !std.process.Child.Term {
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe_len = try std.process.executablePath(io, &exe_buf);
+
+    var environ_map: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environ_map.deinit();
+    if (std.c.getenv("PATH")) |path| try environ_map.put("PATH", std.mem.span(path));
+    try environ_map.put("TEST_FILTER", name);
+    for (env) |entry| try environ_map.put(entry[0], entry[1]);
+
+    var child = std.process.spawn(io, .{
+        .argv = &.{exe_buf[0..exe_len]},
+        .environ_map = &environ_map,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch |err| switch (err) {
+        // Not running natively, e.g. under qemu without binfmt_misc.
+        error.InvalidExe => return error.SkipZigTest,
+        else => return err,
+    };
+    return childWait(&child);
+}
+
+test "spawn with a progress node" {
+    if (builtin.os.tag == .windows or !builtin.link_libc) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    if (std.c.getenv("ZIO_TEST_PROGRESS") != null) {
+        // Spawning removes ZIG_PROGRESS from the environment, so point it at
+        // stdout here.
+        const c = struct {
+            extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+        };
+        try std.testing.expectEqual(0, c.setenv("ZIG_PROGRESS", "1", 1));
+        const root = std.Progress.start(io, .{});
+        defer root.end();
+        const node = root.start("child", 0);
+        defer node.end();
+        try std.testing.expect(node.index != .none);
+
+        var child = try std.process.spawn(io, .{ .argv = argv_exit0, .progress_node = node });
+        const term = try childWait(&child);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
+        return;
+    }
+
+    // The test runner starts its own progress tree unless it is verbose.
+    const term = try runTestBinary(io, "spawn with a progress node", &.{
+        .{ "TEST_VERBOSE", "true" },
+        .{ "ZIO_TEST_PROGRESS", "1" },
+    });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
+}
+
 test "spawn leaves the SIGIO disposition alone" {
     if (builtin.os.tag == .windows or !@hasField(os.posix.SIG, "IO")) return error.SkipZigTest;
 

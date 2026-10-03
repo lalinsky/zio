@@ -30,6 +30,11 @@ All notable changes to this project will be documented in this file.
 - Fixed `std.Io` TCP connect never timing out when given a deadline on the `.real` or
   `.boot` clock.
 
+- `std.Progress.start` no longer panics; zio reads the parent's progress pipe from `ZIG_PROGRESS`
+  like `std.Io.Threaded` does. On Windows, and on POSIX builds without libc, the variable is not
+  read yet and progress is drawn to the terminal as if there were no parent. A child spawned with
+  a `progress_node` does not report progress to it yet, and gets no `ZIG_PROGRESS`.
+
 - Spawning a process no longer installs and restores process-wide SIGIO and SIGPIPE handlers,
   which concurrent spawns could leave permanently replaced.
 

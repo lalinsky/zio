@@ -1894,7 +1894,11 @@ fn processSpawnImpl(userdata: ?*anyopaque, options: std.process.SpawnOptions) st
     var threaded = processThreaded(scratchAllocator(userdata));
     defer threaded.deinit();
     const io = threaded.io();
-    var child = try io.vtable.processSpawn(io.userdata, options);
+    // TODO: pass the progress node through once spawning is native; Threaded
+    // registers the progress pipe with its own Io, which Progress asserts against.
+    var threaded_options = options;
+    threaded_options.progress_node = .none;
+    var child = try io.vtable.processSpawn(io.userdata, threaded_options);
     setChildPipesNonblocking(&child);
     return child;
 }
@@ -1919,8 +1923,16 @@ fn childKillImpl(_: ?*anyopaque, child: *std.process.Child) void {
     process_impl.childKill(child);
 }
 
-fn progressParentFileImpl(_: ?*anyopaque) std.Progress.ParentFileError!Io.File {
-    @panic("progressParentFile: not supported");
+fn progressParentFileImpl(userdata: ?*anyopaque) std.Progress.ParentFileError!Io.File {
+    // TODO: the inherited handle is an overlapped pipe that is not associated
+    // with our IOCP port, so writes through the thread pool fail with WouldBlock.
+    if (builtin.os.tag == .windows) return error.EnvironmentVariableMissing;
+    var threaded = processThreaded(scratchAllocator(userdata));
+    defer threaded.deinit();
+    const io = threaded.io();
+    var file = try io.vtable.progressParentFile(io.userdata);
+    file.flags = .{ .nonblocking = false };
+    return file;
 }
 
 fn nowImpl(_: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
@@ -2998,6 +3010,29 @@ test "io: processExecutablePath returns a non-empty path" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const len = try std.process.executablePath(io, &buf);
     try std.testing.expect(len > 0);
+}
+
+test "io: progressParentFile reads ZIG_PROGRESS" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const result = io.vtable.progressParentFile(io.userdata);
+    if (builtin.os.tag == .windows or !builtin.link_libc) {
+        try std.testing.expectError(error.EnvironmentVariableMissing, result);
+        return;
+    }
+    const value = std.mem.span(std.c.getenv("ZIG_PROGRESS") orelse {
+        try std.testing.expectError(error.EnvironmentVariableMissing, result);
+        return;
+    });
+    const fd = std.fmt.parseInt(u31, value, 10) catch {
+        try std.testing.expectError(error.UnrecognizedFormat, result);
+        return;
+    };
+    const file = try result;
+    try std.testing.expectEqual(fd, file.handle);
+    try std.testing.expectEqual(null, flagsReadPollable(&file.flags));
 }
 
 test "io: debug_io answers process paths without a runtime" {
