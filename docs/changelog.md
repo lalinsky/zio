@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed `std.Io` `Batch.awaitConcurrent` restarting a duration timeout each time it woke
+  up without a completion, instead of timing out once the duration had passed.
+
 - A batched `std.Io` streaming file read into only empty buffers completes right away with
   0 bytes, matching a single read, instead of waiting for a pipe to become readable and
   then failing with `error.EndOfStream`.

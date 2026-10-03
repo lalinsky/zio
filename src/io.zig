@@ -739,6 +739,8 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
     }
     batch.submitted = .{ .head = .none, .tail = .none };
 
+    const deadline = timeout.toDeadline(rt.io());
+
     // Wait loop: drain ready items, check for completions, wait if needed
     while (true) {
         const signaled = state.signaled.load(.acquire);
@@ -748,7 +750,7 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
         if (batch.completed.head != .none or batch.pending.head == .none) return;
 
         // Wait for another callback to finish
-        Futex.waitTimeoutClock(&state.signaled.raw, signaled, .fromStd(timeout), .fromStdTimeout(timeout)) catch |err| switch (err) {
+        Futex.waitTimeoutClock(&state.signaled.raw, signaled, .fromStd(deadline), .fromStdTimeout(deadline)) catch |err| switch (err) {
             error.Timeout => {
                 // Drain one more time before returning timeout
                 batchDrainReady(batch, state);
