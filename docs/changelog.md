@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `Io.Batch.cancel` no longer reports canceled operations in the `next()` iteration, and their
+  slots go back to the unused list. Before, they showed up as completions with
+  `error.Unexpected` (file operations) or `error.Canceled` (`net_receive`).
+
 - Fixed the built-in DNS resolver emptying its `/etc/hosts` table when reloading the file failed.
 
 - POSIX file reads now return `error.IsDir` instead of `error.Unexpected` when the system refuses
