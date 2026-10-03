@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- The built-in DNS resolver now clamps `/etc/resolv.conf` options to about the ranges glibc
+  uses: `timeout` to 1-30 seconds (`timeout:0` made every query fail at once), `attempts` to
+  1-5, and `ndots` to 0-15, including values too large to parse.
+
 - Fixed the built-in DNS resolver skipping the rest of `/etc/resolv.conf` and `/etc/hosts` at a
   line longer than 4 KiB, which left it with no name servers or an empty hosts table; such
   lines are now skipped. A `/etc/resolv.conf` that cannot be opened for good (no permission, a

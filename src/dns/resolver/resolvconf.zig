@@ -96,19 +96,11 @@ pub const ResolvConf = struct {
             } else if (std.mem.eql(u8, keyword, "options")) {
                 while (fields.next()) |opt| {
                     if (std.mem.startsWith(u8, opt, "ndots:")) {
-                        if (std.fmt.parseInt(u8, opt["ndots:".len..], 10)) |n| {
-                            conf.ndots = @min(n, @as(u8, 15));
-                        } else |_| {}
+                        if (parseOption(opt["ndots:".len..], 0, 15)) |n| conf.ndots = @intCast(n);
                     } else if (std.mem.startsWith(u8, opt, "timeout:")) {
-                        const secs = std.fmt.parseInt(u16, opt["timeout:".len..], 10) catch |err| {
-                            log.warn("resolv.conf: invalid timeout: {}", .{err});
-                            continue;
-                        };
-                        conf.timeout = .fromSeconds(secs);
+                        if (parseOption(opt["timeout:".len..], 1, 30)) |n| conf.timeout = .fromSeconds(n);
                     } else if (std.mem.startsWith(u8, opt, "attempts:")) {
-                        if (std.fmt.parseInt(u8, opt["attempts:".len..], 10)) |n| {
-                            conf.attempts = @max(n, 1);
-                        } else |_| {}
+                        if (parseOption(opt["attempts:".len..], 1, 5)) |n| conf.attempts = @intCast(n);
                     } else if (std.mem.eql(u8, opt, "rotate")) {
                         conf.rotate = true;
                     }
@@ -129,6 +121,19 @@ pub const ResolvConf = struct {
         return conf;
     }
 };
+
+/// Parses a numeric option value, clamped to `min..max` even when it is too
+/// large to parse. Null if it is not a number.
+fn parseOption(value: []const u8, min: u32, max: u32) ?u32 {
+    const n = std.fmt.parseInt(i64, value, 10) catch |err| switch (err) {
+        error.Overflow => return if (value[0] == '-') min else max,
+        error.InvalidCharacter => {
+            log.warn("resolv.conf: invalid option value '{s}'", .{value});
+            return null;
+        },
+    };
+    return @intCast(std.math.clamp(n, min, max));
+}
 
 /// Parses a nameserver address. An IPv6 one may carry a zone index after a
 /// `%`, as an interface name or number.
@@ -271,4 +276,23 @@ test "an overlong last line without a newline is skipped" {
 
     try std.testing.expectEqual(1, conf.servers.len);
     try std.testing.expectEqual(0, conf.search.len);
+}
+
+test "option values are clamped" {
+    const cases = [_]struct { input: []const u8, ndots: u8, timeout: u64, attempts: u8 }{
+        .{ .input = "options ndots:0 timeout:0 attempts:0", .ndots = 0, .timeout = 1, .attempts = 1 },
+        .{ .input = "options ndots:16 timeout:31 attempts:6", .ndots = 15, .timeout = 30, .attempts = 5 },
+        .{ .input = "options ndots:300 timeout:99999999999 attempts:256", .ndots = 15, .timeout = 30, .attempts = 5 },
+        .{ .input = "options ndots:-1 timeout:-1 attempts:-99999999999999999999", .ndots = 0, .timeout = 1, .attempts = 1 },
+        .{ .input = "options ndots:x timeout:1s attempts:", .ndots = 1, .timeout = 5, .attempts = 2 },
+    };
+    for (cases) |case| {
+        var reader = std.Io.Reader.fixed(case.input);
+        var conf = try ResolvConf.parse(std.testing.allocator, &reader);
+        defer conf.deinit();
+
+        try std.testing.expectEqual(case.ndots, conf.ndots);
+        try std.testing.expectEqual(case.timeout, conf.timeout.toSeconds());
+        try std.testing.expectEqual(case.attempts, conf.attempts);
+    }
 }
