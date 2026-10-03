@@ -599,19 +599,24 @@ comptime {
 
 /// State for concurrent batch operations, stored in batch.userdata.
 /// Pool is only accessed from await thread (no mutex needed).
-/// Callback signals completion via ready flag in pending.userdata and futex wake.
+/// Callback signals completion via ready flag in pending.userdata, then bumps
+/// `signaled` and wakes the waiter via futex.
 const BatchState = struct {
     pool: MemoryPool(BatchCompletionData),
     allocator: std.mem.Allocator,
     batch: *Io.Batch,
-    ready_count: std.atomic.Value(u32),
+    /// Number of callbacks done with the state, wrapping.
+    signaled: std.atomic.Value(u32),
+    /// Number of ready operations drained by the await thread, wrapping.
+    drained: u32,
 
     fn init(allocator: std.mem.Allocator, batch: *Io.Batch) BatchState {
         return .{
             .pool = MemoryPool(BatchCompletionData).init(allocator),
             .allocator = allocator,
             .batch = batch,
-            .ready_count = std.atomic.Value(u32).init(0),
+            .signaled = std.atomic.Value(u32).init(0),
+            .drained = 0,
         };
     }
 
@@ -725,13 +730,14 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
 
     // Wait loop: drain ready items, check for completions, wait if needed
     while (true) {
+        const signaled = state.signaled.load(.acquire);
         batchDrainReady(batch, state);
 
         // Return if we have completions or nothing pending
         if (batch.completed.head != .none or batch.pending.head == .none) return;
 
-        // Wait for ready_count to become non-zero
-        Futex.waitTimeoutClock(&state.ready_count.raw, 0, .fromStd(timeout), .fromStdTimeout(timeout)) catch |err| switch (err) {
+        // Wait for another callback to finish
+        Futex.waitTimeoutClock(&state.signaled.raw, signaled, .fromStd(timeout), .fromStdTimeout(timeout)) catch |err| switch (err) {
             error.Timeout => {
                 // Drain one more time before returning timeout
                 batchDrainReady(batch, state);
@@ -743,8 +749,6 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
                 return error.Canceled;
             },
         };
-        // Reset count after waking
-        _ = state.ready_count.swap(0, .acq_rel);
     }
 }
 
@@ -840,6 +844,8 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
 /// Callback when a batch operation completes.
 /// Stores result in userdata, sets ready flag (and canceled flag if the operation was
 /// canceled) in the data pointer, signals waiter via futex.
+/// Once the waiter sees the ready flag, the batch storage may be reused, and once
+/// `signaled` catches up with `drained`, `batchCancelImpl` may free the state.
 fn batchCompletionCallback(_: *ev.Loop, completion: *ev.Completion) void {
     const state: *BatchState = @ptrCast(@alignCast(completion.userdata.?));
     const batch = state.batch;
@@ -865,9 +871,9 @@ fn batchCompletionCallback(_: *ev.Loop, completion: *ev.Completion) void {
     // Set flags in the data pointer (release to ensure result is visible)
     @atomicStore(usize, @as(*usize, @ptrCast(&userdata[0])), data_ptr | flags, .release);
 
-    // Signal waiter
-    _ = state.ready_count.fetchAdd(1, .release);
-    Futex.wake(&state.ready_count.raw, 1);
+    // Signal waiter, `state` may be freed after the increment
+    _ = state.signaled.fetchAdd(1, .release);
+    Futex.wake(&state.signaled.raw, 1);
 }
 
 /// Extract result from completed BatchCompletionData
@@ -932,6 +938,7 @@ fn batchDrainReady(batch: *Io.Batch, state: *BatchState) void {
         // Get data pointer (mask off flags) and free it
         const data: *BatchCompletionData = @ptrFromInt(data_ptr & ~batch_flags_mask);
         state.pool.destroy(data);
+        state.drained +%= 1;
 
         // Remove from pending list
         const pending = &storage.pending;
@@ -999,10 +1006,11 @@ fn batchCancelPending(batch: *Io.Batch, state: *BatchState) void {
     }
 
     // Wait for all cancellations to complete
-    while (batch.pending.head != .none) {
-        Futex.waitUncancelable(&state.ready_count.raw, 0);
-        _ = state.ready_count.swap(0, .acq_rel);
+    while (true) {
+        const signaled = state.signaled.load(.acquire);
         batchDrainReady(batch, state);
+        if (batch.pending.head == .none) break;
+        Futex.waitUncancelable(&state.signaled.raw, signaled);
     }
 }
 
@@ -1016,6 +1024,13 @@ fn batchCancelImpl(_: ?*anyopaque, batch: *Io.Batch) void {
     // If there are pending operations, cancel them and wait
     if (batch.pending.head != .none) {
         batchCancelPending(batch, state);
+    }
+
+    // Wait for callbacks that set the ready flag but have not signaled yet
+    while (true) {
+        const signaled = state.signaled.load(.acquire);
+        if (signaled == state.drained) break;
+        Futex.waitUncancelable(&state.signaled.raw, signaled);
     }
 
     state.deinit();
