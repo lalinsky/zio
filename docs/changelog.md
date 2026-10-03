@@ -95,6 +95,10 @@ All notable changes to this project will be documented in this file.
 - Fixed the built-in DNS resolver ignoring a cancellation that arrived while it was reloading
   `/etc/hosts` or `/etc/resolv.conf`.
 
+- Fixed `std.Io` datagram receives with the `trunc` flag panicking with an out-of-bounds
+  slice when the datagram was larger than the buffer; the data is now clamped to the buffer
+  and the message's `trunc` flag reports the truncation.
+
 - Fixed the built-in DNS resolver failing concurrent lookups of the same name with
   `error.Canceled` when the task that started the lookup was canceled.
 
