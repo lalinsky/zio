@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed `std.Io` TCP connect never timing out when given a deadline on the `.real` or
+  `.boot` clock.
+
 - Fixed a use-after-free in `Io.Batch` with work stealing, where an operation completing on
   another executor could still touch the batch state after `cancel` had freed it.
 

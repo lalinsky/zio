@@ -36,7 +36,6 @@ const time = @import("time.zig");
 const common = @import("common.zig");
 const Waiter = common.Waiter;
 const waitForIo = common.waitForIo;
-const timedWaitForIo = common.timedWaitForIo;
 const timedWaitForIoClock = common.timedWaitForIoClock;
 const waitForIoUncancelable = common.waitForIoUncancelable;
 
@@ -2224,7 +2223,7 @@ fn netConnectIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: I
 
     const addr_len = sockAddrLen(&zio_addr.any);
     var connect_op = ev.NetConnect.init(handle, &zio_addr.any, addr_len);
-    try timedWaitForIo(&connect_op.c, .fromStd(options.timeout));
+    try timedWaitForIoClock(&connect_op.c, .fromStd(options.timeout), .fromStdTimeout(options.timeout));
     connect_op.getResult() catch |err| return connectErrToConnectErr(err);
 
     return .{
@@ -3230,6 +3229,48 @@ test "io: net TCP listen/connect/accept handshake" {
             future.await(io);
             const client = try connect_result;
             defer client.close(io);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: net TCP connect times out at a realtime deadline" {
+    // Linux drops SYNs once the accept queue is full, so the connect hangs.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn run(io: Io) !void {
+            var server = try Io.net.IpAddress.listen(
+                &.{ .ip4 = .loopback(0) },
+                io,
+                .{ .reuse_address = true, .kernel_backlog = 0 },
+            );
+            defer server.deinit(io);
+
+            const queued = try Io.net.IpAddress.connect(&server.socket.address, io, .{ .mode = .stream });
+            defer queued.close(io);
+
+            const deadline: Io.Clock.Timestamp = .fromNow(io, .{
+                .raw = .fromMilliseconds(50),
+                .clock = .real,
+            });
+            var sw = time.Stopwatch.start();
+            const result = Io.net.IpAddress.connect(&server.socket.address, io, .{
+                .mode = .stream,
+                .timeout = .{ .deadline = deadline },
+            });
+            if (result) |stream| {
+                stream.close(io);
+                return error.SkipZigTest;
+            } else |err| {
+                try std.testing.expectEqual(error.Timeout, err);
+            }
+            try std.testing.expect(sw.read().toMilliseconds() < 2000);
         }
     };
 
