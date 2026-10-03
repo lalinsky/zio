@@ -8,6 +8,9 @@ All notable changes to this project will be documented in this file.
   cancellation. The wait now returns normally and the cancellation is reported by the next
   cancellation point, so `std.Io.Mutex` and other futex users no longer leave a waiter parked.
 
+- Fixed `Condition.wait` and `Condition.waitTimeout` losing a signal when the task was canceled
+  while reacquiring the mutex after being woken; the signal is now passed to another waiter.
+
 - The built-in DNS resolver now answers `localhost` and names under it (RFC 6761) with the
   loopback addresses when `/etc/hosts` does not list them, instead of querying DNS, like
   `Io.Threaded`.
