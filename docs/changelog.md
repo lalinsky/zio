@@ -115,6 +115,9 @@ All notable changes to this project will be documented in this file.
 - Fixed the built-in DNS resolver failing concurrent lookups of the same name with
   `error.Canceled` when the task that started the lookup was canceled.
 
+- Fixed directory reads on Windows reporting the wrong kind and inode for entries with long
+  non-ASCII names.
+
 - Fixed directory reads on Windows hanging when a batch of entries ran out of room for
   a long non-ASCII name, and losing the last entry of a batch in the same situation.
 

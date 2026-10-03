@@ -438,6 +438,9 @@ pub const DirEntryIterator = struct {
                 if (self.extractInode(entry) == 0) continue;
             }
 
+            // On Windows the name may be written over this entry's header.
+            const kind = self.extractKind(entry);
+            const inode = self.extractInode(entry);
             const name = self.extractName(entry) orelse {
                 // On Windows, null means no buffer space - backtrack and stop
                 self.index = start;
@@ -446,8 +449,8 @@ pub const DirEntryIterator = struct {
 
             return .{
                 .name = name,
-                .kind = self.extractKind(entry),
-                .inode = self.extractInode(entry),
+                .kind = kind,
+                .inode = inode,
             };
         }
         return null;
@@ -579,6 +582,8 @@ test "DirEntryIterator: a Windows name that doesn't fit is left for the next bat
     const first = it.next().?;
     try std.testing.expectEqual(w.NAME_MAX * 3, first.name.len);
     try std.testing.expectEqualStrings("\u{4e00}", first.name[0..3]);
+    try std.testing.expectEqual(.directory, first.kind);
+    try std.testing.expectEqual(100, first.inode);
     try std.testing.expect(it.next() == null);
     try std.testing.expect(it.hasPending());
 
@@ -586,6 +591,8 @@ test "DirEntryIterator: a Windows name that doesn't fit is left for the next bat
     const second = it.next().?;
     try std.testing.expectEqual(w.NAME_MAX * 3, second.name.len);
     try std.testing.expectEqualStrings("\u{4e01}", second.name[0..3]);
+    try std.testing.expectEqual(.directory, second.kind);
+    try std.testing.expectEqual(101, second.inode);
     try std.testing.expect(it.next() == null);
     try std.testing.expect(!it.hasPending());
 }
