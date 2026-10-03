@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed the built-in DNS resolver never picking up a changed `/etc/resolv.conf` that had an
+  unparsable `nameserver` line; the line is now skipped and the rest of the file applies.
+
 - Fixed the built-in DNS resolver misreading `/etc/resolv.conf` lines whose fields are separated
   by more than one space or tab, which dropped name servers and added an empty search domain
   that failed every lookup. Text after a `#` or `;` anywhere on a line is now ignored as a

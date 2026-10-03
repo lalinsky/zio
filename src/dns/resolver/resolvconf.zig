@@ -64,7 +64,6 @@ pub const ResolvConf = struct {
                 const addr_str = fields.next() orelse continue;
                 const addr = net.IpAddress.parseIp(addr_str, 53) catch |err| {
                     log.warn("resolv.conf: invalid nameserver '{s}': {}", .{ addr_str, err });
-                    conf.parse_error = true;
                     continue;
                 };
                 servers.append(allocator, addr) catch |err| {
@@ -196,5 +195,21 @@ test "comments after the content of a line" {
     try expectAddress("8.8.8.8:53", conf.servers[1]);
     try std.testing.expectEqual(1, conf.search.len);
     try std.testing.expectEqualStrings("a.com.", conf.search[0]);
+    try std.testing.expect(!conf.parse_error);
+}
+
+test "an invalid nameserver is skipped" {
+    const input =
+        \\nameserver 1.1.1.1
+        \\nameserver not-an-address
+        \\nameserver 8.8.8.8
+    ;
+    var reader = std.Io.Reader.fixed(input);
+    var conf = try ResolvConf.parse(std.testing.allocator, &reader);
+    defer conf.deinit();
+
+    try std.testing.expectEqual(2, conf.servers.len);
+    try expectAddress("1.1.1.1:53", conf.servers[0]);
+    try expectAddress("8.8.8.8:53", conf.servers[1]);
     try std.testing.expect(!conf.parse_error);
 }

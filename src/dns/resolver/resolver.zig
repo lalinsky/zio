@@ -78,6 +78,7 @@ pub const Resolver = struct {
     hosts_reloading: std.atomic.Value(bool),
 
     conf: ResolvConf,
+    conf_path: []const u8,
     conf_mtime: i64,
     conf_next_check: std.atomic.Value(u32),
     conf_reloading: std.atomic.Value(bool),
@@ -107,6 +108,7 @@ pub const Resolver = struct {
             .hosts_next_check = .init(0),
             .hosts_reloading = .init(false),
             .conf = .{ .arena = .init(allocator), .servers = &.{}, .search = &.{} },
+            .conf_path = "/etc/resolv.conf",
             .conf_mtime = 0,
             .conf_next_check = .init(0),
             .conf_reloading = .init(false),
@@ -535,7 +537,7 @@ pub const Resolver = struct {
         };
         errdefer hosts.deinit();
         var conf_mtime: i64 = 0;
-        const conf = try loadResolvConf(self.allocator, &conf_mtime);
+        const conf = try loadResolvConf(self.allocator, self.conf_path, &conf_mtime);
 
         self.hosts.deinit();
         self.hosts = hosts;
@@ -592,7 +594,7 @@ pub const Resolver = struct {
         self.conf_next_check.store(now_s +% check_interval_secs, .monotonic);
 
         const mtime = check_mtime: {
-            const info = fs.stat("/etc/resolv.conf") catch |err| switch (err) {
+            const info = fs.stat(self.conf_path) catch |err| switch (err) {
                 error.FileNotFound => break :check_mtime 0,
                 error.Canceled => |e| return e,
                 else => return,
@@ -602,7 +604,7 @@ pub const Resolver = struct {
         if (mtime == self.conf_mtime) return;
 
         var new_mtime: i64 = 0;
-        var new_conf = try loadResolvConf(self.allocator, &new_mtime);
+        var new_conf = try loadResolvConf(self.allocator, self.conf_path, &new_mtime);
         if (new_conf.parse_error) {
             new_conf.deinit();
             return;
@@ -996,8 +998,8 @@ fn loadHosts(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i64) (C
     return hosts;
 }
 
-fn loadResolvConf(allocator: std.mem.Allocator, mtime_out: *i64) Cancelable!ResolvConf {
-    const file = fs.openFile("/etc/resolv.conf") catch |err| {
+fn loadResolvConf(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i64) Cancelable!ResolvConf {
+    const file = fs.openFile(path) catch |err| {
         if (err == error.Canceled) return error.Canceled;
         if (err == error.FileNotFound) {
             const conf = ResolvConf.default(allocator) catch |err2| {
@@ -1007,7 +1009,7 @@ fn loadResolvConf(allocator: std.mem.Allocator, mtime_out: *i64) Cancelable!Reso
             mtime_out.* = 0;
             return conf;
         }
-        log.warn("dns: failed to open /etc/resolv.conf: {}", .{err});
+        log.warn("dns: failed to open {s}: {}", .{ path, err });
         return .{ .arena = .init(allocator), .servers = &.{}, .search = &.{}, .parse_error = true };
     };
     defer file.close();
@@ -1021,7 +1023,7 @@ fn loadResolvConf(allocator: std.mem.Allocator, mtime_out: *i64) Cancelable!Reso
     var reader = file.reader(&buf);
     return ResolvConf.parse(allocator, &reader.interface) catch |err| {
         if (reader.err) |read_err| if (read_err == error.Canceled) return error.Canceled;
-        log.warn("dns: failed to parse /etc/resolv.conf: {}", .{err});
+        log.warn("dns: failed to parse {s}: {}", .{ path, err });
         return .{ .arena = .init(allocator), .servers = &.{}, .search = &.{}, .parse_error = true };
     };
 }
@@ -1344,4 +1346,32 @@ test "lookup: a failed hosts reload keeps the current table" {
     resolver.hosts_mtime = 0;
     resolver.hosts_next_check.store(0, .monotonic);
     try expectHostsEntry(&resolver);
+}
+
+test "lookup: a resolv.conf reload skips an invalid nameserver" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const parent = try fs.Dir.cwd().openDir(".", .{});
+    defer parent.close();
+    var temp = try parent.createTempDir(.{ .prefix = "zio_test_" });
+    defer temp.deinit();
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/resolv.conf", .{temp.name()});
+
+    try writeTestFile(temp.dir, "resolv.conf", "nameserver fe80::1%nonexistent0\nnameserver 10.0.0.1\noptions ndots:3\n");
+
+    var resolver = Resolver.init(std.testing.allocator);
+    defer resolver.deinit();
+    var servers = [_]net.IpAddress{try net.IpAddress.parseIp4("127.0.0.1", 53)};
+    useTestConfig(&resolver, &servers, .fromSeconds(1));
+    resolver.conf_path = path;
+    resolver.conf_next_check.store(0, .monotonic);
+
+    try resolver.maybeReloadResolvConf(getCurrentTime());
+
+    try std.testing.expect(resolver.conf_mtime != 0);
+    try std.testing.expectEqual(3, resolver.conf.ndots);
+    try std.testing.expectEqual(1, resolver.conf.servers.len);
+    try std.testing.expect(sameEndpoint(resolver.conf.servers[0], try net.IpAddress.parseIp4("10.0.0.1", 53)));
 }
