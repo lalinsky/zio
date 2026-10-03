@@ -450,6 +450,12 @@ pub const Executor = struct {
         /// random() and too heavy for the park/steal path.
         prng: std.Random.DefaultPrng = undefined,
 
+        /// Consecutive polls this executor made with tasks still in its ring,
+        /// that is, passes where it fell behind; reset by a poll with an empty
+        /// ring. Written by the owner only; a pre-park steal takes only from
+        /// an executor whose backlog is nonzero (see stealWork).
+        backlog: std.atomic.Value(u32) = .init(0),
+
         /// Where the pusher that elected this executor as searcher has surplus
         /// work; armSearcher writes it just before the wake, stealWork consumes
         /// it as the scan's starting victim. `no_steal_hint` means none.
@@ -793,6 +799,8 @@ pub const Executor = struct {
             }
 
             const has_work = self.checkLocalWork(check_ready);
+            // Polling with tasks still queued means this pass fell behind.
+            if (migrates) self.updateBacklog(!self.run_queue.isEmpty());
             if (has_work) {
                 try self.loop.poll(.zero);
             } else {
@@ -884,11 +892,14 @@ pub const Executor = struct {
     /// as the searcher meanwhile, run the searcher-token protocol: consume the
     /// token by finding work, or release it and steal on the pusher's behalf.
     ///
-    /// The pre-park work check extends to the other executors' rings. That is
-    /// what makes the indefinite park sound: the bit is published before the
-    /// check while a pusher publishes its task before reading idle_mask (both
-    /// seq_cst), so either the pusher sees the bit and wakes us, or this check
-    /// sees the pushed task — including one sitting in the pusher's own ring.
+    /// The pre-park work check extends to the other executors' rings. The bit
+    /// is published before the check while a pusher publishes its task before
+    /// reading idle_mask (both seq_cst), so either the pusher sees the bit and
+    /// wakes us, or this check sees the pushed task — including one sitting in
+    /// the pusher's own ring. The check takes such a task only if the pusher
+    /// has fallen behind (see stealWork); otherwise the task is left to the
+    /// pusher, which is awake and reaches it after its current task, or, if
+    /// that task never yields, to the baton holder's rescue.
     fn park(self: *Executor, check_ready: bool) !void {
         const my_bit = @as(usize, 1) << self.id;
         // seq_cst: pairs with armSearcher's idle_mask load (see there). The bit
@@ -903,7 +914,7 @@ pub const Executor = struct {
         }
 
         var found_work = self.checkLocalWork(check_ready);
-        if (!found_work) found_work = self.stealWork();
+        if (!found_work) found_work = self.stealWork(.backlogged);
         if (!found_work) found_work = self.rescueStuck();
         const wait: Duration = if (found_work) .zero else if (self.holdBaton()) baton_tick else .max;
         if (wait.value == baton_tick.value) self.bump("baton_parks", 1);
@@ -940,7 +951,7 @@ pub const Executor = struct {
             // both read the stale token (skipping its announce) and have its
             // push missed by this recheck - a dropped wake with no retry.
             _ = self.runtime.stealing.searchers.cmpxchgStrong(1, 0, .seq_cst, .monotonic);
-            if (self.stealWork()) return;
+            if (self.stealWork(.any)) return;
             // No main-ready here: only queued (stealable) work justifies
             // arming a fresh searcher.
             if (self.checkLocalWork(false)) self.runtime.armSearcher(self.id);
@@ -1055,12 +1066,35 @@ pub const Executor = struct {
         return if (self.run_queue.overflow.isEmpty()) 0 else std.math.maxInt(usize);
     }
 
+    /// Which executors a steal may take from.
+    const Victims = enum {
+        /// Only those that fell behind on their last poll. An executor that
+        /// drains its ring every pass is keeping up, and taking its tasks only
+        /// moves them, and their I/O, away from the loop they are homed on.
+        backlogged,
+        /// Any busy executor: an elected searcher acts on a pusher's announce
+        /// of surplus work.
+        any,
+    };
+
+    /// Records whether this pass polls with tasks still in the ring.
+    fn updateBacklog(self: *Executor, behind: bool) void {
+        const backlog = &self.stealing.backlog;
+        const was = backlog.load(.monotonic);
+        if (behind) {
+            backlog.store(was +| 1, .monotonic);
+        } else if (was != 0) {
+            backlog.store(0, .monotonic);
+        }
+    }
+
     /// Steal half of a random victim's ring into ours. Reached only from
-    /// park() — the indefinite park's pre-check and the searcher-token path —
-    /// never while this executor still has plausible local work and never
-    /// before its own loop has been probed, since migrating a task also
-    /// re-homes its I/O and the home loop often has work ready to hand back.
-    fn stealWork(self: *Executor) bool {
+    /// park() — the indefinite park's pre-check, which takes only from
+    /// executors that fell behind, and the searcher-token path — never while
+    /// this executor still has plausible local work and never before its own
+    /// loop has been probed, since migrating a task also re-homes its I/O and
+    /// the home loop often has work ready to hand back.
+    fn stealWork(self: *Executor, victims: Victims) bool {
         if (!self.runtime.stealingActive()) return false;
         const executors = self.runtime.executors.items;
         if (executors.len <= 1) return false;
@@ -1082,6 +1116,7 @@ pub const Executor = struct {
             const victim_bit = @as(usize, 1) << victim.id;
             const victim_idle = self.runtime.stealing.idle_mask.load(.acquire) & victim_bit != 0;
             if (victim_idle) continue;
+            if (victims == .backlogged and victim.stealing.backlog.load(.monotonic) == 0) continue;
 
             if (self.run_queue.steal(&victim.run_queue)) |node| {
                 _ = self.run_queue.push(node);
