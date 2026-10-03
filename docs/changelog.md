@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed `std.Io` datagram receives with the `trunc` flag panicking with an out-of-bounds
+  slice when the datagram was larger than the buffer; the data is now clamped to the buffer
+  and the message's `trunc` flag reports the truncation.
+
 - Fixed the built-in DNS resolver emptying its `/etc/hosts` table when reloading the file failed.
 
 - POSIX file reads now return `error.IsDir` instead of `error.Unexpected` when the system refuses
