@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- File descriptors received over Unix sockets with `SCM_RIGHTS` are now close-on-exec,
+  using `MSG_CMSG_CLOEXEC` where the system has it. macOS has no such flag, so there they
+  are marked with `fcntl` right after the receive, which leaves a short window in which a
+  concurrent fork and exec can still inherit them.
+
 - Fixed `Socket.receiveFromBatch` and `std.Io`'s `receiveManyTimeout` on io_uring dropping
   the first received message when receiving the rest failed with an error other than
   `WouldBlock`. The message is now returned; `receiveManyTimeout` reports the error with it,

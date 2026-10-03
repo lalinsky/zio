@@ -1455,12 +1455,16 @@ pub fn recvmsg(
                 .flags = 0,
             };
 
+            const has_cmsg_cloexec = @hasDecl(posix.system.MSG, "CMSG_CLOEXEC");
+            const cloexec_flag: c_int = if (has_cmsg_cloexec and control != null) posix.system.MSG.CMSG_CLOEXEC else 0;
+
             while (true) {
-                const rc = posix.system.recvmsg(fd, &msg, @intCast(sys_flags));
+                const rc = posix.system.recvmsg(fd, &msg, @intCast(sys_flags | cloexec_flag));
 
                 switch (posix.errno(rc)) {
                     .SUCCESS => {
                         if (addr_len) |len| len.* = msg.namelen;
+                        if (!has_cmsg_cloexec and msg.controllen > 0) setReceivedFdsCloexec(control.?[0..msg.controllen]);
                         return .{
                             .len = @intCast(rc),
                             .flags = @intCast(msg.flags),
@@ -1472,6 +1476,27 @@ pub fn recvmsg(
                 }
             }
         },
+    }
+}
+
+/// Marks the descriptors in received SCM_RIGHTS messages close-on-exec, for
+/// systems without MSG_CMSG_CLOEXEC.
+fn setReceivedFdsCloexec(control: []const u8) void {
+    const cmsghdr = posix.system.cmsghdr;
+    const cmsg_align = if (builtin.os.tag.isDarwin()) @sizeOf(u32) else @sizeOf(usize);
+    const data_offset = std.mem.alignForward(usize, @sizeOf(cmsghdr), cmsg_align);
+    var offset: usize = 0;
+    while (offset + @sizeOf(cmsghdr) <= control.len) {
+        const hdr = std.mem.bytesToValue(cmsghdr, control[offset..][0..@sizeOf(cmsghdr)]);
+        if (hdr.len < data_offset or hdr.len > control.len - offset) break;
+        if (hdr.level == SOL.SOCKET and hdr.type == posix.system.SCM.RIGHTS) {
+            const fds = control[offset + data_offset .. offset + hdr.len];
+            var i: usize = 0;
+            while (i + @sizeOf(fd_t) <= fds.len) : (i += @sizeOf(fd_t)) {
+                posix.setCloexec(std.mem.bytesToValue(fd_t, fds[i..][0..@sizeOf(fd_t)])) catch {};
+            }
+        }
+        offset += std.mem.alignForward(usize, hdr.len, cmsg_align);
     }
 }
 

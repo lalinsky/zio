@@ -633,7 +633,8 @@ fn submitInner(self: *Self, state: *LoopState, comptime op: Op, c: *Completion, 
                 .flags = 0,
             };
             const sqe = self.getSqeOrDefer(c) orelse return;
-            sqe.prep_recvmsg(data.handle, &data.internal.msg, recvFlagsToMsg(data.flags));
+            const cloexec_flag: u32 = if (data.control != null) linux.MSG.CMSG_CLOEXEC else 0;
+            sqe.prep_recvmsg(data.handle, &data.internal.msg, recvFlagsToMsg(data.flags) | cloexec_flag);
             sqe.user_data = @intFromPtr(c);
         },
         .net_recvmmsg => {

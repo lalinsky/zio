@@ -195,6 +195,46 @@ test "Loop: dontwait recvmsg reports an empty queue as WouldBlock" {
     try loop.run();
 }
 
+test "Loop: recvmsg marks received descriptors close-on-exec" {
+    if (builtin.os.tag == .windows or !net.has_unix_dgram_sockets) return error.SkipZigTest;
+
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    const pair = try net.socketpair(.unix, .dgram, .ip, .{ .nonblocking = true });
+    defer net.close(pair[0]);
+    defer net.close(pair[1]);
+    const pipe = try posix.pipe(.{});
+    defer posix.close(pipe[0]);
+    defer posix.close(pipe[1]);
+
+    const cmsghdr = posix.system.cmsghdr;
+    var send_control: [std.mem.alignForward(usize, @sizeOf(cmsghdr) + @sizeOf(net.fd_t), @alignOf(cmsghdr))]u8 align(@alignOf(cmsghdr)) = @splat(0);
+    std.mem.bytesAsValue(cmsghdr, send_control[0..@sizeOf(cmsghdr)]).* = .{
+        .len = @intCast(@sizeOf(cmsghdr) + @sizeOf(net.fd_t)),
+        .level = net.SOL.SOCKET,
+        .type = posix.system.SCM.RIGHTS,
+    };
+    @memcpy(send_control[@sizeOf(cmsghdr)..][0..@sizeOf(net.fd_t)], std.mem.asBytes(&pipe[0]));
+    var send_iov = [_]net.iovec_const{net.iovecConstFromSlice("x")};
+    _ = try net.sendmsg(pair[0], &send_iov, .{}, null, 0, &send_control);
+
+    var buf: [8]u8 = undefined;
+    var iov: [1]net.iovec = undefined;
+    var control: [64]u8 align(@alignOf(cmsghdr)) = undefined;
+    var recv: NetRecvMsg = .init(pair[1], .fromSlice(&buf, &iov), .{}, null, null, &control);
+    loop.add(&recv.c);
+    try loop.run();
+    const result = try recv.c.getResult(.net_recvmsg);
+    try std.testing.expect(result.controllen >= @sizeOf(cmsghdr) + @sizeOf(net.fd_t));
+
+    const received = std.mem.bytesToValue(net.fd_t, control[@sizeOf(cmsghdr)..][0..@sizeOf(net.fd_t)]);
+    defer posix.close(received);
+    const fd_flags = posix.system.fcntl(received, posix.system.F.GETFD, @as(c_int, 0));
+    try std.testing.expect(@as(c_int, @intCast(fd_flags)) & posix.system.FD_CLOEXEC != 0);
+}
+
 test "Loop: NetPoll on a datagram socket reports readiness and keeps the datagram" {
     var loop: Loop = undefined;
     try loop.init(.{});
