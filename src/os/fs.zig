@@ -1523,6 +1523,9 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
                 .ACCESS_DENIED => return error.AccessDenied,
                 .ALREADY_EXISTS => return error.Unexpected,
                 .SHARING_VIOLATION => return error.FileBusy,
+                .NOT_SAME_DEVICE => return error.CrossDevice,
+                .DIR_NOT_EMPTY => return error.DirNotEmpty,
+                .DIRECTORY => return error.NotDir,
                 else => |err| return unexpectedError(err),
             }
         }
@@ -1575,6 +1578,9 @@ pub fn renameatPreserve(allocator: std.mem.Allocator, old_dir: fd_t, old_path: [
                 .ACCESS_DENIED => return error.AccessDenied,
                 .ALREADY_EXISTS, .FILE_EXISTS => return error.PathAlreadyExists,
                 .SHARING_VIOLATION => return error.FileBusy,
+                .NOT_SAME_DEVICE => return error.CrossDevice,
+                .DIR_NOT_EMPTY => return error.DirNotEmpty,
+                .DIRECTORY => return error.NotDir,
                 else => |err| return unexpectedError(err),
             }
         }
