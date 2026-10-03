@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed `std.Io`'s `receiveManyTimeout` truncating datagrams to an equal share of the data
+  buffer, e.g. to 187 bytes with 8 message slots and a 1500-byte buffer, even when only
+  one datagram arrived. The first datagram now gets the whole buffer. Receiving several
+  datagrams with one `recvmmsg` call needs the buffer split up front, so it is now only
+  done when every slot can hold a full 64 KiB UDP datagram, i.e. with at least 128 KiB of
+  buffer; smaller buffers receive one datagram per syscall.
+
 - File descriptors received over Unix sockets with `SCM_RIGHTS` are now close-on-exec,
   using `MSG_CMSG_CLOEXEC` where the system has it. macOS has no such flag, so there they
   are marked with `fcntl` right after the receive, which leaves a short window in which a

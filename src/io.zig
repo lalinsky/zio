@@ -473,7 +473,7 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout, clock: time.Cloc
         } },
         .net_receive => |*o| return .{
             .net_receive = result: {
-                if (o.message_buffer.len > 1 and !o.flags.peek and !o.flags.trunc and !hasControl(o.message_buffer) and builtin.os.tag != .windows) {
+                if (o.message_buffer.len > 1 and o.data_buffer.len >= 2 * max_datagram_len and !o.flags.peek and !o.flags.trunc and !hasControl(o.message_buffer) and builtin.os.tag != .windows) {
                     break :result netReceiveMmsg(o, timeout, clock) catch |err| switch (err) {
                         error.Canceled => |e| return e,
                         error.Timeout => |e| return e,
@@ -2430,18 +2430,18 @@ fn hasControl(messages: []const Io.net.IncomingMessage) bool {
 
 const max_mmsg_slots = 64;
 
+/// Largest datagram a UDP socket can deliver. Other datagram sockets, such as
+/// Unix ones, can carry larger datagrams, and those can still be truncated by
+/// a buffer at least this large.
+const max_datagram_len = std.math.maxInt(u16);
+
 fn netReceiveMmsg(
     o: *const Io.Operation.NetReceive,
     timeout: time.Timeout,
     clock: time.Clock,
 ) (common.Cancelable || common.Timeoutable)!Io.Operation.NetReceive.Result {
-    var n = @min(o.message_buffer.len, max_mmsg_slots);
-    var chunk = o.data_buffer.len / n;
-    while (chunk == 0 and n > 1) {
-        n -= 1;
-        chunk = o.data_buffer.len / n;
-    }
-    if (chunk == 0) return .{ null, 0 };
+    const n = @min(o.message_buffer.len, max_mmsg_slots, o.data_buffer.len / max_datagram_len);
+    const chunk = o.data_buffer.len / n;
 
     var slots: [max_mmsg_slots]ev.NetRecvMmsg.Slot = undefined;
     for (0..n) |i| {
@@ -2508,8 +2508,8 @@ fn netReceiveMore(o: *const Io.Operation.NetReceive) Io.Operation.NetReceive.Res
 
 fn netReceiveMoreLoop(o: *const Io.Operation.NetReceive, start: usize) Io.Operation.NetReceive.Result {
     var count: usize = 0;
-    var data_i: usize = 0;
-    for (o.message_buffer[0..start]) |m| data_i += m.data.len;
+    const last = o.message_buffer[start - 1].data;
+    var data_i = @intFromPtr(last.ptr) - @intFromPtr(o.data_buffer.ptr) + last.len;
     for (o.message_buffer[start..]) |*message| {
         const remaining = o.data_buffer[data_i..];
         if (remaining.len == 0) break;
@@ -4457,8 +4457,7 @@ test "io: receiveManyTimeout stops when the data buffer is full" {
     try sender.send(io, &receiver.address, "bbb");
     try sender.send(io, &receiver.address, "ccc");
 
-    // 6-byte buffer, 2 message slots: each slot gets 3 bytes, enough for
-    // exactly two datagrams. The third stays queued.
+    // 6-byte buffer, enough for exactly two datagrams. The third stays queued.
     var messages: [2]Io.net.IncomingMessage = @splat(.init);
     var buf: [6]u8 = undefined;
     const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } };
@@ -4471,6 +4470,62 @@ test "io: receiveManyTimeout stops when the data buffer is full" {
     const err2, const n2 = receiver.receiveManyTimeout(io, &messages, &buf, .{}, timeout);
     try std.testing.expectEqual(null, err2);
     try std.testing.expect(n2 >= 1);
+}
+
+test "io: receiveManyTimeout gives a lone datagram the whole buffer" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+    var receiver = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer receiver.close(io);
+
+    const payload: [1000]u8 = @splat('x');
+    try sender.send(io, &receiver.address, &payload);
+
+    var messages: [8]Io.net.IncomingMessage = @splat(.init);
+    var buf: [1500]u8 = undefined;
+    const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } };
+    const err, const n = receiver.receiveManyTimeout(io, &messages, &buf, .{}, timeout);
+    try std.testing.expectEqual(null, err);
+    try std.testing.expectEqual(1, n);
+    try std.testing.expectEqualSlices(u8, &payload, messages[0].data);
+    try std.testing.expect(!messages[0].flags.trunc);
+}
+
+test "io: receiveManyTimeout splits a large buffer between datagrams" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+    var receiver = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer receiver.close(io);
+
+    try sender.send(io, &receiver.address, "one");
+    try sender.send(io, &receiver.address, "two");
+    try sender.send(io, &receiver.address, "three");
+
+    var messages: [8]Io.net.IncomingMessage = @splat(.init);
+    const buf = try std.testing.allocator.alloc(u8, 4 * max_datagram_len);
+    defer std.testing.allocator.free(buf);
+    const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } };
+    const expected = [_][]const u8{ "one", "two", "three" };
+    var seen: usize = 0;
+    while (seen < expected.len) {
+        const err, const n = receiver.receiveManyTimeout(io, &messages, buf, .{}, timeout);
+        try std.testing.expectEqual(null, err);
+        try std.testing.expect(n > 0);
+        // Linux loopback delivery finishes inside send.
+        if (builtin.os.tag == .linux and ev.Backend.supports_recv_dontwait) try std.testing.expectEqual(3, n);
+        for (messages[0..n]) |*message| {
+            try std.testing.expectEqualStrings(expected[seen], message.data);
+            seen += 1;
+        }
+    }
 }
 
 test "io: operateTimeout net_receive times out when no data arrives" {
