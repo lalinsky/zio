@@ -353,6 +353,7 @@ pub fn socket(domain: Domain, socket_type: Type, protocol: Protocol, flags: Open
                 switch (posix.errno(rc)) {
                     .SUCCESS => {
                         const fd: fd_t = @intCast(rc);
+                        errdefer close(fd);
 
                         // On non-Linux systems, set flags using fcntl
                         if (builtin.os.tag != .linux) {
@@ -703,6 +704,7 @@ pub fn accept(fd: fd_t, addr: ?*sockaddr, addr_len: ?*socklen_t, flags: OpenFlag
                             len.* = addr_len_tmp;
                         }
                         const sock: fd_t = @intCast(rc);
+                        errdefer close(sock);
 
                         // On non-Linux systems, set flags using fcntl
                         if (builtin.os.tag != .linux) {

@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed a file descriptor leak on non-Linux POSIX systems when making a new or accepted
+  socket non-blocking or close-on-exec failed.
+
 - Fixed a crash when receiving through `std.Io` on a socket whose sender has a non-IP
   address, such as a bound Unix datagram socket; the sender is now reported as the
   IPv4 loopback placeholder, like `std.Io.Threaded` does.
