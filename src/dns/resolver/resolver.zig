@@ -844,6 +844,10 @@ fn queryBatch(
             };
             switch (result.rcode) {
                 .no_error => {
+                    if (result.truncated) {
+                        last_err = error.NameServerFailure;
+                        continue;
+                    }
                     const c = @min(result.count, parse_addrs.len);
                     @memcpy(q.addrs[0..c], parse_addrs[0..c]);
                     q.count = c;

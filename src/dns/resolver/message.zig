@@ -156,6 +156,7 @@ pub fn parseResponse(
 
     const truncated = flags & 0x0200 != 0;
     const rcode: RCode = @enumFromInt(@as(u4, @truncate(flags)));
+    if (truncated) return .{ .truncated = true, .rcode = rcode, .count = 0, .ttl = 0 };
     const qdcount = std.mem.readInt(u16, buf[4..6], .big);
     const ancount = std.mem.readInt(u16, buf[6..8], .big);
 
@@ -283,4 +284,33 @@ test "parseResponse extracts A record" {
     try std.testing.expectEqual(RCode.no_error, result.rcode);
     try std.testing.expectEqual(1, result.count);
     try std.testing.expectEqual(@as(u16, 80), storage[0].getPort());
+}
+
+test "parseResponse reports a truncated response without parsing its records" {
+    var buf: [512]u8 = undefined;
+
+    // Header: id=0x1234, QR+TC+RD+RA, QDCOUNT=1, ANCOUNT=2
+    std.mem.writeInt(u16, buf[0..2], 0x1234, .big);
+    std.mem.writeInt(u16, buf[2..4], 0x8380, .big);
+    std.mem.writeInt(u16, buf[4..6], 1, .big);
+    std.mem.writeInt(u16, buf[6..8], 2, .big);
+    std.mem.writeInt(u16, buf[8..10], 0, .big);
+    std.mem.writeInt(u16, buf[10..12], 0, .big);
+
+    var pos = try encodeName(&buf, 12, "example.com.");
+    std.mem.writeInt(u16, buf[pos..][0..2], 1, .big);
+    std.mem.writeInt(u16, buf[pos + 2 ..][0..2], 1, .big);
+    pos += 4;
+
+    // The first answer, cut off in the middle of its fixed fields.
+    std.mem.writeInt(u16, buf[pos..][0..2], 0xc00c, .big);
+    std.mem.writeInt(u16, buf[pos + 2 ..][0..2], 1, .big);
+    pos += 4;
+
+    var storage: [4]net.IpAddress = undefined;
+    const result = try parseResponse(buf[0..pos], 0x1234, .a, &storage, 80, null);
+
+    try std.testing.expect(result.truncated);
+    try std.testing.expectEqual(RCode.no_error, result.rcode);
+    try std.testing.expectEqual(0, result.count);
 }

@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed the built-in DNS resolver treating a truncated UDP response whose last record was cut
+  off as a server failure instead of retrying the query over TCP.
+
 - The built-in DNS resolver now clamps `/etc/resolv.conf` options to about the ranges glibc
   uses: `timeout` to 1-30 seconds (`timeout:0` made every query fail at once), `attempts` to
   1-5, and `ndots` to 0-15, including values too large to parse.
