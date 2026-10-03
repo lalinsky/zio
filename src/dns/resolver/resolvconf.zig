@@ -6,6 +6,7 @@ const net = @import("../../net.zig");
 const os = @import("../../os/root.zig");
 const Duration = @import("../../time.zig").Duration;
 const log = @import("../../common.zig").log;
+const takeLine = @import("../../utils/reader.zig").takeLine;
 
 /// /etc/resolv.conf parser.
 ///
@@ -19,7 +20,6 @@ pub const ResolvConf = struct {
     timeout: Duration = .fromSeconds(5),
     attempts: u8 = 2,
     rotate: bool = false,
-    parse_error: bool = false,
 
     pub fn deinit(self: *ResolvConf) void {
         self.arena.deinit();
@@ -56,7 +56,7 @@ pub const ResolvConf = struct {
         try servers.ensureTotalCapacity(allocator, 4);
         var search: std.ArrayList([]const u8) = .empty;
         try search.ensureTotalCapacity(allocator, 8);
-        while (try reader.takeDelimiter('\n')) |line| {
+        while (try takeLine(reader)) |line| {
             const content = line[0 .. std.mem.findAny(u8, line, "#;") orelse line.len];
             var fields = std.mem.tokenizeAny(u8, content, " \t\r");
             const keyword = fields.next() orelse continue;
@@ -199,7 +199,6 @@ test "fields separated by runs of whitespace" {
     try std.testing.expectEqualStrings("b.com.", conf.search[1]);
     try std.testing.expectEqual(3, conf.ndots);
     try std.testing.expect(conf.rotate);
-    try std.testing.expect(!conf.parse_error);
 }
 
 test "comments after the content of a line" {
@@ -217,7 +216,6 @@ test "comments after the content of a line" {
     try expectAddress("8.8.8.8:53", conf.servers[1]);
     try std.testing.expectEqual(1, conf.search.len);
     try std.testing.expectEqualStrings("a.com.", conf.search[0]);
-    try std.testing.expect(!conf.parse_error);
 }
 
 test "an invalid nameserver is skipped" {
@@ -233,7 +231,6 @@ test "an invalid nameserver is skipped" {
     try std.testing.expectEqual(2, conf.servers.len);
     try expectAddress("1.1.1.1:53", conf.servers[0]);
     try expectAddress("8.8.8.8:53", conf.servers[1]);
-    try std.testing.expect(!conf.parse_error);
 }
 
 test "a nameserver with a zone index" {
@@ -250,4 +247,28 @@ test "a nameserver with a zone index" {
     try std.testing.expectEqual(7, conf.servers[0].in6.scope_id);
     try std.testing.expectEqual(1, conf.servers[1].in6.scope_id);
     try std.testing.expectEqual(53, conf.servers[1].getPort());
+}
+
+test "a line longer than the read buffer is skipped" {
+    const input = "nameserver 1.1.1.1\nsearch " ++ @as([100]u8, @splat('a')) ++ "\nnameserver 8.8.8.8\n";
+    var buffer: [32]u8 = undefined;
+    var reader: std.testing.Reader = .init(&buffer, &.{.{ .buffer = input }});
+    var conf = try ResolvConf.parse(std.testing.allocator, &reader.interface);
+    defer conf.deinit();
+
+    try std.testing.expectEqual(2, conf.servers.len);
+    try expectAddress("1.1.1.1:53", conf.servers[0]);
+    try expectAddress("8.8.8.8:53", conf.servers[1]);
+    try std.testing.expectEqual(0, conf.search.len);
+}
+
+test "an overlong last line without a newline is skipped" {
+    const input = "nameserver 1.1.1.1\nsearch " ++ @as([100]u8, @splat('a'));
+    var buffer: [32]u8 = undefined;
+    var reader: std.testing.Reader = .init(&buffer, &.{.{ .buffer = input }});
+    var conf = try ResolvConf.parse(std.testing.allocator, &reader.interface);
+    defer conf.deinit();
+
+    try std.testing.expectEqual(1, conf.servers.len);
+    try std.testing.expectEqual(0, conf.search.len);
 }

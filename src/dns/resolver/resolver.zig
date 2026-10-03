@@ -528,8 +528,8 @@ pub const Resolver = struct {
         defer self.load_mutex.unlock();
         if (self.loaded.load(.monotonic)) return;
 
-        // Without a previous table to keep, a failed load starts empty; mtime 0
-        // makes the next check retry it.
+        // Without a previous table or configuration to keep, a failed load
+        // starts empty; mtime 0 makes the next check retry it.
         var hosts_mtime: i64 = 0;
         var hosts = loadHosts(self.allocator, self.hosts_path, &hosts_mtime) catch |err| switch (err) {
             error.Canceled => |e| return e,
@@ -537,7 +537,10 @@ pub const Resolver = struct {
         };
         errdefer hosts.deinit();
         var conf_mtime: i64 = 0;
-        const conf = try loadResolvConf(self.allocator, self.conf_path, &conf_mtime);
+        const conf = loadResolvConf(self.allocator, self.conf_path, &conf_mtime) catch |err| switch (err) {
+            error.Canceled => |e| return e,
+            error.LoadFailed => ResolvConf{ .arena = .init(self.allocator), .servers = &.{}, .search = &.{} },
+        };
 
         self.hosts.deinit();
         self.hosts = hosts;
@@ -603,12 +606,12 @@ pub const Resolver = struct {
         };
         if (mtime == self.conf_mtime) return;
 
+        // A failed load keeps the current configuration and mtime, so the next check retries.
         var new_mtime: i64 = 0;
-        var new_conf = try loadResolvConf(self.allocator, self.conf_path, &new_mtime);
-        if (new_conf.parse_error) {
-            new_conf.deinit();
-            return;
-        }
+        const new_conf = loadResolvConf(self.allocator, self.conf_path, &new_mtime) catch |err| switch (err) {
+            error.Canceled => |e| return e,
+            error.LoadFailed => return,
+        };
 
         self.lock.lockUncancelable();
         const old_conf = self.conf;
@@ -998,35 +1001,64 @@ fn loadHosts(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i64) (C
     return hosts;
 }
 
-fn loadResolvConf(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i64) Cancelable!ResolvConf {
-    const file = fs.openFile(path) catch |err| {
-        if (err == error.Canceled) return error.Canceled;
-        if (err == error.FileNotFound) {
-            const conf = ResolvConf.default(allocator) catch |err2| {
-                log.warn("dns: failed to init default ResolvConf: {}", .{err2});
-                return .{ .arena = .init(allocator), .servers = &.{}, .search = &.{}, .parse_error = true };
-            };
-            mtime_out.* = 0;
-            return conf;
-        }
-        log.warn("dns: failed to open {s}: {}", .{ path, err });
-        return .{ .arena = .init(allocator), .servers = &.{}, .search = &.{}, .parse_error = true };
+/// Reads and parses the resolver configuration at `path`, setting `mtime_out`
+/// only on success. A file that is missing or that cannot be opened or read
+/// for good is the default configuration.
+fn loadResolvConf(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i64) (Cancelable || error{LoadFailed})!ResolvConf {
+    const file = fs.openFile(path) catch |err| switch (err) {
+        error.Canceled => |e| return e,
+        error.FileNotFound,
+        error.NotDir,
+        error.IsDir,
+        error.SymLinkLoop,
+        error.AccessDenied,
+        error.PermissionDenied,
+        => return defaultResolvConf(allocator, path, mtime_out),
+        else => {
+            log.warn("dns: failed to open {s}: {}", .{ path, err });
+            return error.LoadFailed;
+        },
     };
     defer file.close();
+    var mtime: i64 = 0;
     if (file.stat()) |info| {
-        mtime_out.* = info.mtime;
+        if (info.kind == .directory) return defaultResolvConf(allocator, path, mtime_out);
+        mtime = info.mtime;
     } else |err| switch (err) {
         error.Canceled => |e| return e,
         else => {},
     }
     var buf: [4096]u8 = undefined;
     var reader = file.reader(&buf);
-    return ResolvConf.parse(allocator, &reader.interface) catch |err| {
+    const conf = ResolvConf.parse(allocator, &reader.interface) catch |err| {
         if (err == error.Canceled) return error.Canceled;
         if (reader.err) |read_err| if (read_err == error.Canceled) return error.Canceled;
         log.warn("dns: failed to parse {s}: {}", .{ path, err });
-        return .{ .arena = .init(allocator), .servers = &.{}, .search = &.{}, .parse_error = true };
+        return error.LoadFailed;
     };
+    mtime_out.* = mtime;
+    return conf;
+}
+
+/// The configuration for a file that is not there to read. The mtime is that
+/// of whatever is at `path`, so a reload waits for it to change.
+fn defaultResolvConf(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i64) (Cancelable || error{LoadFailed})!ResolvConf {
+    var conf = ResolvConf.default(allocator) catch |err| {
+        log.warn("dns: failed to init default ResolvConf: {}", .{err});
+        return error.LoadFailed;
+    };
+    const info = fs.stat(path) catch |err| switch (err) {
+        error.Canceled => |e| {
+            conf.deinit();
+            return e;
+        },
+        else => {
+            mtime_out.* = 0;
+            return conf;
+        },
+    };
+    mtime_out.* = info.mtime;
+    return conf;
 }
 
 // -- Tests --------------------------------------------------------------------
@@ -1341,8 +1373,9 @@ test "lookup: a failed hosts reload keeps the current table" {
     resolver.hosts_next_check.store(0, .monotonic);
     try expectHostsEntry(&resolver);
 
-    // A line longer than the read buffer makes the load fail.
-    try writeTestFile(temp.dir, "hosts", &(@as([5000]u8, @splat('x')) ++ "\n".*));
+    // A directory opens but fails to read.
+    try temp.dir.deleteFile("hosts");
+    try temp.dir.createDir("hosts", 0o755);
 
     resolver.hosts_mtime = 0;
     resolver.hosts_next_check.store(0, .monotonic);
@@ -1375,4 +1408,29 @@ test "lookup: a resolv.conf reload skips an invalid nameserver" {
     try std.testing.expectEqual(3, resolver.conf.ndots);
     try std.testing.expectEqual(1, resolver.conf.servers.len);
     try std.testing.expect(sameEndpoint(resolver.conf.servers[0], try net.IpAddress.parseIp4("10.0.0.1", 53)));
+}
+
+test "lookup: an unreadable resolv.conf starts with the default servers" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const parent = try fs.Dir.cwd().openDir(".", .{});
+    defer parent.close();
+    var temp = try parent.createTempDir(.{ .prefix = "zio_test_" });
+    defer temp.deinit();
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/resolv.conf", .{temp.name()});
+    try temp.dir.createDir("resolv.conf", 0o755);
+
+    var resolver = Resolver.init(std.testing.allocator);
+    defer resolver.deinit();
+    resolver.hosts_path = path;
+    resolver.conf_path = path;
+
+    try resolver.ensureLoaded(getCurrentTime());
+
+    try std.testing.expectEqual((try fs.stat(path)).mtime, resolver.conf_mtime);
+    try std.testing.expectEqual(2, resolver.conf.servers.len);
+    try std.testing.expect(sameEndpoint(resolver.conf.servers[0], try net.IpAddress.parseIp4("127.0.0.1", 53)));
+    try std.testing.expect(sameEndpoint(resolver.conf.servers[1], try net.IpAddress.parseIp6("::1", 53)));
 }

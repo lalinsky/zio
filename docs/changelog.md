@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed the built-in DNS resolver skipping the rest of `/etc/resolv.conf` and `/etc/hosts` at a
+  line longer than 4 KiB, which left it with no name servers or an empty hosts table; such
+  lines are now skipped. A `/etc/resolv.conf` that cannot be opened for good (no permission, a
+  directory, and the like) now means the default name servers (`127.0.0.1` and `::1`), like a
+  missing one, instead of none.
+
 - Fixed the built-in DNS resolver never picking up a changed `/etc/resolv.conf` that had an
   unparsable `nameserver` line; the line is now skipped and the rest of the file applies.
   Link-local name servers with a zone index (`nameserver fe80::1%eth0`) are now supported.

@@ -4,6 +4,7 @@
 const std = @import("std");
 const net = @import("../../net.zig");
 const log = @import("../../common.zig").log;
+const takeLine = @import("../../utils/reader.zig").takeLine;
 
 /// /etc/hosts parser.
 ///
@@ -29,7 +30,7 @@ pub const Hosts = struct {
         const allocator = hosts.arena.allocator();
         try hosts.by_name.ensureTotalCapacity(allocator, 32);
 
-        while (try reader.takeDelimiter('\n')) |line| {
+        while (try takeLine(reader)) |line| {
             const trimmed = std.mem.trim(u8, line, " \t\r");
             if (trimmed.len == 0 or trimmed[0] == '#') continue;
 
@@ -89,4 +90,15 @@ test "basic parse" {
     try std.testing.expectEqual(1, google_addrs.len);
 
     try std.testing.expect(hosts.lookupByName("nonexistent") == null);
+}
+
+test "a line longer than the read buffer is skipped" {
+    const input = "10.0.0.1 a.test\n10.0.0.2 " ++ @as([100]u8, @splat('b')) ++ "\n10.0.0.3 c.test\n";
+    var buffer: [32]u8 = undefined;
+    var reader: std.testing.Reader = .init(&buffer, &.{.{ .buffer = input }});
+    var hosts = try Hosts.parse(std.testing.allocator, &reader.interface);
+    defer hosts.deinit();
+
+    try std.testing.expect(hosts.lookupByName("a.test") != null);
+    try std.testing.expect(hosts.lookupByName("c.test") != null);
 }
