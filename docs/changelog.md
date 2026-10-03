@@ -27,8 +27,10 @@ All notable changes to this project will be documented in this file.
 
 - With work stealing, an executor that runs out of work checks its own event loop once
   without waiting and then parks, instead of first waiting up to 100µs. A lightly loaded
-  server no longer pays for a timer wake on every request, and an executor that runs dry
-  takes work from busy ones right away instead of leaving them overloaded.
+  server no longer pays for a timer wake on every request. Before parking it takes work
+  only from executors that are falling behind, those still holding queued tasks when they
+  poll, so overloaded executors are relieved right away while ones that keep up keep
+  their tasks and their I/O.
 
 - `Loop.wake()` no longer makes a syscall when the target loop isn't blocked in its poll;
   the request is picked up by the loop's next poll instead.
