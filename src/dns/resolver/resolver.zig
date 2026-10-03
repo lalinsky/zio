@@ -1022,6 +1022,7 @@ fn loadResolvConf(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i6
     var buf: [4096]u8 = undefined;
     var reader = file.reader(&buf);
     return ResolvConf.parse(allocator, &reader.interface) catch |err| {
+        if (err == error.Canceled) return error.Canceled;
         if (reader.err) |read_err| if (read_err == error.Canceled) return error.Canceled;
         log.warn("dns: failed to parse {s}: {}", .{ path, err });
         return .{ .arena = .init(allocator), .servers = &.{}, .search = &.{}, .parse_error = true };

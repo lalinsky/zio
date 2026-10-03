@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const net = @import("../../net.zig");
+const os = @import("../../os/root.zig");
 const Duration = @import("../../time.zig").Duration;
 const log = @import("../../common.zig").log;
 
@@ -62,9 +63,12 @@ pub const ResolvConf = struct {
 
             if (std.mem.eql(u8, keyword, "nameserver")) {
                 const addr_str = fields.next() orelse continue;
-                const addr = net.IpAddress.parseIp(addr_str, 53) catch |err| {
-                    log.warn("resolv.conf: invalid nameserver '{s}': {}", .{ addr_str, err });
-                    continue;
+                const addr = parseNameserver(addr_str) catch |err| switch (err) {
+                    error.Canceled => |e| return e,
+                    else => {
+                        log.warn("resolv.conf: invalid nameserver '{s}': {}", .{ addr_str, err });
+                        continue;
+                    },
                 };
                 servers.append(allocator, addr) catch |err| {
                     log.warn("resolv.conf: failed to add nameserver: {}", .{err});
@@ -125,6 +129,24 @@ pub const ResolvConf = struct {
         return conf;
     }
 };
+
+/// Parses a nameserver address. An IPv6 one may carry a zone index after a
+/// `%`, as an interface name or number.
+fn parseNameserver(s: []const u8) !net.IpAddress {
+    const percent = std.mem.findScalar(u8, s, '%') orelse return net.IpAddress.parseIp(s, 53);
+    var addr = try net.IpAddress.parseIp6(s[0..percent], 53);
+    const zone = s[percent + 1 ..];
+    addr.in6.scope_id = std.fmt.parseInt(u32, zone, 10) catch try interfaceIndex(zone);
+    return addr;
+}
+
+fn interfaceIndex(name: []const u8) !u32 {
+    var buf: [os.net.IF_NAMESIZE]u8 = undefined;
+    if (name.len == 0 or name.len >= buf.len) return error.InterfaceNotFound;
+    @memcpy(buf[0..name.len], name);
+    buf[name.len] = 0;
+    return os.net.interfaceNameToIndex(buf[0..name.len :0]);
+}
 
 fn ensureRooted(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
     if (s.len > 0 and s[s.len - 1] == '.') {
@@ -212,4 +234,20 @@ test "an invalid nameserver is skipped" {
     try expectAddress("1.1.1.1:53", conf.servers[0]);
     try expectAddress("8.8.8.8:53", conf.servers[1]);
     try std.testing.expect(!conf.parse_error);
+}
+
+test "a nameserver with a zone index" {
+    var lo_name: [os.net.IF_NAMESIZE]u8 = undefined;
+    const lo_len = os.net.interfaceIndexToName(1, &lo_name) catch return error.SkipZigTest;
+
+    var input_buf: [128]u8 = undefined;
+    const input = try std.fmt.bufPrint(&input_buf, "nameserver fe80::1%7\nnameserver fe80::2%{s}\nnameserver fe80::3%nonexistent0\nnameserver 1.1.1.1%1\n", .{lo_name[0..lo_len]});
+    var reader = std.Io.Reader.fixed(input);
+    var conf = try ResolvConf.parse(std.testing.allocator, &reader);
+    defer conf.deinit();
+
+    try std.testing.expectEqual(2, conf.servers.len);
+    try std.testing.expectEqual(7, conf.servers[0].in6.scope_id);
+    try std.testing.expectEqual(1, conf.servers[1].in6.scope_id);
+    try std.testing.expectEqual(53, conf.servers[1].getPort());
 }

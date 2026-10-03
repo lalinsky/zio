@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 - Fixed the built-in DNS resolver never picking up a changed `/etc/resolv.conf` that had an
   unparsable `nameserver` line; the line is now skipped and the rest of the file applies.
+  Link-local name servers with a zone index (`nameserver fe80::1%eth0`) are now supported.
 
 - Fixed the built-in DNS resolver misreading `/etc/resolv.conf` lines whose fields are separated
   by more than one space or tab, which dropped name servers and added an empty search domain
