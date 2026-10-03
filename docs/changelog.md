@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed `Futex.wait` and `Futex.waitTimeout` losing a wake that arrived together with a
+  cancellation. The wait now returns normally and the cancellation is reported by the next
+  cancellation point, so `std.Io.Mutex` and other futex users no longer leave a waiter parked.
+
 - The built-in DNS resolver now answers `localhost` and names under it (RFC 6761) with the
   loopback addresses when `/etc/hosts` does not list them, instead of querying DNS, like
   `Io.Threaded`.
