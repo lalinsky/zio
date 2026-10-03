@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- The built-in DNS resolver now answers `localhost` and names under it (RFC 6761) with the
+  loopback addresses when `/etc/hosts` does not list them, instead of querying DNS, like
+  `Io.Threaded`.
+
 - The built-in DNS resolver now reports the first name on the first `/etc/hosts` line that
   lists the looked-up name as the canonical name, like glibc, instead of the looked-up name;
   it still reports the looked-up name when that first name is not a valid host name.

@@ -252,7 +252,27 @@ pub const Resolver = struct {
             }
         }
 
-        // 2. DNS. The request shape (single family or dual-stack) drives a
+        // 2. RFC 6761 localhost names, which always resolve to the loopback addresses.
+        if (isLocalhost(options.name)) {
+            var i: usize = 0;
+            if (options.family != .ipv4 and i < addr_storage.len) {
+                addr_storage[i] = .{ .address = .initIp6(.{0} ** 15 ++ .{1}, options.port, 0, 0) };
+                i += 1;
+            }
+            if (options.family != .ipv6 and i < addr_storage.len) {
+                addr_storage[i] = .{ .address = .initIp4(.{ 127, 0, 0, 1 }, options.port) };
+                i += 1;
+            }
+            if (cname_buf) |buf| {
+                const canonical_name = "localhost";
+                @memcpy(buf[0..canonical_name.len], canonical_name);
+                storage[0] = .{ .canonical_name = .{ .bytes = buf[0..canonical_name.len] } };
+                return i + 1;
+            }
+            return i;
+        }
+
+        // 3. DNS. The request shape (single family or dual-stack) drives a
         // single cache/dedup unit and a single batched query.
         const shape: Shape = if (options.family) |f| switch (f) {
             .ipv4 => .ipv4,
@@ -627,6 +647,14 @@ pub const Resolver = struct {
         old.deinit();
     }
 };
+
+/// Whether `name` is `localhost` or a name under it, with or without the root dot.
+fn isLocalhost(name: []const u8) bool {
+    const bare = if (std.mem.endsWith(u8, name, ".")) name[0 .. name.len - 1] else name;
+    const localhost = "localhost";
+    if (!std.ascii.endsWithIgnoreCase(bare, localhost)) return false;
+    return bare.len == localhost.len or bare[bare.len - localhost.len - 1] == '.';
+}
 
 /// Build name + '.' + suffix into buf. suffix must already end with '.'.
 /// Returns null if the resulting FQDN would exceed the buffer.
@@ -1476,4 +1504,46 @@ test "lookup: a hosts entry reports the first name on its line as canonical" {
     try std.testing.expectEqual(2, n);
     try std.testing.expectEqualStrings("main.test", storage[0].canonical_name.bytes);
     try std.testing.expect(sameEndpoint(storage[1].address, try net.IpAddress.parseIp4("10.1.2.3", 80)));
+}
+
+test "isLocalhost" {
+    try std.testing.expect(isLocalhost("localhost"));
+    try std.testing.expect(isLocalhost("localhost."));
+    try std.testing.expect(isLocalhost("LocalHost"));
+    try std.testing.expect(isLocalhost("foo.localhost"));
+    try std.testing.expect(isLocalhost("a.b.LOCALHOST."));
+    try std.testing.expect(!isLocalhost("xlocalhost"));
+    try std.testing.expect(!isLocalhost("foo.xlocalhost."));
+    try std.testing.expect(!isLocalhost("localhost.com"));
+    try std.testing.expect(!isLocalhost("localhost.."));
+    try std.testing.expect(!isLocalhost("."));
+    try std.testing.expect(!isLocalhost(""));
+}
+
+test "lookup: localhost names resolve to the loopback addresses without DNS" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    // A server that never answers, so a lookup that reaches DNS fails.
+    const bind_addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    const sock = try bind_addr.bind(.{});
+    defer sock.close();
+
+    var resolver = Resolver.init(std.testing.allocator);
+    defer resolver.deinit();
+    var servers = [_]net.IpAddress{sock.address.ip};
+    useTestConfig(&resolver, &servers, .fromMilliseconds(100));
+
+    var cname_buf: [net.HostName.max_len]u8 = undefined;
+    var storage: [4]dns.LookupResult = undefined;
+    const n = try resolver.lookup(&storage, .{ .name = "App.LocalHost.", .port = 80, .canonical_name_buffer = &cname_buf });
+    try std.testing.expectEqual(3, n);
+    try std.testing.expectEqualStrings("localhost", storage[0].canonical_name.bytes);
+    try std.testing.expect(sameEndpoint(storage[1].address, try net.IpAddress.parseIp6("::1", 80)));
+    try std.testing.expect(sameEndpoint(storage[2].address, try net.IpAddress.parseIp4("127.0.0.1", 80)));
+
+    try std.testing.expectEqual(1, try resolver.lookup(&storage, .{ .name = "foo.localhost", .port = 80, .family = .ipv4 }));
+    try std.testing.expect(sameEndpoint(storage[0].address, try net.IpAddress.parseIp4("127.0.0.1", 80)));
+
+    try std.testing.expectError(error.TemporaryNameServerFailure, resolver.lookup(&storage, .{ .name = "xlocalhost.", .port = 80 }));
 }
