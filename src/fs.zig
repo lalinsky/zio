@@ -484,11 +484,11 @@ pub const Dir = struct {
                 if (self.end - self.index == 0) {
                     if (self.finished) return null;
                     const restart = !self.started;
-                    self.started = true;
 
                     var op = ev.DirRead.init(self.fd, &self.buffer, restart);
                     try waitForIo(&op.c);
                     const n = try op.getResult();
+                    self.started = true;
                     if (n == 0) {
                         self.finished = true;
                         return null;

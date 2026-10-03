@@ -1353,17 +1353,11 @@ fn dirReadImpl(_: ?*anyopaque, r: *Io.Dir.Reader, entries: []Io.Dir.Entry) Io.Di
             if (r.state == .finished) return 0;
 
             const restart = r.state == .reset;
-            r.state = .reading;
 
             var op = ev.DirRead.init(stdIoHandleToZio(r.dir.handle), r.buffer, restart);
-            waitForIo(&op.c) catch |err| {
-                r.state = .reset;
-                return err;
-            };
-            const n = op.getResult() catch |err| {
-                r.state = .reset;
-                return err;
-            };
+            try waitForIo(&op.c);
+            const n = try op.getResult();
+            r.state = .reading;
             if (n == 0) {
                 r.state = .finished;
                 return 0;
@@ -4316,6 +4310,46 @@ test "io: dir iterate over files" {
     }
     // sub's deferred cleanup (file deletion + close) has now run.
     try dir.deleteDir(io, dir_path);
+}
+
+test "io: dir read error does not rewind the reader" {
+    // See comment on dir iterate over files above.
+    if (builtin.os.tag == .netbsd) return error.SkipZigTest;
+
+    var t = try TestDirFixture.init();
+    defer t.deinit();
+    const io = t.rt.io();
+
+    const dir = t.stdDir();
+    const dir_path = "test_io_dir_read_error";
+
+    try dir.createDir(io, dir_path, .default_dir);
+    var sub = try dir.openDir(io, dir_path, .{ .iterate = true });
+    defer sub.close(io);
+
+    var file = try sub.createFile(io, "a.txt", .{});
+    file.close(io);
+
+    var buffer: [Io.Dir.Reader.min_buffer_len]u8 align(@alignOf(usize)) = undefined;
+    var reader: Io.Dir.Reader = .init(sub, &buffer);
+    var entries: [1]Io.Dir.Entry = undefined;
+    try std.testing.expectEqual(1, try reader.read(io, &entries));
+
+    const Canceled = struct {
+        fn read(inner_io: Io, r: *Io.Dir.Reader, result: *Io.Dir.Reader.Error!usize) void {
+            inner_io.sleep(.fromSeconds(60), .awake) catch {};
+            inner_io.recancel();
+            var buf: [1]Io.Dir.Entry = undefined;
+            result.* = r.read(inner_io, &buf);
+        }
+    };
+    var result: Io.Dir.Reader.Error!usize = 0;
+    var future = io.async(Canceled.read, .{ io, &reader, &result });
+    try io.sleep(.fromMilliseconds(10), .awake);
+    future.cancel(io);
+    try std.testing.expectError(error.Canceled, result);
+
+    try std.testing.expectEqual(0, try reader.read(io, &entries));
 }
 
 test "io: dir iterate empty directory" {
