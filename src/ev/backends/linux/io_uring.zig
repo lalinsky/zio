@@ -1829,9 +1829,9 @@ fn storeRecvMmsgResult(c: *Completion, res: i32, _: u32) void {
         };
         count += remaining.recvFromSlots() catch |err| switch (err) {
             error.WouldBlock => 0,
-            else => {
-                c.setError(err);
-                return;
+            else => blk: {
+                data.drain_error = err;
+                break :blk 0;
             },
         };
         data.drained = remaining.drained;

@@ -2547,6 +2547,8 @@ fn netReceiveMmsg(
         };
     }
 
+    if (op.drain_error) |err| return .{ recvMsgErrToReceiveErr(err), count };
+
     if (!op.drained and count > 0 and count < o.message_buffer.len) {
         const more = netReceiveMoreLoop(o, count);
         return .{ more[0], count + more[1] };
@@ -4505,6 +4507,42 @@ test "io: operateTimeout net_receive succeeds when data is ready" {
     try std.testing.expectEqual(null, err);
     try std.testing.expectEqual(1, n);
     try std.testing.expectEqualStrings("hello", msg.data);
+}
+
+test "io: receiveManyTimeout reports an error that follows the first message" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (comptime !@hasDecl(ev.Backend, "selectedEngine")) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+    // Readiness backends report the pending reset before reading any data.
+    if (rt.main_executor.loop.backend.selectedEngine() != .io_uring) return error.SkipZigTest;
+
+    const addr = try zio_net.IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(.{});
+    defer server.close();
+    const client = try server.socket.address.ip.connect(.{});
+    const conn = try server.accept(.{});
+    defer conn.close();
+
+    try client.writeAll("aaa", .none);
+    const linger: extern struct { onoff: c_int, linger: c_int } = .{ .onoff = 1, .linger = 0 };
+    try os_net.setsockopt(client.socket.handle, os_net.SOL.SOCKET, os_net.SO.LINGER, std.mem.asBytes(&linger));
+    client.close();
+
+    var messages: [2]Io.net.IncomingMessage = @splat(.init);
+    var buf: [64]u8 = undefined;
+    const result = try io.operateTimeout(.{ .net_receive = .{
+        .socket_handle = conn.socket.handle,
+        .message_buffer = &messages,
+        .data_buffer = &buf,
+        .flags = .{},
+    } }, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+    const err, const n = result.net_receive;
+    try std.testing.expectEqual(@as(?Io.net.Socket.ReceiveError, error.ConnectionResetByPeer), err);
+    try std.testing.expectEqual(1, n);
+    try std.testing.expectEqualStrings("aaa", messages[0].data);
 }
 
 test "io: receiveManyTimeout returns every datagram already queued" {

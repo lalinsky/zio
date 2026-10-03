@@ -1130,6 +1130,10 @@ pub const NetRecvMmsg = struct {
     slots: []Slot,
     flags: net.RecvFlags,
     drained: bool = false,
+    /// Set when the first slot was received on its own and receiving the
+    /// rest failed. The messages are the result, so the error is kept here;
+    /// the socket may not report it again.
+    drain_error: ?net.RecvError = null,
 
     pub const Error = net.RecvError || Cancelable;
     pub const Result = u32;
