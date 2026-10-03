@@ -223,13 +223,13 @@ pub const Resolver = struct {
             try self.lock.lockShared();
             defer self.lock.unlockShared();
 
-            if (self.hosts.lookupByName(options.name)) |addrs| {
+            if (self.hosts.lookupByName(options.name)) |entry| {
                 var i: usize = 0;
                 // Track matches separately from what fits: a hosts entry that
                 // matched the family filter must answer the lookup even when
                 // nothing fits the buffer, rather than fall through to DNS.
                 var matched = false;
-                for (addrs) |addr_in| {
+                for (entry.addrs) |addr_in| {
                     if (options.family) |f| {
                         if (addr_in.getFamily() != f) continue;
                     }
@@ -242,7 +242,9 @@ pub const Resolver = struct {
                 }
                 if (matched) {
                     if (cname_buf) |buf| {
-                        storage[0] = .{ .canonical_name = .{ .bytes = buf[0..options.name.len] } };
+                        const canonical_name = entry.canonical_name orelse options.name;
+                        @memcpy(buf[0..canonical_name.len], canonical_name);
+                        storage[0] = .{ .canonical_name = .{ .bytes = buf[0..canonical_name.len] } };
                         return i + 1;
                     }
                     return i;
@@ -1453,4 +1455,25 @@ test "lookup: a name that does not encode is an unknown host" {
     var storage: [4]dns.LookupResult = undefined;
     try std.testing.expectError(error.UnknownHostName, resolver.lookup(&storage, .{ .name = "a..test", .port = 80 }));
     try std.testing.expectError(error.UnknownHostName, resolver.lookup(&storage, .{ .name = "a..test.", .port = 80 }));
+}
+
+test "lookup: a hosts entry reports the first name on its line as canonical" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var resolver = Resolver.init(std.testing.allocator);
+    defer resolver.deinit();
+    var servers = [_]net.IpAddress{try net.IpAddress.parseIp4("127.0.0.1", 53)};
+    useTestConfig(&resolver, &servers, .fromSeconds(1));
+
+    var reader = std.Io.Reader.fixed("10.1.2.3 main.test alias.test\n");
+    resolver.hosts.deinit();
+    resolver.hosts = try Hosts.parse(std.testing.allocator, &reader);
+
+    var cname_buf: [net.HostName.max_len]u8 = undefined;
+    var storage: [4]dns.LookupResult = undefined;
+    const n = try resolver.lookup(&storage, .{ .name = "Alias.Test", .port = 80, .canonical_name_buffer = &cname_buf });
+    try std.testing.expectEqual(2, n);
+    try std.testing.expectEqualStrings("main.test", storage[0].canonical_name.bytes);
+    try std.testing.expect(sameEndpoint(storage[1].address, try net.IpAddress.parseIp4("10.1.2.3", 80)));
 }

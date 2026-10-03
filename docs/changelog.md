@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- The built-in DNS resolver now reports the first name on the first `/etc/hosts` line that
+  lists the looked-up name as the canonical name, like glibc, instead of the looked-up name;
+  it still reports the looked-up name when that first name is not a valid host name.
+
 - The built-in DNS resolver now fails a lookup for a name that cannot be encoded in a query
   (an empty label, a label over 63 bytes, or more than 255 bytes in all) with
   `error.UnknownHostName` instead of `error.Unexpected`.
