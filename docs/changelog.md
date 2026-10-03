@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- The built-in DNS resolver now fails a lookup for a name that cannot be encoded in a query
+  (an empty label, a label over 63 bytes, or more than 255 bytes in all) with
+  `error.UnknownHostName` instead of `error.Unexpected`.
+
 - Fixed the built-in DNS resolver treating a truncated UDP response whose last record was cut
   off as a server failure instead of retrying the query over TCP.
 

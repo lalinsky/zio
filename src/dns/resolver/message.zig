@@ -39,6 +39,7 @@ fn encodeName(buf: []u8, pos: usize, name: []const u8) !usize {
         @memcpy(buf[p + 1 ..][0..label.len], label);
         p += 1 + label.len;
     }
+    if (p + 1 - pos > 255) return error.InvalidName;
     if (p >= buf.len) return error.BufferTooSmall;
     buf[p] = 0;
     return p + 1;
@@ -313,4 +314,14 @@ test "parseResponse reports a truncated response without parsing its records" {
     try std.testing.expect(result.truncated);
     try std.testing.expectEqual(RCode.no_error, result.rcode);
     try std.testing.expectEqual(0, result.count);
+}
+
+test "encodeName rejects names that do not encode" {
+    var buf: [512]u8 = undefined;
+    const label: [63]u8 = @splat('a');
+    const longest = label ++ "." ++ label ++ "." ++ label ++ "." ++ @as([61]u8, @splat('a')) ++ ".";
+    try std.testing.expectEqual(12 + 255, try encodeName(&buf, 12, longest));
+    try std.testing.expectError(error.InvalidName, encodeName(&buf, 12, "a." ++ longest));
+    try std.testing.expectError(error.InvalidName, encodeName(&buf, 12, "a..b."));
+    try std.testing.expectError(error.InvalidName, encodeName(&buf, 12, label ++ "a.b."));
 }

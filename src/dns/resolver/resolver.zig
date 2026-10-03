@@ -464,6 +464,7 @@ pub const Resolver = struct {
                     if (r.count > 0) return r;
                 } else |err| switch (err) {
                     error.Canceled => return err,
+                    error.UnknownHostName => {},
                     else => last_err = err,
                 }
             }
@@ -477,6 +478,7 @@ pub const Resolver = struct {
                     if (r.count > 0) return r;
                 } else |err| switch (err) {
                     error.Canceled => return err,
+                    error.UnknownHostName => {},
                     else => last_err = err,
                 }
             }
@@ -488,7 +490,7 @@ pub const Resolver = struct {
                 if (queryBatch(self, storage, options, fqdn, shape, srvs, attempts, timeout)) |r| {
                     if (r.count > 0) return r;
                 } else |err| {
-                    last_err = err;
+                    if (err != error.UnknownHostName) last_err = err;
                 }
             }
         }
@@ -697,7 +699,7 @@ fn queryBatch(
     var query_bufs: [2][message.max_udp_size]u8 = undefined;
     var query_lens: [2]usize = undefined;
     for (qs, 0..) |*q, i| {
-        const built = message.buildQuery(&query_bufs[i], q.id, fqdn, q.qtype) catch return error.Unexpected;
+        const built = message.buildQuery(&query_bufs[i], q.id, fqdn, q.qtype) catch return error.UnknownHostName;
         query_lens[i] = built.len;
     }
 
@@ -1437,4 +1439,18 @@ test "lookup: an unreadable resolv.conf starts with the default servers" {
     try std.testing.expectEqual(2, resolver.conf.servers.len);
     try std.testing.expect(sameEndpoint(resolver.conf.servers[0], try net.IpAddress.parseIp4("127.0.0.1", 53)));
     try std.testing.expect(sameEndpoint(resolver.conf.servers[1], try net.IpAddress.parseIp6("::1", 53)));
+}
+
+test "lookup: a name that does not encode is an unknown host" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var resolver = Resolver.init(std.testing.allocator);
+    defer resolver.deinit();
+    var servers = [_]net.IpAddress{try net.IpAddress.parseIp4("127.0.0.1", 53)};
+    useTestConfig(&resolver, &servers, .fromSeconds(1));
+
+    var storage: [4]dns.LookupResult = undefined;
+    try std.testing.expectError(error.UnknownHostName, resolver.lookup(&storage, .{ .name = "a..test", .port = 80 }));
+    try std.testing.expectError(error.UnknownHostName, resolver.lookup(&storage, .{ .name = "a..test.", .port = 80 }));
 }
