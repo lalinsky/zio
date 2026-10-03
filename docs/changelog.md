@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- The `std.Io` `netWriteFile` vtable entry returns `error.NetworkDown` instead of panicking,
+  like the std evented backends.
+
 - Fixed a file descriptor leak on non-Linux POSIX systems when making a new or accepted
   socket non-blocking or close-on-exec failed.
 
