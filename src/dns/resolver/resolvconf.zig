@@ -56,10 +56,8 @@ pub const ResolvConf = struct {
         var search: std.ArrayList([]const u8) = .empty;
         try search.ensureTotalCapacity(allocator, 8);
         while (try reader.takeDelimiter('\n')) |line| {
-            const trimmed = std.mem.trim(u8, line, " \t\r");
-            if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
-
-            var fields = std.mem.splitAny(u8, trimmed, " \t");
+            const content = line[0 .. std.mem.findAny(u8, line, "#;") orelse line.len];
+            var fields = std.mem.tokenizeAny(u8, content, " \t\r");
             const keyword = fields.next() orelse continue;
 
             if (std.mem.eql(u8, keyword, "nameserver")) {
@@ -159,4 +157,44 @@ test "basic parse" {
     try std.testing.expectEqual(2, conf.ndots);
     try std.testing.expectEqual(3, conf.timeout.toSeconds());
     try std.testing.expect(conf.rotate);
+}
+
+fn expectAddress(expected: []const u8, actual: net.IpAddress) !void {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(expected, try std.fmt.bufPrint(&buf, "{f}", .{actual}));
+}
+
+test "fields separated by runs of whitespace" {
+    const input = "nameserver  1.1.1.1\nnameserver\t\t8.8.8.8 \r\nsearch a.com  \t b.com\noptions  ndots:3\t rotate\n";
+    var reader = std.Io.Reader.fixed(input);
+    var conf = try ResolvConf.parse(std.testing.allocator, &reader);
+    defer conf.deinit();
+
+    try std.testing.expectEqual(2, conf.servers.len);
+    try expectAddress("1.1.1.1:53", conf.servers[0]);
+    try expectAddress("8.8.8.8:53", conf.servers[1]);
+    try std.testing.expectEqual(2, conf.search.len);
+    try std.testing.expectEqualStrings("a.com.", conf.search[0]);
+    try std.testing.expectEqualStrings("b.com.", conf.search[1]);
+    try std.testing.expectEqual(3, conf.ndots);
+    try std.testing.expect(conf.rotate);
+    try std.testing.expect(!conf.parse_error);
+}
+
+test "comments after the content of a line" {
+    const input =
+        \\nameserver 1.1.1.1 # primary
+        \\nameserver 8.8.8.8;secondary
+        \\search a.com # b.com
+        \\  ; nameserver 9.9.9.9
+    ;
+    var reader = std.Io.Reader.fixed(input);
+    var conf = try ResolvConf.parse(std.testing.allocator, &reader);
+    defer conf.deinit();
+
+    try std.testing.expectEqual(2, conf.servers.len);
+    try expectAddress("8.8.8.8:53", conf.servers[1]);
+    try std.testing.expectEqual(1, conf.search.len);
+    try std.testing.expectEqualStrings("a.com.", conf.search[0]);
+    try std.testing.expect(!conf.parse_error);
 }

@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed the built-in DNS resolver misreading `/etc/resolv.conf` lines whose fields are separated
+  by more than one space or tab, which dropped name servers and added an empty search domain
+  that failed every lookup. Text after a `#` or `;` anywhere on a line is now ignored as a
+  comment too, which is more lenient than glibc and musl, where only a whole line is one.
+
 - Fixed the built-in DNS resolver emptying its `/etc/hosts` table when reloading the file failed.
 
 - POSIX file reads now return `error.IsDir` instead of `error.Unexpected` when the system refuses
