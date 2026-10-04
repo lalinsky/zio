@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed a use-after-free in `Io.Batch` with work stealing, where an operation completing on
+  another executor could still touch the batch state after `cancel` had freed it.
+
 - `Io.Batch.cancel` no longer reports canceled operations in the `next()` iteration, and their
   slots go back to the unused list. Before, they showed up as completions with
   `error.Unexpected` (file operations) or `error.Canceled` (`net_receive`).
