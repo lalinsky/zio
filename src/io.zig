@@ -36,7 +36,6 @@ const time = @import("time.zig");
 const common = @import("common.zig");
 const Waiter = common.Waiter;
 const waitForIo = common.waitForIo;
-const timedWaitForIo = common.timedWaitForIo;
 const timedWaitForIoClock = common.timedWaitForIoClock;
 const waitForIoUncancelable = common.waitForIoUncancelable;
 
@@ -692,6 +691,18 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
         const submission = storage.submission;
         const next_index = submission.node.next;
 
+        if (isEmptyStreamingRead(submission.operation)) {
+            storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = .{ .file_read_streaming = 0 } } };
+            if (batch.completed.tail != .none) {
+                batch.storage[batch.completed.tail.toIndex()].completion.node.next = index;
+            } else {
+                batch.completed.head = index;
+            }
+            batch.completed.tail = index;
+            index = next_index;
+            continue;
+        }
+
         // Allocate completion data from pool
         const data = state.pool.create() catch return error.ConcurrencyUnavailable;
 
@@ -728,6 +739,8 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
     }
     batch.submitted = .{ .head = .none, .tail = .none };
 
+    const deadline = timeout.toDeadline(rt.io());
+
     // Wait loop: drain ready items, check for completions, wait if needed
     while (true) {
         const signaled = state.signaled.load(.acquire);
@@ -737,7 +750,7 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
         if (batch.completed.head != .none or batch.pending.head == .none) return;
 
         // Wait for another callback to finish
-        Futex.waitTimeoutClock(&state.signaled.raw, signaled, .fromStd(timeout), .fromStdTimeout(timeout)) catch |err| switch (err) {
+        Futex.waitTimeoutClock(&state.signaled.raw, signaled, .fromStd(deadline), .fromStdTimeout(deadline)) catch |err| switch (err) {
             error.Timeout => {
                 // Drain one more time before returning timeout
                 batchDrainReady(batch, state);
@@ -749,6 +762,18 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
                 return error.Canceled;
             },
         };
+    }
+}
+
+fn isEmptyStreamingRead(operation: Io.Operation) bool {
+    switch (operation) {
+        .file_read_streaming => |o| {
+            for (o.data) |buf| {
+                if (buf.len != 0) return false;
+            }
+            return true;
+        },
+        else => return false,
     }
 }
 
@@ -898,7 +923,7 @@ fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Oper
                 const result = data.net_receive.op.getResult() catch |err| break :blk .{ recvMsgErrToReceiveErr(err), 0 };
                 // Populate the message buffer with received data
                 data.net_receive.message_buffer.* = .{
-                    .from = zioIpToStdIo(zio_net.Address.fromPosix(&data.net_receive.addr_storage.any, data.net_receive.addr_len).ip),
+                    .from = senderAddrToStdIo(&data.net_receive.addr_storage.any, data.net_receive.addr_len),
                     .data = data.net_receive.data_buffer[0..result.len],
                     .control = data.net_receive.message_buffer.control[0..result.controllen],
                     .flags = decodeIncomingFlags(result.flags),
@@ -1951,6 +1976,14 @@ fn zioIpToStdIo(addr: zio_net.IpAddress) Io.net.IpAddress {
     };
 }
 
+fn senderAddrToStdIo(addr: *const os_net.sockaddr, len: os_net.socklen_t) Io.net.IpAddress {
+    const sender = zio_net.Address.fromPosix(addr, len);
+    return switch (sender.any.family) {
+        os_net.AF.INET, os_net.AF.INET6 => zioIpToStdIo(sender.ip),
+        else => .{ .ip4 = .loopback(0) },
+    };
+}
+
 fn sockAddrLen(addr: *const os_net.sockaddr) os_net.socklen_t {
     return switch (addr.family) {
         std.posix.AF.INET => @sizeOf(os_net.sockaddr.in),
@@ -2196,6 +2229,7 @@ fn connectErrToConnectErr(err: ConnectOrCancel) Io.net.IpAddress.ConnectError {
         error.ConnectionResetByPeer => error.ConnectionResetByPeer,
         error.Timeout => error.Timeout,
         error.NetworkUnreachable => error.NetworkUnreachable,
+        error.HostUnreachable => error.HostUnreachable,
         error.NetworkDown => error.NetworkDown,
         error.SystemResources => error.SystemResources,
         error.Canceled => error.Canceled,
@@ -2224,7 +2258,7 @@ fn netConnectIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: I
 
     const addr_len = sockAddrLen(&zio_addr.any);
     var connect_op = ev.NetConnect.init(handle, &zio_addr.any, addr_len);
-    try timedWaitForIo(&connect_op.c, .fromStd(options.timeout));
+    try timedWaitForIoClock(&connect_op.c, .fromStd(options.timeout), .fromStdTimeout(options.timeout));
     connect_op.getResult() catch |err| return connectErrToConnectErr(err);
 
     return .{
@@ -2308,6 +2342,7 @@ fn netConnectUnixImpl(
         error.ConnectionResetByPeer,
         error.Timeout,
         error.NetworkUnreachable,
+        error.HostUnreachable,
         error.FileDescriptorNotASocket,
         error.NameTooLong,
         error.Unexpected,
@@ -2342,7 +2377,11 @@ fn sendErrToSocketSendErr(err: ev.NetSendMsg.Error) Io.net.Socket.SendError {
         error.MessageTooBig => error.MessageOversize,
         error.SystemResources => error.SystemResources,
         error.NetworkUnreachable => error.NetworkUnreachable,
+        error.HostUnreachable => error.HostUnreachable,
         error.NetworkDown => error.NetworkDown,
+        error.ConnectionRefused => error.ConnectionRefused,
+        error.AddressFamilyUnsupported => error.AddressFamilyUnsupported,
+        error.FastOpenAlreadyInProgress => error.FastOpenAlreadyInProgress,
         error.ConnectionResetByPeer, error.ConnectionAborted => error.ConnectionResetByPeer,
         // std.Io has no send error for a kernel connection timeout (ETIMEDOUT);
         // surface the dead connection as a reset, the actionable signal for callers.
@@ -2388,7 +2427,7 @@ fn netSendImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, messages: []Io.net.
 
 fn recvErrToReadErr(err: ev.NetRecv.Error) Io.net.Stream.Reader.Error {
     return switch (err) {
-        error.ConnectionResetByPeer => error.ConnectionResetByPeer,
+        error.ConnectionResetByPeer, error.ConnectionAborted => error.ConnectionResetByPeer,
         // ETIMEDOUT means the connection died (retransmits exhausted), not that a
         // read deadline elapsed; std.Io.Stream.Reader has no timed-out-connection
         // variant, so report it as a broken connection rather than a Timeout.
@@ -2399,7 +2438,6 @@ fn recvErrToReadErr(err: ev.NetRecv.Error) Io.net.Stream.Reader.Error {
         error.Canceled => error.Canceled,
         error.WouldBlock,
         error.ConnectionRefused,
-        error.ConnectionAborted,
         error.FileDescriptorNotASocket,
         error.OperationNotSupported,
         error.MessageOversize,
@@ -2502,7 +2540,7 @@ fn netReceiveMmsg(
 
     for (0..count) |i| {
         o.message_buffer[i] = .{
-            .from = zioIpToStdIo(zio_net.Address.fromPosix(@ptrCast(&slots[i].addr), slots[i].addr_len).ip),
+            .from = senderAddrToStdIo(@ptrCast(&slots[i].addr), slots[i].addr_len),
             .data = slots[i].data[0..slots[i].received_len],
             .control = &.{},
             .flags = decodeIncomingFlags(slots[i].msg_flags),
@@ -2597,7 +2635,7 @@ fn netReceiveImpl(
         else => |e| return recvMsgErrToReceiveErr(e),
     };
     message.* = .{
-        .from = zioIpToStdIo(zio_net.Address.fromPosix(&storage.any, addr_len).ip),
+        .from = senderAddrToStdIo(&storage.any, addr_len),
         // When flags.trunc is set on Linux, result.len is the full datagram
         // length — which may exceed data_buffer.len. We slice verbatim to
         // match std.Io.Threaded; callers that enable .trunc are responsible
@@ -2631,7 +2669,11 @@ fn sendErrToWriteErr(err: ev.NetSend.Error) Io.net.Stream.Writer.Error {
         error.ConnectionTimedOut => error.ConnectionResetByPeer,
         error.SocketNotConnected, error.BrokenPipe => error.SocketUnconnected,
         error.NetworkUnreachable => error.NetworkUnreachable,
+        error.HostUnreachable => error.HostUnreachable,
         error.NetworkDown => error.NetworkDown,
+        error.ConnectionRefused => error.ConnectionRefused,
+        error.AddressFamilyUnsupported => error.AddressFamilyUnsupported,
+        error.FastOpenAlreadyInProgress => error.FastOpenAlreadyInProgress,
         error.SystemResources => error.SystemResources,
         error.Canceled => error.Canceled,
         error.WouldBlock,
@@ -2659,11 +2701,8 @@ fn netWriteImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, header: []const u8
 }
 
 fn netWriteFileImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: []const u8, _: *Io.File.Reader, _: Io.Limit) Io.net.Stream.Writer.WriteFileError!usize {
-    // As of Zig 0.16, std.Io defines this vtable slot but never calls it — every
-    // std backend assigns it (Threaded panics, Dispatch/Uring return NetworkDown)
-    // and no code path dispatches through it. Leave unimplemented until std wires
-    // it up.
-    @panic("netWriteFile is unused by std.Io as of Zig 0.16");
+    // As of Zig 0.16, std.Io defines this vtable slot but never calls it.
+    return error.NetworkDown;
 }
 
 fn netCloseImpl(_: ?*anyopaque, handles: []const Io.net.Socket.Handle) void {
@@ -3237,6 +3276,48 @@ test "io: net TCP listen/connect/accept handshake" {
     try handle.join();
 }
 
+test "io: net TCP connect times out at a realtime deadline" {
+    // Linux drops SYNs once the accept queue is full, so the connect hangs.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn run(io: Io) !void {
+            var server = try Io.net.IpAddress.listen(
+                &.{ .ip4 = .loopback(0) },
+                io,
+                .{ .reuse_address = true, .kernel_backlog = 0 },
+            );
+            defer server.deinit(io);
+
+            const queued = try Io.net.IpAddress.connect(&server.socket.address, io, .{ .mode = .stream });
+            defer queued.close(io);
+
+            const deadline: Io.Clock.Timestamp = .fromNow(io, .{
+                .raw = .fromMilliseconds(50),
+                .clock = .real,
+            });
+            var sw = time.Stopwatch.start();
+            const result = Io.net.IpAddress.connect(&server.socket.address, io, .{
+                .mode = .stream,
+                .timeout = .{ .deadline = deadline },
+            });
+            if (result) |stream| {
+                stream.close(io);
+                return error.SkipZigTest;
+            } else |err| {
+                try std.testing.expectEqual(error.Timeout, err);
+            }
+            try std.testing.expect(sw.read().toMilliseconds() < 2000);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
 test "io: net TCP read/write/shutdown round-trip" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
@@ -3353,6 +3434,31 @@ test "io: net Unix listen/connect/accept round-trip" {
     try handle.join();
 }
 
+test "io: net receive on a Unix datagram socket" {
+    if (!zio_net.has_unix_sockets or builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const fds = try os_net.socketpair(.unix, .dgram, .ip, .{ .nonblocking = true });
+    defer for (fds) |fd| os_net.close(fd);
+
+    const path = "test_io_net_unix_dgram.sock";
+    (Io.Dir.cwd()).deleteFile(io, path) catch {};
+    defer (Io.Dir.cwd()).deleteFile(io, path) catch {};
+    const sender_addr = try zio_net.UnixAddress.init(path);
+    try os_net.bind(fds[0], &sender_addr.any, @sizeOf(os_net.sockaddr.un));
+
+    const iov = os_net.iovecConstFromSlice("hello");
+    _ = try os_net.send(fds[0], (&iov)[0..1], .{});
+
+    const socket: Io.net.Socket = .{ .handle = fds[1], .address = .{ .ip4 = .loopback(0) } };
+    var buf: [16]u8 = undefined;
+    const message = try socket.receive(io, &buf);
+    try std.testing.expectEqualStrings("hello", message.data);
+}
+
 test "io: net UDP bind assigns ephemeral port" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
@@ -3387,6 +3493,19 @@ test "io: net UDP send single datagram succeeds" {
     defer receiver.close(io);
 
     try sender.send(io, &receiver.address, "hello");
+}
+
+test "io: net UDP send to an address of another family fails with AddressFamilyUnsupported" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+
+    try std.testing.expectError(error.AddressFamilyUnsupported, sender.send(io, &.{ .ip6 = .loopback(9) }, "hello"));
 }
 
 test "io: net UDP sendMany delivers multiple datagrams" {
@@ -4679,6 +4798,38 @@ test "io: batch awaitConcurrent with two net_receive operations" {
 
     // Clean up
     batch.cancel(io);
+}
+
+test "io: batch awaitConcurrent file_read_streaming into empty buffers returns 0" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const fds = try os_fs.pipe();
+    var read_file: Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = true } };
+    var write_file: Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = true } };
+    defer read_file.close(io);
+    defer write_file.close(io);
+
+    var storage: [2]Io.Operation.Storage = undefined;
+    var batch: Io.Batch = .init(&storage);
+    defer batch.cancel(io);
+
+    var empty: [0]u8 = .{};
+    const data: []const []u8 = &.{&empty};
+    _ = batch.add(.{ .file_read_streaming = .{ .file = read_file, .data = data } });
+    _ = batch.add(.{ .file_read_streaming = .{ .file = read_file, .data = data } });
+
+    var completed: usize = 0;
+    while (completed < 2) {
+        try batch.awaitConcurrent(io, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+        while (batch.next()) |completion| {
+            try std.testing.expectEqual(0, try completion.result.file_read_streaming);
+            completed += 1;
+        }
+    }
 }
 
 test "io: batch awaitConcurrent times out when no data arrives" {

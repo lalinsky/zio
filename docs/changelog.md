@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Fixed `std.Io` `Batch.awaitConcurrent` restarting a duration timeout each time it woke
+  up without a completion, instead of timing out once the duration had passed.
+
+- A batched `std.Io` streaming file read into only empty buffers completes right away with
+  0 bytes, matching a single read, instead of waiting for a pipe to become readable and
+  then failing with `error.EndOfStream`.
+
+- The `std.Io` `netWriteFile` vtable entry returns `error.NetworkDown` instead of panicking,
+  like the std evented backends.
+
+- Fixed a file descriptor leak on non-Linux POSIX systems when making a new or accepted
+  socket non-blocking or close-on-exec failed.
+
+- Fixed a crash when receiving through `std.Io` on a socket whose sender has a non-IP
+  address, such as a bound Unix datagram socket; the sender is now reported as the
+  IPv4 loopback placeholder, like `std.Io.Threaded` does.
+
+- Socket sends now report `error.ConnectionRefused`, `error.AddressFamilyUnsupported`,
+  `error.FastOpenAlreadyInProgress` and `error.SystemResources` (for `ENOMEM`) instead of
+  `error.Unexpected`, and sends and connects report an unreachable host as
+  `error.HostUnreachable` instead of `error.NetworkUnreachable`. A `std.Io` stream read
+  reports an aborted connection as `error.ConnectionResetByPeer`, like writes do.
+
+- Fixed `std.Io` TCP connect never timing out when given a deadline on the `.real` or
+  `.boot` clock.
+
 - Fixed a use-after-free in `Io.Batch` with work stealing, where an operation completing on
   another executor could still touch the batch state after `cancel` had freed it.
 

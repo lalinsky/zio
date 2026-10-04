@@ -353,6 +353,7 @@ pub fn socket(domain: Domain, socket_type: Type, protocol: Protocol, flags: Open
                 switch (posix.errno(rc)) {
                     .SUCCESS => {
                         const fd: fd_t = @intCast(rc);
+                        errdefer close(fd);
 
                         // On non-Linux systems, set flags using fcntl
                         if (builtin.os.tag != .linux) {
@@ -600,6 +601,7 @@ pub const ConnectError = error{
     ConnectionResetByPeer,
     Timeout,
     NetworkUnreachable,
+    HostUnreachable,
     FileDescriptorNotASocket,
     FileNotFound,
     SymLinkLoop,
@@ -702,6 +704,7 @@ pub fn accept(fd: fd_t, addr: ?*sockaddr, addr_len: ?*socklen_t, flags: OpenFlag
                             len.* = addr_len_tmp;
                         }
                         const sock: fd_t = @intCast(rc);
+                        errdefer close(sock);
 
                         // On non-Linux systems, set flags using fcntl
                         if (builtin.os.tag != .linux) {
@@ -794,7 +797,8 @@ pub fn errnoToConnectError(err: E) ConnectError {
             return switch (err) {
                 .ECONNREFUSED => error.ConnectionRefused,
                 .ETIMEDOUT => error.Timeout,
-                .EHOSTUNREACH, .ENETUNREACH => error.NetworkUnreachable,
+                .ENETUNREACH => error.NetworkUnreachable,
+                .EHOSTUNREACH => error.HostUnreachable,
                 .EACCES => error.AccessDenied,
                 .EADDRINUSE => error.AddressInUse,
                 .EADDRNOTAVAIL => error.AddressUnavailable,
@@ -815,7 +819,8 @@ pub fn errnoToConnectError(err: E) ConnectError {
                 .CONNREFUSED => error.ConnectionRefused,
                 .CONNRESET => error.ConnectionResetByPeer,
                 .TIMEDOUT => error.Timeout,
-                .HOSTUNREACH, .NETUNREACH => error.NetworkUnreachable,
+                .NETUNREACH => error.NetworkUnreachable,
+                .HOSTUNREACH, .HOSTDOWN => error.HostUnreachable,
                 .NETDOWN => error.NetworkDown,
                 .ACCES, .PERM => error.AccessDenied,
                 .ADDRINUSE => error.AddressInUse,
@@ -937,7 +942,9 @@ pub fn errnoToSendError(err: E) SendError {
                 .EMSGSIZE => error.MessageTooBig,
                 .ESHUTDOWN => error.BrokenPipe,
                 .ENETDOWN => error.NetworkDown,
-                .EHOSTUNREACH, .ENETUNREACH => error.NetworkUnreachable,
+                .ENETUNREACH => error.NetworkUnreachable,
+                .EHOSTUNREACH => error.HostUnreachable,
+                .EAFNOSUPPORT => error.AddressFamilyUnsupported,
                 .EOPNOTSUPP => error.OperationNotSupported,
                 .ENOBUFS => error.SystemResources,
                 .OPERATION_ABORTED => error.Canceled,
@@ -957,9 +964,13 @@ pub fn errnoToSendError(err: E) SendError {
                 .MSGSIZE => error.MessageTooBig,
                 .OPNOTSUPP => error.OperationNotSupported,
                 .PIPE => error.BrokenPipe,
-                .HOSTUNREACH, .HOSTDOWN, .NETUNREACH => error.NetworkUnreachable,
+                .NETUNREACH => error.NetworkUnreachable,
+                .HOSTUNREACH, .HOSTDOWN => error.HostUnreachable,
                 .NETDOWN => error.NetworkDown,
-                .NOBUFS => error.SystemResources,
+                .CONNREFUSED => error.ConnectionRefused,
+                .AFNOSUPPORT => error.AddressFamilyUnsupported,
+                .ALREADY => error.FastOpenAlreadyInProgress,
+                .NOBUFS, .NOMEM => error.SystemResources,
                 .CANCELED => error.Canceled,
                 else => |e| unexpectedError(e),
             };
@@ -1173,7 +1184,11 @@ pub const SendError = error{
     MessageTooBig,
     BrokenPipe,
     NetworkUnreachable,
+    HostUnreachable,
     NetworkDown,
+    ConnectionRefused,
+    AddressFamilyUnsupported,
+    FastOpenAlreadyInProgress,
     OperationNotSupported,
     SystemResources,
     Canceled,
