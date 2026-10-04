@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- `Io.Batch.cancel` no longer reports canceled operations in the `next()` iteration, and their
+  slots go back to the unused list. Before, they showed up as completions with
+  `error.Unexpected` (file operations) or `error.Canceled` (`net_receive`).
+
 - Fixed `Futex.wait` and `Futex.waitTimeout` losing a wake that arrived together with a
   cancellation. The wait now returns normally and the cancellation is reported by the next
   cancellation point, so `std.Io.Mutex` and other futex users no longer leave a waiter parked.
