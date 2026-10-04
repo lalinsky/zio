@@ -7,7 +7,7 @@
 
 ZIO is an asynchronous runtime for Zig, in the same spirit as Go's runtime or Tokio: it schedules lightweight coroutines onto a pool of OS threads, and gives you blocking-looking network, file, and process I/O that's actually backed by non-blocking, event-driven OS APIs under the hood. On top of that, it's a full implementation of the standard library's [`std.Io`] interface, so Zig 0.17 code written against `std.Io` runs on zio unmodified.
 
-[`std.Io`]: https://ziglang.org/documentation/0.16.0/std/#std.Io
+[`std.Io`]: https://ziglang.org/documentation/0.17.0/std/#std.Io
 
 ## Architecture
 
@@ -97,8 +97,8 @@ fn handleClient(stream: zio.net.Stream) !void {
     }
 }
 
-pub fn main() !void {
-    const rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
+pub fn main(init: std.process.Init) !void {
+    const rt = try zio.Runtime.init(init.gpa, .{});
     defer rt.deinit();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 8080);
@@ -146,8 +146,8 @@ fn handleClient(io: Io, stream: Io.net.Stream) Io.Cancelable!void {
     }
 }
 
-pub fn main() !void {
-    const rt = try zio.Runtime.init(std.heap.smp_allocator, .{});
+pub fn main(init: std.process.Init) !void {
+    const rt = try zio.Runtime.init(init.gpa, .{});
     defer rt.deinit();
     const io = rt.io();
 

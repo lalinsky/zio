@@ -53,12 +53,9 @@ Hello, world!
 ```
 
 This example is a simple program that prints "Hello, world!" to the console.
-It shows how to initialize the runtime, access stdout, and write to it using the [`std.Io.Writer`](https://ziglang.org/documentation/0.16.0/std/#std.Io.Writer) interface.
+It shows how to initialize the runtime, access stdout, and write to it using the [`std.Io.Writer`](https://ziglang.org/documentation/0.17.0/std/#std.Io.Writer) interface.
 
-The code looks simple, but when you call [`writeAll()`](https://ziglang.org/documentation/0.16.0/std/#std.Io.Writer.writeAll), it will actually
-submit a write operation to the event loop, and suspend the current task
-until the operation is complete, so the execution model behind it is more
-complex than it seems.
+The code looks simple, but writing through the runtime can suspend the current task while an I/O operation completes. Buffered [`writeAll()`](https://ziglang.org/documentation/0.17.0/std/#std.Io.Writer.writeAll) calls may only fill the buffer until it is flushed.
 
 On its own, this is not very useful, possibly even wasteful, but once you
 start doing more things concurrently, this pattern will become very useful.
