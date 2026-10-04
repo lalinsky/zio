@@ -1021,6 +1021,10 @@ fn loadHosts(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i64) (C
     defer file.close();
     var mtime: i64 = 0;
     if (file.stat()) |info| {
+        if (info.kind == .directory) {
+            log.warn("dns: failed to read {s}: it is a directory", .{path});
+            return error.LoadFailed;
+        }
         mtime = info.mtime;
     } else |err| switch (err) {
         error.Canceled => |e| return e,
@@ -1409,7 +1413,7 @@ test "lookup: a failed hosts reload keeps the current table" {
     resolver.hosts_next_check.store(0, .monotonic);
     try expectHostsEntry(&resolver);
 
-    // A directory opens but fails to read.
+    // A directory opens, and on some systems (NetBSD) even reads.
     try temp.dir.deleteFile("hosts");
     try temp.dir.createDir("hosts", 0o755);
 
