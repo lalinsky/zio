@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- The built-in DNS resolver now answers `localhost` and names under it (RFC 6761) with the
+  loopback addresses when `/etc/hosts` does not list them, instead of querying DNS, like
+  `Io.Threaded`.
+
+- The built-in DNS resolver now reports the first name on the first `/etc/hosts` line that
+  lists the looked-up name as the canonical name, like glibc, instead of the looked-up name;
+  it still reports the looked-up name when that first name is not a valid host name.
+
+- The built-in DNS resolver now fails a lookup for a name that cannot be encoded in a query
+  (an empty label, a label over 63 bytes, or more than 255 bytes in all) with
+  `error.UnknownHostName` instead of `error.Unexpected`.
+
+- Fixed the built-in DNS resolver treating a truncated UDP response whose last record was cut
+  off as a server failure instead of retrying the query over TCP.
+
+- The built-in DNS resolver now clamps `/etc/resolv.conf` options to about the ranges glibc
+  uses: `timeout` to 1-30 seconds (`timeout:0` made every query fail at once), `attempts` to
+  1-5, and `ndots` to 0-15, including values too large to parse.
+
+- Fixed the built-in DNS resolver skipping the rest of `/etc/resolv.conf` and `/etc/hosts` at a
+  line longer than 4 KiB, which left it with no name servers or an empty hosts table; such
+  lines are now skipped. A `/etc/resolv.conf` that cannot be opened for good (no permission, a
+  directory, and the like) now means the default name servers (`127.0.0.1` and `::1`), like a
+  missing one, instead of none.
+
+- Fixed the built-in DNS resolver never picking up a changed `/etc/resolv.conf` that had an
+  unparsable `nameserver` line; the line is now skipped and the rest of the file applies.
+  Link-local name servers with a zone index (`nameserver fe80::1%eth0`) are now supported.
+
+- Fixed the built-in DNS resolver misreading `/etc/resolv.conf` lines whose fields are separated
+  by more than one space or tab, which dropped name servers and added an empty search domain
+  that failed every lookup. Text after a `#` or `;` anywhere on a line is now ignored as a
+  comment too, which is more lenient than glibc and musl, where only a whole line is one.
+
 - Fixed the built-in DNS resolver emptying its `/etc/hosts` table when reloading the file failed.
 
 - POSIX file reads now return `error.IsDir` instead of `error.Unexpected` when the system refuses

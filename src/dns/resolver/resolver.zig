@@ -78,6 +78,7 @@ pub const Resolver = struct {
     hosts_reloading: std.atomic.Value(bool),
 
     conf: ResolvConf,
+    conf_path: []const u8,
     conf_mtime: i64,
     conf_next_check: std.atomic.Value(u32),
     conf_reloading: std.atomic.Value(bool),
@@ -107,6 +108,7 @@ pub const Resolver = struct {
             .hosts_next_check = .init(0),
             .hosts_reloading = .init(false),
             .conf = .{ .arena = .init(allocator), .servers = &.{}, .search = &.{} },
+            .conf_path = "/etc/resolv.conf",
             .conf_mtime = 0,
             .conf_next_check = .init(0),
             .conf_reloading = .init(false),
@@ -221,13 +223,13 @@ pub const Resolver = struct {
             try self.lock.lockShared();
             defer self.lock.unlockShared();
 
-            if (self.hosts.lookupByName(options.name)) |addrs| {
+            if (self.hosts.lookupByName(options.name)) |entry| {
                 var i: usize = 0;
                 // Track matches separately from what fits: a hosts entry that
                 // matched the family filter must answer the lookup even when
                 // nothing fits the buffer, rather than fall through to DNS.
                 var matched = false;
-                for (addrs) |addr_in| {
+                for (entry.addrs) |addr_in| {
                     if (options.family) |f| {
                         if (addr_in.getFamily() != f) continue;
                     }
@@ -240,7 +242,9 @@ pub const Resolver = struct {
                 }
                 if (matched) {
                     if (cname_buf) |buf| {
-                        storage[0] = .{ .canonical_name = .{ .bytes = buf[0..options.name.len] } };
+                        const canonical_name = entry.canonical_name orelse options.name;
+                        @memcpy(buf[0..canonical_name.len], canonical_name);
+                        storage[0] = .{ .canonical_name = .{ .bytes = buf[0..canonical_name.len] } };
                         return i + 1;
                     }
                     return i;
@@ -248,7 +252,27 @@ pub const Resolver = struct {
             }
         }
 
-        // 2. DNS. The request shape (single family or dual-stack) drives a
+        // 2. RFC 6761 localhost names, which always resolve to the loopback addresses.
+        if (isLocalhost(options.name)) {
+            var i: usize = 0;
+            if (options.family != .ipv4 and i < addr_storage.len) {
+                addr_storage[i] = .{ .address = .initIp6(.{0} ** 15 ++ .{1}, options.port, 0, 0) };
+                i += 1;
+            }
+            if (options.family != .ipv6 and i < addr_storage.len) {
+                addr_storage[i] = .{ .address = .initIp4(.{ 127, 0, 0, 1 }, options.port) };
+                i += 1;
+            }
+            if (cname_buf) |buf| {
+                const canonical_name = "localhost";
+                @memcpy(buf[0..canonical_name.len], canonical_name);
+                storage[0] = .{ .canonical_name = .{ .bytes = buf[0..canonical_name.len] } };
+                return i + 1;
+            }
+            return i;
+        }
+
+        // 3. DNS. The request shape (single family or dual-stack) drives a
         // single cache/dedup unit and a single batched query.
         const shape: Shape = if (options.family) |f| switch (f) {
             .ipv4 => .ipv4,
@@ -462,6 +486,7 @@ pub const Resolver = struct {
                     if (r.count > 0) return r;
                 } else |err| switch (err) {
                     error.Canceled => return err,
+                    error.UnknownHostName => {},
                     else => last_err = err,
                 }
             }
@@ -475,6 +500,7 @@ pub const Resolver = struct {
                     if (r.count > 0) return r;
                 } else |err| switch (err) {
                     error.Canceled => return err,
+                    error.UnknownHostName => {},
                     else => last_err = err,
                 }
             }
@@ -486,7 +512,7 @@ pub const Resolver = struct {
                 if (queryBatch(self, storage, options, fqdn, shape, srvs, attempts, timeout)) |r| {
                     if (r.count > 0) return r;
                 } else |err| {
-                    last_err = err;
+                    if (err != error.UnknownHostName) last_err = err;
                 }
             }
         }
@@ -526,8 +552,8 @@ pub const Resolver = struct {
         defer self.load_mutex.unlock();
         if (self.loaded.load(.monotonic)) return;
 
-        // Without a previous table to keep, a failed load starts empty; mtime 0
-        // makes the next check retry it.
+        // Without a previous table or configuration to keep, a failed load
+        // starts empty; mtime 0 makes the next check retry it.
         var hosts_mtime: i64 = 0;
         var hosts = loadHosts(self.allocator, self.hosts_path, &hosts_mtime) catch |err| switch (err) {
             error.Canceled => |e| return e,
@@ -535,7 +561,10 @@ pub const Resolver = struct {
         };
         errdefer hosts.deinit();
         var conf_mtime: i64 = 0;
-        const conf = try loadResolvConf(self.allocator, &conf_mtime);
+        const conf = loadResolvConf(self.allocator, self.conf_path, &conf_mtime) catch |err| switch (err) {
+            error.Canceled => |e| return e,
+            error.LoadFailed => ResolvConf{ .arena = .init(self.allocator), .servers = &.{}, .search = &.{} },
+        };
 
         self.hosts.deinit();
         self.hosts = hosts;
@@ -592,7 +621,7 @@ pub const Resolver = struct {
         self.conf_next_check.store(now_s +% check_interval_secs, .monotonic);
 
         const mtime = check_mtime: {
-            const info = fs.stat("/etc/resolv.conf") catch |err| switch (err) {
+            const info = fs.stat(self.conf_path) catch |err| switch (err) {
                 error.FileNotFound => break :check_mtime 0,
                 error.Canceled => |e| return e,
                 else => return,
@@ -601,12 +630,12 @@ pub const Resolver = struct {
         };
         if (mtime == self.conf_mtime) return;
 
+        // A failed load keeps the current configuration and mtime, so the next check retries.
         var new_mtime: i64 = 0;
-        var new_conf = try loadResolvConf(self.allocator, &new_mtime);
-        if (new_conf.parse_error) {
-            new_conf.deinit();
-            return;
-        }
+        const new_conf = loadResolvConf(self.allocator, self.conf_path, &new_mtime) catch |err| switch (err) {
+            error.Canceled => |e| return e,
+            error.LoadFailed => return,
+        };
 
         self.lock.lockUncancelable();
         const old_conf = self.conf;
@@ -618,6 +647,14 @@ pub const Resolver = struct {
         old.deinit();
     }
 };
+
+/// Whether `name` is `localhost` or a name under it, with or without the root dot.
+fn isLocalhost(name: []const u8) bool {
+    const bare = if (std.mem.endsWith(u8, name, ".")) name[0 .. name.len - 1] else name;
+    const localhost = "localhost";
+    if (!std.ascii.endsWithIgnoreCase(bare, localhost)) return false;
+    return bare.len == localhost.len or bare[bare.len - localhost.len - 1] == '.';
+}
 
 /// Build name + '.' + suffix into buf. suffix must already end with '.'.
 /// Returns null if the resulting FQDN would exceed the buffer.
@@ -692,7 +729,7 @@ fn queryBatch(
     var query_bufs: [2][message.max_udp_size]u8 = undefined;
     var query_lens: [2]usize = undefined;
     for (qs, 0..) |*q, i| {
-        const built = message.buildQuery(&query_bufs[i], q.id, fqdn, q.qtype) catch return error.Unexpected;
+        const built = message.buildQuery(&query_bufs[i], q.id, fqdn, q.qtype) catch return error.UnknownHostName;
         query_lens[i] = built.len;
     }
 
@@ -839,6 +876,10 @@ fn queryBatch(
             };
             switch (result.rcode) {
                 .no_error => {
+                    if (result.truncated) {
+                        last_err = error.NameServerFailure;
+                        continue;
+                    }
                     const c = @min(result.count, parse_addrs.len);
                     @memcpy(q.addrs[0..c], parse_addrs[0..c]);
                     q.count = c;
@@ -996,34 +1037,64 @@ fn loadHosts(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i64) (C
     return hosts;
 }
 
-fn loadResolvConf(allocator: std.mem.Allocator, mtime_out: *i64) Cancelable!ResolvConf {
-    const file = fs.openFile("/etc/resolv.conf") catch |err| {
-        if (err == error.Canceled) return error.Canceled;
-        if (err == error.FileNotFound) {
-            const conf = ResolvConf.default(allocator) catch |err2| {
-                log.warn("dns: failed to init default ResolvConf: {}", .{err2});
-                return .{ .arena = .init(allocator), .servers = &.{}, .search = &.{}, .parse_error = true };
-            };
-            mtime_out.* = 0;
-            return conf;
-        }
-        log.warn("dns: failed to open /etc/resolv.conf: {}", .{err});
-        return .{ .arena = .init(allocator), .servers = &.{}, .search = &.{}, .parse_error = true };
+/// Reads and parses the resolver configuration at `path`, setting `mtime_out`
+/// only on success. A file that is missing or that cannot be opened or read
+/// for good is the default configuration.
+fn loadResolvConf(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i64) (Cancelable || error{LoadFailed})!ResolvConf {
+    const file = fs.openFile(path) catch |err| switch (err) {
+        error.Canceled => |e| return e,
+        error.FileNotFound,
+        error.NotDir,
+        error.IsDir,
+        error.SymLinkLoop,
+        error.AccessDenied,
+        error.PermissionDenied,
+        => return defaultResolvConf(allocator, path, mtime_out),
+        else => {
+            log.warn("dns: failed to open {s}: {}", .{ path, err });
+            return error.LoadFailed;
+        },
     };
     defer file.close();
+    var mtime: i64 = 0;
     if (file.stat()) |info| {
-        mtime_out.* = info.mtime;
+        if (info.kind == .directory) return defaultResolvConf(allocator, path, mtime_out);
+        mtime = info.mtime;
     } else |err| switch (err) {
         error.Canceled => |e| return e,
         else => {},
     }
     var buf: [4096]u8 = undefined;
     var reader = file.reader(&buf);
-    return ResolvConf.parse(allocator, &reader.interface) catch |err| {
+    const conf = ResolvConf.parse(allocator, &reader.interface) catch |err| {
+        if (err == error.Canceled) return error.Canceled;
         if (reader.err) |read_err| if (read_err == error.Canceled) return error.Canceled;
-        log.warn("dns: failed to parse /etc/resolv.conf: {}", .{err});
-        return .{ .arena = .init(allocator), .servers = &.{}, .search = &.{}, .parse_error = true };
+        log.warn("dns: failed to parse {s}: {}", .{ path, err });
+        return error.LoadFailed;
     };
+    mtime_out.* = mtime;
+    return conf;
+}
+
+/// The configuration for a file that is not there to read. The mtime is that
+/// of whatever is at `path`, so a reload waits for it to change.
+fn defaultResolvConf(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i64) (Cancelable || error{LoadFailed})!ResolvConf {
+    var conf = ResolvConf.default(allocator) catch |err| {
+        log.warn("dns: failed to init default ResolvConf: {}", .{err});
+        return error.LoadFailed;
+    };
+    const info = fs.stat(path) catch |err| switch (err) {
+        error.Canceled => |e| {
+            conf.deinit();
+            return e;
+        },
+        else => {
+            mtime_out.* = 0;
+            return conf;
+        },
+    };
+    mtime_out.* = info.mtime;
+    return conf;
 }
 
 // -- Tests --------------------------------------------------------------------
@@ -1338,10 +1409,141 @@ test "lookup: a failed hosts reload keeps the current table" {
     resolver.hosts_next_check.store(0, .monotonic);
     try expectHostsEntry(&resolver);
 
-    // A line longer than the read buffer makes the load fail.
-    try writeTestFile(temp.dir, "hosts", &(@as([5000]u8, @splat('x')) ++ "\n".*));
+    // A directory opens but fails to read.
+    try temp.dir.deleteFile("hosts");
+    try temp.dir.createDir("hosts", 0o755);
 
     resolver.hosts_mtime = 0;
     resolver.hosts_next_check.store(0, .monotonic);
     try expectHostsEntry(&resolver);
+}
+
+test "lookup: a resolv.conf reload skips an invalid nameserver" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const parent = try fs.Dir.cwd().openDir(".", .{});
+    defer parent.close();
+    var temp = try parent.createTempDir(.{ .prefix = "zio_test_" });
+    defer temp.deinit();
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/resolv.conf", .{temp.name()});
+
+    try writeTestFile(temp.dir, "resolv.conf", "nameserver fe80::1%nonexistent0\nnameserver 10.0.0.1\noptions ndots:3\n");
+
+    var resolver = Resolver.init(std.testing.allocator);
+    defer resolver.deinit();
+    var servers = [_]net.IpAddress{try net.IpAddress.parseIp4("127.0.0.1", 53)};
+    useTestConfig(&resolver, &servers, .fromSeconds(1));
+    resolver.conf_path = path;
+    resolver.conf_next_check.store(0, .monotonic);
+
+    try resolver.maybeReloadResolvConf(getCurrentTime());
+
+    try std.testing.expect(resolver.conf_mtime != 0);
+    try std.testing.expectEqual(3, resolver.conf.ndots);
+    try std.testing.expectEqual(1, resolver.conf.servers.len);
+    try std.testing.expect(sameEndpoint(resolver.conf.servers[0], try net.IpAddress.parseIp4("10.0.0.1", 53)));
+}
+
+test "lookup: an unreadable resolv.conf starts with the default servers" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const parent = try fs.Dir.cwd().openDir(".", .{});
+    defer parent.close();
+    var temp = try parent.createTempDir(.{ .prefix = "zio_test_" });
+    defer temp.deinit();
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/resolv.conf", .{temp.name()});
+    try temp.dir.createDir("resolv.conf", 0o755);
+
+    var resolver = Resolver.init(std.testing.allocator);
+    defer resolver.deinit();
+    resolver.hosts_path = path;
+    resolver.conf_path = path;
+
+    try resolver.ensureLoaded(getCurrentTime());
+
+    try std.testing.expectEqual((try fs.stat(path)).mtime, resolver.conf_mtime);
+    try std.testing.expectEqual(2, resolver.conf.servers.len);
+    try std.testing.expect(sameEndpoint(resolver.conf.servers[0], try net.IpAddress.parseIp4("127.0.0.1", 53)));
+    try std.testing.expect(sameEndpoint(resolver.conf.servers[1], try net.IpAddress.parseIp6("::1", 53)));
+}
+
+test "lookup: a name that does not encode is an unknown host" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var resolver = Resolver.init(std.testing.allocator);
+    defer resolver.deinit();
+    var servers = [_]net.IpAddress{try net.IpAddress.parseIp4("127.0.0.1", 53)};
+    useTestConfig(&resolver, &servers, .fromSeconds(1));
+
+    var storage: [4]dns.LookupResult = undefined;
+    try std.testing.expectError(error.UnknownHostName, resolver.lookup(&storage, .{ .name = "a..test", .port = 80 }));
+    try std.testing.expectError(error.UnknownHostName, resolver.lookup(&storage, .{ .name = "a..test.", .port = 80 }));
+}
+
+test "lookup: a hosts entry reports the first name on its line as canonical" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var resolver = Resolver.init(std.testing.allocator);
+    defer resolver.deinit();
+    var servers = [_]net.IpAddress{try net.IpAddress.parseIp4("127.0.0.1", 53)};
+    useTestConfig(&resolver, &servers, .fromSeconds(1));
+
+    var reader = std.Io.Reader.fixed("10.1.2.3 main.test alias.test\n");
+    resolver.hosts.deinit();
+    resolver.hosts = try Hosts.parse(std.testing.allocator, &reader);
+
+    var cname_buf: [net.HostName.max_len]u8 = undefined;
+    var storage: [4]dns.LookupResult = undefined;
+    const n = try resolver.lookup(&storage, .{ .name = "Alias.Test", .port = 80, .canonical_name_buffer = &cname_buf });
+    try std.testing.expectEqual(2, n);
+    try std.testing.expectEqualStrings("main.test", storage[0].canonical_name.bytes);
+    try std.testing.expect(sameEndpoint(storage[1].address, try net.IpAddress.parseIp4("10.1.2.3", 80)));
+}
+
+test "isLocalhost" {
+    try std.testing.expect(isLocalhost("localhost"));
+    try std.testing.expect(isLocalhost("localhost."));
+    try std.testing.expect(isLocalhost("LocalHost"));
+    try std.testing.expect(isLocalhost("foo.localhost"));
+    try std.testing.expect(isLocalhost("a.b.LOCALHOST."));
+    try std.testing.expect(!isLocalhost("xlocalhost"));
+    try std.testing.expect(!isLocalhost("foo.xlocalhost."));
+    try std.testing.expect(!isLocalhost("localhost.com"));
+    try std.testing.expect(!isLocalhost("localhost.."));
+    try std.testing.expect(!isLocalhost("."));
+    try std.testing.expect(!isLocalhost(""));
+}
+
+test "lookup: localhost names resolve to the loopback addresses without DNS" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    // A server that never answers, so a lookup that reaches DNS fails.
+    const bind_addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    const sock = try bind_addr.bind(.{});
+    defer sock.close();
+
+    var resolver = Resolver.init(std.testing.allocator);
+    defer resolver.deinit();
+    var servers = [_]net.IpAddress{sock.address.ip};
+    useTestConfig(&resolver, &servers, .fromMilliseconds(100));
+
+    var cname_buf: [net.HostName.max_len]u8 = undefined;
+    var storage: [4]dns.LookupResult = undefined;
+    const n = try resolver.lookup(&storage, .{ .name = "App.LocalHost.", .port = 80, .canonical_name_buffer = &cname_buf });
+    try std.testing.expectEqual(3, n);
+    try std.testing.expectEqualStrings("localhost", storage[0].canonical_name.bytes);
+    try std.testing.expect(sameEndpoint(storage[1].address, try net.IpAddress.parseIp6("::1", 80)));
+    try std.testing.expect(sameEndpoint(storage[2].address, try net.IpAddress.parseIp4("127.0.0.1", 80)));
+
+    try std.testing.expectEqual(1, try resolver.lookup(&storage, .{ .name = "foo.localhost", .port = 80, .family = .ipv4 }));
+    try std.testing.expect(sameEndpoint(storage[0].address, try net.IpAddress.parseIp4("127.0.0.1", 80)));
+
+    try std.testing.expectError(error.TemporaryNameServerFailure, resolver.lookup(&storage, .{ .name = "xlocalhost.", .port = 80 }));
 }
