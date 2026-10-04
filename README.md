@@ -2,12 +2,10 @@
 
 [![CI](https://github.com/lalinsky/zio/actions/workflows/test.yml/badge.svg)](https://github.com/lalinsky/zio/actions/workflows/test.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Zig](https://img.shields.io/badge/zig-0.16.0-orange.svg)](https://ziglang.org/download/)
+[![Zig](https://img.shields.io/badge/zig-0.17.0-orange.svg)](https://ziglang.org/download/)
 [![Documentation](https://img.shields.io/badge/docs-online-green.svg)](https://lalinsky.github.io/zio/)
 
-ZIO is an asynchronous runtime for Zig, in the same spirit as Go's runtime or Tokio: it schedules lightweight coroutines onto a pool of OS threads, and gives you blocking-looking network, file, and process I/O that's actually backed by non-blocking, event-driven OS APIs under the hood. On top of that, it's a full implementation of the standard library's [`std.Io`] interface, so any Zig 0.16+ code written against `std.Io` runs on zio unmodified.
-
-> The main branch is for Zig 0.16 . For Zig master (0.17+), use the [`zig-0.17`](https://github.com/lalinsky/zio/tree/zig-0.17) branch.
+ZIO is an asynchronous runtime for Zig, in the same spirit as Go's runtime or Tokio: it schedules lightweight coroutines onto a pool of OS threads, and gives you blocking-looking network, file, and process I/O that's actually backed by non-blocking, event-driven OS APIs under the hood. On top of that, it's a full implementation of the standard library's [`std.Io`] interface, so Zig 0.17 code written against `std.Io` runs on zio unmodified.
 
 [`std.Io`]: https://ziglang.org/documentation/0.16.0/std/#std.Io
 

@@ -241,9 +241,9 @@ pub const vtable: Io.VTable = .{
     .processSetCurrentDir = processSetCurrentDirImpl,
     .processSetCurrentPath = processSetCurrentPathImpl,
     .processReplace = processReplaceImpl,
-    .processReplacePath = processReplacePathImpl,
     .processSpawn = processSpawnImpl,
-    .processSpawnPath = processSpawnPathImpl,
+    .inheritParentDir = inheritParentDirImpl,
+    .inheritParentFile = inheritParentFileImpl,
     .childWait = childWaitImpl,
     .childKill = childKillImpl,
 
@@ -492,7 +492,7 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout, clock: time.Cloc
                 error.Timeout => |e| return e,
                 else => |e| break :result e,
             };
-            break :result n;
+            break :result .{ .data_len = n };
         } },
         .net_write => |*o| return .{ .net_write = result: {
             const n = netWriteOpImpl(o.socket_handle, o.header, o.data, o.splat, timeout) catch |err| switch (err) {
@@ -992,7 +992,7 @@ fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Oper
             break :blk .{ null, 1 };
         } },
         .net_read => .{
-            .net_read = data.net_read.op.getResult() catch |err| recvErrToReadErr(err),
+            .net_read = if (data.net_read.op.getResult()) |n| .{ .data_len = n } else |err| recvErrToReadErr(err),
         },
         .net_write => .{
             .net_write = data.net_write.op.getResult() catch |err| sendErrToWriteErr(err),
@@ -1925,12 +1925,6 @@ fn processReplaceImpl(_: ?*anyopaque, options: std.process.ReplaceOptions) std.p
     return io.vtable.processReplace(io.userdata, options);
 }
 
-// TODO: implement using our own execve wrapper
-fn processReplacePathImpl(_: ?*anyopaque, dir: Io.Dir, options: std.process.ReplaceOptions) std.process.ReplaceError {
-    const io = globalIo();
-    return io.vtable.processReplacePath(io.userdata, dir, options);
-}
-
 fn processEnviron() std.process.Environ {
     if (builtin.os.tag == .windows) {
         return .{ .block = .global };
@@ -1953,15 +1947,14 @@ fn processSpawnImpl(userdata: ?*anyopaque, options: std.process.SpawnOptions) st
     return child;
 }
 
-// TODO: implement using our own posix_spawn/fork+exec wrapper
-fn processSpawnPathImpl(userdata: ?*anyopaque, dir: Io.Dir, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
-    const rt: *Runtime = @ptrCast(@alignCast(userdata));
-    var threaded: Io.Threaded = .init(rt.allocator, .{ .environ = processEnviron() });
-    defer threaded.deinit();
-    const io = threaded.io();
-    var child = try io.vtable.processSpawnPath(io.userdata, dir, options);
-    setChildPipesNonblocking(&child);
-    return child;
+fn inheritParentDirImpl(_: ?*anyopaque, handle: Io.Dir.Handle) Io.InheritParentHandleError!Io.Dir {
+    const io = globalIo();
+    return io.vtable.inheritParentDir(io.userdata, handle);
+}
+
+fn inheritParentFileImpl(_: ?*anyopaque, handle: Io.File.Handle, flags: Io.File.Flags) Io.InheritParentHandleError!Io.File {
+    const io = globalIo();
+    return io.vtable.inheritParentFile(io.userdata, handle, flags);
 }
 
 fn setChildPipesNonblocking(child: *std.process.Child) void {

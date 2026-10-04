@@ -256,7 +256,7 @@ pub const Resolver = struct {
         if (isLocalhost(options.name)) {
             var i: usize = 0;
             if (options.family != .ipv4 and i < addr_storage.len) {
-                addr_storage[i] = .{ .address = .initIp6(.{0} ** 15 ++ .{1}, options.port, 0, 0) };
+                addr_storage[i] = .{ .address = .initIp6(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, options.port, 0, 0) };
                 i += 1;
             }
             if (options.family != .ipv6 and i < addr_storage.len) {

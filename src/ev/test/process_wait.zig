@@ -90,5 +90,5 @@ test "ProcessWait: wait for child process killed by signal" {
 
     const result = try wait.getResult();
     child.id = null;
-    try std.testing.expectEqual(@as(u8, @intFromEnum(std.posix.SIG.KILL)), result.signal);
+    try std.testing.expectEqual(@as(u8, @backingInt(std.posix.SIG.KILL)), result.signal);
 }

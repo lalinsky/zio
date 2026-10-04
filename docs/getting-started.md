@@ -2,7 +2,7 @@
 
 This guide will help you get started with ZIO in a new Zig project.
 
-We will start completely from scratch, so you will just need to have Zig 0.16.0 installed. See the [Zig installation guide](https://ziglang.org/learn/getting-started/) for more information on that.
+We will start completely from scratch, so you will just need to have Zig 0.17.0 installed. See the [Zig installation guide](https://ziglang.org/learn/getting-started/) for more information on that.
 
 ## Setup
 

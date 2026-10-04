@@ -353,8 +353,8 @@ pub fn sigaction(sig: SIG, act: ?*const Sigaction, oact: ?*Sigaction) usize {
     };
     if (!needs_padding) return linux.sigaction(sig, act, oact);
 
-    std.debug.assert(@intFromEnum(sig) > 0);
-    std.debug.assert(@intFromEnum(sig) < linux.NSIG);
+    std.debug.assert(@backingInt(sig) > 0);
+    std.debug.assert(@backingInt(sig) < linux.NSIG);
     std.debug.assert(sig != .KILL);
     std.debug.assert(sig != .STOP);
 
@@ -385,7 +385,7 @@ pub fn sigaction(sig: SIG, act: ?*const Sigaction, oact: ?*Sigaction) usize {
 
     const result = linux.syscall4(
         .rt_sigaction,
-        @intFromEnum(sig),
+        @backingInt(sig),
         ksa_arg,
         oldksa_arg,
         @sizeOf(sigset_t),
