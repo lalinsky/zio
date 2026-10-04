@@ -119,7 +119,13 @@ pub fn wait(self: *Condition, mutex: *Mutex) Cancelable!void {
 
     // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
     mutex.lockUncancelable();
-    try checkCancel();
+    checkCancel() catch |err| {
+        // We won't process the signal, so wake another waiter to receive it.
+        if (self.wait_queue.pop()) |next_waiter| {
+            Waiter.fromNode(next_waiter).signal();
+        }
+        return err;
+    };
 }
 
 /// Atomically releases the mutex and waits for a signal with cancellation shielding.
@@ -202,7 +208,15 @@ pub fn waitTimeout(self: *Condition, mutex: *Mutex, timeout: Timeout) (Timeoutab
 
     // Re-acquire mutex after waking - propagate cancellation if it occurred during lock
     mutex.lockUncancelable();
-    try checkCancel();
+    checkCancel() catch |err| {
+        // We won't process the signal, so wake another waiter to receive it.
+        if (!timed_out) {
+            if (self.wait_queue.pop()) |next_waiter| {
+                Waiter.fromNode(next_waiter).signal();
+            }
+        }
+        return err;
+    };
 
     if (timed_out) {
         return error.Timeout;
@@ -363,4 +377,75 @@ test "Condition broadcast" {
 
     try std.testing.expect(ready);
     try std.testing.expectEqual(3, waiter_count);
+}
+
+test "Condition: a waiter canceled while reacquiring the mutex passes the signal on" {
+    // The first waiter is signaled and resumes, then blocks reacquiring the
+    // mutex, and only then is canceled. It returns the cancellation without
+    // acting on the signal, so the signal must go to the second waiter.
+    //
+    // One executor, so the order of events is pinned every time.
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(1) });
+    defer runtime.deinit();
+
+    const State = struct {
+        mutex: Mutex = .init,
+        cond: Condition = .init,
+        items: u32 = 0,
+        entered: std.atomic.Value(u32) = .init(0),
+    };
+
+    const Outcome = struct {
+        err: ?anyerror = null,
+        took_item: bool = false,
+    };
+
+    const Tasks = struct {
+        fn waiter(state: *State, timeout: Timeout, out: *Outcome) !void {
+            try state.mutex.lock();
+            defer state.mutex.unlock();
+            _ = state.entered.fetchAdd(1, .release);
+            while (state.items == 0) {
+                const result = if (timeout == .none)
+                    state.cond.wait(&state.mutex)
+                else
+                    state.cond.waitTimeout(&state.mutex, timeout);
+                result catch |err| {
+                    out.err = err;
+                    return;
+                };
+            }
+            state.items -= 1;
+            out.took_item = true;
+        }
+    };
+
+    for ([_]Timeout{ .none, .{ .duration = .fromSeconds(10) } }) |timeout| {
+        var state: State = .{};
+        var first_out: Outcome = .{};
+        var second_out: Outcome = .{};
+
+        var first = try runtime.spawn(Tasks.waiter, .{ &state, timeout, &first_out });
+        while (state.entered.load(.acquire) < 1) try yield();
+        try yield(); // let the first waiter park
+        var second = try runtime.spawn(Tasks.waiter, .{ &state, timeout, &second_out });
+        while (state.entered.load(.acquire) < 2) try yield();
+        try yield(); // let the second waiter park
+
+        try state.mutex.lock();
+        state.items = 1;
+        state.cond.signal();
+        try yield(); // let the first waiter wake and block on the mutex
+        first.awaitable.?.cancel(); // request only, the handle's cancel() would wait
+        state.mutex.unlock();
+        try first.join();
+
+        for (0..10) |_| try yield();
+        const second_took_item = second_out.took_item;
+        second.cancel();
+        try second.join();
+
+        try std.testing.expectEqual(@as(?anyerror, error.Canceled), first_out.err);
+        try std.testing.expect(second_took_item);
+    }
 }

@@ -101,12 +101,12 @@ pub fn wait(ptr: *const u32, expect: u32) Cancelable!void {
     // Wait for signal, handling spurious wakeups internally
     futex_waiter.waiter.wait(1, .allow_cancel) catch |err| {
         // On cancellation, try to remove from queue
-        const was_in_queue = removeFromBucket(bucket, &futex_waiter);
-        if (!was_in_queue) {
-            // Removed by wake() - wait for signal to complete before destroying waiter
-            futex_waiter.waiter.wait(1, .no_cancel);
-        }
-        return err;
+        if (removeFromBucket(bucket, &futex_waiter)) return err;
+        // Claimed by wake() - take the wake instead of the cancellation, wait
+        // for it to land before destroying the waiter, and put the consumed
+        // cancellation request back for the next cancellation point.
+        futex_waiter.waiter.wait(1, .no_cancel);
+        if (waiter.mode.direct.task) |t| t.recancel();
     };
 }
 
@@ -193,12 +193,11 @@ pub fn waitTimeoutClock(ptr: *const u32, expect: u32, timeout: Timeout, clock: C
         },
         error.Canceled => {
             // On cancellation, try to remove from queue
-            const was_in_queue = removeFromBucket(bucket, &futex_waiter);
-            if (!was_in_queue) {
-                // Removed by wake() - wait for signal to complete before destroying waiter
-                futex_waiter.waiter.wait(1, .no_cancel);
-            }
-            return err;
+            if (removeFromBucket(bucket, &futex_waiter)) return error.Canceled;
+            // Claimed by wake() - take the wake instead of the cancellation,
+            // and put the consumed cancellation request back.
+            futex_waiter.waiter.wait(1, .no_cancel);
+            if (waiter.mode.direct.task) |t| t.recancel();
         },
     };
 }
@@ -453,4 +452,52 @@ test "Futex: waitTimeout timeout" {
     // Wait with timeout, no one will wake it, so should timeout
     const result = Futex.waitTimeout(&value, 0, .{ .duration = .fromMilliseconds(10) });
     try std.testing.expectError(error.Timeout, result);
+}
+
+test "Futex: a wait claimed by wake under cancellation keeps the wake" {
+    // wake() claims the parked waiter and only then is the waiter canceled,
+    // so its cancelable wait reports the cancellation while the wake is
+    // already committed to it. The wait must return normally rather than
+    // drop the wake, and because that wait consumed the cancellation
+    // request, the next cancellation point must still report it.
+    //
+    // One executor, and the wake before the cancel, so the waiter cannot run
+    // in between: that pins the race to the claimed branch every time.
+    const checkCancel = @import("../runtime.zig").checkCancel;
+
+    const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(1) });
+    defer rt.deinit();
+
+    const Outcome = struct {
+        wait_err: ?anyerror = null,
+        after_wait: ?anyerror = null,
+    };
+
+    const Tasks = struct {
+        fn waiter(v: *u32, timeout: Timeout, entered: *std.atomic.Value(bool), out: *Outcome) !void {
+            entered.store(true, .release);
+            Futex.waitTimeout(v, 0, timeout) catch |err| {
+                out.wait_err = err;
+                return;
+            };
+            out.after_wait = if (checkCancel()) |_| null else |err| err;
+        }
+    };
+
+    for ([_]Timeout{ .none, .{ .duration = .fromSeconds(10) } }) |timeout| {
+        var value: u32 = 0;
+        var entered = std.atomic.Value(bool).init(false);
+        var outcome: Outcome = .{};
+
+        var handle = try rt.spawn(Tasks.waiter, .{ &value, timeout, &entered, &outcome });
+        while (!entered.load(.acquire)) try yield();
+        try yield(); // let the waiter park
+
+        Futex.wake(&value, 1);
+        handle.cancel();
+        try handle.join();
+
+        try std.testing.expectEqual(@as(?anyerror, null), outcome.wait_err);
+        try std.testing.expectEqual(@as(?anyerror, error.Canceled), outcome.after_wait);
+    }
 }
