@@ -729,6 +729,16 @@ pub fn timedWaitForIoClock(c: *ev.Completion, timeout: Timeout, clock: Clock) (T
                 return error.Timeout;
             }
         }
+    } else if (c.err) |io_err| {
+        // TODO: remove once #785 is understood
+        if (io_err == error.Canceled) {
+            log.err("timed {t} canceled without a timeout (#785): io_cancel_requested={} timer_err={?} timer_cancel_requested={}", .{
+                c.op,
+                c.loadState().cancel_requested,
+                timer.c.err,
+                timer.c.loadState().cancel_requested,
+            });
+        }
     }
 }
 
