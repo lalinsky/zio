@@ -1919,7 +1919,18 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
 
             if (result == windows.FALSE) {
                 const err = windows.WSAGetLastError();
-                c.setError(net.errnoToRecvError(err));
+                const recv_err = net.errnoToRecvError(err);
+                // TODO: remove once #785 is understood
+                if (recv_err == error.Canceled and !c.loadState().cancel_requested) {
+                    log.err("net_recv aborted without a cancel request (#785): status=0x{x} wsa={} bytes={} dequeued_by={*} owner={?*}", .{
+                        entry.Internal,
+                        err,
+                        entry.dwNumberOfBytesTransferred,
+                        state.loop,
+                        c.getLoop(),
+                    });
+                }
+                c.setError(recv_err);
             } else {
                 c.setResult(.net_recv, @intCast(bytes_transferred));
             }
