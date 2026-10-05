@@ -112,6 +112,28 @@ All notable changes to this project will be documented in this file.
 - Fixed the built-in DNS resolver ignoring a cancellation that arrived while it was reloading
   `/etc/hosts` or `/etc/resolv.conf`.
 
+- Fixed `std.Io`'s `receiveManyTimeout` on systems without `recvmmsg` (macOS, OpenBSD and
+  others) splitting the data buffer between the message slots up front, which truncated a
+  datagram larger than its share, e.g. to 187 bytes with 8 slots and a 1500-byte buffer, even
+  when it was the only one. Without `recvmmsg`, each receive gets the rest of the buffer again.
+
+- File descriptors received over Unix sockets with `SCM_RIGHTS` are now close-on-exec, so
+  they no longer leak into child processes spawned later; clear `FD_CLOEXEC` on one to hand
+  it to a child. This uses `MSG_CMSG_CLOEXEC` where the system has it, as `std.Io.Threaded`
+  does for stream reads with control data in Zig 0.17 (its datagram receive leaves them
+  inheritable). macOS has no such flag, so there they are marked with `fcntl` right after
+  the receive, which leaves a short window in which a concurrent fork and exec can still
+  inherit them.
+
+- Fixed `Socket.receiveFromBatch` and `std.Io`'s `receiveManyTimeout` on io_uring dropping
+  the first received message when receiving the rest failed with an error other than
+  `WouldBlock`. The message is now returned; `receiveManyTimeout` reports the error with it,
+  while `receiveFromBatch` drops the error, which the socket may not report again.
+
+- Fixed `std.Io` datagram receives with the `trunc` flag panicking with an out-of-bounds
+  slice when the datagram was larger than the buffer; the data is now clamped to the buffer
+  and the message's `trunc` flag reports the truncation.
+
 - Fixed the built-in DNS resolver failing concurrent lookups of the same name with
   `error.Canceled` when the task that started the lookup was canceled.
 

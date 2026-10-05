@@ -633,7 +633,8 @@ fn submitInner(self: *Self, state: *LoopState, comptime op: Op, c: *Completion, 
                 .flags = 0,
             };
             const sqe = self.getSqeOrDefer(c) orelse return;
-            sqe.prep_recvmsg(data.handle, &data.internal.msg, recvFlagsToMsg(data.flags));
+            const cloexec_flag: u32 = if (data.control != null) linux.MSG.CMSG_CLOEXEC else 0;
+            sqe.prep_recvmsg(data.handle, &data.internal.msg, recvFlagsToMsg(data.flags) | cloexec_flag);
             sqe.user_data = @intFromPtr(c);
         },
         .net_recvmmsg => {
@@ -1829,9 +1830,9 @@ fn storeRecvMmsgResult(c: *Completion, res: i32, _: u32) void {
         };
         count += remaining.recvFromSlots() catch |err| switch (err) {
             error.WouldBlock => 0,
-            else => {
-                c.setError(err);
-                return;
+            else => blk: {
+                data.drain_error = err;
+                break :blk 0;
             },
         };
         data.drained = remaining.drained;

@@ -1131,6 +1131,9 @@ pub const Socket = struct {
         return try op.getResult();
     }
 
+    /// Receives up to `messages.len` queued datagrams, waiting for the first.
+    /// When an error follows the first datagram, the datagrams received are
+    /// returned and this call doesn't report the error.
     pub fn receiveFromBatch(
         self: Socket,
         messages: []RecvMessage,
@@ -3265,6 +3268,40 @@ test "a canceled task does not start another operation" {
     group.cancel();
 
     try std.testing.expectEqual(@as(?anyerror, error.Canceled), outcome.after_recancel);
+}
+
+test "Socket: receiveFromBatch keeps the first message when a later slot fails" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (comptime !@hasDecl(ev.Backend, "selectedEngine")) return error.SkipZigTest;
+
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+    // Readiness backends report the pending reset before reading any data.
+    if (runtime.main_executor.loop.backend.selectedEngine() != .io_uring) return error.SkipZigTest;
+
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(.{});
+    defer server.close();
+    const client = try server.socket.address.ip.connect(.{});
+    const conn = try server.accept(.{});
+    defer conn.close();
+
+    // The data stays readable after the reset, and the reset is reported
+    // once it has been consumed, so the slot after the data fails.
+    try client.writeAll("aaa", .none);
+    const linger: extern struct { onoff: c_int, linger: c_int } = .{ .onoff = 1, .linger = 0 };
+    try os.net.setsockopt(client.socket.handle, os.net.SOL.SOCKET, os.net.SO.LINGER, std.mem.asBytes(&linger));
+    client.close();
+
+    var buf0: [64]u8 = undefined;
+    var buf1: [64]u8 = undefined;
+    var messages = [_]RecvMessage{
+        .{ .buf = &buf0 },
+        .{ .buf = &buf1 },
+    };
+    const n = try conn.socket.receiveFromBatch(&messages, .{ .duration = .fromSeconds(1) });
+    try std.testing.expectEqual(1, n);
+    try std.testing.expectEqualStrings("aaa", messages[0].buf[0..messages[0].len]);
 }
 
 test "Socket: receiveFromBatch drains multiple queued datagrams" {

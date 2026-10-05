@@ -472,7 +472,7 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout, clock: time.Cloc
         } },
         .net_receive => |*o| return .{
             .net_receive = result: {
-                if (o.message_buffer.len > 1 and !o.flags.peek and !o.flags.trunc and !hasControl(o.message_buffer) and builtin.os.tag != .windows) {
+                if (o.message_buffer.len > 1 and !o.flags.peek and !o.flags.trunc and !hasControl(o.message_buffer) and os_net.has_recvmmsg) {
                     break :result netReceiveMmsg(o, timeout, clock) catch |err| switch (err) {
                         error.Canceled => |e| return e,
                         error.Timeout => |e| return e,
@@ -924,7 +924,7 @@ fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Oper
                 // Populate the message buffer with received data
                 data.net_receive.message_buffer.* = .{
                     .from = senderAddrToStdIo(&data.net_receive.addr_storage.any, data.net_receive.addr_len),
-                    .data = data.net_receive.data_buffer[0..result.len],
+                    .data = data.net_receive.data_buffer[0..@min(result.len, data.net_receive.data_buffer.len)],
                     .control = data.net_receive.message_buffer.control[0..result.controllen],
                     .flags = decodeIncomingFlags(result.flags),
                 };
@@ -2561,6 +2561,8 @@ fn netReceiveMmsg(
         };
     }
 
+    if (op.drain_error) |err| return .{ recvMsgErrToReceiveErr(err), count };
+
     if (!op.drained and count > 0 and count < o.message_buffer.len) {
         const more = netReceiveMoreLoop(o, count);
         return .{ more[0], count + more[1] };
@@ -2650,11 +2652,9 @@ fn netReceiveImpl(
     };
     message.* = .{
         .from = senderAddrToStdIo(&storage.any, addr_len),
-        // When flags.trunc is set on Linux, result.len is the full datagram
-        // length — which may exceed data_buffer.len. We slice verbatim to
-        // match std.Io.Threaded; callers that enable .trunc are responsible
-        // for sizing data_buffer appropriately.
-        .data = data_buffer[0..result.len],
+        // With flags.trunc on Linux, result.len is the full datagram length,
+        // which may exceed data_buffer.len; flags.trunc in the message tells.
+        .data = data_buffer[0..@min(result.len, data_buffer.len)],
         .control = if (has_control) message.control[0..result.controllen] else message.control,
         .flags = decodeIncomingFlags(result.flags),
     };
@@ -4625,6 +4625,69 @@ test "io: operateTimeout net_receive succeeds when data is ready" {
     try std.testing.expectEqualStrings("hello", msg.data);
 }
 
+test "io: receiveManyTimeout reports an error that follows the first message" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (comptime !@hasDecl(ev.Backend, "selectedEngine")) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+    // Readiness backends report the pending reset before reading any data.
+    if (rt.main_executor.loop.backend.selectedEngine() != .io_uring) return error.SkipZigTest;
+
+    const addr = try zio_net.IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(.{});
+    defer server.close();
+    const client = try server.socket.address.ip.connect(.{});
+    const conn = try server.accept(.{});
+    defer conn.close();
+
+    try client.writeAll("aaa", .none);
+    const linger: extern struct { onoff: c_int, linger: c_int } = .{ .onoff = 1, .linger = 0 };
+    try os_net.setsockopt(client.socket.handle, os_net.SOL.SOCKET, os_net.SO.LINGER, std.mem.asBytes(&linger));
+    client.close();
+
+    var messages: [2]Io.net.IncomingMessage = @splat(.init);
+    var buf: [64]u8 = undefined;
+    const result = try io.operateTimeout(.{ .net_receive = .{
+        .socket_handle = conn.socket.handle,
+        .message_buffer = &messages,
+        .data_buffer = &buf,
+        .flags = .{},
+    } }, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+    const err, const n = result.net_receive;
+    try std.testing.expectEqual(@as(?Io.net.Socket.ReceiveError, error.ConnectionResetByPeer), err);
+    try std.testing.expectEqual(1, n);
+    try std.testing.expectEqualStrings("aaa", messages[0].data);
+}
+
+test "io: receiveManyTimeout gives a lone datagram the whole buffer without recvmmsg" {
+    // With recvmmsg the buffer is split between the slots up front; without
+    // it, each receive gets what is left of the buffer.
+    if (os_net.has_recvmmsg) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+    var receiver = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer receiver.close(io);
+
+    const payload: [1000]u8 = @splat('x');
+    try sender.send(io, &receiver.address, &payload);
+
+    var messages: [8]Io.net.IncomingMessage = @splat(.init);
+    var buf: [1500]u8 = undefined;
+    const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } };
+    const err, const n = receiver.receiveManyTimeout(io, &messages, &buf, .{}, timeout);
+    try std.testing.expectEqual(null, err);
+    try std.testing.expectEqual(1, n);
+    try std.testing.expectEqual(payload.len, messages[0].data.len);
+    try std.testing.expect(!messages[0].flags.trunc);
+}
+
 test "io: receiveManyTimeout returns every datagram already queued" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
@@ -4971,6 +5034,73 @@ test "io: batch awaitConcurrent times out when no data arrives" {
 
     // Should timeout since no data arrives
     try std.testing.expectError(error.Timeout, batch.awaitConcurrent(io, .{ .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake } }));
+}
+
+test "io: operateTimeout net_receive with trunc clamps a datagram larger than the buffer" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+    var receiver = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer receiver.close(io);
+
+    const payload: [200]u8 = @splat('x');
+    try sender.send(io, &receiver.address, &payload);
+
+    var msg: Io.net.IncomingMessage = .init;
+    var buf: [100]u8 = undefined;
+    const result = try io.operateTimeout(.{ .net_receive = .{
+        .socket_handle = receiver.handle,
+        .message_buffer = (&msg)[0..1],
+        .data_buffer = &buf,
+        .flags = .{ .trunc = true },
+    } }, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+    const err, const n = result.net_receive;
+    try std.testing.expectEqual(null, err);
+    try std.testing.expectEqual(1, n);
+    try std.testing.expectEqual(buf.len, msg.data.len);
+    try std.testing.expect(msg.flags.trunc);
+}
+
+test "io: batch net_receive with trunc clamps a datagram larger than the buffer" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+    var receiver = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer receiver.close(io);
+
+    const payload: [200]u8 = @splat('x');
+    try sender.send(io, &receiver.address, &payload);
+
+    var storage: [1]Io.Operation.Storage = undefined;
+    var batch: Io.Batch = .init(&storage);
+    defer batch.cancel(io);
+
+    var msg: Io.net.IncomingMessage = .init;
+    var buf: [100]u8 = undefined;
+    _ = batch.add(.{ .net_receive = .{
+        .socket_handle = receiver.handle,
+        .message_buffer = (&msg)[0..1],
+        .data_buffer = &buf,
+        .flags = .{ .trunc = true },
+    } });
+
+    try batch.awaitConcurrent(io, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+    const completion = batch.next() orelse return error.TestUnexpectedResult;
+    const err, const n = completion.result.net_receive;
+    try std.testing.expectEqual(null, err);
+    try std.testing.expectEqual(1, n);
+    try std.testing.expectEqual(buf.len, msg.data.len);
+    try std.testing.expect(msg.flags.trunc);
 }
 
 test "io: batch cancel does not report canceled operations" {
