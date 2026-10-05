@@ -2,234 +2,120 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.19.0] - 2026-10-05
 
-- Fixed `std.Io` `Batch.awaitConcurrent` restarting a duration timeout each time it woke
-  up without a completion, instead of timing out once the duration had passed.
+This release adds support for Zig 0.17 and is the last one for Zig 0.16. It is tagged
+twice: `v0.19.0-zig0.17` for Zig 0.17 and `v0.19.0-zig0.16` for Zig 0.16.
 
-- A batched `std.Io` streaming file read into only empty buffers completes right away with
-  0 bytes, matching a single read, instead of waiting for a pipe to become readable and
-  then failing with `error.EndOfStream`.
+### Breaking
 
-- The `std.Io` `netWriteFile` vtable entry returns `error.NetworkDown` instead of panicking,
-  like the std evented backends.
+- Compile-time options now come from a `pub const zio_options: zio.Options` declaration in
+  the root module instead of build options, and `.scheduling` replaces the
+  `task-migration` option and `RuntimeOptions.enable_task_migration`. Choosing the
+  scheduling mode at compile time lets the `.single_executor` and `.pinned` modes drop the
+  synchronization that only work stealing needs.
 
-- Fixed a file descriptor leak on non-Linux POSIX systems when making a new or accepted
-  socket non-blocking or close-on-exec failed.
+- The native `FileTimestamps` fields are now a `SetTimestamp` union instead of `?i96`.
 
-- Fixed a crash when receiving through `std.Io` on a socket whose sender has a non-IP
-  address, such as a bound Unix datagram socket; the sender is now reported as the
-  IPv4 loopback placeholder, like `std.Io.Threaded` does.
+- `Loop.done()` is no longer public, and with `.single_executor` scheduling a `LoopGroup`
+  accepts only one loop.
 
-- Socket sends now report `error.ConnectionRefused`, `error.AddressFamilyUnsupported`,
-  `error.FastOpenAlreadyInProgress` and `error.SystemResources` (for `ENOMEM`) instead of
-  `error.Unexpected`, and sends and connects report an unreachable host as
-  `error.HostUnreachable` instead of `error.NetworkUnreachable`. A `std.Io` stream read
-  reports an aborted connection as `error.ConnectionResetByPeer`, like writes do.
+### Added
 
-- Fixed `std.Io` TCP connect never timing out when given a deadline on the `.real` or
-  `.boot` clock.
+- Added `spawnInto` to `Runtime`, `Group` and `zio`, for spawning a task on a specific
+  executor.
 
-- Fixed `std.process.replace` without an `environ_map` starting the new program with an empty
-  environment and resolving `argv[0]` against a default `PATH` instead of the process's own.
+- Added `blockInPlaceReserved`, a `blockInPlace` that never waits behind other queued
+  jobs (#745).
 
-- `std.Progress.start` no longer panics; zio reads the parent's progress pipe from `ZIG_PROGRESS`
-  like `std.Io.Threaded` does. On Windows, and on POSIX builds without libc, the variable is not
-  read yet and progress is drawn to the terminal as if there were no parent. A child spawned with
-  a `progress_node` does not report progress to it yet, and gets no `ZIG_PROGRESS`.
+### Changed
 
-- Spawning a process no longer installs and restores process-wide SIGIO and SIGPIPE handlers,
-  which concurrent spawns could leave permanently replaced.
+- With work stealing, idle executors park sooner and steal only from executors that are
+  falling behind, which lowers CPU use on lightly loaded servers.
 
-- `std.process.spawnPath` and `std.process.replacePath` return `error.OperationUnsupported`
-  instead of hitting the `@panic("TODO")` in `std.Io.Threaded` they were delegated to.
+- With work stealing, a task stuck behind another task that never yields is now picked up
+  by a parked executor within 10ms.
 
-- Fixed `Runtime.blockingIo()` panicking on misaligned userdata in process spawning,
-  getting and setting the current path, `Batch.awaitConcurrent` and host name lookups.
+- Lower scheduling and event loop overhead: no mutex for cross-executor wakes with
+  `.pinned`, no atomics for completions with `.single_executor`, and fewer syscalls and
+  atomics in the event loop.
 
-- Fixed a use-after-free in `Io.Batch` with work stealing, where an operation completing on
-  another executor could still touch the batch state after `cancel` had freed it.
+- On io_uring, short-lived connections use about 14% less CPU and small TCP reads and
+  writes are about 5% faster.
 
-- `Io.Batch.cancel` no longer reports canceled operations in the `next()` iteration, and their
-  slots go back to the unused list. Before, they showed up as completions with
-  `error.Unexpected` (file operations) or `error.Canceled` (`net_receive`).
+- File descriptors received with `SCM_RIGHTS` are now close-on-exec.
 
-- Fixed `Futex.wait` and `Futex.waitTimeout` losing a wake that arrived together with a
-  cancellation. The wait now returns normally and the cancellation is reported by the next
-  cancellation point, so `std.Io.Mutex` and other futex users no longer leave a waiter parked.
+- `lockStderr` without a terminal mode now detects colors for stderr instead of always
+  disabling them.
 
-- Fixed `Condition.wait` and `Condition.waitTimeout` losing a signal when the task was canceled
-  while reacquiring the mutex after being woken; the signal is now passed to another waiter.
+- `std.Progress.start` no longer panics.
 
-- Fixed `Barrier.wait` underflowing its arrival count and breaking the next generation when a
-  waiter was canceled after the barrier had already released it.
+- `std.process.spawnPath` and `std.process.replacePath` return
+  `error.OperationUnsupported` instead of panicking.
 
-- The built-in DNS resolver now answers `localhost` and names under it (RFC 6761) with the
-  loopback addresses when `/etc/hosts` does not list them, instead of querying DNS, like
-  `Io.Threaded`.
+- Socket, file and rename operations report more specific errors in many cases that used
+  to be `error.Unexpected`.
 
-- The built-in DNS resolver now reports the first name on the first `/etc/hosts` line that
-  lists the looked-up name as the canonical name, like glibc, instead of the looked-up name;
-  it still reports the looked-up name when that first name is not a valid host name.
+- The built-in DNS resolver now resolves `localhost` without querying DNS, and reports
+  canonical names from `/etc/hosts` like glibc.
 
-- The built-in DNS resolver now fails a lookup for a name that cannot be encoded in a query
-  (an empty label, a label over 63 bytes, or more than 255 bytes in all) with
-  `error.UnknownHostName` instead of `error.Unexpected`.
+### Fixed
 
-- `lockStderr` without a terminal mode now detects one for stderr, honoring `NO_COLOR` and
-  `CLICOLOR_FORCE`, like `Io.Threaded`, instead of always disabling colors.
+- Fixed a possible deadlock in reserved thread pool work, which backs `std.Io.concurrent`
+  on the blocking Io.
 
-- Fixed `unlockStderr` leaving the stderr writer pointing at the caller's buffer, so after a
-  failed write the next `lockStderr` could write out stale bytes from a dead stack frame.
+- Fixed an error returned from `main` hanging, and panics losing their stack trace, when
+  using `debug_io` (#744).
 
-- Fixed the built-in DNS resolver treating a truncated UDP response whose last record was cut
-  off as a server failure instead of retrying the query over TCP.
+- Fixed coroutine stacks failing to allocate on aarch64 Linux with 16K or 64K pages (e.g.
+  Asahi, Raspberry Pi 5).
 
-- The built-in DNS resolver now clamps `/etc/resolv.conf` options to about the ranges glibc
-  uses: `timeout` to 1-30 seconds (`timeout:0` made every query fail at once), `attempts` to
-  1-5, and `ndots` to 0-15, including values too large to parse.
+- Fixed debug builds printing a spurious error for every coroutine stack on Linux kernels
+  without transparent huge pages.
 
-- Fixed the built-in DNS resolver skipping the rest of `/etc/resolv.conf` and `/etc/hosts` at a
-  line longer than 4 KiB, which left it with no name servers or an empty hosts table; such
-  lines are now skipped. A `/etc/resolv.conf` that cannot be opened for good (no permission, a
-  directory, and the like) now means the default name servers (`127.0.0.1` and `::1`), like a
-  missing one, instead of none.
+- Fixed `Runtime.blockingIo()` panicking in process spawning, path operations,
+  `Batch.awaitConcurrent` and host name lookups.
 
-- Fixed the built-in DNS resolver never picking up a changed `/etc/resolv.conf` that had an
-  unparsable `nameserver` line; the line is now skipped and the rest of the file applies.
-  Link-local name servers with a zone index (`nameserver fe80::1%eth0`) are now supported.
+- Fixed `Futex`, `Condition` and `Barrier` losing wakeups or breaking when a waiter was
+  canceled at the same time, which could leave a `std.Io.Mutex` waiter stuck.
 
-- Fixed the built-in DNS resolver misreading `/etc/resolv.conf` lines whose fields are separated
-  by more than one space or tab, which dropped name servers and added an empty search domain
-  that failed every lookup. Text after a `#` or `;` anywhere on a line is now ignored as a
-  comment too, which is more lenient than glibc and musl, where only a whole line is one.
+- Fixed several `Io.Batch` bugs: a use-after-free with work stealing, canceled operations
+  showing up as completions, duration timeouts restarting, and empty reads blocking.
 
-- Fixed the built-in DNS resolver emptying its `/etc/hosts` table when reloading the file failed.
+- Fixed `std.Io` TCP connect ignoring deadlines on the `.real` and `.boot` clocks.
 
-- POSIX file reads now return `error.IsDir` instead of `error.Unexpected` when the system refuses
-  to read a directory.
+- Fixed `std.process.replace` starting the new program with an empty environment.
 
-- Fixed the built-in DNS resolver ignoring a cancellation that arrived while it was reloading
-  `/etc/hosts` or `/etc/resolv.conf`.
+- Fixed concurrent process spawns possibly leaving the SIGIO and SIGPIPE handlers replaced.
 
-- Fixed `std.Io`'s `receiveManyTimeout` on systems without `recvmmsg` (macOS, OpenBSD and
-  others) splitting the data buffer between the message slots up front, which truncated a
-  datagram larger than its share, e.g. to 187 bytes with 8 slots and a 1500-byte buffer, even
-  when it was the only one. Without `recvmmsg`, each receive gets the rest of the buffer again.
+- Fixed stderr output possibly including stale bytes after a failed write.
 
-- File descriptors received over Unix sockets with `SCM_RIGHTS` are now close-on-exec, so
-  they no longer leak into child processes spawned later; clear `FD_CLOEXEC` on one to hand
-  it to a child. This uses `MSG_CMSG_CLOEXEC` where the system has it, as `std.Io.Threaded`
-  does for stream reads with control data in Zig 0.17 (its datagram receive leaves them
-  inheritable). macOS has no such flag, so there they are marked with `fcntl` right after
-  the receive, which leaves a short window in which a concurrent fork and exec can still
-  inherit them.
+- Fixed a file descriptor leak on non-Linux POSIX systems when configuring a new socket
+  failed.
 
-- Fixed `Socket.receiveFromBatch` and `std.Io`'s `receiveManyTimeout` on io_uring dropping
-  the first received message when receiving the rest failed with an error other than
-  `WouldBlock`. The message is now returned; `receiveManyTimeout` reports the error with it,
-  while `receiveFromBatch` drops the error, which the socket may not report again.
+- Fixed several `std.Io` datagram receive bugs: a crash on Unix datagram senders, a panic
+  with the `trunc` flag, truncated datagrams on systems without `recvmmsg`, and a dropped
+  message on io_uring.
 
-- Fixed `std.Io` datagram receives with the `trunc` flag panicking with an out-of-bounds
-  slice when the datagram was larger than the buffer; the data is now clamped to the buffer
-  and the message's `trunc` flag reports the truncation.
+- Fixed the built-in DNS resolver losing or spreading cancellations, which could fail
+  unrelated concurrent lookups of the same name with `error.Canceled`.
 
-- Fixed the built-in DNS resolver failing concurrent lookups of the same name with
-  `error.Canceled` when the task that started the lookup was canceled.
+- Fixed the built-in DNS resolver losing its `/etc/hosts` entries when a reload failed.
 
-- A failed or canceled `std.Io` directory read no longer rewinds the reader, which made the
-  next read return entries that were already seen.
+- Fixed the built-in DNS resolver not retrying a truncated response over TCP.
 
-- Directory iteration on macOS now skips entries with a zero inode, which mark deleted
-  entries, like std does.
+- Fixed the built-in DNS resolver misreading `/etc/resolv.conf` and `/etc/hosts`, which
+  could drop name servers or hosts entries.
 
-- POSIX renames now return `error.DirNotEmpty` instead of `error.Unexpected` when the system
-  reports `EEXIST` for a non-empty target directory.
+- Fixed setting file timestamps to `.now` failing for non-owners, and leaving a timestamp
+  unchanged not working on macOS and the BSDs.
 
-- Setting a file timestamp to `.now` through `std.Io` now passes `UTIME_NOW` to the system
-  instead of the current time, so it works for non-owners with write permission. The native
-  `FileTimestamps` fields are now a `SetTimestamp` union (`.unchanged`, `.now` or
-  `.new = nanoseconds`) instead of `?i96`.
+- Fixed a failed directory read making the next read repeat entries, and macOS directory
+  iteration returning deleted entries.
 
-- Fixed leaving a timestamp unchanged when setting file timestamps on macOS and the BSDs,
-  which used Linux's `UTIME_OMIT` value.
-
-- Renames on Windows now return `error.CrossDevice`, `error.DirNotEmpty` and `error.NotDir`
-  instead of `error.Unexpected` for the corresponding system errors.
-
-- Opening a regular file as a directory on Windows now fails with `error.NotDir` instead of
-  returning a handle.
-
-- Fixed `deleteTree` on Windows following a directory symlink or junction inside the tree
-  and deleting the contents of its target. Opening a directory with
-  `follow_symlinks = false` now opens the link itself, as std does.
-
-- Fixed directory reads on Windows reporting the wrong kind and inode for entries with long
+- Fixed several Windows filesystem bugs: opening a file as a directory, `deleteTree`
+  following symlinks and junctions out of the tree, and directory reads mishandling long
   non-ASCII names.
-
-- Fixed directory reads on Windows hanging when a batch of entries ran out of room for
-  a long non-ASCII name, and losing the last entry of a batch in the same situation.
-
-- Fixed a DNS lookup that joined another task's in-flight query losing its own cancellation
-  when the answer arrived at the same time.
-
-- With `.single_executor` scheduling, event loop completions change state with plain loads and
-  stores instead of atomic read-modify-writes, and a `LoopGroup` accepts only one loop.
-
-- With work stealing, a task woken onto an executor's empty run queue no longer wakes an idle
-  executor to steal it, since its own executor runs it next; one parked executor instead
-  checks every 10ms for a task stuck behind another task that never yields.
-
-- With work stealing, an executor that runs out of work checks its own event loop once
-  without waiting and then parks, instead of first waiting up to 100µs. A lightly loaded
-  server no longer pays for a timer wake on every request. Before parking it takes work
-  only from executors that are falling behind, those still holding queued tasks when they
-  poll, so overloaded executors are relieved right away while ones that keep up keep
-  their tasks and their I/O.
-
-- `Loop.wake()` no longer makes a syscall when the target loop isn't blocked in its poll;
-  the request is picked up by the loop's next poll instead.
-
-- Added `spawnInto` to `Runtime`, `Group` and `zio`, which spawns a task with a `Placement`
-  (`.auto`, `.local` or `.executor = id`); fixed placements need scheduling without
-  migration and otherwise fail with `error.InvalidPlacement`.
-
-- On io_uring, socket reads and writes with a single buffer use `RECV`/`SEND` instead of
-  `RECVMSG`/`SENDMSG`, which raised 64-byte TCP echo throughput by about 5%.
-
-- The event loop no longer keeps an atomic count of active completions, which saves two atomic
-  counter updates per operation, and `Loop.done()` is no longer public.
-
-- **Breaking:** compile-time options now come from a `pub const zio_options: zio.Options`
-  declaration in the root module instead of `b.dependency` build options, and
-  `.scheduling` (`.single_executor`, `.pinned` or `.work_stealing`) replaces the
-  `task-migration` build option and `RuntimeOptions.enable_task_migration`. The default is
-  `.work_stealing`, as before.
-
-- With `.pinned` scheduling, cross-executor wakes no longer take a mutex; each executor's
-  overflow queue is now a lock-free stack drained only by its owner.
-
-- A non-blocking poll on the io_uring backend no longer arms a kernel timer and
-  schedules out when nothing has completed yet, which cut server CPU per short-lived
-  connection by about 14%.
-
-- Added `blockInPlaceReserved`, a `blockInPlace` whose work is guaranteed a worker instead
-  of waiting in the queue behind jobs that are already running (#745).
-
-- Reserved thread pool work, which backs `std.Io.concurrent` on the blocking Io and
-  `blockInPlaceReserved`, now goes to the front of the queue. The worker spawned for a
-  reservation used to take the head of the queue instead, so a reserved job could wait
-  behind an older job, and deadlock if that job was waiting on it. Reserved jobs are now
-  LIFO among themselves.
-
-- Fixed `debug_io` crashing on a null runtime when std asked it for the executable path,
-  which made an error returned from `main` hang and a panic lose its stack trace (#744).
-
-- Debug builds no longer print an "unexpected error" stack trace for every coroutine
-  stack on Linux kernels built without transparent huge pages.
-
-- Coroutine stacks now work on aarch64 Linux kernels with 16K or 64K pages (e.g. Asahi,
-  Raspberry Pi 5). Every stack allocation used to fail with `OutOfMemory` there.
 
 ## [0.18.0] - 2026-09-20
 
