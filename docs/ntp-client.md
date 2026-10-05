@@ -51,7 +51,7 @@ Before we can contact an NTP server, we need to resolve its hostname to an IP ad
 --8<-- "examples/ntp_client.zig:lookup"
 ```
 
-[`HostName.lookup()`](../apidocs/#zio.net.HostName.lookup) returns an iterator that yields DNS results. The resolver may return multiple addresses (IPv4 and IPv6), and we take the first one. This happens asynchronously - the task suspends while DNS queries are performed.
+[`HostName.lookup()`](../apidocs/#zio.net.HostName.lookup) fills a caller-provided results buffer and returns the number of addresses found. The resolver may return multiple addresses (IPv4 and IPv6), and we take the first one. This happens asynchronously - the task suspends while DNS queries are performed.
 
 ### UDP Sockets
 
@@ -124,7 +124,7 @@ const NtpPacket = extern struct {
 };
 ```
 
-The `extern` keyword ensures the struct has C-compatible layout with no padding. We serialize it to bytes using [`writeStruct()`](https://ziglang.org/documentation/0.16.0/std/#std.Io.Writer.writeStruct):
+The `extern` keyword ensures the struct has C-compatible layout with no padding. We serialize it to bytes using [`writeStruct()`](https://ziglang.org/documentation/0.17.0/std/#std.Io.Writer.writeStruct):
 
 ```zig
 const request: NtpPacket = .{};

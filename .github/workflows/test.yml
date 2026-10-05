@@ -5,13 +5,14 @@ on:
     branches: [ main ]
     tags:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
     strategy:
       fail-fast: false
       matrix:
-        zig_version: ['0.16.0']
+        zig_version: ['0.17.0']
         mode: [debug, release]
         config:
           - { os: ubuntu-24.04, target: native, backends: 'linux io_uring epoll poll' }
@@ -117,7 +118,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        zig_version: ['0.16.0']
+        zig_version: ['0.17.0']
         mode: [debug, release]
         scheduling: [pinned, single_executor]
 
