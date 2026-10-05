@@ -85,7 +85,7 @@ pub fn io_uring_enter2(
     const SYS_io_uring_enter = 426; // syscall number for io_uring_enter2
 
     const rc = linux.syscall6(
-        @enumFromInt(SYS_io_uring_enter),
+        @fromBackingInt(@intCast(SYS_io_uring_enter)),
         @as(usize, @bitCast(@as(isize, fd))),
         to_submit,
         min_complete,

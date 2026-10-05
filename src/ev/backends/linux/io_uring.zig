@@ -22,7 +22,7 @@ const UD_SPECIAL: u64 = 1;
 const SpecialKind = enum(u2) { waker = 0, cancel = 1, wall_boot = 2, wall_real = 3 };
 
 fn specialUd(kind: SpecialKind, generation: u32) u64 {
-    return UD_SPECIAL | (@as(u64, @intFromEnum(kind)) << 1) | (@as(u64, generation) << 3);
+    return UD_SPECIAL | (@as(u64, @backingInt(kind)) << 1) | (@as(u64, generation) << 3);
 }
 
 fn udIsSpecial(ud: u64) bool {
@@ -30,7 +30,7 @@ fn udIsSpecial(ud: u64) bool {
 }
 
 fn udKind(ud: u64) SpecialKind {
-    return @enumFromInt(@as(u2, @truncate(ud >> 1)));
+    return @fromBackingInt(@intCast(@as(u2, @truncate(ud >> 1))));
 }
 
 fn udGeneration(ud: u64) u32 {
@@ -681,7 +681,7 @@ fn submitInner(self: *Self, state: *LoopState, comptime op: Op, c: *Completion, 
         .net_shutdown => {
             const data = c.cast(NetShutdown);
             const sqe = self.getSqeOrDefer(c) orelse return;
-            sqe.prep_shutdown(data.handle, @intFromEnum(data.how));
+            sqe.prep_shutdown(data.handle, @backingInt(data.how));
             sqe.user_data = @intFromPtr(c);
         },
         .net_close => {
@@ -1070,13 +1070,13 @@ fn netSendFileAdvance(self: *Self, state: *LoopState, c: *Completion, res: i32) 
     // -ENOENT, and a poll armed after that would never be canceled, hanging
     // the op on a stalled socket forever).
     if (c.loadState().cancel_requested) {
-        self.storeResult(c, -@as(i32, @intFromEnum(linux.E.CANCELED)));
+        self.storeResult(c, -@as(i32, @backingInt(linux.E.CANCELED)));
         state.markCompletedFromBackend(c);
         return;
     }
 
     if (res < 0) {
-        const errno: linux.E = @enumFromInt(-res);
+        const errno: linux.E = @fromBackingInt(@intCast(-res));
         if (errno == .AGAIN and !data.internal.polling) {
             data.internal.polling = true;
             self.netSendFileIssue(c);
@@ -1325,7 +1325,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
                 // (from re-arming) is ignored.
                 .wall_boot, .wall_real => {
                     const idx: usize = if (udKind(cqe.user_data) == .wall_boot) 0 else 1;
-                    if (cqe.res == -@as(i32, @intFromEnum(linux.E.TIME)) and
+                    if (cqe.res == -@as(i32, @backingInt(linux.E.TIME)) and
                         udGeneration(cqe.user_data) == self.wall_generation[idx] and
                         self.wall_armed[idx] != null)
                     {
@@ -1350,7 +1350,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
 
         // Handle EINTR by deferring to pending — resubmit after armWaker so the
         // waker always gets priority over EINTR resubmissions.
-        if (cqe.res == -@as(i32, @intFromEnum(linux.E.INTR))) {
+        if (cqe.res == -@as(i32, @backingInt(linux.E.INTR))) {
             self.pending.push(completion);
             continue;
         }
@@ -1390,7 +1390,7 @@ fn drainPending(self: *Self, state: *LoopState) void {
         if (c.loadState().cancel_requested) {
             // Complete canceled pending ops immediately rather than writing a SQE.
             // storeResult handles resource cleanup (e.g. allocated paths).
-            self.storeResult(c, -@as(i32, @intFromEnum(linux.E.CANCELED)));
+            self.storeResult(c, -@as(i32, @backingInt(linux.E.CANCELED)));
             state.markCompletedFromBackend(c);
         } else {
             // resubmit() will call getSqeOrDefer(); if the SQ fills up again the
@@ -1407,35 +1407,35 @@ inline fn storeResult(self: *Self, c: *Completion, res: i32) void {
     switch (c.op) {
         .net_recv => {
             if (res < 0) {
-                c.setError(net.errnoToRecvError(@enumFromInt(-res)));
+                c.setError(net.errnoToRecvError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.net_recv, @as(usize, @intCast(res)));
             }
         },
         .net_send => {
             if (res < 0) {
-                c.setError(net.errnoToSendError(@enumFromInt(-res)));
+                c.setError(net.errnoToSendError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.net_send, @as(usize, @intCast(res)));
             }
         },
         .net_accept => {
             if (res < 0) {
-                c.setError(net.errnoToAcceptError(@enumFromInt(-res)));
+                c.setError(net.errnoToAcceptError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.net_accept, @as(net.fd_t, @intCast(res)));
             }
         },
         .file_read => {
             if (res < 0) {
-                c.setError(fs.errnoToFileReadError(@enumFromInt(-res)));
+                c.setError(fs.errnoToFileReadError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.file_read, @intCast(res));
             }
         },
         .file_write => {
             if (res < 0) {
-                c.setError(fs.errnoToFileWriteError(@enumFromInt(-res)));
+                c.setError(fs.errnoToFileWriteError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.file_write, @intCast(res));
             }
@@ -1452,7 +1452,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
         .net_recvmmsg => unreachable, // handled in reap loop before storeResult
         .net_bind => {
             if (res < 0) {
-                c.setError(net.errnoToBindError(@enumFromInt(-res)));
+                c.setError(net.errnoToBindError(@fromBackingInt(@intCast(-res))));
             } else {
                 const data = c.cast(NetBind);
                 // IORING_OP_BIND does not report the bound address, so fetch
@@ -1467,7 +1467,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
         },
         .net_listen => {
             if (res < 0) {
-                c.setError(net.errnoToListenError(@enumFromInt(-res)));
+                c.setError(net.errnoToListenError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.net_listen, {});
             }
@@ -1489,14 +1489,14 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
 
         .net_connect => {
             if (res < 0) {
-                c.setError(net.errnoToConnectError(@enumFromInt(-res)));
+                c.setError(net.errnoToConnectError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.net_connect, {});
             }
         },
         .net_recvfrom => {
             if (res < 0) {
-                c.setError(net.errnoToRecvError(@enumFromInt(-res)));
+                c.setError(net.errnoToRecvError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.net_recvfrom, @as(usize, @intCast(res)));
                 // Propagate the peer address length filled in by the kernel
@@ -1508,14 +1508,14 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
         },
         .net_sendto => {
             if (res < 0) {
-                c.setError(net.errnoToSendError(@enumFromInt(-res)));
+                c.setError(net.errnoToSendError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.net_sendto, @as(usize, @intCast(res)));
             }
         },
         .net_recvmsg => {
             if (res < 0) {
-                c.setError(net.errnoToRecvError(@enumFromInt(-res)));
+                c.setError(net.errnoToRecvError(@fromBackingInt(@intCast(-res))));
             } else {
                 const data = c.cast(NetRecvMsg);
                 c.setResult(.net_recvmsg, .{
@@ -1531,14 +1531,14 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
         },
         .net_sendmsg => {
             if (res < 0) {
-                c.setError(net.errnoToSendError(@enumFromInt(-res)));
+                c.setError(net.errnoToSendError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.net_sendmsg, @as(usize, @intCast(res)));
             }
         },
         .net_poll => {
             if (res < 0) {
-                c.setError(net.errnoToRecvError(@enumFromInt(-res)));
+                c.setError(net.errnoToRecvError(@fromBackingInt(@intCast(-res))));
             } else {
                 // Poll succeeded - requested events are ready
                 c.setResult(.net_poll, {});
@@ -1546,7 +1546,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
         },
         .net_shutdown => {
             if (res < 0) {
-                c.setError(net.errnoToShutdownError(@enumFromInt(-res)));
+                c.setError(net.errnoToShutdownError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.net_shutdown, {});
             }
@@ -1561,7 +1561,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
             const data = c.cast(FileOpen);
             self.allocator.free(data.internal.path);
             if (res < 0) {
-                c.setError(fs.errnoToFileOpenError(@enumFromInt(-res), data.flags));
+                c.setError(fs.errnoToFileOpenError(@fromBackingInt(@intCast(-res)), data.flags));
             } else {
                 c.setResult(.file_open, .{ .fd = res });
             }
@@ -1571,7 +1571,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
             const data = c.cast(FileCreate);
             self.allocator.free(data.internal.path);
             if (res < 0) {
-                c.setError(fs.errnoToFileOpenError(@enumFromInt(-res), data.flags));
+                c.setError(fs.errnoToFileOpenError(@fromBackingInt(@intCast(-res)), data.flags));
             } else {
                 c.setResult(.file_create, .{ .fd = res });
             }
@@ -1579,7 +1579,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
 
         .file_close => {
             if (res < 0) {
-                c.setError(fs.errnoToFileCloseError(@enumFromInt(-res)));
+                c.setError(fs.errnoToFileCloseError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.file_close, {});
             }
@@ -1587,7 +1587,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
 
         .file_read_streaming => {
             if (res < 0) {
-                c.setError(fs.errnoToFileReadError(@enumFromInt(-res)));
+                c.setError(fs.errnoToFileReadError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.file_read_streaming, @intCast(res));
             }
@@ -1595,7 +1595,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
 
         .file_write_streaming => {
             if (res < 0) {
-                c.setError(fs.errnoToFileWriteError(@enumFromInt(-res)));
+                c.setError(fs.errnoToFileWriteError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.file_write_streaming, @intCast(res));
             }
@@ -1603,7 +1603,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
 
         .file_sync => {
             if (res < 0) {
-                c.setError(fs.errnoToFileSyncError(@enumFromInt(-res)));
+                c.setError(fs.errnoToFileSyncError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.file_sync, {});
             }
@@ -1611,7 +1611,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
 
         .file_set_size => {
             if (res < 0) {
-                c.setError(fs.errnoToFileSetSizeError(@enumFromInt(-res)));
+                c.setError(fs.errnoToFileSetSizeError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.file_set_size, {});
             }
@@ -1625,7 +1625,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
             const data = c.cast(DirCreateDir);
             self.allocator.free(data.internal.path);
             if (res < 0) {
-                c.setError(fs.errnoToDirCreateDirError(@enumFromInt(-res)));
+                c.setError(fs.errnoToDirCreateDirError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.dir_create_dir, {});
             }
@@ -1636,7 +1636,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
             self.allocator.free(data.internal.old_path);
             self.allocator.free(data.internal.new_path);
             if (res < 0) {
-                c.setError(fs.errnoToDirRenameError(@enumFromInt(-res)));
+                c.setError(fs.errnoToDirRenameError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.dir_rename, {});
             }
@@ -1647,7 +1647,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
             self.allocator.free(data.internal.old_path);
             self.allocator.free(data.internal.new_path);
             if (res < 0) {
-                const errno: linux.E = @enumFromInt(-res);
+                const errno: linux.E = @fromBackingInt(@intCast(-res));
                 if (errno == .EXIST) {
                     c.setError(error.PathAlreadyExists);
                 } else {
@@ -1662,7 +1662,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
             const data = c.cast(DirDeleteFile);
             self.allocator.free(data.internal.path);
             if (res < 0) {
-                c.setError(fs.errnoToDirDeleteFileError(@enumFromInt(-res)));
+                c.setError(fs.errnoToDirDeleteFileError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.dir_delete_file, {});
             }
@@ -1672,7 +1672,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
             const data = c.cast(DirDeleteDir);
             self.allocator.free(data.internal.path);
             if (res < 0) {
-                c.setError(fs.errnoToDirDeleteDirError(@enumFromInt(-res)));
+                c.setError(fs.errnoToDirDeleteDirError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.dir_delete_dir, {});
             }
@@ -1681,7 +1681,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
         .file_size => {
             const data = c.cast(FileSize);
             if (res < 0) {
-                c.setError(fs.errnoToFileSizeError(@enumFromInt(-res)));
+                c.setError(fs.errnoToFileSizeError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.file_size, data.internal.statx.size);
             }
@@ -1694,7 +1694,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
                 self.allocator.free(data.internal.path);
             }
             if (res < 0) {
-                c.setError(fs.errnoToFileStatError(@enumFromInt(-res)));
+                c.setError(fs.errnoToFileStatError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.file_stat, statxToFileStat(data.internal.statx));
             }
@@ -1704,7 +1704,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
             const data = c.cast(DirOpen);
             self.allocator.free(data.internal.path);
             if (res < 0) {
-                c.setError(fs.errnoToDirOpenError(@enumFromInt(-res), data.flags));
+                c.setError(fs.errnoToDirOpenError(@fromBackingInt(@intCast(-res)), data.flags));
             } else {
                 c.setResult(.dir_open, res);
             }
@@ -1712,14 +1712,14 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
 
         .dir_close => {
             if (res < 0) {
-                c.setError(fs.errnoToFileCloseError(@enumFromInt(-res)));
+                c.setError(fs.errnoToFileCloseError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.dir_close, {});
             }
         },
         .pipe_poll => {
             if (res < 0) {
-                c.setError(fs.errnoToFileReadError(@enumFromInt(-res)));
+                c.setError(fs.errnoToFileReadError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.pipe_poll, {});
             }
@@ -1727,14 +1727,14 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
         .pipe_create => unreachable, // Handled synchronously
         .pipe_close => {
             if (res < 0) {
-                c.setError(fs.errnoToFileCloseError(@enumFromInt(-res)));
+                c.setError(fs.errnoToFileCloseError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.pipe_close, {});
             }
         },
         .process_wait => {
             if (res < 0) {
-                const err: linux.E = @enumFromInt(-res);
+                const err: linux.E = @fromBackingInt(@intCast(-res));
                 switch (err) {
                     .CHILD => c.setError(error.ProcessNotFound),
                     else => c.setError(error.Unexpected),
@@ -1765,7 +1765,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
             const data = c.cast(NetSendFile);
             self.netSendFileCleanup(c);
             if (res < 0) {
-                const errno: linux.E = @enumFromInt(-res);
+                const errno: linux.E = @fromBackingInt(@intCast(-res));
                 c.setError(switch (data.internal.stage) {
                     .to_pipe => fs.errnoToFileReadError(errno),
                     .to_socket => net.errnoToSendError(errno),
@@ -1811,7 +1811,7 @@ fn statxTimeToNanos(ts: linux.statx_timestamp) i64 {
 fn storeRecvMmsgResult(c: *Completion, res: i32, _: u32) void {
     const data = c.cast(NetRecvMmsg);
     if (res < 0) {
-        c.setError(net.errnoToRecvError(@enumFromInt(-res)));
+        c.setError(net.errnoToRecvError(@fromBackingInt(@intCast(-res))));
         return;
     }
     // First slot was received via the SQE's recvmsg.

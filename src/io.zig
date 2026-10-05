@@ -240,9 +240,9 @@ pub const vtable: Io.VTable = .{
     .processSetCurrentDir = processSetCurrentDirImpl,
     .processSetCurrentPath = processSetCurrentPathImpl,
     .processReplace = processReplaceImpl,
-    .processReplacePath = processReplacePathImpl,
     .processSpawn = processSpawnImpl,
-    .processSpawnPath = processSpawnPathImpl,
+    .inheritParentDir = inheritParentDirImpl,
+    .inheritParentFile = inheritParentFileImpl,
     .childWait = childWaitImpl,
     .childKill = childKillImpl,
 
@@ -262,9 +262,6 @@ pub const vtable: Io.VTable = .{
     .netListenUnix = netListenUnixImpl,
     .netConnectUnix = netConnectUnixImpl,
     .netSocketCreatePair = netSocketCreatePairImpl,
-    .netSend = netSendImpl,
-    .netRead = netReadImpl,
-    .netWrite = netWriteImpl,
     .netWriteFile = netWriteFileImpl,
     .netClose = netCloseImpl,
     .netShutdown = netShutdownImpl,
@@ -481,12 +478,29 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout, clock: time.Cloc
                 netReceiveImpl(o.socket_handle, &o.message_buffer[0], o.data_buffer, o.flags, false, timeout, clock) catch |err| switch (err) {
                     error.Canceled => |e| return e,
                     error.Timeout => |e| return e,
-                    error.WouldBlock => unreachable, // only with dontwait
+                    error.WouldBlock => unreachable,
                     else => |e| break :result .{ e, 0 },
                 };
                 break :result netReceiveMore(o);
             },
         },
+        .net_send => |*o| return .{ .net_send = try netSendOpImpl(o.socket_handle, o.messages, o.flags, timeout, clock) },
+        .net_read => |*o| return .{ .net_read = result: {
+            const n = netReadOpImpl(o.socket_handle, o.data, timeout, clock) catch |err| switch (err) {
+                error.Canceled => |e| return e,
+                error.Timeout => |e| return e,
+                else => |e| break :result e,
+            };
+            break :result .{ .data_len = n };
+        } },
+        .net_write => |*o| return .{ .net_write = result: {
+            const n = netWriteOpImpl(o.socket_handle, o.header, o.data, o.splat, timeout, clock) catch |err| switch (err) {
+                error.Canceled => |e| return e,
+                error.Timeout => |e| return e,
+                else => |e| break :result e,
+            };
+            break :result n;
+        } },
     }
 }
 
@@ -572,6 +586,22 @@ const BatchCompletionData = union(Io.Operation.Tag) {
         message_buffer: *Io.net.IncomingMessage,
         data_buffer: []u8,
     },
+    net_send: struct {
+        op: ev.NetSendMsg,
+        iov: os_net.iovec_const,
+        addr_storage: zio_net.IpAddress,
+        addr_len: os_net.socklen_t,
+        message: *Io.net.OutgoingMessage,
+    },
+    net_read: struct {
+        op: ev.NetRecv,
+        iovecs: [max_iovecs_len]os_net.iovec,
+    },
+    net_write: struct {
+        op: ev.NetSend,
+        iovecs: [max_iovecs_len]os_net.iovec_const,
+        splat_buf: [8]u8,
+    },
 
     fn getCompletion(self: *BatchCompletionData) *ev.Completion {
         return switch (self.*) {
@@ -579,6 +609,9 @@ const BatchCompletionData = union(Io.Operation.Tag) {
             .file_write_streaming => |*d| &d.op.c,
             .device_io_control => |*d| &d.op.c,
             .net_receive => |*d| &d.op.c,
+            .net_send => |*d| &d.op.c,
+            .net_read => |*d| &d.op.c,
+            .net_write => |*d| &d.op.c,
         };
     }
 };
@@ -863,6 +896,53 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
             );
             return &data.net_receive.op.c;
         },
+        .net_send => |*o| {
+            // One completion is one sendmsg, so only the first message goes out
+            // here and the result reports 1. Partial counts are contractual, so
+            // the caller re-submits the rest; `net_receive` above does the same.
+            const msg = &o.messages[0];
+            data.* = .{ .net_send = .{
+                .op = undefined,
+                .iov = os_net.iovecConstFromSlice(msg.data_ptr[0..msg.data_len]),
+                .addr_storage = stdIoIpToZio(msg.address.*),
+                .addr_len = undefined,
+                .message = msg,
+            } };
+            data.net_send.addr_len = sockAddrLen(&data.net_send.addr_storage.any);
+            data.net_send.op = ev.NetSendMsg.init(
+                stdIoHandleToZio(o.socket_handle),
+                .{ .iovecs = (&data.net_send.iov)[0..1] },
+                zioSendFlags(o.flags),
+                &data.net_send.addr_storage.any,
+                data.net_send.addr_len,
+                if (msg.control.len != 0) msg.control else null,
+            );
+            return &data.net_send.op.c;
+        },
+        .net_read => |*o| {
+            data.* = .{ .net_read = .{ .op = undefined, .iovecs = undefined } };
+            data.net_read.op = ev.NetRecv.init(
+                stdIoHandleToZio(o.socket_handle),
+                ev.ReadBuf.fromSlices(o.data, &data.net_read.iovecs),
+                .{},
+            );
+            return &data.net_read.op.c;
+        },
+        .net_write => |*o| {
+            data.* = .{ .net_write = .{
+                .op = undefined,
+                .iovecs = undefined,
+                .splat_buf = undefined,
+            } };
+            var slices: [max_iovecs_len][]const u8 = undefined;
+            const n = fillBuf(&slices, o.header, o.data, o.splat, &data.net_write.splat_buf);
+            data.net_write.op = ev.NetSend.init(
+                stdIoHandleToZio(o.socket_handle),
+                ev.WriteBuf.fromSlices(slices[0..n], &data.net_write.iovecs),
+                .{},
+            );
+            return &data.net_write.op.c;
+        },
     }
 }
 
@@ -930,6 +1010,17 @@ fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Oper
                 };
                 break :blk .{ null, 1 };
             },
+        },
+        .net_send => .{ .net_send = blk: {
+            const sent = data.net_send.op.getResult() catch |err| break :blk .{ sendErrToSocketSendErr(err), 0 };
+            data.net_send.message.data_len = sent;
+            break :blk .{ null, 1 };
+        } },
+        .net_read => .{
+            .net_read = if (data.net_read.op.getResult()) |n| .{ .data_len = n } else |err| recvErrToReadErr(err),
+        },
+        .net_write => .{
+            .net_write = data.net_write.op.getResult() catch |err| sendErrToWriteErr(err),
         },
     };
 }
@@ -1855,11 +1946,6 @@ fn processReplaceImpl(userdata: ?*anyopaque, options: std.process.ReplaceOptions
     return io.vtable.processReplace(io.userdata, options);
 }
 
-// TODO: implement using our own execve wrapper
-fn processReplacePathImpl(_: ?*anyopaque, _: Io.Dir, _: std.process.ReplaceOptions) std.process.ReplaceError {
-    return error.OperationUnsupported;
-}
-
 fn processEnviron() std.process.Environ {
     if (builtin.os.tag == .windows) {
         return .{ .block = .global };
@@ -1899,9 +1985,14 @@ fn processSpawnImpl(userdata: ?*anyopaque, options: std.process.SpawnOptions) st
     return child;
 }
 
-// TODO: implement using our own posix_spawn/fork+exec wrapper
-fn processSpawnPathImpl(_: ?*anyopaque, _: Io.Dir, _: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
-    return error.OperationUnsupported;
+fn inheritParentDirImpl(_: ?*anyopaque, handle: Io.Dir.Handle) Io.InheritParentHandleError!Io.Dir {
+    const io = globalIo();
+    return io.vtable.inheritParentDir(io.userdata, handle);
+}
+
+fn inheritParentFileImpl(_: ?*anyopaque, handle: Io.File.Handle, flags: Io.File.Flags) Io.InheritParentHandleError!Io.File {
+    const io = globalIo();
+    return io.vtable.inheritParentFile(io.userdata, handle, flags);
 }
 
 fn setChildPipesNonblocking(child: *std.process.Child) void {
@@ -2039,9 +2130,10 @@ fn bindErrToListenErr(err: BindOrCancel) Io.net.IpAddress.ListenError {
         error.NetworkDown => error.NetworkDown,
         error.SystemResources => error.SystemResources,
         error.Canceled => error.Canceled,
-        // TODO(zig-0.17): map `error.AccessDenied` through once `ListenError` has it
-        // (https://codeberg.org/ziglang/zig/pulls/36307). Binding a privileged port
-        // without the permission to do so is a normal error, not something unexpected.
+        // TODO: map `error.AccessDenied` through once `ListenError` has it. Binding a
+        // privileged port without the permission to do so is a normal error, not
+        // something unexpected. Still missing from the set as of 0.17.0-dev.1464,
+        // waiting on https://codeberg.org/ziglang/zig/pulls/36307.
         error.AccessDenied,
         error.FileDescriptorNotASocket,
         error.SymLinkLoop,
@@ -2155,9 +2247,8 @@ fn bindErrToBindErr(err: BindOrCancel) Io.net.IpAddress.BindError {
         error.NetworkDown => error.NetworkDown,
         error.SystemResources => error.SystemResources,
         error.Canceled => error.Canceled,
-        // TODO(zig-0.17): same as in `bindErrToListenErr`, map `error.AccessDenied`
-        // through once `BindError` has it
-        // (https://codeberg.org/ziglang/zig/pulls/36307).
+        // TODO: same as in `bindErrToListenErr`, map `error.AccessDenied` through
+        // once `BindError` has it.
         error.AccessDenied,
         error.FileDescriptorNotASocket,
         error.SymLinkLoop,
@@ -2182,12 +2273,9 @@ fn netBindIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: Io.n
         waitForIoUncancelable(&close_op.c);
     }
 
-    // TODO(zig-0.17): `ip6_only` became `?bool`, where null means "leave it to the system
-    // configuration" (ziglang/zig a0aba69c11). Set the option only when it is non-null,
-    // with `@intFromBool` as the value, instead of only ever turning it on.
-    if (options.ip6_only) {
+    if (options.ip6_only) |ip6_only| {
         if (zio_addr.any.family != os_net.AF.INET6) return error.OptionUnsupported;
-        const value: c_int = 1;
+        const value: c_int = @intFromBool(ip6_only);
         // IPV6_V6ONLY optname: 26 on Linux, 27 on BSD/macOS/Windows.
         const v6only: u32 = switch (builtin.os.tag) {
             .linux => 26,
@@ -2345,10 +2433,7 @@ fn netConnectUnixImpl(
         error.WouldBlock => error.WouldBlock,
         error.NetworkDown => error.NetworkDown,
         error.Canceled => error.Canceled,
-        // TODO(zig-0.17): map `error.ConnectionRefused` through once it is part of
-        // `Io.net.UnixAddress.ConnectError` (ziglang/zig 9726270846). Connecting to a
-        // socket path with no listener is a normal error, not something unexpected.
-        error.ConnectionRefused,
+        error.ConnectionRefused => error.ConnectionRefused,
         error.AddressInUse,
         error.AddressUnavailable,
         error.AlreadyConnected,
@@ -2411,14 +2496,27 @@ fn sendErrToSocketSendErr(err: ev.NetSendMsg.Error) Io.net.Socket.SendError {
     };
 }
 
-fn netSendImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, messages: []Io.net.OutgoingMessage, flags: Io.net.SendFlags) struct { ?Io.net.Socket.SendError, usize } {
-    const zio_flags: os_net.SendFlags = .{
+fn zioSendFlags(flags: Io.net.SendFlags) os_net.SendFlags {
+    return .{
         .confirm = flags.confirm,
         .dont_route = flags.dont_route,
         .eor = flags.eor,
         .oob = flags.oob,
         .fastopen = flags.fastopen,
     };
+}
+
+/// Sends each message in turn, reporting how many made it. A partial count is
+/// part of the contract, so a caller that gets fewer than it passed re-submits
+/// the rest; that is what lets the batch path below send just one.
+fn netSendOpImpl(
+    handle: Io.net.Socket.Handle,
+    messages: []Io.net.OutgoingMessage,
+    flags: Io.net.SendFlags,
+    timeout: time.Timeout,
+    clock: time.Clock,
+) (Io.Cancelable || common.Timeoutable)!Io.Operation.NetSend.Result {
+    const zio_flags = zioSendFlags(flags);
 
     for (messages, 0..) |*msg, i| {
         const zio_addr = stdIoIpToZio(msg.address.*);
@@ -2432,14 +2530,27 @@ fn netSendImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, messages: []Io.net.
             sockAddrLen(&zio_addr.any),
             if (msg.control.len != 0) msg.control else null,
         );
-        waitForIo(&op.c) catch |err| return .{ err, i };
+        try timedWaitForIoClock(&op.c, timeout, clock);
         const sent = op.getResult() catch |err| return .{ sendErrToSocketSendErr(err), i };
         msg.data_len = sent;
     }
     return .{ null, messages.len };
 }
 
-fn recvErrToReadErr(err: ev.NetRecv.Error) Io.net.Stream.Reader.Error {
+fn netReadOpImpl(
+    handle: Io.net.Socket.Handle,
+    data: [][]u8,
+    timeout: time.Timeout,
+    clock: time.Clock,
+) (Io.Operation.NetRead.Error || Io.Cancelable || common.Timeoutable)!usize {
+    if (data.len == 0) return 0;
+    var iovecs: [max_iovecs_len]os_net.iovec = undefined;
+    var op = ev.NetRecv.init(stdIoHandleToZio(handle), ev.ReadBuf.fromSlices(data, &iovecs), .{});
+    try timedWaitForIoClock(&op.c, timeout, clock);
+    return op.getResult() catch |err| return recvErrToReadErr(err);
+}
+
+fn recvErrToReadErr(err: ev.NetRecv.Error) Io.Operation.NetRead.Error {
     return switch (err) {
         error.ConnectionResetByPeer, error.ConnectionAborted => error.ConnectionResetByPeer,
         // ETIMEDOUT means the connection died (retransmits exhausted), not that a
@@ -2449,7 +2560,7 @@ fn recvErrToReadErr(err: ev.NetRecv.Error) Io.net.Stream.Reader.Error {
         error.SocketNotConnected, error.SocketShutdown => error.SocketUnconnected,
         error.NetworkDown => error.NetworkDown,
         error.SystemResources => error.SystemResources,
-        error.Canceled => error.Canceled,
+        error.Canceled,
         error.WouldBlock,
         error.ConnectionRefused,
         error.FileDescriptorNotASocket,
@@ -2660,24 +2771,7 @@ fn netReceiveImpl(
     };
 }
 
-fn netReadImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, data: [][]u8) Io.net.Stream.Reader.Error!usize {
-    var iovecs: [max_iovecs_len]os_net.iovec = undefined;
-    var count: usize = 0;
-    for (data) |buf| {
-        if (count == iovecs.len) break;
-        if (buf.len != 0) {
-            iovecs[count] = os_net.iovecFromSlice(buf);
-            count += 1;
-        }
-    }
-    if (count == 0) return 0;
-
-    var op = ev.NetRecv.init(stdIoHandleToZio(handle), .{ .iovecs = iovecs[0..count] }, .{});
-    try waitForIo(&op.c);
-    return op.getResult() catch |err| return recvErrToReadErr(err);
-}
-
-fn sendErrToWriteErr(err: ev.NetSend.Error) Io.net.Stream.Writer.Error {
+fn sendErrToWriteErr(err: ev.NetSend.Error) Io.Operation.NetWrite.Error {
     return switch (err) {
         error.ConnectionResetByPeer, error.ConnectionAborted => error.ConnectionResetByPeer,
         error.ConnectionTimedOut => error.ConnectionResetByPeer,
@@ -2689,7 +2783,10 @@ fn sendErrToWriteErr(err: ev.NetSend.Error) Io.net.Stream.Writer.Error {
         error.AddressFamilyUnsupported => error.AddressFamilyUnsupported,
         error.FastOpenAlreadyInProgress => error.FastOpenAlreadyInProgress,
         error.SystemResources => error.SystemResources,
-        error.Canceled => error.Canceled,
+        // Cancellation reaches the caller from the wait, not from the result,
+        // so seeing it here means the operation ended some other way. Same
+        // reasoning as `recvErrToReadErr`.
+        error.Canceled,
         error.WouldBlock,
         error.AccessDenied,
         error.FileDescriptorNotASocket,
@@ -2700,7 +2797,14 @@ fn sendErrToWriteErr(err: ev.NetSend.Error) Io.net.Stream.Writer.Error {
     };
 }
 
-fn netWriteImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) Io.net.Stream.Writer.Error!usize {
+fn netWriteOpImpl(
+    handle: Io.net.Socket.Handle,
+    header: []const u8,
+    data: []const []const u8,
+    splat: usize,
+    timeout: time.Timeout,
+    clock: time.Clock,
+) (Io.Operation.NetWrite.Error || Io.Cancelable || common.Timeoutable)!usize {
     var slices: [max_iovecs_len][]const u8 = undefined;
     var splat_buf: [64]u8 = undefined;
     const n = fillBuf(&slices, header, data, splat, &splat_buf);
@@ -2710,7 +2814,7 @@ fn netWriteImpl(_: ?*anyopaque, handle: Io.net.Socket.Handle, header: []const u8
     const wbuf = ev.WriteBuf.fromSlices(slices[0..n], &iovecs);
 
     var op = ev.NetSend.init(stdIoHandleToZio(handle), wbuf, .{});
-    try waitForIo(&op.c);
+    try timedWaitForIoClock(&op.c, timeout, clock);
     return op.getResult() catch |err| return sendErrToWriteErr(err);
 }
 
@@ -2719,14 +2823,14 @@ fn netWriteFileImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: []const u8, _: *
     return error.NetworkDown;
 }
 
-fn netCloseImpl(_: ?*anyopaque, handles: []const Io.net.Socket.Handle) void {
+fn netCloseImpl(_: ?*anyopaque, sockets: []const Io.net.Socket) void {
     var i: usize = 0;
-    while (i < handles.len) {
+    while (i < sockets.len) {
         var ops: [8]ev.NetClose = undefined;
         var group = ev.Group.init(.gather);
-        const n = @min(ops.len, handles.len - i);
+        const n = @min(ops.len, sockets.len - i);
         for (0..n) |j| {
-            ops[j] = ev.NetClose.init(stdIoHandleToZio(handles[i + j]));
+            ops[j] = ev.NetClose.init(stdIoHandleToZio(sockets[i + j].handle));
             group.add(&ops[j].c);
         }
         waitForIoUncancelable(&group.c);
@@ -3494,6 +3598,33 @@ test "io: net receive on a Unix datagram socket" {
     var buf: [16]u8 = undefined;
     const message = try socket.receive(io, &buf);
     try std.testing.expectEqualStrings("hello", message.data);
+}
+
+test "io: net Unix connect to a path with no listener is refused" {
+    if (!zio_net.has_unix_sockets) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn run(io: Io) !void {
+            const path = "test_io_net_unix_refused.sock";
+            (Io.Dir.cwd()).deleteFile(io, path) catch {};
+            defer (Io.Dir.cwd()).deleteFile(io, path) catch {};
+
+            const address = try Io.net.UnixAddress.init(path);
+
+            // Leave a stale socket file behind: the path exists, but nothing is
+            // listening on it any more, so connecting has to be refused.
+            var server = try address.listen(io, .{});
+            server.deinit(io);
+
+            try std.testing.expectError(error.ConnectionRefused, Io.net.UnixAddress.connect(&address, io));
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
 }
 
 test "io: net UDP bind assigns ephemeral port" {
@@ -5009,6 +5140,126 @@ test "io: batch awaitConcurrent file_read_streaming into empty buffers returns 0
             completed += 1;
         }
     }
+}
+
+test "io: batch awaitConcurrent with a net_send operation" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var receiver = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer receiver.close(io);
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+
+    var storage: [1]Io.Operation.Storage = undefined;
+    var batch: Io.Batch = .init(&storage);
+
+    // The destination comes from the message, so this also pins that the batch
+    // path copies the address into its own storage: the op holds a pointer to
+    // it for as long as the send is in flight.
+    const payload = "batched";
+    var out: [1]Io.net.OutgoingMessage = .{.{
+        .address = &receiver.address,
+        .data_ptr = payload,
+        .data_len = payload.len,
+        .control = &.{},
+    }};
+    _ = batch.add(.{ .net_send = .{
+        .socket_handle = sender.handle,
+        .messages = &out,
+        .flags = .{},
+    } });
+
+    try batch.awaitConcurrent(io, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+
+    const completion = batch.next();
+    try std.testing.expect(completion != null);
+    const err, const n = completion.?.result.net_send;
+    try std.testing.expectEqual(null, err);
+    // One completion is one sendmsg, so exactly one message goes out.
+    try std.testing.expectEqual(1, n);
+
+    // Bounded, so a send that goes to the wrong address fails here instead of
+    // parking the suite forever.
+    var msg: Io.net.IncomingMessage = .init;
+    var buf: [32]u8 = undefined;
+    const received = try io.operateTimeout(.{ .net_receive = .{
+        .socket_handle = receiver.handle,
+        .message_buffer = (&msg)[0..1],
+        .data_buffer = &buf,
+        .flags = .{},
+    } }, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+    const recv_err, _ = received.net_receive;
+    try std.testing.expectEqual(null, recv_err);
+    try std.testing.expectEqualStrings(payload, msg.data);
+
+    batch.cancel(io);
+}
+
+test "io: batch awaitConcurrent with a net_write operation" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const expected = "head:midababab";
+
+    const Worker = struct {
+        fn sink(io: Io, server: *Io.net.Server, out: *anyerror!void) void {
+            out.* = collect(io, server);
+        }
+
+        fn collect(io: Io, server: *Io.net.Server) !void {
+            const peer = try server.accept(io);
+            defer peer.close(io);
+
+            var recv_buf: [64]u8 = undefined;
+            var reader = peer.reader(io, &recv_buf);
+            var got: [64]u8 = undefined;
+            const n = try reader.interface.readSliceShort(&got);
+            try std.testing.expectEqualStrings(expected, got[0..n]);
+        }
+
+        fn run(io: Io) !void {
+            var server = try Io.net.IpAddress.listen(&.{ .ip4 = .loopback(0) }, io, .{});
+            defer server.deinit(io);
+
+            var sink_err: anyerror!void = {};
+            var future = io.async(sink, .{ io, &server, &sink_err });
+            defer future.cancel(io);
+
+            const client = try Io.net.IpAddress.connect(&server.socket.address, io, .{ .mode = .stream });
+            defer client.close(io);
+
+            var storage: [1]Io.Operation.Storage = undefined;
+            var batch: Io.Batch = .init(&storage);
+
+            // header + data + splat, so the batch path's own fillBuf and
+            // splat_buf are what assemble the iovecs.
+            const data: []const []const u8 = &.{ "mid", "ab" };
+            _ = batch.add(.{ .net_write = .{
+                .socket_handle = client.socket.handle,
+                .header = "head:",
+                .data = data,
+                .splat = 3,
+            } });
+
+            try batch.awaitConcurrent(io, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+
+            const completion = batch.next();
+            try std.testing.expect(completion != null);
+            const written = try completion.?.result.net_write;
+            try std.testing.expectEqual(expected.len, written);
+
+            batch.cancel(io);
+            try client.shutdown(io, .send);
+
+            future.await(io);
+            try sink_err;
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
 }
 
 test "io: batch awaitConcurrent times out when no data arrives" {

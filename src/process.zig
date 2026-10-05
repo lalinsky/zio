@@ -37,14 +37,14 @@ pub fn childKill(child: *std.process.Child) void {
 
 fn exitStatusToTerm(status: ev.ProcessWait.ExitStatus) std.process.Child.Term {
     if (status.signal) |sig| {
-        return .{ .signal = @enumFromInt(sig) };
+        return .{ .signal = @fromBackingInt(@intCast(sig)) };
     }
     return .{ .exited = status.code };
 }
 
 fn sendTermSignal(handle: ProcessHandle) void {
     if (builtin.os.tag == .windows) {
-        _ = std.os.windows.ntdll.NtTerminateProcess(handle, @enumFromInt(1));
+        _ = std.os.windows.ntdll.NtTerminateProcess(handle, @fromBackingInt(@intCast(1)));
     } else {
         _ = std.posix.system.kill(handle, .TERM);
     }
@@ -120,22 +120,6 @@ test "childWait: spawn nonexistent binary returns FileNotFound" {
 
     const result = std.process.spawn(rt.io(), .{ .argv = &.{"definitely-not-a-real-binary-xyz123"} });
     try std.testing.expectError(error.FileNotFound, result);
-}
-
-test "spawnPath returns OperationUnsupported" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    const result = std.process.spawnPath(rt.io(), .cwd(), .{ .argv = argv_exit0 });
-    try std.testing.expectError(error.OperationUnsupported, result);
-}
-
-test "replacePath returns OperationUnsupported" {
-    const rt = try Runtime.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    const err = std.process.replacePath(rt.io(), .cwd(), .{ .argv = argv_exit0 });
-    try std.testing.expectEqual(error.OperationUnsupported, err);
 }
 
 /// Runs this test binary again with only the test `name` selected, which relies

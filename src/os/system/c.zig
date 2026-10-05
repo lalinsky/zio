@@ -316,7 +316,7 @@ pub const AT = switch (native_os) {
 pub const MAP_FAILED: *anyopaque = @ptrFromInt(std.math.maxInt(usize));
 
 pub fn errno(rc: anytype) E {
-    return if (rc == -1) @enumFromInt(c._errno().*) else .SUCCESS;
+    return if (rc == -1) @fromBackingInt(@intCast(c._errno().*)) else .SUCCESS;
 }
 
 const libc = struct {

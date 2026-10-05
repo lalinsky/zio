@@ -51,7 +51,7 @@ pub const CacheKey = struct {
         std.debug.assert(name.len <= std.math.maxInt(u8));
         const plen = @min(name.len, key_prefix_len);
         key.len = @intCast(name.len);
-        key.shape = @intFromEnum(shape);
+        key.shape = @backingInt(shape);
         key.hash = std.hash.Wyhash.hash(seed, name);
         @memset(&key.prefix, 0);
         @memcpy(key.prefix[0..plen], name[0..plen]);

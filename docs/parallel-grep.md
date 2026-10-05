@@ -155,7 +155,7 @@ Channels are the primary way to communicate between tasks in ZIO. They provide:
 
 - **Type safety** - channels are typed, so you can only send/receive values of the declared type
 - **Blocking semantics** - [`send()`](../apidocs/#zio.Channel.send) and [`receive()`](../apidocs/#zio.Channel.receive) suspend the task when the operation can't complete immediately
-- **Graceful closure** - closed channels return `error.ChannelClosed` to signal no more data will be sent
+- **Graceful closure** - closed channels return `error.Closed` to signal no more data will be sent
 
 Use buffered channels when you want to decouple producers and consumers, allowing bursts of work. Use unbuffered channels when you want direct handoff between tasks.
 
