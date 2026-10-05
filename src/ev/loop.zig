@@ -1193,7 +1193,7 @@ pub const Loop = struct {
         };
 
         switch (completion.op) {
-            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_read_streaming, .file_write_streaming, .file_sync, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .dir_create_dir, .dir_rename, .dir_rename_preserve, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat, .dir_open, .dir_close, .dir_read, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps, .dir_sym_link, .dir_read_link, .dir_hard_link, .dir_access, .dir_real_path, .dir_real_path_file, .file_real_path, .file_hard_link, .device_io_control, .process_wait => |op| {
+            inline .file_open, .file_create, .file_close, .file_read, .file_write, .file_read_streaming, .file_write_streaming, .file_sync, .file_sync_range, .file_set_size, .file_set_permissions, .file_set_owner, .file_set_timestamps, .dir_create_dir, .dir_rename, .dir_rename_preserve, .dir_delete_file, .dir_delete_dir, .file_size, .file_stat, .dir_open, .dir_close, .dir_read, .dir_set_permissions, .dir_set_owner, .dir_set_file_permissions, .dir_set_file_owner, .dir_set_file_timestamps, .dir_sym_link, .dir_read_link, .dir_hard_link, .dir_access, .dir_real_path, .dir_real_path_file, .file_real_path, .file_hard_link, .device_io_control, .process_wait => |op| {
                 if (comptime Backend.capability(op) == .yes) {
                     unreachable;
                 }
@@ -1207,6 +1207,7 @@ pub const Loop = struct {
                     .file_read_streaming => common.fileReadStreamingWork,
                     .file_write_streaming => common.fileWriteStreamingWork,
                     .file_sync => common.fileSyncWork,
+                    .file_sync_range => common.fileSyncRangeWork,
                     .file_set_size => common.fileSetSizeWork,
                     .file_set_permissions => common.fileSetPermissionsWork,
                     .file_set_owner => common.fileSetOwnerWork,

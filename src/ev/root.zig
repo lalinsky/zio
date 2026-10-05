@@ -55,6 +55,7 @@ pub const FileWrite = completion.FileWrite;
 pub const FileReadStreaming = completion.FileReadStreaming;
 pub const FileWriteStreaming = completion.FileWriteStreaming;
 pub const FileSync = completion.FileSync;
+pub const FileSyncRange = completion.FileSyncRange;
 pub const FileSetSize = completion.FileSetSize;
 pub const FileSetPermissions = completion.FileSetPermissions;
 pub const FileSetOwner = completion.FileSetOwner;

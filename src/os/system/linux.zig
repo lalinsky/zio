@@ -462,6 +462,41 @@ pub fn renameat2(oldfd: fd_t, oldpath: [*:0]const u8, newfd: fd_t, newpath: [*:0
     }
 }
 
+/// sync_file_range() flags. Values from linux/fs.h.
+pub const SYNC_FILE_RANGE = packed struct(u32) {
+    WAIT_BEFORE: bool = false,
+    WRITE: bool = false,
+    WAIT_AFTER: bool = false,
+    _: u29 = 0,
+};
+
+/// Whether `sync_file_range` can be called directly. 32-bit targets split the
+/// 64-bit arguments differently per ABI, so they are not supported here; the
+/// io_uring backend does not need this.
+pub const has_sync_file_range = @sizeOf(usize) == 8;
+
+pub fn sync_file_range(fd: fd_t, offset: u64, nbytes: u64, flags: SYNC_FILE_RANGE) usize {
+    comptime std.debug.assert(has_sync_file_range);
+    if (@hasField(linux.SYS, "sync_file_range")) {
+        return linux.syscall4(
+            .sync_file_range,
+            @as(usize, @bitCast(@as(isize, fd))),
+            offset,
+            nbytes,
+            @as(u32, @bitCast(flags)),
+        );
+    } else {
+        // powerpc64 only has the variant with flags second.
+        return linux.syscall4(
+            .sync_file_range2,
+            @as(usize, @bitCast(@as(isize, fd))),
+            @as(u32, @bitCast(flags)),
+            offset,
+            nbytes,
+        );
+    }
+}
+
 pub fn mkdirat(dirfd: fd_t, path: [*:0]const u8, mode: mode_t) usize {
     return linux.syscall3(
         .mkdirat,

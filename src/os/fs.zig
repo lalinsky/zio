@@ -253,6 +253,25 @@ pub const FileSyncFlags = struct {
     only_data: bool = false,
 };
 
+/// What `fileSyncRange` waits for and starts. See sync_file_range(2).
+pub const FileSyncRangeFlags = struct {
+    /// Wait for writeback already in progress on the range to finish.
+    wait_before: bool = false,
+    /// Start writeback of the range's dirty pages.
+    write: bool = true,
+    /// Wait for the writeback of the range to finish.
+    wait_after: bool = false,
+};
+
+pub const FileSyncRangeError = error{
+    InputOutput,
+    NoSpaceLeft,
+    SystemResources,
+    Unseekable,
+    Canceled,
+    Unexpected,
+};
+
 pub const FileSyncError = error{
     InputOutput,
     NoSpaceLeft,
@@ -1456,6 +1475,34 @@ pub fn fileSync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
     }
 }
 
+/// Start (and optionally wait for) writeback of a byte range of a file, as
+/// sync_file_range(2). This is a writeback hint, not a durability guarantee:
+/// it flushes neither metadata nor the drive cache, so `fileSync` is still
+/// needed to make data durable. `len == 0` means to the end of the file.
+/// Does nothing where the call is unavailable (other than 64-bit Linux).
+pub fn fileSyncRange(fd: fd_t, offset: u64, len: u64, flags: FileSyncRangeFlags) FileSyncRangeError!void {
+    if (builtin.os.tag != .linux) return;
+    if (!posix.sys.has_sync_file_range) return;
+
+    const sc = try syscall_cancel.Syscall.begin();
+    defer sc.finish();
+    while (true) {
+        const rc = posix.sys.sync_file_range(fd, offset, len, .{
+            .WAIT_BEFORE = flags.wait_before,
+            .WRITE = flags.write,
+            .WAIT_AFTER = flags.wait_after,
+        });
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => {
+                try sc.checkCancel();
+                continue;
+            },
+            else => |err| return errnoToFileSyncRangeError(err),
+        }
+    }
+}
+
 /// Move the file position by `offset` bytes, relative to the current position.
 pub fn fileSeekBy(fd: fd_t, offset: i64) FileSeekError!void {
     if (builtin.os.tag == .windows) {
@@ -2013,6 +2060,18 @@ pub fn errnoToFileCloseError(errno: E) FileCloseError {
             };
         },
     }
+}
+
+pub fn errnoToFileSyncRangeError(errno: posix.system.E) FileSyncRangeError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
+        .IO => error.InputOutput,
+        .NOSPC => error.NoSpaceLeft,
+        .NOMEM => error.SystemResources,
+        .SPIPE => error.Unseekable,
+        .CANCELED => error.Canceled,
+        else => |e| unexpectedError(e),
+    };
 }
 
 pub fn errnoToFileSyncError(errno: posix.system.E) FileSyncError {
