@@ -4,8 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [0.19.0] - 2026-10-05
 
-This release adds support for Zig 0.17 and is the last one for Zig 0.16. It is tagged
-twice: `v0.19.0-zig0.17` for Zig 0.17 and `v0.19.0-zig0.16` for Zig 0.16.
+This is the last release for Zig 0.16. Later releases require Zig 0.17, and Zig 0.16
+fixes continue on the `zig-0.16` branch.
 
 ### Breaking
 
