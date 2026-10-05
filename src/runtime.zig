@@ -14,6 +14,7 @@ const os = @import("os/root.zig");
 const cgroup = @import("cgroup.zig");
 
 const meta = @import("meta.zig");
+const compat = @import("compat.zig");
 const Cancelable = @import("common.zig").Cancelable;
 const log = @import("common.zig").log;
 const time = @import("time.zig");
@@ -423,14 +424,14 @@ pub const SchedulerMetrics = struct {
     /// Sleepers woken by batched wake decisions.
     batch_wake_claims: u64 = 0,
     pub fn add(self: *SchedulerMetrics, other: SchedulerMetrics) void {
-        inline for (@typeInfo(SchedulerMetrics).@"struct".fields) |field| {
-            @field(self, field.name) += @field(other, field.name);
+        inline for (compat.fieldNames(SchedulerMetrics)) |name| {
+            @field(self, name) += @field(other, name);
         }
     }
 
     pub fn sub(self: *SchedulerMetrics, other: SchedulerMetrics) void {
-        inline for (@typeInfo(SchedulerMetrics).@"struct".fields) |field| {
-            @field(self, field.name) -= @field(other, field.name);
+        inline for (compat.fieldNames(SchedulerMetrics)) |name| {
+            @field(self, name) -= @field(other, name);
         }
     }
 };

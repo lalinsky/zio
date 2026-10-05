@@ -7,6 +7,7 @@ const posix = @import("../os/posix.zig");
 const fs = @import("../os/fs.zig");
 const w = @import("../os/windows.zig");
 const coroutines = @import("coroutines.zig");
+const compat = @import("../compat.zig");
 
 const log = @import("../common.zig").log;
 
@@ -45,7 +46,7 @@ pub fn stackAlloc(info: *StackInfo, maximum_size: usize, committed_size: usize) 
         try stackAllocPosix(info, maximum_size, committed_size);
     }
 
-    if (builtin.mode == .Debug and builtin.valgrind_support) {
+    if (compat.is_debug and builtin.valgrind_support) {
         const stack_slice: [*]u8 = @ptrFromInt(info.limit);
         info.valgrind_stack_id = std.valgrind.stackRegister(stack_slice[0 .. info.base - info.limit]);
     }
@@ -270,14 +271,14 @@ pub fn stackInitSlot(info: *StackInfo, slot: []align(page_size) u8, committed_si
     };
     stackWriteOwnerTag(info.*, owner_tag);
 
-    if (builtin.mode == .Debug and builtin.valgrind_support) {
+    if (compat.is_debug and builtin.valgrind_support) {
         const stack_slice: [*]u8 = @ptrFromInt(info.limit);
         info.valgrind_stack_id = std.valgrind.stackRegister(stack_slice[0 .. info.base - info.limit]);
     }
 }
 
 pub fn stackFree(info: StackInfo) void {
-    if (builtin.mode == .Debug and builtin.valgrind_support) {
+    if (compat.is_debug and builtin.valgrind_support) {
         if (info.valgrind_stack_id != 0) {
             std.valgrind.stackDeregister(info.valgrind_stack_id);
         }
@@ -332,7 +333,7 @@ pub fn stackExtend(info: *StackInfo, mode: StackExtendMode) error{StackOverflow}
         try stackExtendPosix(info, mode);
     }
 
-    if (builtin.mode == .Debug and builtin.valgrind_support) {
+    if (compat.is_debug and builtin.valgrind_support) {
         if (info.valgrind_stack_id != 0) {
             const stack_slice: [*]u8 = @ptrFromInt(info.limit);
             std.valgrind.stackChange(info.valgrind_stack_id, stack_slice[0 .. info.base - info.limit]);
