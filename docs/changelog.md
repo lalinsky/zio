@@ -95,6 +95,11 @@ All notable changes to this project will be documented in this file.
 - Fixed the built-in DNS resolver ignoring a cancellation that arrived while it was reloading
   `/etc/hosts` or `/etc/resolv.conf`.
 
+- Fixed `std.Io`'s `receiveManyTimeout` on systems without `recvmmsg` (macOS, OpenBSD and
+  others) splitting the data buffer between the message slots up front, which truncated a
+  datagram larger than its share, e.g. to 187 bytes with 8 slots and a 1500-byte buffer, even
+  when it was the only one. Without `recvmmsg`, each receive gets the rest of the buffer again.
+
 - File descriptors received over Unix sockets with `SCM_RIGHTS` are now close-on-exec, so
   they no longer leak into child processes spawned later; clear `FD_CLOEXEC` on one to hand
   it to a child. This uses `MSG_CMSG_CLOEXEC` where the system has it, as `std.Io.Threaded`

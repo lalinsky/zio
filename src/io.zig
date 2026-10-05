@@ -472,7 +472,7 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout, clock: time.Cloc
         } },
         .net_receive => |*o| return .{
             .net_receive = result: {
-                if (o.message_buffer.len > 1 and !o.flags.peek and !o.flags.trunc and !hasControl(o.message_buffer) and builtin.os.tag != .windows) {
+                if (o.message_buffer.len > 1 and !o.flags.peek and !o.flags.trunc and !hasControl(o.message_buffer) and os_net.has_recvmmsg) {
                     break :result netReceiveMmsg(o, timeout, clock) catch |err| switch (err) {
                         error.Canceled => |e| return e,
                         error.Timeout => |e| return e,
@@ -4543,6 +4543,33 @@ test "io: receiveManyTimeout reports an error that follows the first message" {
     try std.testing.expectEqual(@as(?Io.net.Socket.ReceiveError, error.ConnectionResetByPeer), err);
     try std.testing.expectEqual(1, n);
     try std.testing.expectEqualStrings("aaa", messages[0].data);
+}
+
+test "io: receiveManyTimeout gives a lone datagram the whole buffer without recvmmsg" {
+    // With recvmmsg the buffer is split between the slots up front; without
+    // it, each receive gets what is left of the buffer.
+    if (os_net.has_recvmmsg) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+    var receiver = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer receiver.close(io);
+
+    const payload: [1000]u8 = @splat('x');
+    try sender.send(io, &receiver.address, &payload);
+
+    var messages: [8]Io.net.IncomingMessage = @splat(.init);
+    var buf: [1500]u8 = undefined;
+    const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } };
+    const err, const n = receiver.receiveManyTimeout(io, &messages, &buf, .{}, timeout);
+    try std.testing.expectEqual(null, err);
+    try std.testing.expectEqual(1, n);
+    try std.testing.expectEqual(payload.len, messages[0].data.len);
+    try std.testing.expect(!messages[0].flags.trunc);
 }
 
 test "io: receiveManyTimeout returns every datagram already queued" {
