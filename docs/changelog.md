@@ -30,6 +30,23 @@ All notable changes to this project will be documented in this file.
 - Fixed `std.Io` TCP connect never timing out when given a deadline on the `.real` or
   `.boot` clock.
 
+- Fixed `std.process.replace` without an `environ_map` starting the new program with an empty
+  environment and resolving `argv[0]` against a default `PATH` instead of the process's own.
+
+- `std.Progress.start` no longer panics; zio reads the parent's progress pipe from `ZIG_PROGRESS`
+  like `std.Io.Threaded` does. On Windows, and on POSIX builds without libc, the variable is not
+  read yet and progress is drawn to the terminal as if there were no parent. A child spawned with
+  a `progress_node` does not report progress to it yet, and gets no `ZIG_PROGRESS`.
+
+- Spawning a process no longer installs and restores process-wide SIGIO and SIGPIPE handlers,
+  which concurrent spawns could leave permanently replaced.
+
+- `std.process.spawnPath` and `std.process.replacePath` return `error.OperationUnsupported`
+  instead of hitting the `@panic("TODO")` in `std.Io.Threaded` they were delegated to.
+
+- Fixed `Runtime.blockingIo()` panicking on misaligned userdata in process spawning,
+  getting and setting the current path, `Batch.awaitConcurrent` and host name lookups.
+
 - Fixed a use-after-free in `Io.Batch` with work stealing, where an operation completing on
   another executor could still touch the batch state after `cancel` had freed it.
 
