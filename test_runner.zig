@@ -186,7 +186,7 @@ pub fn main(init: std.process.Init) !void {
         test_index += 1;
 
         current_test = friendly_name;
-        std.testing.allocator_instance = .{};
+        std.testing.allocator_instance = .init(gpa, .{});
         std.testing.io_instance = .init(gpa, .{});
 
         if (env.do_log_capture) {
@@ -212,7 +212,7 @@ pub fn main(init: std.process.Init) !void {
         const ns_taken = slowest.endTiming(io, gpa, friendly_name);
 
         std.testing.io_instance.deinit();
-        if (std.testing.allocator_instance.deinit() == .leak) {
+        if (std.testing.allocator_instance.deinit() != 0) {
             leak += 1;
             Printer.status(.fail, "\n{s}\n\"{s}\" - Memory Leak\n{s}\n", .{ BORDER, friendly_name, BORDER });
         }
