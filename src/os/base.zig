@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const windows = @import("windows.zig");
+const compat = @import("../compat.zig");
 
 pub const iovec = switch (builtin.os.tag) {
     .windows => windows.WSABUF,
@@ -12,7 +13,7 @@ pub const iovec_const = switch (builtin.os.tag) {
     else => std.c.iovec_const,
 };
 
-pub const unexpected_error_tracing = builtin.mode == .Debug and switch (builtin.zig_backend) {
+pub const unexpected_error_tracing = compat.is_debug and switch (builtin.zig_backend) {
     .stage2_llvm, .stage2_x86_64 => true,
     else => false,
 };

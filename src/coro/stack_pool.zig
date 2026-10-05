@@ -8,6 +8,7 @@ const StackInfo = stack.StackInfo;
 const Timestamp = @import("../time.zig").Timestamp;
 const Duration = @import("../time.zig").Duration;
 const os = @import("../os/root.zig");
+const compat = @import("../compat.zig");
 
 /// A node in a free list, stored at the base of an unused stack.
 const FreeNode = struct {
@@ -239,7 +240,7 @@ pub const StackPool = struct {
                 // above base), but cheap paranoia in safe builds: the slab
                 // must contain this slot.
                 self.mutex.lock();
-                if (builtin.mode == .Debug) {
+                if (compat.is_debug) {
                     std.debug.assert(self.slabOfLocked(stack_info.allocation_ptr) == slab);
                 }
                 // Slab slots always commit at least one page, so the node fits.

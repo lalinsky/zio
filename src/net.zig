@@ -15,6 +15,7 @@ const Group = @import("group.zig").Group;
 const dns = @import("dns/root.zig");
 
 const common = @import("common.zig");
+const compat = @import("compat.zig");
 const waitForIo = common.waitForIo;
 const waitForIoUncancelable = common.waitForIoUncancelable;
 const timedWaitForIo = common.timedWaitForIo;
@@ -2624,8 +2625,8 @@ test "Server: accept never reports ConnectionAborted" {
 
     const AcceptError = @typeInfo(@typeInfo(@TypeOf(Server.accept)).@"fn".return_type.?).error_union.error_set;
     comptime {
-        for (@typeInfo(AcceptError).error_set.?) |e| {
-            if (std.mem.eql(u8, e.name, "ConnectionAborted")) {
+        for (compat.errorNames(AcceptError).?) |name| {
+            if (std.mem.eql(u8, name, "ConnectionAborted")) {
                 @compileError("Server.accept must retry ConnectionAborted, not report it");
             }
         }

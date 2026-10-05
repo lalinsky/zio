@@ -116,4 +116,5 @@ test {
     _ = @import("task.zig");
     _ = @import("stderr.zig");
     _ = @import("os/syscall_cancel.zig");
+    _ = @import("compat.zig");
 }

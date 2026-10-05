@@ -10,6 +10,7 @@ const Duration = @import("../time.zig").Duration;
 const Timestamp = @import("../time.zig").Timestamp;
 const Timeout = @import("../time.zig").Timeout;
 const Clock = @import("../time.zig").Clock;
+const compat = @import("../compat.zig");
 const Queue = @import("queue.zig").Queue;
 const Heap = @import("heap.zig").Heap;
 const Work = @import("completion.zig").Work;
@@ -27,8 +28,8 @@ const common = @import("backends/common.zig");
 
 const log = @import("../common.zig").log;
 
-const in_safe_mode = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
-const in_debug_mode = builtin.mode == .Debug;
+const in_safe_mode = compat.is_safe;
+const in_debug_mode = compat.is_debug;
 
 /// The loop bound to the current thread (debug builds only), used by
 /// `assertOwnThread`. Set by `Loop.init`, cleared by `Loop.deinit`.

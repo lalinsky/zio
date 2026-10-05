@@ -11,6 +11,7 @@ const StackInfo = @import("stack.zig").StackInfo;
 const stackAlloc = @import("stack.zig").stackAlloc;
 const stackFree = @import("stack.zig").stackFree;
 const tsan = @import("tsan.zig");
+const compat = @import("../compat.zig");
 
 /// Current coroutine context for this thread. Used by the SIGSEGV signal handler
 /// to determine if a fault is from a coroutine stack and to access stack metadata.
@@ -1627,10 +1628,10 @@ pub fn Closure(func: anytype) type {
     const FullArgs = std.meta.ArgsTuple(@TypeOf(func));
 
     // Build a new tuple type without the first argument (Coroutine)
-    const args_fields = std.meta.fields(FullArgs);
-    comptime var user_types: [args_fields.len - 1]type = undefined;
-    inline for (args_fields[1..], 0..) |field, i| {
-        user_types[i] = field.type;
+    const arg_types = compat.fieldTypes(FullArgs);
+    comptime var user_types: [arg_types.len - 1]type = undefined;
+    inline for (arg_types[1..], 0..) |ArgType, i| {
+        user_types[i] = ArgType;
     }
     const UserArgs = @Tuple(&user_types);
 

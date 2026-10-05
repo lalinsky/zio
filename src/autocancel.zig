@@ -16,6 +16,7 @@ const Clock = @import("time.zig").Clock;
 const Timestamp = @import("time.zig").Timestamp;
 const AnyTask = @import("task.zig").AnyTask;
 const meta = @import("meta.zig");
+const compat = @import("compat.zig");
 const Timeoutable = @import("common.zig").Timeoutable;
 
 /// Automatically cancels I/O operations on the current task after a timeout.
@@ -168,9 +169,9 @@ pub fn withTimeout(
 /// Whether `error.Canceled` can travel out of an error set, and so whether a
 /// timeout on a `func` returning it could ever be observed.
 fn canBeCanceled(comptime ErrorSet: type) bool {
-    const errors = @typeInfo(ErrorSet).error_set orelse return true; // anyerror
-    for (errors) |e| {
-        if (std.mem.eql(u8, e.name, "Canceled")) return true;
+    const names = compat.errorNames(ErrorSet) orelse return true; // anyerror
+    for (names) |name| {
+        if (std.mem.eql(u8, name, "Canceled")) return true;
     }
     return false;
 }
