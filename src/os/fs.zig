@@ -3125,7 +3125,7 @@ fn dirReadPosix(handle: fd_t, buffer: []u8, restart: bool) DirReadError!usize {
     defer sc.finish();
     while (true) {
         const rc = switch (builtin.os.tag) {
-            .linux => std.os.linux.getdents64(handle, buffer.ptr, buffer.len),
+            .linux => std.os.linux.getdents64(handle, buffer.ptr, @intCast(@min(buffer.len, std.math.maxInt(c_uint)))),
             .macos, .ios, .tvos, .watchos, .visionos => blk: {
                 var basep: i64 = 0;
                 break :blk @as(usize, @bitCast(std.c.__getdirentries64(handle, buffer.ptr, buffer.len, &basep)));
@@ -3533,7 +3533,7 @@ fn isCygwinPty(handle: fd_t) bool {
     // buffer that cannot hold every possible name is enough; anything that does
     // not fit is not one of ours.
     const name_offset = @offsetOf(w.FILE_NAME_INFORMATION, "FileName");
-    var name_bytes align(@alignOf(w.FILE_NAME_INFORMATION)) = [_]u8{0} ** (name_offset + 256 * 2);
+    var name_bytes: [name_offset + 256 * 2]u8 align(@alignOf(w.FILE_NAME_INFORMATION)) = @splat(0);
     if (w.NtQueryInformationFile(
         handle,
         &iosb,
