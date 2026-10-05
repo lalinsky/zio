@@ -7,6 +7,10 @@ All notable changes to this project will be documented in this file.
 - Zig 0.17 is now required. For Zig 0.16, use the v0.19.x releases or the `zig-0.16`
   branch.
 
+### Added
+
+- Added `Dir.sync`, to make files created, renamed or deleted in a directory durable.
+
 ## [0.19.0] - 2026-10-05
 
 This is the last release for Zig 0.16. Later releases require Zig 0.17, and Zig 0.16
