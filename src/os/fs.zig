@@ -422,35 +422,43 @@ pub const DirEntryIterator = struct {
     }
 
     /// Get next directory entry, skipping "." and "..".
-    /// Returns null when no more entries, or if buffer space exhausted (Windows).
+    /// Returns null when no more entries, or if buffer space exhausted (Windows),
+    /// in which case `hasPending()` is still true.
     pub fn next(self: *DirEntryIterator) ?DirEntry {
         while (self.index < self.end) {
+            const start = self.index;
             const entry = self.nextRaw() orelse return null;
 
             // Skip . and ..
             if (self.isDotOrDotDot(entry)) continue;
 
-            // On NetBSD/OpenBSD a zero fileno marks an invalid or deleted entry
-            // still present in the directory block; skip it (matches std).
-            if (builtin.os.tag == .netbsd or builtin.os.tag == .openbsd) {
+            // On Darwin/NetBSD/OpenBSD a zero inode marks an invalid or deleted
+            // entry still present in the directory block; skip it (matches std).
+            if (builtin.os.tag.isDarwin() or builtin.os.tag == .netbsd or builtin.os.tag == .openbsd) {
                 if (self.extractInode(entry) == 0) continue;
             }
 
+            // On Windows the name may be written over this entry's header.
+            const kind = self.extractKind(entry);
+            const inode = self.extractInode(entry);
             const name = self.extractName(entry) orelse {
                 // On Windows, null means no buffer space - backtrack and stop
-                if (builtin.os.tag == .windows) {
-                    self.backtrack(entry);
-                }
+                self.index = start;
                 return null;
             };
 
             return .{
                 .name = name,
-                .kind = self.extractKind(entry),
-                .inode = self.extractInode(entry),
+                .kind = kind,
+                .inode = inode,
             };
         }
         return null;
+    }
+
+    /// Whether unparsed entries remain in the buffer.
+    pub fn hasPending(self: *const DirEntryIterator) bool {
+        return self.index < self.end;
     }
 
     fn nextRaw(self: *DirEntryIterator) ?*align(1) const RawEntry {
@@ -469,19 +477,6 @@ pub const DirEntryIterator = struct {
         };
 
         return entry;
-    }
-
-    fn backtrack(self: *DirEntryIterator, entry: *align(1) const RawEntry) void {
-        // Revert to where this entry started
-        self.index -= switch (builtin.os.tag) {
-            .linux, .macos, .ios, .tvos, .watchos, .visionos, .freebsd, .netbsd, .openbsd => entry.reclen,
-            .dragonfly => entry.reclen(),
-            .windows => if (entry.NextEntryOffset != 0)
-                entry.NextEntryOffset
-            else
-                0, // Was last entry, index is already at end
-            else => @compileError("unsupported OS"),
-        };
     }
 
     fn extractName(self: *DirEntryIterator, entry: *align(1) const RawEntry) ?[]const u8 {
@@ -564,6 +559,43 @@ pub const DirEntryIterator = struct {
         };
     }
 };
+
+test "DirEntryIterator: a Windows name that doesn't fit is left for the next batch" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const Info = w.FILE_BOTH_DIR_INFORMATION;
+    const entry_size = comptime std.mem.alignForward(usize, @offsetOf(Info, "FileName") + w.NAME_MAX * 2, @alignOf(Info));
+    var buffer: [DirEntryIterator.reserved_len + 2 * entry_size]u8 align(@alignOf(Info)) = undefined;
+    const raw = DirEntryIterator.getUnreservedBuffer(&buffer);
+    for (0..2) |i| {
+        const info: *Info = @ptrCast(@alignCast(raw[i * entry_size ..].ptr));
+        info.* = std.mem.zeroes(Info);
+        info.NextEntryOffset = if (i == 0) entry_size else 0;
+        info.FileIndex = @intCast(100 + i);
+        info.FileAttributes = .{ .DIRECTORY = true };
+        info.FileNameLength = w.NAME_MAX * 2;
+        const name: [*]u16 = @ptrCast(&info.FileName);
+        @memset(name[0..w.NAME_MAX], @intCast(0x4e00 + i));
+    }
+
+    var it = DirEntryIterator.init(&buffer, 0, 2 * entry_size);
+    const first = it.next().?;
+    try std.testing.expectEqual(w.NAME_MAX * 3, first.name.len);
+    try std.testing.expectEqualStrings("\u{4e00}", first.name[0..3]);
+    try std.testing.expectEqual(.directory, first.kind);
+    try std.testing.expectEqual(100, first.inode);
+    try std.testing.expect(it.next() == null);
+    try std.testing.expect(it.hasPending());
+
+    it = DirEntryIterator.init(&buffer, it.index, it.end);
+    const second = it.next().?;
+    try std.testing.expectEqual(w.NAME_MAX * 3, second.name.len);
+    try std.testing.expectEqualStrings("\u{4e01}", second.name[0..3]);
+    try std.testing.expectEqual(.directory, second.kind);
+    try std.testing.expectEqual(101, second.inode);
+    try std.testing.expect(it.next() == null);
+    try std.testing.expect(!it.hasPending());
+}
 
 pub const FileSizeError = error{
     AccessDenied,
@@ -791,7 +823,8 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
         const access_mask: w.DWORD = w.GENERIC_READ;
 
         // FILE_FLAG_BACKUP_SEMANTICS is required to open directory handles
-        const file_flags: w.DWORD = w.FILE_ATTRIBUTE_NORMAL | w.FILE_FLAG_BACKUP_SEMANTICS;
+        var file_flags: w.DWORD = w.FILE_ATTRIBUTE_NORMAL | w.FILE_FLAG_BACKUP_SEMANTICS;
+        if (!flags.follow_symlinks) file_flags |= w.FILE_FLAG_OPEN_REPARSE_POINT;
 
         const handle = w.CreateFileW(
             path_w.ptr,
@@ -812,6 +845,14 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
                 else => |err| return unexpectedError(err),
             };
         }
+        errdefer _ = w.CloseHandle(handle);
+
+        // FILE_FLAG_BACKUP_SEMANTICS opens regular files too.
+        var info: w.BY_HANDLE_FILE_INFORMATION = undefined;
+        if (w.GetFileInformationByHandle(handle, &info) == w.FALSE) {
+            return unexpectedError(w.GetLastError());
+        }
+        if (info.dwFileAttributes & w.FILE_ATTRIBUTE_DIRECTORY == 0) return error.NotDir;
 
         return handle;
     }
@@ -1482,6 +1523,9 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
                 .ACCESS_DENIED => return error.AccessDenied,
                 .ALREADY_EXISTS => return error.Unexpected,
                 .SHARING_VIOLATION => return error.FileBusy,
+                .NOT_SAME_DEVICE => return error.CrossDevice,
+                .DIR_NOT_EMPTY => return error.DirNotEmpty,
+                .DIRECTORY => return error.NotDir,
                 else => |err| return unexpectedError(err),
             }
         }
@@ -1534,6 +1578,9 @@ pub fn renameatPreserve(allocator: std.mem.Allocator, old_dir: fd_t, old_path: [
                 .ACCESS_DENIED => return error.AccessDenied,
                 .ALREADY_EXISTS, .FILE_EXISTS => return error.PathAlreadyExists,
                 .SHARING_VIOLATION => return error.FileBusy,
+                .NOT_SAME_DEVICE => return error.CrossDevice,
+                .DIR_NOT_EMPTY => return error.DirNotEmpty,
+                .DIRECTORY => return error.NotDir,
                 else => |err| return unexpectedError(err),
             }
         }
@@ -2036,7 +2083,7 @@ pub fn errnoToDirRenameError(errno: posix.system.E) DirRenameError {
         .NOENT => error.FileNotFound,
         .NOMEM => error.SystemResources,
         .NOTDIR => error.NotDir,
-        .EXIST => error.Unexpected, // PathAlreadyExists mapped to Unexpected for RenameError (use RenamePreserve for non-overwriting)
+        .EXIST => error.DirNotEmpty,
         .NOSPC => error.NoSpaceLeft,
         .ROFS => error.ReadOnlyFileSystem,
         .XDEV => error.CrossDevice,
@@ -2517,19 +2564,50 @@ pub fn errnoToFileSetOwnerError(errno: posix.system.E) FileSetOwnerError {
     };
 }
 
+/// New value of a single file timestamp
+pub const SetTimestamp = union(enum) {
+    /// Keep the timestamp unchanged
+    unchanged,
+    /// Set the timestamp to the current time
+    now,
+    /// Nanoseconds since Unix epoch
+    new: i96,
+};
+
 /// Timestamps for fileSetTimestamps
 pub const FileTimestamps = struct {
-    /// Access time in nanoseconds since Unix epoch, or null to keep unchanged
-    atime: ?i96 = null,
-    /// Modification time in nanoseconds since Unix epoch, or null to keep unchanged
-    mtime: ?i96 = null,
+    /// Access time
+    atime: SetTimestamp = .unchanged,
+    /// Modification time
+    mtime: SetTimestamp = .unchanged,
 };
+
+fn setTimestampToTimespec(timestamp: SetTimestamp) posix.system.timespec {
+    return switch (timestamp) {
+        .unchanged => posix.system.UTIME.OMIT,
+        .now => posix.system.UTIME.NOW,
+        .new => |ns| .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) },
+    };
+}
+
+fn setTimestampToFileTime(timestamp: SetTimestamp, now: w.FILETIME) ?w.FILETIME {
+    return switch (timestamp) {
+        .unchanged => null,
+        .now => now,
+        .new => |ns| w.nanosToFileTime(ns),
+    };
+}
 
 /// Set file timestamps
 pub fn fileSetTimestamps(fd: fd_t, timestamps: FileTimestamps) FileSetTimestampsError!void {
     if (builtin.os.tag == .windows) {
-        const atime: ?w.FILETIME = if (timestamps.atime) |ns| w.nanosToFileTime(ns) else null;
-        const mtime: ?w.FILETIME = if (timestamps.mtime) |ns| w.nanosToFileTime(ns) else null;
+        const now_ticks: u64 = if (timestamps.atime == .now or timestamps.mtime == .now)
+            @bitCast(w.RtlGetSystemTimePrecise())
+        else
+            0;
+        const now: w.FILETIME = .{ .dwLowDateTime = @truncate(now_ticks), .dwHighDateTime = @truncate(now_ticks >> 32) };
+        const atime = setTimestampToFileTime(timestamps.atime, now);
+        const mtime = setTimestampToFileTime(timestamps.mtime, now);
 
         if (w.SetFileTime(
             fd,
@@ -2546,17 +2624,9 @@ pub fn fileSetTimestamps(fd: fd_t, timestamps: FileTimestamps) FileSetTimestamps
         return;
     }
 
-    const UTIME_OMIT = 0x3ffffffe;
-
     const times: [2]posix.system.timespec = .{
-        if (timestamps.atime) |ns|
-            .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) }
-        else
-            .{ .sec = 0, .nsec = UTIME_OMIT },
-        if (timestamps.mtime) |ns|
-            .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) }
-        else
-            .{ .sec = 0, .nsec = UTIME_OMIT },
+        setTimestampToTimespec(timestamps.atime),
+        setTimestampToTimespec(timestamps.mtime),
     };
 
     const sc = try syscall_cancel.Syscall.begin();
@@ -2656,17 +2726,9 @@ pub fn dirSetFileTimestamps(allocator: std.mem.Allocator, dir: fd_t, path: []con
     const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.Unexpected;
     defer allocator.free(path_z);
 
-    const UTIME_OMIT = 0x3ffffffe;
-
     const times: [2]posix.system.timespec = .{
-        if (timestamps.atime) |ns|
-            .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) }
-        else
-            .{ .sec = 0, .nsec = UTIME_OMIT },
-        if (timestamps.mtime) |ns|
-            .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) }
-        else
-            .{ .sec = 0, .nsec = UTIME_OMIT },
+        setTimestampToTimespec(timestamps.atime),
+        setTimestampToTimespec(timestamps.mtime),
     };
 
     const at_flags: u32 = if (!flags.follow_symlinks) posix.AT.SYMLINK_NOFOLLOW else 0;

@@ -470,7 +470,6 @@ pub const Dir = struct {
         // index/end are positions in the raw-entry (unreserved) region.
         index: usize = 0,
         end: usize = 0,
-        name_index: usize = 0,
         started: bool = false,
         finished: bool = false,
 
@@ -485,32 +484,28 @@ pub const Dir = struct {
                 if (self.end - self.index == 0) {
                     if (self.finished) return null;
                     const restart = !self.started;
-                    self.started = true;
 
                     var op = ev.DirRead.init(self.fd, &self.buffer, restart);
                     try waitForIo(&op.c);
                     const n = try op.getResult();
+                    self.started = true;
                     if (n == 0) {
                         self.finished = true;
                         return null;
                     }
                     self.index = 0;
                     self.end = n;
-                    self.name_index = 0;
                 }
 
                 // Reconstruct the parser each call (rather than storing it) so the
                 // Iterator holds no slice into its own buffer and stays movable.
                 var it = os.fs.DirEntryIterator.init(&self.buffer, self.index, self.end);
-                it.name_index = self.name_index;
                 const entry = it.next() orelse {
+                    std.debug.assert(!it.hasPending());
                     self.index = it.index;
-                    self.end = it.end;
-                    self.name_index = it.name_index;
                     continue;
                 };
                 self.index = it.index;
-                self.name_index = it.name_index;
                 return entry;
             }
         }
@@ -2081,11 +2076,18 @@ test "File: setTimestamps" {
     const atime: i96 = 1000000000 * std.time.ns_per_s; // 2001-09-09
     const mtime: i96 = 1500000000 * std.time.ns_per_s; // 2017-07-14
 
-    try t.file.setTimestamps(.{ .atime = atime, .mtime = mtime });
+    try t.file.setTimestamps(.{ .atime = .{ .new = atime }, .mtime = .{ .new = mtime } });
 
     const info = try t.file.stat();
     try std.testing.expectEqual(atime, info.atime);
     try std.testing.expectEqual(mtime, info.mtime);
+
+    const new_mtime: i96 = 1600000000 * std.time.ns_per_s; // 2020-09-13
+    try t.file.setTimestamps(.{ .mtime = .{ .new = new_mtime } });
+
+    const new_info = try t.file.stat();
+    try std.testing.expectEqual(atime, new_info.atime);
+    try std.testing.expectEqual(new_mtime, new_info.mtime);
 }
 
 test "File: reader and writer interface" {
@@ -2196,7 +2198,7 @@ test "Dir: setFileTimestamps" {
     const atime: i96 = 1000000000 * std.time.ns_per_s; // 2001-09-09
     const mtime: i96 = 1500000000 * std.time.ns_per_s; // 2017-07-14
 
-    try dir.setFileTimestamps(file_path, .{ .atime = atime, .mtime = mtime }, .{});
+    try dir.setFileTimestamps(file_path, .{ .atime = .{ .new = atime }, .mtime = .{ .new = mtime } }, .{});
 
     const info = try dir.statPath(file_path);
     try std.testing.expectEqual(atime, info.atime);
@@ -2817,6 +2819,51 @@ test "Dir: deleteTree" {
 
     try cwd.deleteTree(root_path);
     try std.testing.expectError(error.FileNotFound, cwd.openDir(root_path, .{}));
+}
+
+test "Dir: deleteTree removes a directory symlink without following it" {
+    var t = try TestDirFixture.init();
+    defer t.deinit();
+
+    const cwd = t.dir;
+    try cwd.createDir("outside", 0o755);
+    (try cwd.createFile("outside/keep.txt", .{})).close();
+    try cwd.createDir("tree", 0o755);
+    {
+        const tree = try cwd.openDir("tree", .{});
+        defer tree.close();
+        if (builtin.os.tag == .windows) {
+            const CreateSymbolicLinkW = struct {
+                extern "kernel32" fn CreateSymbolicLinkW(
+                    lpSymlinkFileName: [*:0]const u16,
+                    lpTargetFileName: [*:0]const u16,
+                    dwFlags: u32,
+                ) callconv(.winapi) u8;
+            }.CreateSymbolicLinkW;
+            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const tree_path = try tree.realPath(&path_buf);
+            const link_path = try std.fmt.allocPrint(std.testing.allocator, "{s}\\link", .{tree_path});
+            defer std.testing.allocator.free(link_path);
+            const link_w = try std.unicode.wtf8ToWtf16LeAllocZ(std.testing.allocator, link_path);
+            defer std.testing.allocator.free(link_w);
+            const directory_flag = 0x1;
+            const allow_unprivileged_flag = 0x2;
+            if (CreateSymbolicLinkW(link_w, std.unicode.wtf8ToWtf16LeStringLiteral("..\\outside"), directory_flag | allow_unprivileged_flag) == 0) {
+                return error.SkipZigTest;
+            }
+            // Wine reports success without creating the link.
+            tree.access("link", .{}) catch |err| switch (err) {
+                error.FileNotFound => return error.SkipZigTest,
+                else => |e| return e,
+            };
+        } else {
+            try tree.symLink("../outside", "link", .{ .is_directory = true });
+        }
+    }
+
+    try cwd.deleteTree("tree");
+    try std.testing.expectError(error.FileNotFound, cwd.access("tree", .{}));
+    try cwd.access("outside/keep.txt", .{});
 }
 
 test "Dir: deleteTree on a file and on a missing path" {

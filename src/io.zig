@@ -1067,14 +1067,11 @@ fn permissionsToZioMode(permissions: Io.File.Permissions) os_fs.mode_t {
     return permissions.toMode();
 }
 
-/// Resolve a `std.Io.File.SetTimestamp` union into the `?i96` nanoseconds
-/// representation expected by `os_fs.FileTimestamps` (null == UTIME_OMIT).
-/// `.now` is evaluated against the realtime clock at call time.
-fn resolveSetTimestamp(t: Io.File.SetTimestamp) ?i96 {
+fn resolveSetTimestamp(t: Io.File.SetTimestamp) os_fs.SetTimestamp {
     return switch (t) {
-        .unchanged => null,
-        .now => @intCast(time.Timestamp.now(.realtime).toNanoseconds()),
-        .new => |ts| ts.nanoseconds,
+        .unchanged => .unchanged,
+        .now => .now,
+        .new => |ts| .{ .new = ts.nanoseconds },
     };
 }
 
@@ -1356,17 +1353,11 @@ fn dirReadImpl(_: ?*anyopaque, r: *Io.Dir.Reader, entries: []Io.Dir.Entry) Io.Di
             if (r.state == .finished) return 0;
 
             const restart = r.state == .reset;
-            r.state = .reading;
 
             var op = ev.DirRead.init(stdIoHandleToZio(r.dir.handle), r.buffer, restart);
-            waitForIo(&op.c) catch |err| {
-                r.state = .reset;
-                return err;
-            };
-            const n = op.getResult() catch |err| {
-                r.state = .reset;
-                return err;
-            };
+            try waitForIo(&op.c);
+            const n = try op.getResult();
+            r.state = .reading;
             if (n == 0) {
                 r.state = .finished;
                 return 0;
@@ -1382,7 +1373,10 @@ fn dirReadImpl(_: ?*anyopaque, r: *Io.Dir.Reader, entries: []Io.Dir.Entry) Io.Di
 
         const entry = it.next() orelse {
             r.index = it.index;
-            r.end = it.end;
+            if (it.hasPending()) {
+                std.debug.assert(entry_index > 0);
+                break;
+            }
             continue;
         };
         r.index = it.index;
@@ -4136,6 +4130,21 @@ test "io: deleteFile on a directory returns IsDir" {
     try std.testing.expectError(error.IsDir, dir.deleteFile(io, dir_path));
 }
 
+test "io: openDir on a file returns NotDir" {
+    var t = try TestDirFixture.init();
+    defer t.deinit();
+    const io = t.rt.io();
+
+    const dir = t.stdDir();
+    const file_path = "test_io_opendir_on_file";
+
+    var file = try dir.createFile(io, file_path, .{});
+    file.close(io);
+
+    try std.testing.expectError(error.NotDir, dir.openDir(io, file_path, .{}));
+    try std.testing.expectError(error.NotDir, dir.openDir(io, file_path, .{ .iterate = true }));
+}
+
 test "io: dir createDirPath creates nested directories" {
     var t = try TestDirFixture.init();
     defer t.deinit();
@@ -4303,6 +4312,46 @@ test "io: dir iterate over files" {
     try dir.deleteDir(io, dir_path);
 }
 
+test "io: dir read error does not rewind the reader" {
+    // See comment on dir iterate over files above.
+    if (builtin.os.tag == .netbsd) return error.SkipZigTest;
+
+    var t = try TestDirFixture.init();
+    defer t.deinit();
+    const io = t.rt.io();
+
+    const dir = t.stdDir();
+    const dir_path = "test_io_dir_read_error";
+
+    try dir.createDir(io, dir_path, .default_dir);
+    var sub = try dir.openDir(io, dir_path, .{ .iterate = true });
+    defer sub.close(io);
+
+    var file = try sub.createFile(io, "a.txt", .{});
+    file.close(io);
+
+    var buffer: [Io.Dir.Reader.min_buffer_len]u8 align(@alignOf(usize)) = undefined;
+    var reader: Io.Dir.Reader = .init(sub, &buffer);
+    var entries: [1]Io.Dir.Entry = undefined;
+    try std.testing.expectEqual(1, try reader.read(io, &entries));
+
+    const Canceled = struct {
+        fn read(inner_io: Io, r: *Io.Dir.Reader, result: *Io.Dir.Reader.Error!usize) void {
+            inner_io.sleep(.fromSeconds(60), .awake) catch {};
+            inner_io.recancel();
+            var buf: [1]Io.Dir.Entry = undefined;
+            result.* = r.read(inner_io, &buf);
+        }
+    };
+    var result: Io.Dir.Reader.Error!usize = 0;
+    var future = io.async(Canceled.read, .{ io, &reader, &result });
+    try io.sleep(.fromMilliseconds(10), .awake);
+    future.cancel(io);
+    try std.testing.expectError(error.Canceled, result);
+
+    try std.testing.expectEqual(0, try reader.read(io, &entries));
+}
+
 test "io: dir iterate empty directory" {
     // See comment on dir iterate over files above.
     if (builtin.os.tag == .netbsd) return error.SkipZigTest;
@@ -4427,6 +4476,30 @@ test "io: dir setTimestamps round-trip" {
         .access_timestamp = .now,
         .modify_timestamp = .now,
     });
+}
+
+test "io: setting timestamps to now needs only write permission" {
+    // macOS refuses futimens on a /dev/null the caller doesn't own, even with
+    // UTIME_NOW, and there is no other file a non-root test can write but not own.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (std.os.linux.geteuid() == 0) return error.SkipZigTest;
+
+    var t = try TestDirFixture.init();
+    defer t.deinit();
+    const io = t.rt.io();
+
+    const cwd = Io.Dir.cwd();
+    cwd.setTimestamps(io, "/dev/null", .{
+        .access_timestamp = .now,
+        .modify_timestamp = .now,
+    }) catch |err| switch (err) {
+        error.AccessDenied, error.ReadOnlyFileSystem => return error.SkipZigTest,
+        else => |e| return e,
+    };
+
+    var file = try cwd.openFile(io, "/dev/null", .{ .mode = .write_only });
+    defer file.close(io);
+    try file.setTimestampsNow(io);
 }
 
 test "io: dir realPath and realPathFile" {

@@ -115,6 +115,39 @@ All notable changes to this project will be documented in this file.
 - Fixed the built-in DNS resolver failing concurrent lookups of the same name with
   `error.Canceled` when the task that started the lookup was canceled.
 
+- A failed or canceled `std.Io` directory read no longer rewinds the reader, which made the
+  next read return entries that were already seen.
+
+- Directory iteration on macOS now skips entries with a zero inode, which mark deleted
+  entries, like std does.
+
+- POSIX renames now return `error.DirNotEmpty` instead of `error.Unexpected` when the system
+  reports `EEXIST` for a non-empty target directory.
+
+- Setting a file timestamp to `.now` through `std.Io` now passes `UTIME_NOW` to the system
+  instead of the current time, so it works for non-owners with write permission. The native
+  `FileTimestamps` fields are now a `SetTimestamp` union (`.unchanged`, `.now` or
+  `.new = nanoseconds`) instead of `?i96`.
+
+- Fixed leaving a timestamp unchanged when setting file timestamps on macOS and the BSDs,
+  which used Linux's `UTIME_OMIT` value.
+
+- Renames on Windows now return `error.CrossDevice`, `error.DirNotEmpty` and `error.NotDir`
+  instead of `error.Unexpected` for the corresponding system errors.
+
+- Opening a regular file as a directory on Windows now fails with `error.NotDir` instead of
+  returning a handle.
+
+- Fixed `deleteTree` on Windows following a directory symlink or junction inside the tree
+  and deleting the contents of its target. Opening a directory with
+  `follow_symlinks = false` now opens the link itself, as std does.
+
+- Fixed directory reads on Windows reporting the wrong kind and inode for entries with long
+  non-ASCII names.
+
+- Fixed directory reads on Windows hanging when a batch of entries ran out of room for
+  a long non-ASCII name, and losing the last entry of a batch in the same situation.
+
 - Fixed a DNS lookup that joined another task's in-flight query losing its own cancellation
   when the answer arrived at the same time.
 
