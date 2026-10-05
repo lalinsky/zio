@@ -307,7 +307,7 @@ const FutexDarwin = struct {
         );
 
         if (rc < 0) {
-            const err: posix.sys.E = @enumFromInt(-rc);
+            const err: posix.sys.E = @fromBackingInt(@intCast(-rc));
             if (err == .TIMEDOUT) return error.Timeout;
         }
     }
@@ -346,7 +346,7 @@ const FutexFreeBSD = struct {
         const interval: sys.umtx_time = .{
             .timeout = timeout.toTimespec(),
             .flags = 0, // an interval, not an absolute deadline
-            .clockid = @intFromEnum(posix.system.CLOCK.MONOTONIC),
+            .clockid = @backingInt(posix.system.CLOCK.MONOTONIC),
         };
 
         const rc = sys._umtx_op(
