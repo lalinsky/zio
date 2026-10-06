@@ -1439,6 +1439,27 @@ pub fn fileSync(fd: fd_t, flags: FileSyncFlags) FileSyncError!void {
 
     const sc = try syscall_cancel.Syscall.begin();
     defer sc.finish();
+
+    // On Darwin, fsync() only hands the data to the drive, which can keep it in
+    // its volatile write cache; F_FULLFSYNC also flushes that cache. It applies
+    // to `only_data` too, which relaxes what metadata is flushed, not whether the
+    // data is durable. Some filesystems (SMB, some FUSE) don't support it, so
+    // those fall back to fsync()/fdatasync() below.
+    if (builtin.os.tag.isDarwin()) {
+        while (true) {
+            const rc = posix.system.fcntl(fd, posix.system.F.FULLFSYNC, @as(c_int, 0));
+            switch (posix.errno(rc)) {
+                .SUCCESS => return,
+                .INTR => {
+                    try sc.checkCancel();
+                    continue;
+                },
+                .OPNOTSUPP, .INVAL => break, // ENOTSUP is OPNOTSUPP on Darwin
+                else => |err| return errnoToFileSyncError(err),
+            }
+        }
+    }
+
     while (true) {
         const rc = if (flags.only_data)
             posix.system.fdatasync(fd)

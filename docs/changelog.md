@@ -7,6 +7,12 @@ All notable changes to this project will be documented in this file.
 - Zig 0.17 is now required. For Zig 0.16, use the v0.19.x releases or the `zig-0.16`
   branch.
 
+### Fixed
+
+- `File.sync` on macOS now uses `F_FULLFSYNC`, so synced data is flushed out of the
+  drive's write cache too, as on other systems. It falls back to `fsync` on filesystems
+  that don't support it.
+
 ## [0.19.0] - 2026-10-05
 
 This is the last release for Zig 0.16. Later releases require Zig 0.17, and Zig 0.16
