@@ -679,7 +679,7 @@ pub const IpAddress = extern union {
         errdefer socket.close();
 
         try socket.connect(.{ .ip = self }, .{ .timeout = options.timeout });
-        os.net.disableNagle(socket.handle);
+        socket.setNoDelay(true) catch {};
         return .{ .socket = socket };
     }
 };
@@ -947,9 +947,17 @@ pub const Socket = struct {
 
     /// Enable or disable Nagle's algorithm (TCP_NODELAY)
     /// When enabled (true), disables buffering for low-latency communication.
-    /// TCP streams from `connect` and `accept` have it enabled already.
+    ///
+    /// TCP streams from `connect` and `accept`, in both the native API and
+    /// `std.Io`, have it enabled already, as in Go. zio writes through buffered
+    /// writers that flush a whole message at a time, so Nagle has nothing left to
+    /// coalesce. All it still does is hold back the tail of a message that goes
+    /// out in more than one write, such as a body spanning several TLS records,
+    /// until the peer ACKs what came before, which a delayed ACK makes up to 40ms.
+    /// A failure to enable it there is ignored: the stream works either way, and
+    /// it can fail on a connection the peer has already reset.
     pub fn setNoDelay(self: Socket, enabled: bool) !void {
-        try self.setBoolOption(os.posix.IPPROTO.TCP, os.posix.TCP.NODELAY, enabled);
+        try os.net.setNoDelay(self.handle, enabled);
     }
 
     /// Whether Nagle's algorithm is disabled (TCP_NODELAY)
@@ -1205,7 +1213,7 @@ pub const Server = struct {
                 else => |e| return e,
             };
             const address: Address = .fromPosix(&peer_addr.any, peer_addr_len);
-            if (address.getType() == .ip) os.net.disableNagle(handle);
+            if (address.getType() == .ip) os.net.setNoDelay(handle, true) catch {};
             return .{ .socket = .{ .handle = handle, .address = address } };
         }
     }

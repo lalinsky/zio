@@ -2215,7 +2215,7 @@ fn netAcceptImpl(_: ?*anyopaque, server: Io.net.Socket.Handle, _: Io.net.Server.
         };
 
         switch (peer_addr.any.family) {
-            os_net.AF.INET, os_net.AF.INET6 => os_net.disableNagle(handle),
+            os_net.AF.INET, os_net.AF.INET6 => os_net.setNoDelay(handle, true) catch {},
             else => {},
         }
 
@@ -2369,7 +2369,7 @@ fn netConnectIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: I
     connect_op.getResult() catch |err| return connectErrToConnectErr(err);
 
     if (options.mode == .stream and (options.protocol orelse .tcp) == .tcp) {
-        os_net.disableNagle(handle);
+        os_net.setNoDelay(handle, true) catch {};
     }
 
     return .{
