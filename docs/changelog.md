@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- TCP streams that zio connects or accepts, through both the native API and `std.Io`, now
+  have Nagle's algorithm disabled (`TCP_NODELAY`), as Go does by default. A message
+  written in more than one piece, such as a body spanning several TLS records, no longer
+  waits up to 40ms for the peer's delayed ACK. `Socket.setNoDelay(false)` turns it back
+  on, and the new `Socket.getNoDelay` reports the setting.
+
 ## [0.19.0] - 2026-10-05
 
 This is the last release for Zig 0.16. Later releases require Zig 0.17, and Zig 0.16

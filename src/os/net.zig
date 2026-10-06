@@ -771,6 +771,12 @@ pub fn setsockopt(fd: fd_t, level: i32, optname: u32, optval: []const u8) Setsoc
     }
 }
 
+/// Sets TCP_NODELAY, which disables Nagle's algorithm when enabled.
+pub fn setNoDelay(fd: fd_t, enabled: bool) SetsockoptError!void {
+    const value: c_int = @intFromBool(enabled);
+    return setsockopt(fd, IPPROTO.TCP, posix.TCP.NODELAY, std.mem.asBytes(&value));
+}
+
 pub const GetsockoptError = error{Unexpected};
 
 pub fn getsockopt(fd: fd_t, level: i32, optname: u32, optval: []u8) GetsockoptError!void {
