@@ -11,6 +11,9 @@ All notable changes to this project will be documented in this file.
 
 - Added `Dir.sync`, to make files created, renamed or deleted in a directory durable.
 
+- Added `File.syncRange`, a wrapper for Linux's `sync_file_range`, to start writeback of
+  a byte range ahead of a `sync`.
+
 ## [0.19.0] - 2026-10-05
 
 This is the last release for Zig 0.16. Later releases require Zig 0.17, and Zig 0.16

@@ -89,6 +89,7 @@ pub const Op = enum {
     file_read_streaming,
     file_write_streaming,
     file_sync,
+    file_sync_range,
     file_set_size,
     file_set_permissions,
     file_set_owner,
@@ -154,6 +155,7 @@ pub const Op = enum {
             .file_read_streaming => FileReadStreaming,
             .file_write_streaming => FileWriteStreaming,
             .file_sync => FileSync,
+            .file_sync_range => FileSyncRange,
             .file_set_size => FileSetSize,
             .file_set_permissions => FileSetPermissions,
             .file_set_owner => FileSetOwner,
@@ -221,6 +223,7 @@ pub const Op = enum {
             FileReadStreaming => .file_read_streaming,
             FileWriteStreaming => .file_write_streaming,
             FileSync => .file_sync,
+            FileSyncRange => .file_sync_range,
             FileSetSize => .file_set_size,
             FileSetPermissions => .file_set_permissions,
             FileSetOwner => .file_set_owner,
@@ -1498,6 +1501,34 @@ pub const FileSync = struct {
 
     pub fn getResult(self: *const FileSync) Error!void {
         return self.c.getResult(.file_sync);
+    }
+};
+
+pub const FileSyncRange = struct {
+    c: Completion,
+    result_private_do_not_touch: void = {},
+    internal: BackendOpData(.file_sync_range, "FileSyncRangeData") = .{},
+    linked_work: LinkedWorkData(.file_sync_range) = .{},
+    route: RouteData(.file_sync_range) = .none,
+    handle: fs.fd_t,
+    offset: u64,
+    len: u64,
+    flags: fs.FileSyncRangeFlags,
+
+    pub const Error = fs.FileSyncRangeError || Cancelable;
+
+    pub fn init(handle: fs.fd_t, offset: u64, len: u64, flags: fs.FileSyncRangeFlags) FileSyncRange {
+        return .{
+            .c = .init(.file_sync_range),
+            .handle = handle,
+            .offset = offset,
+            .len = len,
+            .flags = flags,
+        };
+    }
+
+    pub fn getResult(self: *const FileSyncRange) Error!void {
+        return self.c.getResult(.file_sync_range);
     }
 };
 
