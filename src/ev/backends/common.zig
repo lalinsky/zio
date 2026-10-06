@@ -17,6 +17,7 @@ const FileReadStreaming = @import("../completion.zig").FileReadStreaming;
 const FileWriteStreaming = @import("../completion.zig").FileWriteStreaming;
 const FileSync = @import("../completion.zig").FileSync;
 const FileSetSize = @import("../completion.zig").FileSetSize;
+const FileSyncRange = @import("../completion.zig").FileSyncRange;
 const FileSetPermissions = @import("../completion.zig").FileSetPermissions;
 const FileSetOwner = @import("../completion.zig").FileSetOwner;
 const FileSetTimestamps = @import("../completion.zig").FileSetTimestamps;
@@ -273,6 +274,16 @@ pub fn handleFileSync(c: *Completion) void {
     }
 }
 
+/// Helper to handle file sync range operation
+pub fn handleFileSyncRange(c: *Completion) void {
+    const data = c.cast(FileSyncRange);
+    if (fs.fileSyncRange(data.handle, data.offset, data.len, data.flags)) |_| {
+        c.setResult(.file_sync_range, {});
+    } else |err| {
+        c.setError(err);
+    }
+}
+
 /// Helper to handle file set size operation
 pub fn handleFileSetSize(c: *Completion) void {
     const data = c.cast(FileSetSize);
@@ -399,6 +410,12 @@ pub fn fileWriteStreamingWork(work: *Work) void {
 pub fn fileSyncWork(work: *Work) void {
     const file_sync = opFromWork(work, FileSync);
     handleFileSync(&file_sync.c);
+}
+
+/// Work function for FileSyncRange - performs blocking sync_file_range() syscall
+pub fn fileSyncRangeWork(work: *Work) void {
+    const file_sync_range = opFromWork(work, FileSyncRange);
+    handleFileSyncRange(&file_sync_range.c);
 }
 
 /// Work function for FileSetSize - performs blocking ftruncate() syscall

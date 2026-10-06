@@ -1259,6 +1259,11 @@ pub const File = struct {
         op.* = ev.FileSync.init(self.fd, flags);
     }
 
+    /// Fill `op` with a writeback of `len` bytes at `offset` per `flags`.
+    pub fn prepSyncRange(self: File, op: *ev.FileSyncRange, offset: u64, len: u64, flags: os.fs.FileSyncRangeFlags) void {
+        op.* = ev.FileSyncRange.init(self.fd, offset, len, flags);
+    }
+
     /// Read from file into a single slice.
     pub fn read(self: File, buffer: []u8, offset: u64) ReadError!usize {
         var storage: [1]os.iovec = undefined;
@@ -1357,6 +1362,26 @@ pub const File = struct {
     pub fn sync(self: File, flags: os.fs.FileSyncFlags) SyncError!void {
         var op: ev.FileSync = undefined;
         self.prepSync(&op, flags);
+        try waitForIo(&op.c);
+        try op.getResult();
+    }
+
+    pub const SyncRangeError = os.fs.FileSyncRangeError || Cancelable;
+
+    /// Start writeback of `len` bytes at `offset`, optionally waiting for it,
+    /// as Linux's sync_file_range(2). `len == 0` means to the end of the file,
+    /// and a range may be widened to the end of the file.
+    ///
+    /// This is a writeback hint, not a durability guarantee: it flushes neither
+    /// metadata nor the drive cache, so call `sync` to make data durable. Its use
+    /// is pacing a large write: starting writeback as you go keeps dirty pages
+    /// from piling up, so the final `sync` is short instead of one long stall.
+    ///
+    /// A no-op on other systems, and on 32-bit Linux without io_uring.
+    pub fn syncRange(self: File, offset: u64, len: u64, flags: os.fs.FileSyncRangeFlags) SyncRangeError!void {
+        if (builtin.os.tag != .linux) return;
+        var op: ev.FileSyncRange = undefined;
+        self.prepSyncRange(&op, offset, len, flags);
         try waitForIo(&op.c);
         try op.getResult();
     }
@@ -2026,6 +2051,19 @@ test "File: sync operation" {
 
     // Data-only sync (fdatasync)
     try t.file.sync(.{ .only_data = true });
+}
+
+test "File: syncRange" {
+    var t = try TestFileFixture.create(.{});
+    defer t.deinit();
+
+    const data: [8192]u8 = @splat(0xab);
+    try std.testing.expectEqual(data.len, try t.file.write(&data, 0));
+
+    // Start writeback of the first page, then wait for the whole file.
+    try t.file.syncRange(0, 4096, .{});
+    try t.file.syncRange(0, 0, .{ .wait_before = true, .write = true, .wait_after = true });
+    try t.file.sync(.{});
 }
 
 test "File: size and setSize" {

@@ -58,6 +58,7 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
         .file_read_streaming => common.handleFileReadStreaming(c),
         .file_write_streaming => common.handleFileWriteStreaming(c),
         .file_sync => common.handleFileSync(c),
+        .file_sync_range => common.handleFileSyncRange(c),
         .file_set_size => common.handleFileSetSize(c),
         .file_set_permissions => common.handleFileSetPermissions(c),
         .file_set_owner => common.handleFileSetOwner(c),
