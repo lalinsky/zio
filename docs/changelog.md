@@ -12,6 +12,11 @@ All notable changes to this project will be documented in this file.
   waits up to 40ms for the peer's delayed ACK. `Socket.setNoDelay(false)` turns it back
   on, and the new `Socket.getNoDelay` reports the setting.
 
+### Fixed
+
+- Fixed a panic in `Runtime.init` with more than one executor when logging through
+  `zio.debug_io` (#804).
+
 ## [0.19.0] - 2026-10-05
 
 This is the last release for Zig 0.16. Later releases require Zig 0.17, and Zig 0.16
