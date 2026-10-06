@@ -1594,11 +1594,19 @@ pub const Runtime = struct {
     workers: std.ArrayList(Worker) = .empty,
     task_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), // Active task counter
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    // Permission for worker threads to tear down their executors. Set by
-    // shutdownWorkers() once every shutdown notification has been delivered,
-    // so a worker cannot close its waker fds while a notifier is still using
-    // them. See the wait in runWorker().
-    teardown: os.ResetEvent = .init(),
+    // Worker lifecycle barriers, see runWorker(). A worker starts running
+    // only once worker_start is .run, after every executor is registered, so
+    // no worker can park, and appear in idle_mask, before it is in the
+    // executor list. If init() fails first, worker_start becomes .abort and
+    // workers skip running altogether. On the way out a worker counts itself
+    // in workers_stopped and tears down its executor only once teardown is
+    // set, after every worker has stopped running, so no executor can steal
+    // from or wake an executor that is already torn down.
+    worker_mutex: os.Mutex = .init(),
+    worker_cond: os.Condition = .init(),
+    worker_start: WorkerStart = .wait,
+    workers_stopped: usize = 0,
+    teardown: bool = false,
     metrics_monitor: ?std.Thread = null,
     metrics_stop: std.atomic.Value(u32) = .init(0),
     own_self: bool = false,
@@ -1607,9 +1615,6 @@ pub const Runtime = struct {
 
     /// Runtime-wide work-stealing state; empty unless tasks migrate.
     const Stealing = if (migrates) struct {
-        /// Whether executors may steal from each other. False with a single
-        /// executor and during shutdown.
-        active: std.atomic.Value(bool) = .init(false),
         /// Shared global run queue: external submissions, cross-thread wakes,
         /// and per-executor ring overflow land here, and every executor drains
         /// a fair batch from it once per tick.
@@ -1622,6 +1627,8 @@ pub const Runtime = struct {
         /// Executor.park).
         baton: std.atomic.Value(u32) = .init(0),
     } else struct {};
+
+    const WorkerStart = enum { wait, run, abort };
 
     const Worker = struct {
         thread: std.Thread = undefined,
@@ -1700,9 +1707,7 @@ pub const Runtime = struct {
                 }
                 self.executors.appendAssumeCapacity(&worker.executor);
             }
-            // With no workers there is nobody to steal from or to; leaving this
-            // false lets single-executor runtimes skip the steal machinery.
-            if (migrates and num_workers > 0) self.stealing.active.store(true, .release);
+            self.startWorkers(.run);
         }
 
         if (options.metrics_log_interval.value > 0) {
@@ -1746,21 +1751,53 @@ pub const Runtime = struct {
         }
     }
 
+    /// Release the worker threads waiting in runWorker(), either to run their
+    /// executors or to skip straight to shutdown. Only the first call decides.
+    fn startWorkers(self: *Runtime, start: WorkerStart) void {
+        self.worker_mutex.lock();
+        defer self.worker_mutex.unlock();
+        if (self.worker_start != .wait) return;
+        self.worker_start = start;
+        self.worker_cond.broadcast();
+    }
+
     /// Stop worker executors and join threads. Used by deinit() and init() error path.
     fn shutdownWorkers(self: *Runtime) void {
-        if (migrates) self.stealing.active.store(false, .release);
-        // Wait for all workers to finish initialization, then stop their event loops.
-        // Workers that failed to initialize (err != null) don't have valid executors.
+        // A worker whose run() fails retries until this is set.
+        self.shutting_down.store(true, .release);
+
+        // Wait for all workers to finish initialization. Workers that failed
+        // to initialize (err != null) don't have valid executors; the rest
+        // all pass through the stop barrier below.
+        var running: usize = 0;
         for (self.workers.items) |*worker| {
             worker.ready.wait();
+            if (worker.err == null) running += 1;
+        }
+
+        // On the init() error path the executor list may be incomplete, so
+        // workers still waiting to start must not run.
+        self.startWorkers(.abort);
+
+        for (self.workers.items) |*worker| {
             if (worker.err == null) {
                 worker.executor.shutdown.notify();
             }
         }
 
-        // Every notify() above has returned, so no waker syscall is in flight
-        // against a worker loop any more; workers may now tear theirs down.
-        self.teardown.set();
+        // Once every worker has stopped running, no executor can steal from or
+        // wake another, and every notify() above has returned, so no waker
+        // syscall is in flight against a worker loop any more; workers may now
+        // tear theirs down.
+        {
+            self.worker_mutex.lock();
+            defer self.worker_mutex.unlock();
+            while (self.workers_stopped < running) {
+                self.worker_cond.wait(&self.worker_mutex);
+            }
+            self.teardown = true;
+            self.worker_cond.broadcast();
+        }
 
         // Join worker threads
         for (self.workers.items) |*worker| {
@@ -1889,27 +1926,47 @@ pub const Runtime = struct {
         };
     }
 
-    /// Worker thread entry point. Initializes executor and runs until stopped.
-    /// Signals worker.ready after initialization (success or failure).
+    /// Worker thread entry point. Initializes the executor and signals
+    /// worker.ready (success or failure), then waits for startWorkers() to
+    /// release it, runs until stopped (unless aborted), and waits for
+    /// teardown before deinit.
     fn runWorker(self: *Runtime, worker: *Worker, id: ExecutorId) void {
         worker.executor.init(self, id) catch |e| {
             worker.err = e;
             worker.ready.set();
             return;
         };
+        defer worker.executor.deinit();
+
+        worker.ready.set();
+
+        self.worker_mutex.lock();
+        while (self.worker_start == .wait) {
+            self.worker_cond.wait(&self.worker_mutex);
+        }
+        const start = self.worker_start;
+        self.worker_mutex.unlock();
+
         defer {
             // A cross-thread notifier publishes its wake (Async.pending plus the
             // loop's wake_requested bit) before it performs the waker syscall,
             // and the loop is free to act on that publication in between: it can
             // run the shutdown callback, stop, and get here while the notifier
-            // is still short of its write(). Deiniting now would close the waker
-            // fds underneath it, so wait until shutdownWorkers() reports that
-            // every notification has been delivered.
-            self.teardown.wait();
-            worker.executor.deinit();
+            // is still short of its write(). Other executors may also still be
+            // running, stealing from this one or waking its loop. Deiniting now
+            // would close the waker fds underneath them, so wait until
+            // shutdownWorkers() reports that every worker has stopped and every
+            // notification has been delivered.
+            self.worker_mutex.lock();
+            defer self.worker_mutex.unlock();
+            self.workers_stopped += 1;
+            self.worker_cond.broadcast();
+            while (!self.teardown) {
+                self.worker_cond.wait(&self.worker_mutex);
+            }
         }
 
-        worker.ready.set();
+        if (start == .abort) return;
 
         var backoff = Duration.fromMilliseconds(10);
         const max_backoff = Duration.fromMilliseconds(1000);
@@ -1940,9 +1997,10 @@ pub const Runtime = struct {
         return total;
     }
 
-    /// Whether other executors can currently steal from this runtime's queues.
+    /// Whether other executors can steal from this runtime's queues. The
+    /// executor list only grows during init, before any worker runs.
     pub inline fn stealingActive(self: *Runtime) bool {
-        return migrates and self.stealing.active.load(.acquire);
+        return migrates and self.executors.items.len > 1;
     }
 
     fn armSearcher(self: *Runtime, hint: ?ExecutorId) void {
