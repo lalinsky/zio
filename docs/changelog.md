@@ -14,6 +14,12 @@ All notable changes to this project will be documented in this file.
 - Added `File.syncRange`, a wrapper for Linux's `sync_file_range`, to start writeback of
   a byte range ahead of a `sync`.
 
+### Fixed
+
+- `File.sync` on macOS now uses `F_FULLFSYNC`, so synced data is flushed out of the
+  drive's write cache too, as on other systems. It falls back to `fsync` on filesystems
+  that don't support it.
+
 ## [0.19.0] - 2026-10-05
 
 This is the last release for Zig 0.16. Later releases require Zig 0.17, and Zig 0.16

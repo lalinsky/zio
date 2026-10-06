@@ -1375,6 +1375,10 @@ pub const File = struct {
 
     pub const SyncError = os.fs.FileSyncError || Cancelable;
 
+    /// Make the file's data (and, unless `only_data`, its metadata) durable.
+    /// On macOS this uses `F_FULLFSYNC`, so the data is flushed out of the
+    /// drive's write cache as well, falling back to `fsync` on filesystems
+    /// that don't support it.
     pub fn sync(self: File, flags: os.fs.FileSyncFlags) SyncError!void {
         var op: ev.FileSync = undefined;
         self.prepSync(&op, flags);
