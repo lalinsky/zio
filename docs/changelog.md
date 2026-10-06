@@ -7,6 +7,13 @@ All notable changes to this project will be documented in this file.
 - Zig 0.17 is now required. For Zig 0.16, use the v0.19.x releases or the `zig-0.16`
   branch.
 
+### Added
+
+- Added `Dir.sync`, to make files created, renamed or deleted in a directory durable.
+
+- Added `File.syncRange`, a wrapper for Linux's `sync_file_range`, to start writeback of
+  a byte range ahead of a `sync`.
+
 ### Fixed
 
 - `File.sync` on macOS now uses `F_FULLFSYNC`, so synced data is flushed out of the

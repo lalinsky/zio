@@ -73,6 +73,7 @@ const FileReadStreaming = @import("../../completion.zig").FileReadStreaming;
 const FileWriteStreaming = @import("../../completion.zig").FileWriteStreaming;
 const FileSync = @import("../../completion.zig").FileSync;
 const FileSetSize = @import("../../completion.zig").FileSetSize;
+const FileSyncRange = @import("../../completion.zig").FileSyncRange;
 const DirOpen = @import("../../completion.zig").DirOpen;
 const DirClose = @import("../../completion.zig").DirClose;
 const PipePoll = @import("../../completion.zig").PipePoll;
@@ -144,6 +145,7 @@ pub fn capability(comptime op: Op) Support {
         .file_read_streaming,
         .file_write_streaming,
         .file_sync,
+        .file_sync_range,
         .dir_create_dir,
         .dir_rename,
         .dir_rename_preserve,
@@ -788,6 +790,20 @@ fn submitInner(self: *Self, state: *LoopState, comptime op: Op, c: *Completion, 
             const sqe = self.getSqeOrDefer(c) orelse return;
             const flags: u32 = if (data.flags.only_data) linux.IORING_FSYNC_DATASYNC else 0;
             sqe.prep_fsync(data.handle, flags);
+            sqe.user_data = @intFromPtr(c);
+        },
+        .file_sync_range => {
+            const data = c.cast(FileSyncRange);
+            const sqe = self.getSqeOrDefer(c) orelse return;
+            // The SQE's length is 32 bits. A longer range is widened to the end
+            // of the file (len 0), which only starts or waits for more writeback.
+            const len: u32 = std.math.cast(u32, data.len) orelse 0;
+            sqe.prep_rw(.SYNC_FILE_RANGE, data.handle, 0, len, data.offset);
+            sqe.rw_flags = @bitCast(linux_sys.SYNC_FILE_RANGE{
+                .WAIT_BEFORE = data.flags.wait_before,
+                .WRITE = data.flags.write,
+                .WAIT_AFTER = data.flags.wait_after,
+            });
             sqe.user_data = @intFromPtr(c);
         },
         .file_set_size => {
@@ -1606,6 +1622,14 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
                 c.setError(fs.errnoToFileSyncError(@fromBackingInt(@intCast(-res))));
             } else {
                 c.setResult(.file_sync, {});
+            }
+        },
+
+        .file_sync_range => {
+            if (res < 0) {
+                c.setError(fs.errnoToFileSyncRangeError(@fromBackingInt(@intCast(-res))));
+            } else {
+                c.setResult(.file_sync_range, {});
             }
         },
 
