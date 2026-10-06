@@ -2214,6 +2214,11 @@ fn netAcceptImpl(_: ?*anyopaque, server: Io.net.Socket.Handle, _: Io.net.Server.
             => return error.Unexpected,
         };
 
+        switch (peer_addr.any.family) {
+            os_net.AF.INET, os_net.AF.INET6 => os_net.disableNagle(handle),
+            else => {},
+        }
+
         return .{
             .handle = handle,
             .address = switch (peer_addr.any.family) {
@@ -2362,6 +2367,10 @@ fn netConnectIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: I
     var connect_op = ev.NetConnect.init(handle, &zio_addr.any, addr_len);
     try timedWaitForIoClock(&connect_op.c, .fromStd(options.timeout), .fromStdTimeout(options.timeout));
     connect_op.getResult() catch |err| return connectErrToConnectErr(err);
+
+    if (options.mode == .stream and (options.protocol orelse .tcp) == .tcp) {
+        os_net.disableNagle(handle);
+    }
 
     return .{
         .handle = handle,
@@ -3410,6 +3419,44 @@ test "io: net TCP listen/connect/accept handshake" {
             future.await(io);
             const client = try connect_result;
             defer client.close(io);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: net TCP connected and accepted streams have Nagle's algorithm disabled" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn connector(io: Io, address: *const Io.net.IpAddress, result: *Io.net.IpAddress.ConnectError!Io.net.Stream) void {
+            result.* = Io.net.IpAddress.connect(address, io, .{ .mode = .stream });
+        }
+
+        fn noDelay(stream: Io.net.Stream) !bool {
+            const socket: zio_net.Socket = .{ .handle = stdIoHandleToZio(stream.socket.handle), .address = undefined };
+            return socket.getNoDelay();
+        }
+
+        fn run(io: Io) !void {
+            var server = try Io.net.IpAddress.listen(&.{ .ip4 = .loopback(0) }, io, .{});
+            defer server.deinit(io);
+
+            var connect_result: Io.net.IpAddress.ConnectError!Io.net.Stream = undefined;
+            var future = io.async(connector, .{ io, &server.socket.address, &connect_result });
+            defer future.cancel(io);
+
+            const accepted = try server.accept(io);
+            defer accepted.close(io);
+
+            future.await(io);
+            const client = try connect_result;
+            defer client.close(io);
+
+            try std.testing.expect(try noDelay(accepted));
+            try std.testing.expect(try noDelay(client));
         }
     };
 

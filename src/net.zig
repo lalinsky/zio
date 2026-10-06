@@ -679,6 +679,7 @@ pub const IpAddress = extern union {
         errdefer socket.close();
 
         try socket.connect(.{ .ip = self }, .{ .timeout = options.timeout });
+        os.net.disableNagle(socket.handle);
         return .{ .socket = socket };
     }
 };
@@ -945,9 +946,18 @@ pub const Socket = struct {
     }
 
     /// Enable or disable Nagle's algorithm (TCP_NODELAY)
-    /// When enabled (true), disables buffering for low-latency communication
+    /// When enabled (true), disables buffering for low-latency communication.
+    /// TCP streams from `connect` and `accept` have it enabled already.
     pub fn setNoDelay(self: Socket, enabled: bool) !void {
         try self.setBoolOption(os.posix.IPPROTO.TCP, os.posix.TCP.NODELAY, enabled);
+    }
+
+    /// Whether Nagle's algorithm is disabled (TCP_NODELAY)
+    pub fn getNoDelay(self: Socket) !bool {
+        // Zeroed first: Windows writes this option as a one-byte BOOLEAN.
+        var value: c_int = 0;
+        try os.net.getsockopt(self.handle, os.posix.IPPROTO.TCP, os.posix.TCP.NODELAY, std.mem.asBytes(&value));
+        return value != 0;
     }
 
     /// Set the system-level send buffer size (SO_SNDBUF)
@@ -1194,7 +1204,9 @@ pub const Server = struct {
                 error.ConnectionAborted => continue,
                 else => |e| return e,
             };
-            return .{ .socket = .{ .handle = handle, .address = .fromPosix(&peer_addr.any, peer_addr_len) } };
+            const address: Address = .fromPosix(&peer_addr.any, peer_addr_len);
+            if (address.getType() == .ip) os.net.disableNagle(handle);
+            return .{ .socket = .{ .handle = handle, .address = address } };
         }
     }
 
@@ -1856,8 +1868,8 @@ test "Stream.Writer.sendFile cancellation unblocks a stalled transfer" {
     defer runtime.deinit();
     const io = runtime.io();
 
-    // A file much larger than any socket buffer, so the send stalls once the
-    // buffers fill and the peer never reads.
+    // A file much larger than the socket buffers, which both ends pin small, so
+    // the send stalls once they fill and the peer never reads.
     const total = 4 * 1024 * 1024;
     {
         var f = try Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
@@ -1886,6 +1898,9 @@ test "Stream.Writer.sendFile cancellation unblocks a stalled transfer" {
             const addr = IpAddress.parseIp4("127.0.0.1", 0) catch return;
             const server = addr.listen(.{}) catch return;
             defer server.close();
+            // Autotuning can grow a loopback receive buffer past the size of the
+            // file, so it is pinned small. The accepted socket inherits it.
+            server.socket.setReceiveBufferSize(64 * 1024) catch return;
             server_port.send(server.socket.address.ip.getPort()) catch return;
             var stream = server.accept(.{}) catch return;
             defer stream.close();
@@ -1917,6 +1932,10 @@ test "Stream.Writer.sendFile cancellation unblocks a stalled transfer" {
                 return;
             };
             defer stream.close();
+            stream.socket.setSendBufferSize(64 * 1024) catch |e| {
+                out.send_err = e;
+                return;
+            };
 
             var wbuf: [4096]u8 = undefined;
             var writer = stream.writer(&wbuf);
@@ -2446,6 +2465,39 @@ test "IpAddress: listen/accept/connect/read/write IPv4" {
     var write_buffer: [32]u8 = undefined;
     const addr = try IpAddress.parseIp4("127.0.0.1", 0);
     try checkListen(addr, IpAddress.ListenOptions{}, &write_buffer);
+}
+
+test "IpAddress: connected and accepted streams have Nagle's algorithm disabled" {
+    const Test = struct {
+        fn serverFn(server: Server) !void {
+            const stream = try server.accept(.{});
+            defer stream.close();
+            try std.testing.expect(try stream.socket.getNoDelay());
+        }
+
+        fn clientFn(server: Server) !void {
+            const stream = try server.socket.address.connect(.{});
+            defer stream.close();
+            try std.testing.expect(try stream.socket.getNoDelay());
+        }
+    };
+
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(.{});
+    defer server.close();
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(Test.serverFn, .{server});
+    try group.spawn(Test.clientFn, .{server});
+
+    try group.wait();
+    // A group logs its tasks' errors rather than returning them.
+    try std.testing.expect(!group.hasFailed());
 }
 
 test "IpAddress: reuse_address does not enable duplicate listeners" {

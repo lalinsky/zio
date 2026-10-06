@@ -771,6 +771,23 @@ pub fn setsockopt(fd: fd_t, level: i32, optname: u32, optval: []const u8) Setsoc
     }
 }
 
+/// Turns off Nagle's algorithm (sets TCP_NODELAY) on a TCP stream zio has just
+/// connected or accepted.
+///
+/// zio writes through buffered writers that flush a whole message at a time, so
+/// Nagle has nothing left to coalesce. All it still does is hold back the tail of
+/// a message that goes out in more than one write, such as a body spanning
+/// several TLS records, until the peer ACKs what came before, and a peer that
+/// delays its ACKs makes that up to 40ms on Linux. Go does the same for every
+/// TCP connection. `Socket.setNoDelay(false)` turns Nagle back on.
+///
+/// A failure is ignored: the stream works either way, and setting the option can
+/// fail on a connection the peer has already reset.
+pub fn disableNagle(fd: fd_t) void {
+    const value: c_int = 1;
+    setsockopt(fd, IPPROTO.TCP, posix.TCP.NODELAY, std.mem.asBytes(&value)) catch {};
+}
+
 pub const GetsockoptError = error{Unexpected};
 
 pub fn getsockopt(fd: fd_t, level: i32, optname: u32, optval: []u8) GetsockoptError!void {
