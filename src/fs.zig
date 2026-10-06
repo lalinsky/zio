@@ -356,6 +356,22 @@ pub const Dir = struct {
         try op.getResult();
     }
 
+    pub const SyncError = os.fs.FileSyncError || Cancelable;
+
+    /// Make changes to this directory's entries durable: files created, renamed
+    /// or deleted in it. Syncing a file only covers its contents, so a rename
+    /// (including `AtomicFile.replace`) is not crash-safe until the directory
+    /// it landed in is synced too.
+    ///
+    /// A no-op on Windows, where directory handles are opened without the write
+    /// access `FlushFileBuffers` requires.
+    pub fn sync(self: Dir) SyncError!void {
+        if (builtin.os.tag == .windows) return;
+        var op = ev.FileSync.init(self.fd, .{});
+        try waitForIo(&op.c);
+        try op.getResult();
+    }
+
     pub const StatError = os.fs.FileStatError || Cancelable;
 
     pub fn stat(self: Dir) StatError!os.fs.FileStatInfo {
@@ -2315,6 +2331,19 @@ test "Dir: rename" {
         return;
     };
     return error.TestExpectedError;
+}
+
+test "Dir: sync" {
+    var t = try TestDirFixture.init();
+    defer t.deinit();
+
+    var file = try t.dir.createFile("test_sync.txt", .{});
+    _ = try file.write("synced", 0);
+    try file.sync(.{});
+    file.close();
+
+    try t.dir.rename("test_sync.txt", t.dir, "test_sync_renamed.txt");
+    try t.dir.sync();
 }
 
 test "Dir: renamePreserve" {
