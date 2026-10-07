@@ -644,9 +644,13 @@ pub fn waitForIo(c: *ev.Completion) Cancelable!void {
 
     // Async path: Submit to the event loop and wait for completion
     task.getExecutor().loopAdd(c);
-    // Inline completions never park; charge the coop budget so they still
-    // hit a yield point.
-    const completed_inline = waiter.mode.direct.notify.state.load(.acquire) != 0;
+    // An op that completes inside loopAdd still goes through the dispatched
+    // queue, so the wait below parks until the executor drains it, and that
+    // park is its yield point. A completion finished on another loop's thread
+    // (one that owns the socket) can signal before the wait, which then
+    // returns without parking; charge the coop budget for that case so it
+    // still hits a yield point.
+    const signaled_early = waiter.mode.direct.notify.state.load(.acquire) != 0;
     waiter.wait(1, .allow_cancel) catch |err| switch (err) {
         error.Canceled => {
             // On cancellation, cancel the I/O and wait for completion
@@ -664,7 +668,7 @@ pub fn waitForIo(c: *ev.Completion) Cancelable!void {
             return;
         },
     };
-    if (completed_inline) {
+    if (signaled_early) {
         task.getExecutor().maybeYield(.reschedule, .no_cancel);
     }
 }
@@ -693,9 +697,10 @@ pub fn waitForIoUncancelable(c: *ev.Completion) void {
 
     // Async path: Submit to the event loop and wait for completion (no cancel)
     task.getExecutor().loopAdd(c);
-    const completed_inline = waiter.mode.direct.notify.state.load(.acquire) != 0;
+    // See waitForIo.
+    const signaled_early = waiter.mode.direct.notify.state.load(.acquire) != 0;
     waiter.wait(1, .no_cancel);
-    if (completed_inline) {
+    if (signaled_early) {
         task.getExecutor().maybeYield(.reschedule, .no_cancel);
     }
 }
