@@ -1028,30 +1028,29 @@ pub const Executor = struct {
     /// and a refill from the overflow queue. Deliberately never steals — see
     /// parkAndSearch for when remote work is taken.
     fn checkLocalWork(self: *Executor, check_main_ready: bool) bool {
+        // Refill from the overflow queue before draining the dispatched queue:
+        // overflow tasks became runnable earlier, and a busy ring has room only
+        // in the slots this pass freed, which a steady completion stream would
+        // fill on every pass. A busy ring takes one task per check, which bounds
+        // an overflow task's wait; this executor is often its only consumer, as
+        // stealing takes from rings and armSearcher does nothing while nobody is
+        // idle. An empty ring takes a batch. Overflow work counts as work, so a
+        // local ring spill (which doesn't wake the loop) can't put this executor
+        // to sleep.
+        if (!self.run_queue.overflow.isEmpty()) {
+            if (self.run_queue.isEmpty()) {
+                _ = self.run_queue.refill(self.overflowBatch(), .block);
+            } else {
+                _ = self.run_queue.refill(1, .try_only);
+            }
+        }
         // Task wakes can enter the dispatched queue outside any poll: an
         // operation that completes inline during loop.add finishes on this
         // thread before its task parks. Every work check must see those, or
         // a pre-park check can sleep on the only work in existence.
         self.drainDispatched();
         const main_ready = check_main_ready and self.main_task.state.load(.acquire).tag == .ready;
-        if (main_ready or !self.run_queue.isEmpty()) {
-            // The batch refill below is reached only on an empty ring, but a ring
-            // that keeps refilling itself (tasks yielding to each other, a steady
-            // completion stream) never empties: it exits the run loop's drain on
-            // tick budget instead. Its overflow queue would then hold cross-thread
-            // wakes indefinitely, with no other rescue — the sole drainer is this
-            // executor, stealing takes from rings rather than from here, and
-            // armSearcher is a no-op while nobody is idle. One task per check
-            // bounds that wait to a tick without displacing local work.
-            _ = self.run_queue.refill(1, .try_only);
-            return true;
-        }
-        // Ring empty: pull a batch from the overflow queue back into it.
-        // Overflow work counts as work, so a local ring spill (which doesn't
-        // wake the loop) can't put this executor to sleep.
-        const batch = self.overflowBatch();
-        if (batch == 0) return false;
-        return self.run_queue.refill(batch, .block) > 0;
+        return main_ready or !self.run_queue.isEmpty();
     }
 
     /// How many tasks an empty ring should pull from the overflow queue, or 0

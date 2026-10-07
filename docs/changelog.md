@@ -24,6 +24,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Under sustained load, tasks that overflowed an executor's run queue could wait until the
+  load dropped, stalling some connections for seconds.
+
 - `File.sync` on macOS now uses `F_FULLFSYNC`, so synced data is flushed out of the
   drive's write cache too, as on other systems. It falls back to `fsync` on filesystems
   that don't support it.
