@@ -2827,9 +2827,72 @@ fn netWriteOpImpl(
     return op.getResult() catch |err| return sendErrToWriteErr(err);
 }
 
-fn netWriteFileImpl(_: ?*anyopaque, _: Io.net.Socket.Handle, _: []const u8, _: *Io.File.Reader, _: Io.Limit) Io.net.Stream.Writer.WriteFileError!usize {
-    // As of Zig 0.16, std.Io defines this vtable slot but never calls it.
-    return error.NetworkDown;
+fn netWriteFileImpl(
+    _: ?*anyopaque,
+    handle: Io.net.Socket.Handle,
+    header: []const u8,
+    file_reader: *Io.File.Reader,
+    limit: Io.Limit,
+) Io.net.Stream.Writer.WriteFileError!usize {
+    // `NetSendFile` reads at an explicit offset and leaves the kernel's file
+    // position alone, which a streaming reader relies on.
+    if (file_reader.mode != .positional) return error.Unimplemented;
+    if (positionalUnsupported(file_reader.file)) return error.Unimplemented;
+
+    // Bytes already in hand go out first, as a plain send; the caller loops
+    // back for the file body.
+    const reader_buffered = limit.slice(file_reader.interface.buffered());
+    if (header.len != 0 or reader_buffered.len != 0) {
+        const n = netWriteOpImpl(handle, header, &.{reader_buffered}, 1, .none, .awake) catch |err| switch (err) {
+            error.Timeout => unreachable,
+            else => |e| return e,
+        };
+        file_reader.interface.toss(n -| header.len);
+        return n;
+    }
+
+    if (limit == .nothing) return 0;
+    if (file_reader.size) |size| {
+        if (file_reader.pos >= size) return error.EndOfStream;
+    }
+
+    // The reader's buffer is empty here, so the fallback loop can borrow it.
+    const buffer = file_reader.interface.buffer;
+    if (ev.Backend.capability(.net_send_file) != .yes and buffer.len == 0) return error.Unimplemented;
+
+    var op = ev.NetSendFile.init(
+        stdIoHandleToZio(handle),
+        file_reader.file.handle,
+        file_reader.pos,
+        @backingInt(limit),
+        .{ buffer, &.{} },
+    );
+    try waitForIo(&op.c);
+    const n = op.getResult() catch |err| switch (err) {
+        // A reader starts positional even on a pipe and learns otherwise
+        // here, before anything was sent; same recovery as std's
+        // `readVecPositional`.
+        error.Unseekable => {
+            file_reader.mode = file_reader.mode.toStreaming();
+            const pos = file_reader.pos;
+            if (pos != 0) {
+                file_reader.pos = 0;
+                file_reader.seekBy(@intCast(pos)) catch {
+                    file_reader.mode = .failure;
+                    return error.ReadFailed;
+                };
+            }
+            return error.Unimplemented;
+        },
+        error.InputOutput, error.IsDir, error.NotOpenForReading => |e| {
+            file_reader.err = e;
+            return error.ReadFailed;
+        },
+        else => |e| return sendErrToWriteErr(@errorCast(e)),
+    };
+    if (n == 0) return error.EndOfStream;
+    file_reader.pos += n;
+    return n;
 }
 
 fn netCloseImpl(_: ?*anyopaque, sockets: []const Io.net.Socket) void {
@@ -3573,6 +3636,103 @@ test "io: net TCP read/write/shutdown round-trip" {
     try handle.join();
 }
 
+/// Sends `header` and up to `limit` bytes of `file_reader` over a loopback TCP
+/// connection with `sendFileAll`, and returns what the peer received.
+fn testSendFileOverTcp(io: Io, header: []const u8, file_reader: *Io.File.Reader, limit: Io.Limit) ![]u8 {
+    const Receiver = struct {
+        fn run(io2: Io, server: *Io.net.Server, out: *anyerror![]u8) void {
+            out.* = receive(io2, server);
+        }
+
+        fn receive(io2: Io, server: *Io.net.Server) ![]u8 {
+            const peer = try server.accept(io2);
+            defer peer.close(io2);
+            var recv_buf: [256]u8 = undefined;
+            var reader = peer.reader(io2, &recv_buf);
+            return reader.interface.allocRemaining(std.testing.allocator, .unlimited);
+        }
+    };
+
+    var server = try Io.net.IpAddress.listen(&.{ .ip4 = .loopback(0) }, io, .{ .reuse_address = true });
+    defer server.deinit(io);
+
+    var received: anyerror![]u8 = error.Unexpected;
+    var future = io.async(Receiver.run, .{ io, &server, &received });
+    defer future.cancel(io);
+
+    const client = try Io.net.IpAddress.connect(&server.socket.address, io, .{ .mode = .stream });
+    defer client.close(io);
+    var send_buf: [64]u8 = undefined;
+    var writer = client.writer(io, &send_buf);
+    try writer.interface.writeAll(header);
+    _ = try writer.interface.sendFileAll(file_reader, limit);
+    try writer.interface.flush();
+    try client.shutdown(io, .send);
+
+    future.await(io);
+    return received;
+}
+
+test "io: net TCP sendFileAll sends buffered header and file range" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const Worker = struct {
+        fn run(io: Io, dir: Io.Dir) !void {
+            var data: [40_000]u8 = undefined;
+            for (&data, 0..) |*b, i| b.* = @intCast(i % 251);
+            try dir.writeFile(io, .{ .sub_path = "sendfile", .data = &data });
+
+            const file = try dir.openFile(io, "sendfile", .{});
+            defer file.close(io);
+            var file_buf: [256]u8 = undefined;
+            var file_reader = file.reader(io, &file_buf);
+            try file_reader.seekTo(100);
+
+            const received = try testSendFileOverTcp(io, "HDR", &file_reader, .limited(30_000));
+            defer std.testing.allocator.free(received);
+            try std.testing.expectEqualStrings("HDR", received[0..3]);
+            try std.testing.expectEqualSlices(u8, data[100..30_100], received[3..]);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{ rt.io(), tmp.dir });
+    try handle.join();
+}
+
+test "io: net TCP sendFileAll falls back to reading from a pipe" {
+    // Windows pipes are never positional, so they don't reach the `Unseekable` path.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn run(io: Io) !void {
+            const fds = try os_fs.pipe();
+            const read_file: Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = true } };
+            defer read_file.close(io);
+            {
+                const write_file: Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = true } };
+                defer write_file.close(io);
+                try write_file.writeStreamingAll(io, "pipe data");
+            }
+
+            var file_buf: [256]u8 = undefined;
+            var file_reader = read_file.reader(io, &file_buf);
+            const received = try testSendFileOverTcp(io, "", &file_reader, .unlimited);
+            defer std.testing.allocator.free(received);
+            try std.testing.expectEqualStrings("pipe data", received);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
 test "io: net Unix listen/connect/accept round-trip" {
     if (!zio_net.has_unix_sockets) return error.SkipZigTest;
 
@@ -3878,7 +4038,7 @@ test "io: file lock blocks until holder releases" {
         }
     };
     var future = io.async(S.releaser, .{ io, &holder });
-    defer future.await(io);
+    defer future.cancel(io);
 
     // Blocks via the backoff loop until the releaser unlocks ~30ms later.
     try waiter.lock(io, .exclusive);
