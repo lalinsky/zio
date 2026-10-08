@@ -1039,6 +1039,12 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
                     .SUCCESS => break,
                     .INTR => continue,
                     .AGAIN => return .requeue,
+                    // The source is not a regular file (e.g. a pipe), which
+                    // the caller can recover from by reading it instead.
+                    .INVAL => {
+                        comp.setError(error.Unseekable);
+                        return .completed;
+                    },
                     else => |err| {
                         comp.setError(net.errnoToSendError(err));
                         return .completed;
