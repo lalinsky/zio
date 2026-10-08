@@ -3684,10 +3684,9 @@ test "io: net TCP sendFileAll sends buffered header and file range" {
         fn run(io: Io, dir: Io.Dir) !void {
             var data: [40_000]u8 = undefined;
             for (&data, 0..) |*b, i| b.* = @intCast(i % 251);
-            try dir.writeFile(io, .{ .sub_path = "sendfile", .data = &data });
-
-            const file = try dir.openFile(io, "sendfile", .{});
+            const file = try dir.createFile(io, "sendfile", .{ .read = true });
             defer file.close(io);
+            try file.writePositionalAll(io, &data, 0);
             var file_buf: [256]u8 = undefined;
             var file_reader = file.reader(io, &file_buf);
             try file_reader.seekTo(100);
