@@ -170,6 +170,8 @@ pub fn main(init: std.process.Init) !void {
 
 See `examples/*.zig` for more examples.
 
+If you need an HTTP client or server, that works well with zio, have a look at [dusty](https://github.com/lalinsky/dusty).
+
 ## Frequently Asked Questions
 
 ### What is the difference between this project and `std.Io.Evented`?
