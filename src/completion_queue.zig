@@ -3,9 +3,10 @@
 
 //! A queue for waiting on multiple I/O operations with an iterator-like interface.
 //!
-//! Unlike `waitForIo` (single operation) or `ev.Group` (combine into one virtual
-//! completion), `CompletionQueue` lets you submit multiple operations, dynamically
-//! add more, and process completions one at a time as they finish.
+//! Unlike `ev.Group` (combine into one virtual completion), `CompletionQueue`
+//! lets you submit multiple operations, dynamically add more, and process
+//! completions one at a time as they finish. For a single operation, use
+//! `CompletionQueue.submitAndWait`, which needs no queue.
 //!
 //! Runtime-only: must be used from within an async task context.
 //!
@@ -159,6 +160,30 @@ pub const CompletionQueue = struct {
         self.mutex.unlock();
 
         getCurrentExecutor().loopAdd(c);
+    }
+
+    pub const SubmitAndWaitError = Timeoutable || Cancelable || error{
+        /// Same as `SubmitError.InvalidCompletion`.
+        InvalidCompletion,
+    };
+
+    /// Run a single operation to completion, without a queue.
+    ///
+    /// The completion's `userdata`, `callback` and `flags` are taken over;
+    /// set up only the operation itself. Once this returns, the operation
+    /// has finished and its result is in the completion.
+    ///
+    /// If the timeout expires first, the operation is canceled and
+    /// `error.Timeout` is returned. If the task is canceled, the operation is
+    /// canceled too and `error.Canceled` is returned, unless the operation
+    /// had already finished on its own: then this returns normally, so the
+    /// result (an accepted socket, bytes read) is not lost, and the
+    /// cancellation is delivered at the task's next cancellation point.
+    pub fn submitAndWait(c: *Completion, timeout: Timeout) SubmitAndWaitError!void {
+        if (c.group.owner != null or c.flags.rearm) {
+            return error.InvalidCompletion;
+        }
+        return common.timedWaitForIo(c, timeout);
     }
 
     /// Close the queue: `submit` fails with `error.Closed` from now on, and
@@ -1118,6 +1143,62 @@ test "CompletionQueue: submit refuses completions the queue cannot own" {
 
     // Every refusal left the queue and the completions untouched.
     try std.testing.expect(cq.isEmpty());
+}
+
+test "CompletionQueue: submitAndWait runs one operation" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
+    try CompletionQueue.submitAndWait(&timer.c, .none);
+    try timer.getResult();
+}
+
+test "CompletionQueue: submitAndWait times out and cancels the operation" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var timer = ev.Timer.init(.{ .duration = .fromSeconds(10) });
+    try std.testing.expectError(error.Timeout, CompletionQueue.submitAndWait(&timer.c, .fromMilliseconds(10)));
+    try std.testing.expectError(error.Canceled, timer.getResult());
+}
+
+test "CompletionQueue: canceling submitAndWait cancels the operation" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var slow = ev.Timer.init(.{ .duration = .fromSeconds(10) });
+
+    const Waiting = struct {
+        fn run(c: *Completion) SubmitAndWaitError!void {
+            try CompletionQueue.submitAndWait(c, .none);
+        }
+        const SubmitAndWaitError = CompletionQueue.SubmitAndWaitError;
+    };
+
+    var handle = try rt.spawn(Waiting.run, .{&slow.c});
+
+    // Let the task park on the operation, then cancel it.
+    var pause = ev.Timer.init(.{ .duration = .fromMilliseconds(20) });
+    try common.waitForIo(&pause.c);
+    handle.cancel();
+
+    try std.testing.expectError(error.Canceled, handle.join());
+    try std.testing.expectError(error.Canceled, slow.getResult());
+}
+
+test "CompletionQueue: submitAndWait refuses completions it cannot own" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var member = ev.Timer.init(.{ .duration = .fromSeconds(10) });
+    var grp = ev.Group.init(.race);
+    grp.add(&member.c);
+    try std.testing.expectError(error.InvalidCompletion, CompletionQueue.submitAndWait(&member.c, .none));
+
+    var mail = ev.Async.init();
+    mail.c.flags.rearm = true;
+    try std.testing.expectError(error.InvalidCompletion, CompletionQueue.submitAndWait(&mail.c, .none));
 }
 
 test "CompletionQueue: close hands out in-flight completions before error.Closed" {

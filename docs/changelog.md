@@ -22,6 +22,9 @@ All notable changes to this project will be documented in this file.
 
 - Added `Dir.sync`, to make files created, renamed or deleted in a directory durable.
 
+- Added `CompletionQueue.submitAndWait`, to run a single event loop operation from a task
+  without setting up a queue.
+
 - Added `File.syncRange`, a wrapper for Linux's `sync_file_range`, to start writeback of
   a byte range ahead of a `sync`.
 
