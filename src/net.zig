@@ -688,9 +688,14 @@ pub const IpAddress = extern union {
             // With port 0, Linux would otherwise reserve a port at bind time
             // without knowing the destination, so every connection from this IP
             // would need a distinct port. This defers the choice to connect.
+            // Where the option is missing (kernels before 4.2, QEMU user mode),
+            // the bind still works, only with the port picked early.
             if (builtin.os.tag == .linux and local.getPort() == 0) {
                 const value: c_int = 1;
-                try os.net.setsockopt(socket.handle, os.net.IPPROTO.IP, std.os.linux.IP.BIND_ADDRESS_NO_PORT, std.mem.asBytes(&value));
+                os.net.setsockopt(socket.handle, os.net.IPPROTO.IP, std.os.linux.IP.BIND_ADDRESS_NO_PORT, std.mem.asBytes(&value)) catch |err| switch (err) {
+                    error.OptionNotSupported => {},
+                    else => |e| return e,
+                };
             }
             try socket.bind(.{ .ip = local });
         }
