@@ -2555,7 +2555,24 @@ test "IpAddress: connect binds to local_address" {
     try std.testing.expectEqual(port, conn.socket.address.ip.getPort());
 }
 
-test "IpAddress: connect binds to a local_address IP with port 0" {
+test "IpAddress: connect binds to a local_address with port 0" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(.{});
+    defer server.close();
+
+    const client = try server.socket.address.ip.connect(.{ .local_address = addr });
+    defer client.close();
+    const conn = try server.accept(.{});
+    defer conn.close();
+
+    try std.testing.expectEqual(addr.in.addr, conn.socket.address.ip.in.addr);
+    try std.testing.expect(conn.socket.address.ip.getPort() != 0);
+}
+
+test "IpAddress: connect binds to a non-default loopback local_address" {
     // Only Linux routes all of 127.0.0.0/8 to loopback by default.
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
