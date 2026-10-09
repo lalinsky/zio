@@ -548,7 +548,10 @@ fn submitInner(self: *Self, state: *LoopState, comptime op: Op, c: *Completion, 
         .net_accept => {
             const data = c.cast(NetAccept);
             const sqe = self.getSqeOrDefer(c) orelse return;
-            sqe.prep_accept(data.handle, data.addr, data.addr_len, 0);
+            var accept_flags: u32 = 0;
+            if (data.flags.nonblocking) accept_flags |= linux.SOCK.NONBLOCK;
+            if (data.flags.cloexec) accept_flags |= linux.SOCK.CLOEXEC;
+            sqe.prep_accept(data.handle, data.addr, data.addr_len, accept_flags);
             sqe.user_data = @intFromPtr(c);
         },
         // A single buffer goes through plain RECV/SEND: no msghdr to build

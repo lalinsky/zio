@@ -1333,15 +1333,9 @@ fn armNetSendFile(self: *Self, data: *NetSendFile) !bool {
     return true;
 }
 
-fn submitConnect(self: *Self, state: *LoopState, data: *NetConnect) !void {
-    // Get address family from the target address
-    const family: u16 = @as(*const windows.sockaddr, @ptrCast(@alignCast(data.addr))).family;
-
-    // Load ConnectEx extension function for this address family
-    const exts = self.shared_state.exts;
-
-    // ConnectEx requires the socket to be bound first (even to wildcard address)
-    // Create a wildcard bind address
+/// Binds `handle` to the wildcard address of `family`, letting the system pick
+/// the port.
+fn bindWildcard(handle: windows.SOCKET, family: u16) !void {
     var bind_addr_buf align(@alignOf(windows.sockaddr.in6)) = @as([128]u8, @splat(0));
     var bind_addr_len: net.socklen_t = 0;
 
@@ -1366,11 +1360,23 @@ fn submitConnect(self: *Self, state: *LoopState, data: *NetConnect) !void {
         return error.Unexpected;
     }
 
-    // Bind to wildcard address
-    _ = net.bind(data.handle, @ptrCast(&bind_addr_buf), bind_addr_len) catch |err| {
-        // If already bound, that's OK (user may have called bind explicitly)
-        if (err != error.AddressInUse) return err;
-    };
+    try net.bind(handle, @ptrCast(&bind_addr_buf), bind_addr_len);
+}
+
+fn submitConnect(self: *Self, state: *LoopState, data: *NetConnect) !void {
+    // Get address family from the target address
+    const family: u16 = @as(*const windows.sockaddr, @ptrCast(@alignCast(data.addr))).family;
+
+    // Load ConnectEx extension function for this address family
+    const exts = self.shared_state.exts;
+
+    // ConnectEx requires the socket to be bound first. A socket the caller
+    // already bound is left as is; getsockname fails only on an unbound one.
+    var bind_addr_buf align(@alignOf(windows.sockaddr.in6)) = @as([128]u8, @splat(0));
+    var bind_addr_len: net.socklen_t = bind_addr_buf.len;
+    if (windows.getsockname(data.handle, @ptrCast(&bind_addr_buf), &bind_addr_len) != 0) {
+        try bindWildcard(data.handle, family);
+    }
 
     // Initialize OVERLAPPED
     data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
@@ -1812,9 +1818,8 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 );
 
                 if (setsockopt_result == windows.SOCKET_ERROR) {
-                    // setsockopt failed - close the socket and report error
+                    // The socket belongs to the caller, who closes it on error.
                     const err = windows.WSAGetLastError();
-                    net.close(data.handle);
                     c.setError(net.errnoToConnectError(err));
                 } else {
                     c.setResult(.net_connect, {});
