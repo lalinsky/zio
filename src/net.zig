@@ -188,13 +188,14 @@ pub const HostName = struct {
     /// Resolves the hostname and connects to the first successful address.
     pub fn connect(self: HostName, port: u16, options: IpAddress.ConnectOptions) !Stream {
         var storage: [32]LookupResult = undefined;
-        const count = try self.lookup(&storage, .{ .port = port });
+        const family: ?IpAddress.Family = if (options.local_address) |local| local.getFamily() else null;
+        const count = try self.lookup(&storage, .{ .port = port, .family = family });
 
         var last_err: ?anyerror = null;
         for (storage[0..count]) |entry| {
             switch (entry) {
                 .address => |addr| {
-                    return addr.connect(.{ .timeout = options.timeout }) catch |err| {
+                    return addr.connect(options) catch |err| {
                         last_err = err;
                         continue;
                     };
@@ -639,6 +640,10 @@ pub const IpAddress = extern union {
 
     pub const ConnectOptions = struct {
         timeout: Timeout = .none,
+        /// Local address to bind the socket to before connecting. A port of 0
+        /// selects only the source IP and lets the system pick the port. The
+        /// family must match the remote address.
+        local_address: ?IpAddress = null,
     };
 
     pub fn bind(self: IpAddress, options: BindOptions) !Socket {
@@ -677,6 +682,18 @@ pub const IpAddress = extern union {
     pub fn connect(self: IpAddress, options: ConnectOptions) !Stream {
         var socket = try Socket.open(.stream, .fromPosix(self.any.family), .ip);
         errdefer socket.close();
+
+        if (options.local_address) |local| {
+            if (local.any.family != self.any.family) return error.AddressFamilyUnsupported;
+            // With port 0, Linux would otherwise reserve a port at bind time
+            // without knowing the destination, so every connection from this IP
+            // would need a distinct port. This defers the choice to connect.
+            if (builtin.os.tag == .linux and local.getPort() == 0) {
+                const value: c_int = 1;
+                try os.net.setsockopt(socket.handle, os.net.IPPROTO.IP, std.os.linux.IP.BIND_ADDRESS_NO_PORT, std.mem.asBytes(&value));
+            }
+            try socket.bind(.{ .ip = local });
+        }
 
         try socket.connect(.{ .ip = self }, .{ .timeout = options.timeout });
         socket.setNoDelay(true) catch {};
@@ -2506,6 +2523,61 @@ test "IpAddress: connected and accepted streams have Nagle's algorithm disabled"
     try group.wait();
     // A group logs its tasks' errors rather than returning them.
     try std.testing.expect(!group.hasFailed());
+}
+
+test "IpAddress: connect binds to local_address" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(.{});
+    defer server.close();
+
+    // Borrow a free port by listening on it briefly.
+    const port = blk: {
+        const probe = try addr.listen(.{});
+        defer probe.close();
+        break :blk probe.socket.address.ip.getPort();
+    };
+
+    const local = try IpAddress.parseIp4("127.0.0.1", port);
+    const client = try server.socket.address.ip.connect(.{ .local_address = local });
+    defer client.close();
+    const conn = try server.accept(.{});
+    defer conn.close();
+
+    try std.testing.expectEqual(local.in.addr, conn.socket.address.ip.in.addr);
+    try std.testing.expectEqual(port, conn.socket.address.ip.getPort());
+}
+
+test "IpAddress: connect binds to a local_address IP with port 0" {
+    // Only Linux routes all of 127.0.0.0/8 to loopback by default.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(.{});
+    defer server.close();
+
+    const local = try IpAddress.parseIp4("127.0.0.2", 0);
+    const client = try server.socket.address.ip.connect(.{ .local_address = local });
+    defer client.close();
+    const conn = try server.accept(.{});
+    defer conn.close();
+
+    try std.testing.expectEqual(local.in.addr, conn.socket.address.ip.in.addr);
+    try std.testing.expect(conn.socket.address.ip.getPort() != 0);
+}
+
+test "IpAddress: connect rejects a local_address of another family" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const remote = try IpAddress.parseIp4("127.0.0.1", 1);
+    const local = try IpAddress.parseIp6("::1", 0);
+    try std.testing.expectError(error.AddressFamilyUnsupported, remote.connect(.{ .local_address = local }));
 }
 
 test "IpAddress: reuse_address does not enable duplicate listeners" {

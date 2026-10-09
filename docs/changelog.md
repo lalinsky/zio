@@ -22,6 +22,9 @@ All notable changes to this project will be documented in this file.
 - Added `File.syncRange`, a wrapper for Linux's `sync_file_range`, to start writeback of
   a byte range ahead of a `sync`.
 
+- Added `local_address` to `IpAddress.ConnectOptions`, to connect from a specific local
+  address.
+
 ### Fixed
 
 - Sockets accepted with the io_uring backend were blocking and leaked into child processes,
