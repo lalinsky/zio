@@ -753,18 +753,22 @@ pub fn getSockError(fd: fd_t) GetSockErrorError!i32 {
     return err;
 }
 
-pub const SetsockoptError = error{Unexpected};
+pub const SetsockoptError = error{ OptionNotSupported, Unexpected };
 
 pub fn setsockopt(fd: fd_t, level: i32, optname: u32, optval: []const u8) SetsockoptError!void {
     switch (builtin.os.tag) {
         .windows => {
             const rc = windows.setsockopt(fd, level, optname, optval.ptr, @intCast(optval.len));
-            if (rc != 0) return unexpectedError(windows.WSAGetLastError());
+            if (rc != 0) return switch (windows.WSAGetLastError()) {
+                .ENOPROTOOPT => error.OptionNotSupported,
+                else => |err| unexpectedError(err),
+            };
         },
         else => {
             const rc = posix.system.setsockopt(fd, level, @intCast(optname), optval.ptr, @intCast(optval.len));
             switch (posix.errno(rc)) {
                 .SUCCESS => {},
+                .NOPROTOOPT => return error.OptionNotSupported,
                 else => |err| return unexpectedError(err),
             }
         },

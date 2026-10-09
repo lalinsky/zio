@@ -17,6 +17,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Added `local_address` to `IpAddress.ConnectOptions`, to connect from a specific local
+  address.
+
 - Added `Dir.sync`, to make files created, renamed or deleted in a directory durable.
 
 - Added `File.syncRange`, a wrapper for Linux's `sync_file_range`, to start writeback of
