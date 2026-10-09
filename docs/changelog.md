@@ -24,6 +24,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Sockets accepted with the io_uring backend were blocking and leaked into child processes,
+  and on Windows a socket bound before `connect` failed to connect.
+
 - Under sustained load, tasks that overflowed an executor's run queue could wait until the
   load dropped, stalling some connections for seconds.
 

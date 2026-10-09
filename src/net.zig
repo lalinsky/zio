@@ -2670,6 +2670,46 @@ test "Server: accept deadline timeout" {
     try std.testing.expectError(error.Timeout, result);
 }
 
+test "Server: accepted sockets are nonblocking and close-on-exec" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(.{});
+    defer server.close();
+    const client = try server.socket.address.ip.connect(.{});
+    defer client.close();
+    const conn = try server.accept(.{});
+    defer conn.close();
+
+    const system = os.posix.system;
+    const fl_flags = system.fcntl(conn.socket.handle, system.F.GETFL, @as(c_int, 0));
+    try std.testing.expect(fl_flags & (@as(c_int, 1) << @bitOffsetOf(system.O, "NONBLOCK")) != 0);
+    const fd_flags = system.fcntl(conn.socket.handle, system.F.GETFD, @as(c_int, 0));
+    try std.testing.expect(fd_flags & system.FD_CLOEXEC != 0);
+}
+
+test "Socket: connect from an explicitly bound socket" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(.{});
+    defer server.close();
+
+    var socket = try Socket.open(.stream, .ipv4, .ip);
+    defer socket.close();
+    try socket.bind(.{ .ip = addr });
+    const local = socket.address.ip;
+    try socket.connect(server.socket.address, .{});
+
+    const conn = try server.accept(.{});
+    defer conn.close();
+    try std.testing.expectEqual(local.getPort(), conn.socket.address.ip.getPort());
+}
+
 test "Server: accept never reports ConnectionAborted" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
