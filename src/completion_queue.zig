@@ -67,7 +67,6 @@ const Futex = @import("sync/Futex.zig");
 const SimpleQueue = @import("utils/simple_queue.zig").SimpleQueue;
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentExecutor = @import("runtime.zig").getCurrentExecutor;
-const getCurrentTaskOrNull = @import("runtime.zig").getCurrentTaskOrNull;
 
 const Cancelable = common.Cancelable;
 const Timeoutable = common.Timeoutable;
@@ -168,8 +167,7 @@ pub const CompletionQueue = struct {
         InvalidCompletion,
     };
 
-    /// Run a single operation to completion on the current task, without a
-    /// queue. Must be called from a task.
+    /// Run a single operation to completion, without a queue.
     ///
     /// The completion's `userdata`, `callback` and `flags` are taken over;
     /// set up only the operation itself. Once this returns, the operation
@@ -182,7 +180,6 @@ pub const CompletionQueue = struct {
     /// result (an accepted socket, bytes read) is not lost, and the
     /// cancellation is delivered at the task's next cancellation point.
     pub fn submitAndWait(c: *Completion, timeout: Timeout) SubmitAndWaitError!void {
-        std.debug.assert(getCurrentTaskOrNull() != null);
         if (c.group.owner != null or c.flags.rearm) {
             return error.InvalidCompletion;
         }
