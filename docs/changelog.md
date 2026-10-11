@@ -42,6 +42,9 @@ All notable changes to this project will be documented in this file.
 - An `AutoCancel` or `withTimeout` deadline that passed just after the operation finished
   no longer fails the task's next operation with `error.Canceled`.
 
+- A cancel was lost when `std.Io.Group.async` could not spawn its task and ran it on the
+  caller instead.
+
 - Sockets accepted with the io_uring backend were blocking and leaked into child processes,
   and on Windows a socket bound before `connect` failed to connect.
 
