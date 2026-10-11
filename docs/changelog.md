@@ -30,6 +30,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- A cancel was lost when `std.Io.Group.async` could not spawn its task, and ran it on
+  the caller instead, such as when out of memory: the task took the caller's cancel, and
+  the group dropped the `error.Canceled` it returned, so the caller went on as if it had
+  not been canceled. The cancel is now put back for the caller.
+
 - Sockets accepted with the io_uring backend were blocking and leaked into child processes,
   and on Windows a socket bound before `connect` failed to connect.
 
