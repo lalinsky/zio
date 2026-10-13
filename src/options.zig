@@ -64,6 +64,11 @@ pub const Options = struct {
     /// Count scheduler events (parks, steals, wake batches) in per-executor
     /// counters readable via `Runtime.schedulerMetrics`.
     scheduler_metrics: bool = build_options.scheduler_metrics,
+    /// Record where each `error.Canceled` is delivered, and report a task that
+    /// parks on a cancelable wait after one was delivered without re-arming
+    /// it, the signature of a swallowed cancellation. The report prints the
+    /// stack trace of the delivery and of the park, once per task.
+    debug_cancel: bool = build_options.debug_cancel,
 };
 
 /// The resolved configuration. A `-fsingle-threaded` build has only one

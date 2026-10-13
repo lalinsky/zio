@@ -14,6 +14,7 @@ pub fn build(b: *std.Build) void {
     const resolve_beneath_mode = b.option(BuildOptions.ResolveBeneathMode, "resolve-beneath-mode", "How to handle resolve_beneath on platforms without kernel support: strict (error.Unsupported) or best_effort (log warning, continue)");
     const no_hacks = b.option(bool, "no-hacks", "Avoid unsafe performance tricks (bool smuggling, etc.)");
     const scheduler_metrics = b.option(bool, "scheduler_metrics", "Count scheduler events (parks, steals, wake batches) in per-executor counters readable via Runtime.schedulerMetrics (default true)");
+    const debug_cancel = b.option(bool, "debug_cancel", "Report tasks that keep running after swallowing error.Canceled, with stack traces (default false)");
 
     const build_options: BuildOptions = .{
         .backend = backend,
@@ -21,6 +22,7 @@ pub fn build(b: *std.Build) void {
         .resolve_beneath_mode = resolve_beneath_mode orelse .strict,
         .no_hacks = no_hacks orelse false,
         .scheduler_metrics = scheduler_metrics orelse true,
+        .debug_cancel = debug_cancel orelse false,
     };
 
     const zio = b.addModule("zio", .{
@@ -135,6 +137,7 @@ const BuildOptions = struct {
     resolve_beneath_mode: ResolveBeneathMode,
     no_hacks: bool,
     scheduler_metrics: bool,
+    debug_cancel: bool,
 
     // Enums are passed as tag names and mapped back to zio's own types in
     // src/options.zig.
@@ -145,6 +148,7 @@ const BuildOptions = struct {
         options.addOption([]const u8, "resolve_beneath_mode", @tagName(self.resolve_beneath_mode));
         options.addOption(bool, "no_hacks", self.no_hacks);
         options.addOption(bool, "scheduler_metrics", self.scheduler_metrics);
+        options.addOption(bool, "debug_cancel", self.debug_cancel);
         return options;
     }
 };

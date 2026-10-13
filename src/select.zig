@@ -601,6 +601,9 @@ fn waitInternal(future: anytype, comptime flags: WaitFlags) Cancelable!WaitResul
     }
 
     if (flags.on_cancel == .cancel_and_continue) {
+        const task = getCurrentTaskOrNull();
+        if (task) |t| t.beginCancelHandlingWait();
+        defer if (task) |t| t.endCancelHandlingWait();
         // Wait with cancellation enabled first
         waiter.wait(1, .allow_cancel) catch |err| switch (err) {
             error.Canceled => {

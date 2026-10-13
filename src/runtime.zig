@@ -3056,3 +3056,39 @@ test "runtime: a busy ring still drains cross-thread wakes from the overflow que
     // The spinner was stopped by the wake, not by its own cap.
     try std.testing.expect(!hit_cap.load(.acquire));
 }
+
+test "debug_cancel: reports a task that parks after swallowing error.Canceled" {
+    if (!zio_options.debug_cancel) return error.SkipZigTest;
+
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const T = struct {
+        fn swallow() !void {
+            sleep(.fromSeconds(60)) catch {};
+            sleep(.fromMilliseconds(1)) catch return error.TestUnexpectedResult;
+            try std.testing.expect(getCurrentTaskOrNull().?.cancel_debug.reported);
+        }
+
+        fn propagate() !void {
+            sleep(.fromSeconds(60)) catch {
+                recancel();
+                try std.testing.expectError(error.Canceled, sleep(.fromMilliseconds(1)));
+                try std.testing.expect(!getCurrentTaskOrNull().?.cancel_debug.reported);
+                return;
+            };
+            return error.TestUnexpectedResult;
+        }
+    };
+
+    var swallowing = try runtime.spawn(T.swallow, .{});
+    defer swallowing.cancel();
+    var propagating = try runtime.spawn(T.propagate, .{});
+    defer propagating.cancel();
+
+    try runtime.sleep(.fromMilliseconds(10));
+    swallowing.cancel();
+    propagating.cancel();
+    try swallowing.join();
+    try propagating.join();
+}
