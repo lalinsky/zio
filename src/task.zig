@@ -18,6 +18,7 @@ const registerGroupTask = @import("group.zig").registerGroupTask;
 const unregisterGroupTask = @import("group.zig").unregisterGroupTask;
 const os = @import("os/root.zig");
 const Timestamp = @import("time.zig").Timestamp;
+const zio_options = @import("options.zig").options;
 
 pub const Closure = struct {
     start: Start,
@@ -195,6 +196,28 @@ pub const AnyTask = struct {
     /// Only ever accessed by the task itself, so it needs no synchronization.
     tls_head: ?*TaskLocalNode = null,
 
+    /// See `Options.debug_cancel`. Only accessed by the task itself.
+    cancel_debug: if (zio_options.debug_cancel) CancelDebug else void = if (zio_options.debug_cancel) .{} else {},
+
+    const CancelDebug = struct {
+        addrs: [32]usize = undefined,
+        trace: ?std.debug.StackTrace = null,
+        reported: bool = false,
+        /// Nesting depth of waits that handle a cancellation themselves.
+        exempt: u32 = 0,
+    };
+
+    /// Marks a cancelable wait that handles error.Canceled itself (e.g.
+    /// `waitUntilComplete`), so parking in it is not reported. No-op unless
+    /// `Options.debug_cancel` is set.
+    pub fn beginCancelHandlingWait(self: *AnyTask) void {
+        if (zio_options.debug_cancel) self.cancel_debug.exempt += 1;
+    }
+
+    pub fn endCancelHandlingWait(self: *AnyTask) void {
+        if (zio_options.debug_cancel) self.cancel_debug.exempt -= 1;
+    }
+
     /// Task state and park token, packed into a single byte for atomic operations.
     ///
     /// The `awaken` bit implements a NetBSD-style park token:
@@ -285,6 +308,10 @@ pub const AnyTask = struct {
         // only costs one spurious reschedule at the next park.
         if (cancel_mode == .allow_cancel) {
             try self.checkCancel();
+            if (zio_options.debug_cancel and mode == .park and self.reportSwallowedCancel()) {
+                // Printing can suspend, and the task may have migrated.
+                executor = getCurrentExecutor();
+            }
         }
 
         // Set up deferred cleanup — state transition happens after context is saved
@@ -453,8 +480,32 @@ pub const AnyTask = struct {
                 current = prev;
                 continue;
             }
+            if (zio_options.debug_cancel) {
+                const d = &self.cancel_debug;
+                d.trace = std.debug.captureCurrentStackTrace(.{ .first_address = @returnAddress() }, &d.addrs);
+            }
             return error.Canceled;
         }
+    }
+
+    /// The task is about to park on a cancelable wait. If a cancellation was
+    /// delivered earlier and is neither pending again nor shielded, whoever
+    /// received the error.Canceled did not propagate it and the wait can block
+    /// forever. Reports the first occurrence per task; returns whether it did.
+    fn reportSwallowedCancel(self: *AnyTask) bool {
+        const d = &self.cancel_debug;
+        if (d.reported or d.exempt > 0) return false;
+        const trace = d.trace orelse return false;
+        const status: CanceledStatus = @bitCast(self.canceled_status.load(.acquire));
+        if (status.pending_errors > 0 or status.shield_count > 0) return false;
+        d.reported = true;
+
+        std.debug.print("zio: task {*} parks on a cancelable wait after error.Canceled was delivered and not propagated\n", .{self});
+        std.debug.print("error.Canceled was delivered at:\n", .{});
+        std.debug.dumpStackTrace(&trace);
+        std.debug.print("the task is now parking at:\n", .{});
+        std.debug.dumpCurrentStackTrace(.{ .first_address = @returnAddress() });
+        return true;
     }
 
     /// Cancel this task by setting canceled status and waking it if suspended.
