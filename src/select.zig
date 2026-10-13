@@ -6,6 +6,8 @@ const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTask = @import("runtime.zig").getCurrentTask;
 const getCurrentTaskOrNull = @import("runtime.zig").getCurrentTaskOrNull;
 const yield = @import("runtime.zig").yield;
+const recancel = @import("runtime.zig").recancel;
+const rt_mod = @import("runtime.zig");
 const common = @import("common.zig");
 const Cancelable = common.Cancelable;
 const Waiter = common.Waiter;
@@ -204,7 +206,8 @@ pub fn WaitResult(comptime T: type) type {
 pub const CancelBehavior = enum {
     /// Propagate the cancellation error to the caller
     propagate,
-    /// Cancel the child task and continue waiting until completion (with shield)
+    /// Cancel the child task, wait until completion, and re-arm the caller's
+    /// cancellation so its next cancellation point reports it
     cancel_and_continue,
 };
 
@@ -607,6 +610,9 @@ fn waitInternal(future: anytype, comptime flags: WaitFlags) Cancelable!WaitResul
                 // On cancellation, cancel child and wait for completion
                 fut.cancel();
                 waiter.wait(1, .no_cancel);
+                // The cancellation was ours, not the child's: put it back
+                // whatever the child did with the one forwarded to it.
+                recancel();
                 const result = if (has_context) fut.getResult(&context) else fut.getResult();
                 return .{ .value = result };
             },
@@ -637,8 +643,10 @@ pub fn wait(future: anytype) Cancelable!WaitResult(FutureResult(@TypeOf(future))
 }
 
 /// Wait for a single future to complete, never propagating cancellation.
-/// When canceled, cancels the child task and continues waiting with shield enabled.
-/// This ensures the function always returns a result and never returns error.Canceled.
+/// When canceled, cancels the child task and continues waiting until it completes.
+/// This ensures the function always returns a result and never returns error.Canceled;
+/// the cancellation is re-armed instead, so the caller's next cancellation point
+/// reports it, even if the child swallowed the one forwarded to it.
 /// `future` must be a pointer to a future type.
 /// Works from both coroutines and threads.
 ///
@@ -1164,5 +1172,58 @@ test "select: promotes a notification that bounced off the commit fence" {
     const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(1) });
     defer runtime.deinit();
     var handle = try runtime.spawn(Body.run, .{});
+    try handle.join();
+}
+
+test "waitUntilComplete: re-arms the caller's cancellation in join" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const T = struct {
+        fn child() u32 {
+            // Swallows the cancellation forwarded by the parent.
+            rt_mod.sleep(.fromSeconds(60)) catch {};
+            return 7;
+        }
+
+        fn parent(r: *Runtime) !void {
+            var handle = try r.spawn(child, .{});
+            try std.testing.expectEqual(7, handle.join());
+            try std.testing.expectError(error.Canceled, rt_mod.checkCancel());
+        }
+    };
+
+    var handle = try rt.spawn(T.parent, .{rt});
+    defer handle.cancel();
+
+    try rt.sleep(.fromMilliseconds(10));
+    handle.cancel();
+    try handle.join();
+}
+
+test "waitUntilComplete: re-arms the caller's cancellation in JoinHandle.cancel" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const T = struct {
+        fn child() void {
+            // Swallows its cancellation, then keeps the parent waiting.
+            rt_mod.sleep(.fromSeconds(60)) catch {};
+            rt_mod.sleep(.fromMilliseconds(100)) catch {};
+        }
+
+        fn parent(r: *Runtime) !void {
+            var handle = try r.spawn(child, .{});
+            rt_mod.sleep(.fromMilliseconds(1)) catch return error.TestUnexpectedResult;
+            handle.cancel();
+            try std.testing.expectError(error.Canceled, rt_mod.checkCancel());
+        }
+    };
+
+    var handle = try rt.spawn(T.parent, .{rt});
+    defer handle.cancel();
+
+    try rt.sleep(.fromMilliseconds(20));
+    handle.cancel();
     try handle.join();
 }
