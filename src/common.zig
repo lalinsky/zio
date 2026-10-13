@@ -606,6 +606,18 @@ pub fn waitOnFlagQueue(queue: *WaitQueue(WaitNode), waiter: *Waiter) AsyncWaitSt
 /// If called from a context with an async runtime, uses the event loop.
 /// If called from a context without a runtime, executes the operation synchronously.
 pub fn waitForIo(c: *ev.Completion) Cancelable!void {
+    return waitForIoImpl(c, .check_first);
+}
+
+const CancelCheck = enum {
+    /// Report a pending cancellation instead of submitting the operation.
+    check_first,
+    /// Submit regardless; a pending cancellation cancels the operation once
+    /// the wait parks. For operations that have to run.
+    submit_always,
+};
+
+fn waitForIoImpl(c: *ev.Completion, comptime cancel_check: CancelCheck) Cancelable!void {
     var waiter = Waiter.init();
     c.userdata = &waiter;
     // Null callback: the loop hands the finished completion out through its
@@ -640,7 +652,7 @@ pub fn waitForIo(c: *ev.Completion) Cancelable!void {
     // reporting the cancellation instead of its result would throw away an
     // accepted socket or bytes already read, which is exactly what the
     // re-arm below is protecting.
-    try task.checkCancel();
+    if (cancel_check == .check_first) try task.checkCancel();
 
     // Async path: Submit to the event loop and wait for completion
     task.getExecutor().loopAdd(c);
@@ -918,14 +930,18 @@ fn blockInPlaceImpl(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func)), rese
     // error.Canceled, which surfaces here as that result; waitForIo re-arms the
     // task's pending cancellation before returning.
     //
-    // waitForIo only fails with error.Canceled, and only when the *completion*
+    // The work is submitted even if the task is already canceled: `func` has
+    // to run to produce ctx.result, and the cancellation reaches it in-band
+    // through the token once the wait parks.
+    //
+    // With that, waitForIo only fails with error.Canceled when the *completion*
     // carries a Canceled result — which happens on the drop path, where workFn
     // never runs and ctx.result would be undefined. Token-bearing work is never
     // dropped (it always completes via setResult, cancellation delivered in-band
     // through func's return), so this is unreachable. Assert it: were it ever to
     // fire we would be returning uninitialized ctx.result, which we would much
     // rather crash on.
-    waitForIo(&work.c) catch unreachable;
+    waitForIoImpl(&work.c, .submit_always) catch unreachable;
 
     return ctx.result;
 }
@@ -1032,5 +1048,34 @@ test "blockInPlace: cancellation interrupts a blocking syscall on the worker" {
     handle.cancel();
 
     // The worker catches the cancellation and returns normally, so join succeeds.
+    try handle.join();
+}
+
+test "blockInPlace: runs the function for an already canceled task" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const T = struct {
+        fn answer() u32 {
+            return 42;
+        }
+
+        fn call(r: *Runtime) !void {
+            r.sleep(.fromSeconds(60)) catch |err| {
+                try std.testing.expectEqual(error.Canceled, err);
+                getCurrentTaskOrNull().?.recancel();
+                try std.testing.expectEqual(42, blockInPlace(answer, .{}));
+                try std.testing.expectError(error.Canceled, r.checkCancel());
+                return;
+            };
+            return error.TestUnexpectedResult;
+        }
+    };
+
+    var handle = try rt.spawn(T.call, .{rt});
+    defer handle.cancel();
+
+    try rt.sleep(.fromMilliseconds(10));
+    handle.cancel();
     try handle.join();
 }
