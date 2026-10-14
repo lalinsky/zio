@@ -11,6 +11,30 @@
 //! - Custom scheduling strategies
 //! - Integration with external event loops
 //! - Fine-grained control over context switching
+//!
+//! ## Stacks
+//!
+//! `stackAlloc(info, maximum_size, committed_size)` reserves `maximum_size`
+//! bytes of address space but makes only the top `committed_size` bytes
+//! usable. What happens when a coroutine runs past the committed region
+//! depends on the platform:
+//!
+//! - POSIX: the rest is only reachable through `setupStackGrowth()`, which
+//!   installs a SIGSEGV/SIGBUS handler that commits more pages on demand and
+//!   reports a real overflow with a "Coroutine stack overflow!" message.
+//!   Without it, touching uncommitted stack is a plain segfault, typically
+//!   reported at the prologue of whatever function was being entered.
+//!   `zio.Runtime` calls it on every executor thread; when using this module
+//!   directly, call it on each thread that runs coroutines (and
+//!   `cleanupStackGrowth()` when the thread is done), or commit the whole
+//!   stack up front.
+//! - Windows: the stack grows automatically via guard pages.
+//! - OpenBSD: the whole stack is committed at allocation, there is no growth.
+//!
+//! Size stacks for the code that runs on them, not for the coroutine body
+//! alone. Debug builds of the standard library use large frames: even
+//! `std.debug.print` needs more than 4 KiB, and 64 KiB is too little for much
+//! of `std.Io`. `zio.Runtime` defaults to 8 MiB reserved, 256 KiB committed.
 
 const std = @import("std");
 
