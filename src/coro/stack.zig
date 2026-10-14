@@ -39,6 +39,12 @@ pub const StackInfo = extern struct {
     valgrind_stack_id: usize = 0,
 };
 
+/// Allocate a coroutine stack, reserving `maximum_size` bytes of address space
+/// and committing the top `committed_size` bytes.
+///
+/// On POSIX (except OpenBSD), the uncommitted part is only usable on threads
+/// where `setupStackGrowth()` has been called; elsewhere, running past
+/// `committed_size` segfaults. See the "Stacks" section in `zio.coro`.
 pub fn stackAlloc(info: *StackInfo, maximum_size: usize, committed_size: usize) error{OutOfMemory}!void {
     if (builtin.os.tag == .windows) {
         try stackAllocWindows(info, maximum_size, committed_size);
@@ -460,6 +466,10 @@ fn stackExtendWindows(_: *StackInfo) error{StackOverflow}!void {
 /// On Windows: No-op (stack growth is automatic via PAGE_GUARD)
 ///
 /// Must be called once per thread before using coroutines on that thread.
+/// `zio.Runtime` does this for its executor threads. Without it, a coroutine
+/// that runs past its committed stack segfaults instead of growing. With it,
+/// overflowing the reserved maximum aborts with a "Coroutine stack overflow!"
+/// message instead of a bare segfault.
 pub fn setupStackGrowth() !void {
     // Windows handles stack growth automatically via PAGE_GUARD.
     // OpenBSD stacks are fully committed at allocation time (MAP_STACK cannot be
