@@ -10,9 +10,9 @@
 //! whoever it waits on, a plain thread blocks without stopping the runtime.
 //!
 //! A no-suspend caller (the run loop, a `loopAdd`/`loopCancel` region, the
-//! crash handler; see `runtime.getWaitableTaskOrNull`) must not park and must
-//! never wait for a holder that can. It still prefers the user sink, so that
-//! output stays in one stream whenever possible:
+//! crash handler, and a thread-pool worker; see `runtime.markMachineryThread`)
+//! must not park and must never wait for a holder that can. It still prefers
+//! the user sink, so that output stays in one stream whenever possible:
 //!
 //!  * user lock free: take it, write on the blocking path, release within
 //!    the section.
@@ -293,8 +293,9 @@ const Context = struct {
 /// Classifies the caller. A mounted task outside a no-suspend region is task
 /// context; an executor thread without one is the run loop; the region depth
 /// covers `loopAdd`/`loopCancel` and explicit regions on any executor thread,
-/// including a task's own stack. Everything else, including thread-pool
-/// workers running user code, is user thread context.
+/// including a task's own stack. A thread-pool worker is runtime machinery and
+/// counts as no-suspend (see `runtime.markMachineryThread`); everything else is
+/// user thread context.
 fn currentContext() Context {
     if (crashed) {
         return .{
@@ -309,6 +310,12 @@ fn currentContext() Context {
                 return .{ .no_suspend = false, .holder = .{ .task = task } };
             }
         }
+        return .{ .no_suspend = true, .holder = .{ .thread = std.Thread.getCurrentId() } };
+    }
+    // A thread-pool worker, not user code: a parked task may be waiting on this
+    // very thread to deliver the completion of its I/O, so waiting for that
+    // task here would deadlock. Divert to the scheduler sink instead.
+    if (runtime.isMachineryThread()) {
         return .{ .no_suspend = true, .holder = .{ .thread = std.Thread.getCurrentId() } };
     }
     return .{ .no_suspend = false, .holder = .{ .thread = std.Thread.getCurrentId() } };

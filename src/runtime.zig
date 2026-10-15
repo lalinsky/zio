@@ -1400,6 +1400,29 @@ pub fn getWaitableTaskOrNull() ?*AnyTask {
     return exec.current_task;
 }
 
+/// Whether the calling thread is runtime machinery rather than user code.
+/// Only thread-pool workers set it, once, for their whole life.
+threadlocal var machinery_thread: bool = false;
+
+/// Mark the calling thread as runtime machinery for the rest of its life.
+///
+/// **Internal to the runtime, and not exported from `zio`.** A thread-pool
+/// worker runs the scheduler's own work: a delegated operation, and then the
+/// completion that hands its result to the task parked on it. That task can
+/// hold the stderr lock while it waits, so a log call on the worker must not
+/// block on it -- `stderr.currentContext` classifies a machinery thread as
+/// no-suspend, diverting it to the scheduler sink instead.
+///
+/// Called once per worker, from `ThreadPool.run`.
+pub fn markMachineryThread() void {
+    machinery_thread = true;
+}
+
+/// Whether the calling thread was marked by `markMachineryThread`.
+pub fn isMachineryThread() bool {
+    return machinery_thread;
+}
+
 /// Enter a no-suspend region on this thread.
 ///
 /// **Internal to the runtime, and not exported from `zio`.** This is for code

@@ -523,12 +523,13 @@ fn wallTimerAPC(arg: ?*anyopaque, low: windows.DWORD, high: windows.DWORD) callc
 
 pub fn wake(self: *Self, state: *LoopState) void {
     _ = state;
-    // Queue an APC to wake the thread
+    // Queue an APC to wake the thread. Hot cross-thread path (every cross-thread
+    // task schedule), also run from thread-pool workers, so it must not log: a
+    // log call takes the stderr lock, which a parked task can hold while it
+    // waits for the very completion this wake delivers (see stderr.zig).
     const result = windows.QueueUserAPC(wakeAPC, self.thread_handle, 0);
     if (result == 0) {
         log.err("QueueUserAPC failed: {}", .{windows.GetLastError()});
-    } else {
-        log.debug("QueueUserAPC succeeded", .{});
     }
 }
 
@@ -2340,15 +2341,15 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         const err = windows.GetLastError();
         switch (err) {
             .WAIT_TIMEOUT => {
-                log.debug("poll() timed out", .{});
                 _ = self.consumeWallFired();
                 return true; // Timed out
             },
             WAIT_IO_COMPLETION => {
                 // Woken by an APC: either wake() or a wall-timer fire. Report a
                 // timeout only when a boot/real timer actually fired so the loop
-                // re-runs checkTimers; a bare wake() returns false.
-                log.debug("poll() woken by APC", .{});
+                // re-runs checkTimers; a bare wake() returns false. No logging:
+                // this fires on every cross-thread wake and would interleave
+                // into whatever a task is holding stderr to write.
                 return self.consumeWallFired();
             },
             else => {
