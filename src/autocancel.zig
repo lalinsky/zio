@@ -37,7 +37,18 @@ pub const AutoCancel = struct {
     /// of this struct. A `clear` that lost the disarm race parks on it, which
     /// keeps this struct (and the timer inside it) alive for exactly as long
     /// as the callback needs them.
-    fired: std.atomic.Value(u32) = .init(0),
+    fired: std.atomic.Value(Fired) = .init(.{}),
+
+    const Fired = packed struct(u32) {
+        done: bool = false,
+        /// The cancel took, and `delivered` is the task's count from then. If
+        /// `check` has not claimed it and the count has not moved by `clear`,
+        /// no cancellation point reported the error, so the guarded operation
+        /// finished without seeing it and `clear` takes the cancel back.
+        canceled: bool = false,
+        delivered: u7 = 0,
+        _padding: u23 = 0,
+    };
 
     pub const init: AutoCancel = .{};
 
@@ -53,10 +64,24 @@ pub const AutoCancel = struct {
         // has run) against this struct. Park until it is done with it; it
         // wakes this task after setting the flag.
         const task = getCurrentTask();
-        while (self.fired.load(.acquire) == 0) {
+        var fired = self.fired.load(.acquire);
+        while (!fired.done) {
             task.yield(.park, .no_cancel);
+            fired = self.fired.load(.acquire);
         }
         self.task = null;
+
+        // A timer that fired too late for any cancellation point to report it
+        // must not fail whatever the task does next. When `check` already
+        // claimed it, or the count has moved, the error went somewhere, so
+        // leave it. Either way it is settled, and a later `clear` must not
+        // look at it again.
+        if (fired.canceled) {
+            self.fired.store(.{ .done = true }, .monotonic);
+            if (self.triggered.load(.monotonic) and task.retractAutoCancel(fired.delivered)) {
+                self.triggered.store(false, .monotonic);
+            }
+        }
     }
 
     /// Arms against the monotonic clock. See `setClock` to pick another.
@@ -93,7 +118,7 @@ pub const AutoCancel = struct {
         // Set task reference and reset the per-arm flags
         self.task = task;
         self.triggered.store(false, .monotonic);
-        self.fired.store(0, .monotonic);
+        self.fired.store(.{}, .monotonic);
 
         // Initialize ev.Timer
         self.timer.c.userdata = self;
@@ -116,7 +141,10 @@ pub const AutoCancel = struct {
         // callback), so `checkAutoCancel` is what decides; the flag only says
         // which instance to attribute an auto-cancel to.
         if (!self.triggered.load(.acquire)) return false;
-        return getCurrentTask().checkAutoCancel();
+        if (!getCurrentTask().checkAutoCancel()) return false;
+        // Claimed, so a later `clear` must not take it back.
+        self.triggered.store(false, .monotonic);
+        return true;
     }
 };
 
@@ -183,6 +211,7 @@ fn autoCancelCallback(
 ) void {
     const autocancel: *AutoCancel = @ptrCast(@alignCast(completion.userdata.?));
     const task = autocancel.task;
+    var fired: AutoCancel.Fired = .{ .done = true };
 
     // Clear the associated task
     autocancel.task = null;
@@ -201,7 +230,12 @@ fn autoCancelCallback(
             // instance, and `checkAutoCancel` refuses once the task is
             // user-canceled.
             autocancel.triggered.store(true, .release);
-            if (!t.setCanceled(.auto)) autocancel.triggered.store(false, .monotonic);
+            if (t.setCanceled(.auto)) |delivered| {
+                fired.canceled = true;
+                fired.delivered = delivered;
+            } else {
+                autocancel.triggered.store(false, .monotonic);
+            }
         }
     }
 
@@ -209,7 +243,7 @@ fn autoCancelCallback(
     // lost the disarm race and is parked on this flag. Nothing below may touch
     // the struct or the completion again, since observing the flag lets the
     // owner drop the frame both live in.
-    autocancel.fired.store(1, .release);
+    autocancel.fired.store(fired, .release);
 
     // Wake unconditionally: the owner may be parked in `clear` waiting for the
     // flag even when the cancel did not take. A wake with nothing parked just
@@ -464,6 +498,126 @@ test "AutoCancel: cancels spawned task via join" {
     return error.TestUnexpectedResult;
 }
 
+test "AutoCancel: a timer that fires after the operation finished is taken back by clear" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var timeout: AutoCancel = .init;
+    timeout.set(.fromMilliseconds(10));
+
+    // The timer fires while no cancellation point can report it.
+    rt.beginShield();
+    rt.sleep(.fromMilliseconds(50)) catch unreachable;
+    rt.endShield();
+
+    timeout.clear();
+    try std.testing.expect(!timeout.triggered.load(.monotonic));
+
+    // Nothing timed out, so the next cancellation point must not fail.
+    try rt.sleep(.fromMilliseconds(1));
+}
+
+test "AutoCancel: taking back a late inner timer leaves the outer one pending" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var outer: AutoCancel = .init;
+    defer outer.clear();
+    outer.set(.fromMilliseconds(10));
+
+    var inner: AutoCancel = .init;
+    inner.set(.fromMilliseconds(5));
+
+    // Both fire while no cancellation point can report them.
+    rt.beginShield();
+    rt.sleep(.fromMilliseconds(50)) catch unreachable;
+    rt.endShield();
+
+    inner.clear();
+
+    rt.sleep(.fromMilliseconds(1)) catch |err| {
+        try std.testing.expect(outer.check(err));
+        return;
+    };
+    return error.TestUnexpectedResult;
+}
+
+test "AutoCancel: a late timer claimed by check is not taken back by clear" {
+    // The error check sees does not come from this task's own cancellation
+    // points: join forwards the child's error.Canceled.
+    const Child = struct {
+        fn run(runtime: *Runtime) !void {
+            try runtime.sleep(.fromMilliseconds(60_000));
+        }
+    };
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var handle = try rt.spawn(Child.run, .{rt});
+    try rt.sleep(.fromMilliseconds(1));
+    handle.cancel();
+
+    var timeout: AutoCancel = .init;
+    defer timeout.clear();
+    timeout.set(.fromMilliseconds(10));
+
+    rt.beginShield();
+    rt.sleep(.fromMilliseconds(50)) catch unreachable;
+    const result = handle.join();
+    rt.endShield();
+
+    result catch |err| {
+        try std.testing.expect(timeout.check(err));
+        return;
+    };
+    return error.TestUnexpectedResult;
+}
+
+test "AutoCancel: a timer whose error was put back by recancel is taken back by clear" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var timeout: AutoCancel = .init;
+    timeout.set(.fromMilliseconds(10));
+
+    // An operation that completed anyway puts the error back and succeeds.
+    rt.sleep(.fromMilliseconds(50)) catch |err| {
+        std.debug.assert(err == error.Canceled);
+        recancel();
+    };
+
+    timeout.clear();
+    try rt.sleep(.fromMilliseconds(1));
+}
+
+test "AutoCancel: a late timer is not taken back from a user-canceled task" {
+    const Worker = struct {
+        fn run(runtime: *Runtime) !void {
+            var timeout: AutoCancel = .init;
+            timeout.set(.fromMilliseconds(10));
+
+            runtime.beginShield();
+            runtime.sleep(.fromMilliseconds(50)) catch unreachable;
+            runtime.endShield();
+
+            timeout.clear();
+            try std.testing.expectError(error.Canceled, runtime.sleep(.fromMilliseconds(1)));
+            // Both cancels stay pending, the auto one is not taken back.
+            try std.testing.expectError(error.Canceled, runtime.sleep(.fromMilliseconds(1)));
+        }
+    };
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    // The timer has fired inside the worker's shielded sleep by now.
+    var handle = try rt.spawn(Worker.run, .{rt});
+    try rt.sleep(.fromMilliseconds(20));
+    handle.cancel();
+    try handle.join();
+}
+
 test "withTimeout: returns the value when func finishes in time" {
     const work = struct {
         fn call(rt: *Runtime) !u32 {
@@ -591,6 +745,23 @@ test "withTimeout: recancel re-arms a cancellation the timeout delivered" {
     };
 
     try std.testing.expectError(error.Timeout, withTimeout(.fromMilliseconds(10), Work.run, .{rt}));
+}
+
+test "withTimeout: a deadline that passes after func returned does not cancel the caller" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Work = struct {
+        fn run(runtime: *Runtime) u32 {
+            runtime.beginShield();
+            defer runtime.endShield();
+            runtime.sleep(.fromMilliseconds(50)) catch unreachable;
+            return 42;
+        }
+    };
+
+    try std.testing.expectEqual(42, try withTimeout(.fromMilliseconds(10), Work.run, .{rt}));
+    try rt.sleep(.fromMilliseconds(1));
 }
 
 test "withTimeout: nested, inner deadline fires first" {
