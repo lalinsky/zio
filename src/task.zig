@@ -141,13 +141,19 @@ pub const Closure = struct {
 
 // Cancellation status - tracks both user and auto-cancellation
 // Organized as 4 bytes for easier alignment:
-// Byte 0: flags (user_canceled + padding)
+// Byte 0: user_canceled flag + delivered counter
 // Byte 1: auto_canceled counter
 // Byte 2: pending_errors counter
 // Byte 3: shield_count counter
 pub const CanceledStatus = packed struct(u32) {
     user_canceled: bool = false,
-    _padding: u7 = 0,
+    /// Net count of error.Canceled delivered to the task, wrapping: `checkCancel`
+    /// adds one per error it reports and `recancel` takes it back. An
+    /// auto-cancel records it when it fires, and an unchanged count later means
+    /// none of the task's cancellation points has reported an error since (see
+    /// `retractAutoCancel`). Wrapping can only mistake 128 net deliveries for
+    /// none, which takes that many other auto-cancels firing in between.
+    delivered: u7 = 0,
     auto_canceled: u8 = 0,
     pending_errors: u8 = 0,
     shield_count: u8 = 0,
@@ -374,8 +380,9 @@ pub const AnyTask = struct {
     }
 
     /// Set the canceled status on this task.
-    /// Returns true if this cancellation triggered, false if shadowed by prior user cancellation.
-    pub fn setCanceled(self: *AnyTask, kind: CancelKind) bool {
+    /// Returns the `delivered` count at the time of the cancellation if it
+    /// triggered, null if shadowed by prior user cancellation.
+    pub fn setCanceled(self: *AnyTask, kind: CancelKind) ?u7 {
         var current = self.canceled_status.load(.acquire);
         while (true) {
             var status: CanceledStatus = @bitCast(current);
@@ -405,7 +412,7 @@ pub const AnyTask = struct {
                 current = prev;
                 continue;
             }
-            return triggered;
+            return if (triggered) status.delivered else null;
         }
     }
 
@@ -423,12 +430,15 @@ pub const AnyTask = struct {
 
             // Increment pending_errors
             status.pending_errors += 1;
+            status.delivered -%= 1;
 
             const new: u32 = @bitCast(status);
             if (self.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
                 current = prev;
                 continue;
             }
+            // The delivered error is pending again, so it was not swallowed.
+            if (zio_options.debug_cancel) self.cancel_debug.trace = null;
             break;
         }
     }
@@ -458,6 +468,35 @@ pub const AnyTask = struct {
         }
     }
 
+    /// Take back an auto-cancel that fired when the `delivered` count was
+    /// `delivered`, has not been consumed by `checkAutoCancel`, and whose
+    /// error no cancellation point has reported since. Returns true if it was
+    /// taken back, false if user-canceled or if some error was delivered in
+    /// the meantime, which may have been this one.
+    pub fn retractAutoCancel(self: *AnyTask, delivered: u7) bool {
+        var current = self.canceled_status.load(.acquire);
+        while (true) {
+            var status: CanceledStatus = @bitCast(current);
+
+            // User cancellation has priority
+            if (status.user_canceled) return false;
+            if (status.delivered != delivered) return false;
+
+            // A `check` on another instance can consume this one's unit
+            // through a forwarded error, so the increments may be gone.
+            if (status.auto_canceled == 0 or status.pending_errors == 0) return false;
+            status.auto_canceled -= 1;
+            status.pending_errors -= 1;
+
+            const new: u32 = @bitCast(status);
+            if (self.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
+                current = prev;
+                continue;
+            }
+            return true;
+        }
+    }
+
     /// Check if there are pending cancellation errors to consume.
     /// If pending_errors > 0 and not shielded, decrements the count and returns error.Canceled.
     /// Otherwise returns void (no error).
@@ -474,6 +513,7 @@ pub const AnyTask = struct {
 
             // Decrement pending_errors
             status.pending_errors -= 1;
+            status.delivered +%= 1;
 
             const new: u32 = @bitCast(status);
             if (self.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
@@ -510,7 +550,7 @@ pub const AnyTask = struct {
 
     /// Cancel this task by setting canceled status and waking it if suspended.
     pub fn cancel(self: *AnyTask) void {
-        if (self.setCanceled(.user)) {
+        if (self.setCanceled(.user) != null) {
             self.wake();
         }
     }
