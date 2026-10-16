@@ -62,7 +62,7 @@ jobs:
             cp zig-out/bin/test zig-out/bin/test-$backend
           fi
         done
-      timeout-minutes: 10
+      timeout-minutes: 15
       env:
         TEST_VERBOSE: 2
 
