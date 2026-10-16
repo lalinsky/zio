@@ -5,6 +5,7 @@ const Completion = @import("completion.zig").Completion;
 const Work = @import("completion.zig").Work;
 const os = @import("../os/root.zig");
 const Timeout = @import("../time.zig").Timeout;
+const runtime = @import("../runtime.zig");
 
 const log = @import("../common.zig").log;
 
@@ -294,6 +295,10 @@ pub const ThreadPool = struct {
     }
 
     fn run(self: *ThreadPool, worker_id: u64) void {
+        // This worker is runtime machinery: a parked task may be waiting on it
+        // to deliver an I/O completion, so a log call here must not block on
+        // the stderr lock that task holds.
+        runtime.markMachineryThread();
         while (true) {
             const shutdown = self.runTasks();
             if (self.removeThread(worker_id, shutdown)) return;
