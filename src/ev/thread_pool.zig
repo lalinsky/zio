@@ -105,8 +105,6 @@ pub const ThreadPool = struct {
         const worker_id = self.next_worker_id;
         self.next_worker_id +%= 1;
 
-        log.debug("Spawning thread {}", .{worker_id});
-
         // Reservations can push the worker count past the init-time capacity, so
         // this must allocate on demand rather than assume capacity.
         const worker = try self.workers.addOne(self.allocator);
@@ -121,8 +119,6 @@ pub const ThreadPool = struct {
 
         const allow_removal = after_shutdown or self.workers.items.len > self.min_threads;
         if (!allow_removal) return false;
-
-        log.debug("Removing thread {}", .{worker_id});
 
         for (self.workers.items, 0..) |*worker, i| {
             if (worker.worker_id == worker_id) {
@@ -295,10 +291,12 @@ pub const ThreadPool = struct {
     }
 
     fn run(self: *ThreadPool, worker_id: u64) void {
-        // This worker is runtime machinery: a parked task may be waiting on it
-        // to deliver an I/O completion, so a log call here must not block on
-        // the stderr lock that task holds.
-        runtime.markMachineryThread();
+        // A worker is runtime machinery for its whole life. That includes the
+        // `spawnBlocking` user code it also runs: such code can block on the
+        // stderr lock, and the task holding that lock may be parked on this very
+        // pool, so waiting would starve the worker needed to release it. See
+        // `runtime.ThreadRole`.
+        runtime.setThreadRole(.machinery);
         while (true) {
             const shutdown = self.runTasks();
             if (self.removeThread(worker_id, shutdown)) return;
