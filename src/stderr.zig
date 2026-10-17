@@ -504,6 +504,15 @@ test "stderr lock: a machinery thread diverts to the scheduler sink" {
     defer rt.deinit();
     const io = rt.io();
 
+    // Both sinks are process-global and remember the `Io` they were first
+    // bound to. This test is the first to touch them, so hand them back
+    // unbound instead of leaving them pointing at a runtime that is about to
+    // be destroyed.
+    defer {
+        user_sink = .{};
+        scheduler_sink = .{};
+    }
+
     // The main task holds the user sink for the duration.
     var buffer: [32]u8 = undefined;
     _ = try io.lockStderr(&buffer, .no_color);
