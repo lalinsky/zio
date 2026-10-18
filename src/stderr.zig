@@ -10,7 +10,7 @@
 //! whoever it waits on, a plain thread blocks without stopping the runtime.
 //!
 //! A no-suspend caller (the run loop, a `loopAdd`/`loopCancel` region, the
-//! crash handler, and a thread-pool worker; see `runtime.markMachineryThread`)
+//! crash handler, and runtime machinery; see `runtime.ThreadRole`)
 //! must not park and must never wait for a holder that can. It still prefers
 //! the user sink, so that output stays in one stream whenever possible:
 //!
@@ -22,6 +22,10 @@
 //!    machinery that has to resume it is the #661 deadlock. Divert to the
 //!    scheduler sink, whose holders are only ever no-suspend callers, so
 //!    every wait for it is bounded too.
+//!
+//! The worker case is a safety net, not a license to log from the machinery:
+//! the hot paths in `ev/` do not log at all (#661), so a worker reaches
+//! stderr only on an error path.
 //!
 //! On the crash path there is one more case: the user lock held by the task
 //! mounted on the crashing thread itself. That task is mid-panic on this very
@@ -293,9 +297,9 @@ const Context = struct {
 /// Classifies the caller. A mounted task outside a no-suspend region is task
 /// context; an executor thread without one is the run loop; the region depth
 /// covers `loopAdd`/`loopCancel` and explicit regions on any executor thread,
-/// including a task's own stack. A thread-pool worker is runtime machinery and
-/// counts as no-suspend (see `runtime.markMachineryThread`); everything else is
-/// user thread context.
+/// including a task's own stack. A thread running runtime machinery counts as
+/// no-suspend (see `runtime.ThreadRole`); everything else is user thread
+/// context.
 fn currentContext() Context {
     if (crashed) {
         return .{
@@ -312,10 +316,10 @@ fn currentContext() Context {
         }
         return .{ .no_suspend = true, .holder = .{ .thread = std.Thread.getCurrentId() } };
     }
-    // A thread-pool worker, not user code: a parked task may be waiting on this
+    // Runtime machinery, not user code: a parked task may be waiting on this
     // very thread to deliver the completion of its I/O, so waiting for that
     // task here would deadlock. Divert to the scheduler sink instead.
-    if (runtime.isMachineryThread()) {
+    if (runtime.getThreadRole() == .machinery) {
         return .{ .no_suspend = true, .holder = .{ .thread = std.Thread.getCurrentId() } };
     }
     return .{ .no_suspend = false, .holder = .{ .thread = std.Thread.getCurrentId() } };
@@ -464,6 +468,74 @@ test "stderr lock: a no-suspend region diverts from a task-held lock" {
     try std.testing.expect(!std.meta.eql(task_context.holder, ns_context.holder));
     try std.testing.expect(l.lockNoSuspend(ns_context.holder, null) == null);
     try std.testing.expect(l.tryLockNoSuspend(ns_context.holder, null) == null);
+}
+
+test "stderr lock: a machinery thread is no-suspend context" {
+    const rt = try runtime.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    // The test thread runs the runtime's main task, so it is task context.
+    try std.testing.expectEqual(Holder.task, std.meta.activeTag(currentContext().holder));
+
+    const Probe = struct {
+        fn run(marked: bool, out: *bool) void {
+            if (marked) runtime.setThreadRole(.machinery);
+            out.* = currentContext().no_suspend;
+        }
+    };
+
+    // A thread-pool worker is runtime machinery: the task it is about to
+    // unblock may be parked while holding the lock, so it must not wait.
+    var worker_no_suspend = false;
+    const worker = try std.Thread.spawn(.{}, Probe.run, .{ true, &worker_no_suspend });
+    worker.join();
+    try std.testing.expect(worker_no_suspend);
+
+    // Unmarked, the same thread is user code and keeps the blocking behaviour,
+    // which is what the marker exists to change.
+    var user_no_suspend = true;
+    const user = try std.Thread.spawn(.{}, Probe.run, .{ false, &user_no_suspend });
+    user.join();
+    try std.testing.expect(!user_no_suspend);
+}
+
+test "stderr lock: a machinery thread diverts to the scheduler sink" {
+    const rt = try runtime.Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    // Both sinks are process-global and remember the `Io` they were first
+    // bound to. This test is the first to touch them, so hand them back
+    // unbound instead of leaving them pointing at a runtime that is about to
+    // be destroyed.
+    defer {
+        user_sink = .{};
+        scheduler_sink = .{};
+    }
+
+    // The main task holds the user sink for the duration.
+    var buffer: [32]u8 = undefined;
+    _ = try io.lockStderr(&buffer, .no_color);
+    defer io.unlockStderr();
+
+    const Probe = struct {
+        fn run(worker_io: Io, out: *bool) void {
+            runtime.setThreadRole(.machinery);
+            var probe_buffer: [32]u8 = undefined;
+            const locked = worker_io.tryLockStderr(&probe_buffer, .no_color) catch return;
+            if (locked != null) {
+                worker_io.unlockStderr();
+                out.* = true;
+            }
+        }
+    };
+
+    // Waiting for the task would deadlock: the task is parked on this very
+    // worker. The worker must take the scheduler sink instead.
+    var diverted = false;
+    const worker = try std.Thread.spawn(.{}, Probe.run, .{ io, &diverted });
+    worker.join();
+    try std.testing.expect(diverted);
 }
 
 test "stderr lock: re-entry from the same no-suspend thread" {
