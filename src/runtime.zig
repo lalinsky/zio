@@ -1040,8 +1040,14 @@ pub const Executor = struct {
         if (!self.run_queue.overflow.isEmpty()) {
             if (self.run_queue.isEmpty()) {
                 _ = self.run_queue.refill(self.overflowBatch(), .block);
-            } else {
+            } else if (migrates) {
                 _ = self.run_queue.refill(1, .try_only);
+            } else {
+                // A private overflow holds only tasks queued behind the ring
+                // (see LocalRunQueue.push), so it refills as far as the ring
+                // has room: one at a time would leave its tasks waiting a
+                // tick each.
+                _ = self.run_queue.refill(std.math.maxInt(usize), .try_only);
             }
         }
         // Task wakes can enter the dispatched queue outside any poll: an
@@ -1145,7 +1151,13 @@ pub const Executor = struct {
             return null;
         }
 
-        const node = self.run_queue.pop() orelse return null;
+        const node = self.run_queue.pop() orelse blk: {
+            // Pinned: the ring ran dry within the tick while tasks wait in
+            // its overflow; take them now rather than after a poll.
+            if (migrates or self.run_queue.overflow.isEmpty()) return null;
+            if (self.run_queue.refill(std.math.maxInt(usize), .try_only) == 0) return null;
+            break :blk self.run_queue.pop() orelse return null;
+        };
         self.spendQuantum();
         return AnyTask.fromWaitNode(node);
     }

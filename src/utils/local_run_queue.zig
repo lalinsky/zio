@@ -247,7 +247,20 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
         /// Owner-only push (FIFO, to the tail). On a full ring, spills half the
         /// ring plus this node to the overflow queue (Go's runqput/runqputslow).
         /// Returns true when the ring was empty before the push.
+        ///
+        /// Without stealers (pinned scheduling) the spill would only reorder
+        /// work: the oldest half of the ring would go behind tasks woken after
+        /// it, and with the busy ring taking back one overflow task per check
+        /// it could wait ~half a ring's worth of ticks (with 256+ busy
+        /// connections on one executor, a ~13 ms p99 where the mean is 1 ms).
+        /// So the ring and its overflow stay one FIFO queue: once anything is
+        /// in the overflow, new tasks queue behind it, and a full ring spills
+        /// only the new task.
         pub fn push(self: *Self, node: *T) bool {
+            if (!stealable and !self.overflow.isEmpty()) {
+                self.overflow.push(node);
+                return false;
+            }
             while (true) {
                 const h = self.loadHead(); // synchronize with consumers
                 const t = self.ownTail(); // owner is the sole producer
@@ -255,6 +268,10 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
                     self.buffer[t & mask] = node;
                     self.storeTail(t +% 1); // publish the slot
                     return t == h;
+                }
+                if (!stealable) {
+                    self.overflow.push(node);
+                    return false;
                 }
                 if (self.pushOverflow(node, h, t)) return false;
                 // Ring was full but a steal freed space; retry.
@@ -836,6 +853,8 @@ test "LocalRunQueue: non-stealable spill and refill keep FIFO order" {
         n.* = .{ .id = i };
         _ = q.push(n);
     }
+    // A full ring spills only the new task: the ring keeps the oldest.
+    try testing.expectEqual(cap, q.len());
 
     var order: std.ArrayList(usize) = .empty;
     defer order.deinit(testing.allocator);
@@ -844,18 +863,34 @@ test "LocalRunQueue: non-stealable spill and refill keep FIFO order" {
         if (q.refill(std.math.maxInt(usize), .block) == 0) break;
     }
 
-    // The first push past capacity spilled the ring's oldest half plus itself,
-    // so the ring (the newer tasks) drains first, then the spilled ones. Each
-    // part keeps its order.
+    // With no stealers the ring and its overflow are one FIFO queue.
     try testing.expectEqual(total, order.items.len);
     try testing.expect(q.overflow.isEmpty());
-    const spilled = cap / 2 + 1;
-    const from_ring = order.items[0 .. total - spilled];
-    const from_overflow = order.items[total - spilled ..];
-    for (from_ring[1..], from_ring[0 .. from_ring.len - 1]) |id, prev| try testing.expect(id > prev);
-    for (from_overflow[1..], from_overflow[0 .. from_overflow.len - 1]) |id, prev| try testing.expect(id > prev);
-    try testing.expectEqual(0, from_overflow[0]);
-    try testing.expectEqual(cap, from_overflow[from_overflow.len - 1]);
+    for (order.items, 0..) |id, i| try testing.expectEqual(i, id);
+}
+
+test "LocalRunQueue: non-stealable push queues behind a non-empty overflow" {
+    const cap = TestLocalQueue.capacity;
+    var q: TestLocalQueue = .{};
+
+    const nodes = try testing.allocator.alloc(TestNode, cap + 2);
+    defer testing.allocator.free(nodes);
+    for (nodes[0 .. cap + 1], 0..) |*n, i| {
+        n.* = .{ .id = i };
+        _ = q.push(n);
+    }
+    // Room in the ring again, but task `cap` still waits in the overflow:
+    // the next push must not overtake it.
+    try testing.expectEqual(0, q.pop().?.id);
+    nodes[cap + 1] = .{ .id = cap + 1 };
+    try testing.expect(!q.push(&nodes[cap + 1]));
+
+    var expect: usize = 1;
+    while (true) {
+        while (q.pop()) |n| : (expect += 1) try testing.expectEqual(expect, n.id);
+        if (q.refill(std.math.maxInt(usize), .block) == 0) break;
+    }
+    try testing.expectEqual(cap + 2, expect);
 }
 
 test "LocalOverflowQueue: concurrent producers lose, duplicate or reorder no task" {
