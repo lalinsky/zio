@@ -20,6 +20,7 @@ const NetSendTo = @import("../completion.zig").NetSendTo;
 const NetRecvMsg = @import("../completion.zig").NetRecvMsg;
 const NetRecvMmsg = @import("../completion.zig").NetRecvMmsg;
 const NetSendMsg = @import("../completion.zig").NetSendMsg;
+const NetSendMmsg = @import("../completion.zig").NetSendMmsg;
 const NetPoll = @import("../completion.zig").NetPoll;
 const NetSendFile = @import("../completion.zig").NetSendFile;
 const FileRead = @import("../completion.zig").FileRead;
@@ -236,6 +237,7 @@ pub fn capability(comptime op: Op) Support {
         .net_recvmsg,
         .net_recvmmsg,
         .net_sendmsg,
+        .net_sendmmsg,
         .net_poll,
         .net_shutdown,
         .net_close,
@@ -301,6 +303,11 @@ pub const NetRecvMsgData = struct {
 pub const NetSendMsgData = struct {
     msg: windows.WSAMSG_const = undefined,
     control_buf: windows.WSABUF_nullable = undefined,
+};
+
+pub const NetSendMmsgData = struct {
+    send: NetSendMsgData = .{},
+    iov: net.iovec_const = undefined,
 };
 
 pub const NetSendFileData = struct {
@@ -675,10 +682,16 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
 
         .net_sendmsg => {
             const data = c.cast(NetSendMsg);
-            self.submitSendMsg(state, data) catch |err| {
-                c.setError(err);
-                state.markCompletedFromBackend(c);
-            };
+            self.submitSendMsg(state, c, &data.internal, data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control);
+        },
+
+        // No sendmmsg here: the first slot goes out on its own and the result
+        // reports one message.
+        .net_sendmmsg => {
+            const data = c.cast(NetSendMmsg);
+            const slot = &data.slots[0];
+            data.internal.iov = net.iovecConstFromSlice(slot.data);
+            self.submitSendMsg(state, c, &data.internal.send, data.handle, (&data.internal.iov)[0..1], data.flags, slot.addr, slot.addr_len, slot.control);
         },
 
         .net_poll => {
@@ -1214,42 +1227,53 @@ fn submitRecvMsg(self: *Self, state: *LoopState, data: *NetRecvMsg) !void {
     // Operation will complete via IOCP (either immediate or async)
 }
 
-fn submitSendMsg(self: *Self, state: *LoopState, data: *NetSendMsg) !void {
+fn submitSendMsg(
+    self: *Self,
+    state: *LoopState,
+    c: *Completion,
+    internal: *NetSendMsgData,
+    handle: NetHandle,
+    iovecs: []const net.iovec_const,
+    flags: net.SendFlags,
+    addr: ?*const net.sockaddr,
+    addr_len: net.socklen_t,
+    control: ?[]const u8,
+) void {
     // Initialize OVERLAPPED
-    data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
+    c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
 
     // Set up control buffer if provided
-    if (data.control) |ctl| {
-        data.internal.control_buf = .{
+    if (control) |ctl| {
+        internal.control_buf = .{
             .len = @intCast(ctl.len),
             .buf = @constCast(ctl.ptr),
         };
     } else {
-        data.internal.control_buf = .{
+        internal.control_buf = .{
             .len = 0,
             .buf = null,
         };
     }
 
     // Initialize WSAMSG_const
-    data.internal.msg = .{
-        .name = if (data.addr) |addr| @ptrCast(addr) else null,
-        .namelen = if (data.addr != null) @intCast(data.addr_len) else 0,
-        .lpBuffers = @constCast(data.data.iovecs.ptr),
-        .dwBufferCount = @intCast(data.data.iovecs.len),
-        .Control = data.internal.control_buf,
-        .dwFlags = sendFlagsToMsg(data.flags),
+    internal.msg = .{
+        .name = if (addr) |a| @ptrCast(a) else null,
+        .namelen = if (addr != null) @intCast(addr_len) else 0,
+        .lpBuffers = @constCast(iovecs.ptr),
+        .dwBufferCount = @intCast(iovecs.len),
+        .Control = internal.control_buf,
+        .dwFlags = sendFlagsToMsg(flags),
     };
 
     // Load WSASendMsg extension function
     const exts = self.shared_state.exts;
 
     const result = exts.wsasendmsg(
-        data.handle,
-        &data.internal.msg,
-        sendFlagsToMsg(data.flags),
-        &data.c.internal.bytes,
-        &data.c.internal.overlapped,
+        handle,
+        &internal.msg,
+        sendFlagsToMsg(flags),
+        &c.internal.bytes,
+        &c.internal.overlapped,
         null, // No completion routine
     );
 
@@ -1257,8 +1281,8 @@ fn submitSendMsg(self: *Self, state: *LoopState, data: *NetSendMsg) !void {
         const err = windows.WSAGetLastError();
         if (err != .IO_PENDING) {
             log.err("WSASendMsg failed: {}", .{err});
-            data.c.setError(net.errnoToSendError(err));
-            state.markCompletedFromBackend(&data.c);
+            c.setError(net.errnoToSendError(err));
+            state.markCompletedFromBackend(c);
             return;
         }
     }
@@ -1692,6 +1716,7 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
                 .net_recvmsg,
                 .net_recvmmsg,
                 .net_sendmsg,
+                .net_sendmmsg,
                 .net_poll,
                 .net_send_file,
                 => blk: {
@@ -1706,6 +1731,7 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
                         .net_recvmsg => target.cast(NetRecvMsg).handle,
                         .net_recvmmsg => target.cast(NetRecvMmsg).handle,
                         .net_sendmsg => target.cast(NetSendMsg).handle,
+                        .net_sendmmsg => target.cast(NetSendMmsg).handle,
                         .net_poll => target.cast(NetPoll).handle,
                         .net_send_file => target.cast(NetSendFile).handle,
                         else => unreachable,
@@ -2113,6 +2139,30 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 c.setError(net.errnoToSendError(err));
             } else {
                 c.setResult(.net_sendmsg, @intCast(bytes_transferred));
+            }
+
+            state.markCompletedFromBackend(c);
+        },
+
+        .net_sendmmsg => {
+            const data = c.cast(NetSendMmsg);
+            var bytes_transferred: windows.DWORD = 0;
+            var flags: windows.DWORD = 0;
+
+            const result = windows.WSAGetOverlappedResult(
+                data.handle,
+                &data.c.internal.overlapped,
+                &bytes_transferred,
+                windows.FALSE,
+                &flags,
+            );
+
+            if (result == windows.FALSE) {
+                const err = windows.WSAGetLastError();
+                c.setError(net.errnoToSendError(err));
+            } else {
+                data.slots[0].sent_len = bytes_transferred;
+                c.setResult(.net_sendmmsg, 1);
             }
 
             state.markCompletedFromBackend(c);

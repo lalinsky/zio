@@ -55,6 +55,7 @@ pub fn Backend(comptime mode: Mode) type {
         pub const NetRecvMsgData = if (mode == .epoll) struct {} else IoUring.NetRecvMsgData;
         pub const NetRecvMmsgData = if (mode == .epoll) struct {} else IoUring.NetRecvMmsgData;
         pub const NetSendMsgData = if (mode == .epoll) struct {} else IoUring.NetSendMsgData;
+        pub const NetSendMmsgData = if (mode == .epoll) struct {} else IoUring.NetSendMmsgData;
         pub const FileOpenData = IoUring.FileOpenData;
         pub const FileCreateData = IoUring.FileCreateData;
         pub const DirCreateDirData = IoUring.DirCreateDirData;

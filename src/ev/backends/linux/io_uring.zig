@@ -53,6 +53,7 @@ const NetSendTo = @import("../../completion.zig").NetSendTo;
 const NetRecvMsg = @import("../../completion.zig").NetRecvMsg;
 const NetRecvMmsg = @import("../../completion.zig").NetRecvMmsg;
 const NetSendMsg = @import("../../completion.zig").NetSendMsg;
+const NetSendMmsg = @import("../../completion.zig").NetSendMmsg;
 const NetSendFile = @import("../../completion.zig").NetSendFile;
 const NetPoll = @import("../../completion.zig").NetPoll;
 const NetClose = @import("../../completion.zig").NetClose;
@@ -133,6 +134,7 @@ pub fn capability(comptime op: Op) Support {
         .net_recvmsg,
         .net_recvmmsg,
         .net_sendmsg,
+        .net_sendmmsg,
         .net_poll,
         .net_shutdown,
         .net_close,
@@ -212,6 +214,11 @@ pub const NetRecvMmsgData = struct {
 
 pub const NetSendMsgData = struct {
     msg: linux.msghdr_const = undefined,
+};
+
+pub const NetSendMmsgData = struct {
+    msg: linux.msghdr_const = undefined,
+    iov: net.iovec_const = undefined,
 };
 
 pub const FileOpenData = struct {
@@ -667,6 +674,23 @@ fn submitInner(self: *Self, state: *LoopState, comptime op: Op, c: *Completion, 
                 .iovlen = data.data.iovecs.len,
                 .control = if (data.control) |ctl| ctl.ptr else null,
                 .controllen = if (data.control) |ctl| ctl.len else 0,
+                .flags = 0,
+            };
+            const sqe = self.getSqeOrDefer(c) orelse return;
+            sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags));
+            sqe.user_data = @intFromPtr(c);
+        },
+        .net_sendmmsg => {
+            const data = c.cast(NetSendMmsg);
+            const slot = &data.slots[0];
+            data.internal.iov = net.iovecConstFromSlice(slot.data);
+            data.internal.msg = .{
+                .name = slot.addr,
+                .namelen = slot.addr_len,
+                .iov = (&data.internal.iov)[0..1].ptr,
+                .iovlen = 1,
+                .control = if (slot.control) |ctl| ctl.ptr else null,
+                .controllen = if (slot.control) |ctl| ctl.len else 0,
                 .flags = 0,
             };
             const sqe = self.getSqeOrDefer(c) orelse return;
@@ -1382,10 +1406,10 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         }
 
         // Store the result in the completion
-        if (completion.op == .net_recvmmsg) {
-            storeRecvMmsgResult(completion, cqe.res, cqe.flags);
-        } else {
-            self.storeResult(completion, cqe.res);
+        switch (completion.op) {
+            .net_recvmmsg => storeRecvMmsgResult(completion, cqe.res, cqe.flags),
+            .net_sendmmsg => storeSendMmsgResult(completion, cqe.res),
+            else => self.storeResult(completion, cqe.res),
         }
 
         // Mark as completed (also decrements inflight_io)
@@ -1468,7 +1492,7 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
         .net_recv, .net_send, .net_accept, .file_read, .file_write => unreachable, // storeResult
         .group, .timer, .async, .work => unreachable,
         .net_open => unreachable,
-        .net_recvmmsg => unreachable, // handled in reap loop before storeResult
+        .net_recvmmsg, .net_sendmmsg => unreachable, // handled in reap loop before storeResult
         .net_bind => {
             if (res < 0) {
                 c.setError(net.errnoToBindError(@fromBackingInt(@intCast(-res))));
@@ -1865,6 +1889,25 @@ fn storeRecvMmsgResult(c: *Completion, res: i32, _: u32) void {
         data.drained = remaining.drained;
     }
     c.setResult(.net_recvmmsg, count);
+}
+
+/// The first slot went out through the SQE's sendmsg; the rest follow in one
+/// sendmmsg that does not wait. An error there comes after a message that was
+/// sent, so it is dropped the way sendmmsg drops one: the short count makes the
+/// caller re-submit the rest, and that reports it.
+fn storeSendMmsgResult(c: *Completion, res: i32) void {
+    const data = c.cast(NetSendMmsg);
+    if (res < 0) {
+        c.setError(net.errnoToSendError(@fromBackingInt(@intCast(-res))));
+        return;
+    }
+    data.slots[0].sent_len = @intCast(res);
+
+    var count: u32 = 1;
+    if (data.slots.len > 1) {
+        count += NetSendMmsg.sendSlots(data.handle, data.slots[1..], data.flags) catch 0;
+    }
+    c.setResult(.net_sendmmsg, count);
 }
 
 fn recvFlagsToMsg(flags: net.RecvFlags) u32 {
