@@ -27,6 +27,10 @@ fn handleClient(stream: zio.net.Stream) !void {
     while (true) {
         // Receive HTTP request headers
         var request = server.receiveHead() catch |err| switch (err) {
+            // The client sent nothing and closed the connection. That is how a
+            // keep-alive connection ends, not a server failure, so leave the
+            // loop without reporting an error.
+            error.HttpConnectionClosing => break,
             error.ReadFailed => |e| return reader.err orelse e,
             else => |e| return e,
         };
