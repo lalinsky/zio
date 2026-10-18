@@ -3946,6 +3946,48 @@ test "io: net UDP sendMany delivers more datagrams than one batch, each to its o
     }
 }
 
+test "io: net UDP sendMany reports an error in the middle of a batch with the count sent before it" {
+    // IOCP completes a send that fails with WSAEMSGSIZE right away, but a
+    // completion packet still follows for it.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+
+    var receiver = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer receiver.close(io);
+
+    // Larger than any IPv4 UDP datagram, so this one fails with EMSGSIZE.
+    const bad = 70;
+    var oversized: [70000]u8 = undefined;
+    @memset(&oversized, 0);
+
+    const count = 150;
+    var payloads: [count][4]u8 = undefined;
+    var messages: [count]Io.net.OutgoingMessage = undefined;
+    for (&messages, &payloads, 0..) |*m, *p, i| {
+        std.mem.writeInt(u32, p, @intCast(i), .little);
+        m.* = .{ .address = &receiver.address, .data_ptr = p, .data_len = p.len };
+    }
+    messages[bad] = .{ .address = &receiver.address, .data_ptr = &oversized, .data_len = oversized.len };
+
+    const err, const sent = sender.sendManyTimeout(io, &messages, .{}, .none);
+    try std.testing.expectEqual(error.MessageOversize, err.?);
+    try std.testing.expectEqual(bad, sent);
+
+    var buf: [16]u8 = undefined;
+    for (0..bad) |i| {
+        try std.testing.expectEqual(4, messages[i].data_len);
+        const msg = try receiver.receive(io, &buf);
+        try std.testing.expectEqual(4, msg.data.len);
+        try std.testing.expectEqual(i, std.mem.readInt(u32, msg.data[0..4], .little));
+    }
+}
+
 test "io: netLookup resolves numeric IPv4" {
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();

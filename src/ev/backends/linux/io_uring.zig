@@ -1492,7 +1492,10 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
         .net_recv, .net_send, .net_accept, .file_read, .file_write => unreachable, // storeResult
         .group, .timer, .async, .work => unreachable,
         .net_open => unreachable,
-        .net_recvmmsg, .net_sendmmsg => unreachable, // handled in reap loop before storeResult
+        // Reached from drainPending's cancel path; CQEs take the reap loop's
+        // own call to these.
+        .net_recvmmsg => storeRecvMmsgResult(c, res, 0),
+        .net_sendmmsg => storeSendMmsgResult(c, res),
         .net_bind => {
             if (res < 0) {
                 c.setError(net.errnoToBindError(@fromBackingInt(@intCast(-res))));
@@ -1894,7 +1897,8 @@ fn storeRecvMmsgResult(c: *Completion, res: i32, _: u32) void {
 /// The first slot went out through the SQE's sendmsg; the rest follow in one
 /// sendmmsg that does not wait. An error there comes after a message that was
 /// sent, so it is dropped the way sendmmsg drops one: the short count makes the
-/// caller re-submit the rest, and that reports it.
+/// caller re-submit the rest, and that reports it. A canceled op sends nothing
+/// more.
 fn storeSendMmsgResult(c: *Completion, res: i32) void {
     const data = c.cast(NetSendMmsg);
     if (res < 0) {
@@ -1904,8 +1908,10 @@ fn storeSendMmsgResult(c: *Completion, res: i32) void {
     data.slots[0].sent_len = @intCast(res);
 
     var count: u32 = 1;
-    if (data.slots.len > 1) {
-        count += NetSendMmsg.sendSlots(data.handle, data.slots[1..], data.flags) catch 0;
+    if (data.slots.len > 1 and !c.loadState().cancel_requested) {
+        var flags = data.flags;
+        flags.dontwait = true;
+        count += NetSendMmsg.sendSlots(data.handle, data.slots[1..], flags) catch 0;
     }
     c.setResult(.net_sendmmsg, count);
 }
