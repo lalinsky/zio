@@ -15,6 +15,9 @@ All notable changes to this project will be documented in this file.
   waits up to 40ms for the peer's delayed ACK. `Socket.setNoDelay(false)` turns it back
   on, and the new `Socket.getNoDelay` reports the setting.
 
+- `Socket.sendMany` now sends datagrams in batches with `sendmmsg` on Linux, FreeBSD
+  and NetBSD, instead of one `sendmsg` and event loop round trip per datagram.
+
 ### Added
 
 - Added `local_address` to `IpAddress.ConnectOptions`, to connect from a specific local

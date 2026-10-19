@@ -43,6 +43,7 @@ pub const NetSendTo = completion.NetSendTo;
 pub const NetRecvMsg = completion.NetRecvMsg;
 pub const NetRecvMmsg = completion.NetRecvMmsg;
 pub const NetSendMsg = completion.NetSendMsg;
+pub const NetSendMmsg = completion.NetSendMmsg;
 pub const NetPoll = completion.NetPoll;
 pub const NetClose = completion.NetClose;
 pub const NetShutdown = completion.NetShutdown;

@@ -77,6 +77,7 @@ pub const Op = enum {
     net_recvmsg,
     net_recvmmsg,
     net_sendmsg,
+    net_sendmmsg,
     net_poll,
     net_shutdown,
     net_close,
@@ -143,6 +144,7 @@ pub const Op = enum {
             .net_recvmsg => NetRecvMsg,
             .net_recvmmsg => NetRecvMmsg,
             .net_sendmsg => NetSendMsg,
+            .net_sendmmsg => NetSendMmsg,
             .net_poll => NetPoll,
             .net_close => NetClose,
             .net_shutdown => NetShutdown,
@@ -211,6 +213,7 @@ pub const Op = enum {
             NetRecvMsg => .net_recvmsg,
             NetRecvMmsg => .net_recvmmsg,
             NetSendMsg => .net_sendmsg,
+            NetSendMmsg => .net_sendmmsg,
             NetPoll => .net_poll,
             NetClose => .net_close,
             NetShutdown => .net_shutdown,
@@ -1252,6 +1255,82 @@ pub const NetSendMsg = struct {
 
     pub fn getResult(self: *const NetSendMsg) Error!usize {
         return self.c.getResult(.net_sendmsg);
+    }
+};
+
+/// Sends a batch of messages, each with its own address and control data. The
+/// result is how many went out, counted from the first slot, and may fall short
+/// of `slots.len` whenever the socket stops taking messages; the caller
+/// re-submits the rest. Without sendmmsg, a completion sends one message.
+pub const NetSendMmsg = struct {
+    c: Completion,
+    result_private_do_not_touch: u32 = undefined,
+    internal: if (@hasDecl(Backend, "NetSendMmsgData")) Backend.NetSendMmsgData else struct {} = .{},
+    handle: Backend.NetHandle,
+    slots: []Slot,
+    flags: net.SendFlags,
+
+    pub const Error = net.SendError || Cancelable;
+    pub const Result = u32;
+
+    pub const Slot = struct {
+        data: []const u8,
+        addr: ?*const net.sockaddr = null,
+        addr_len: net.socklen_t = 0,
+        control: ?[]const u8 = null,
+        sent_len: usize = 0,
+    };
+
+    pub fn init(
+        handle: Backend.NetHandle,
+        slots: []Slot,
+        flags: net.SendFlags,
+    ) NetSendMmsg {
+        std.debug.assert(slots.len > 0);
+        return .{
+            .c = .init(.net_sendmmsg),
+            .handle = handle,
+            .slots = slots,
+            .flags = flags,
+        };
+    }
+
+    pub fn getResult(self: *const NetSendMmsg) Error!Result {
+        return self.c.getResult(.net_sendmmsg);
+    }
+
+    const max_batch = 64;
+
+    /// Sends from the start of `slots` without waiting, in a single syscall,
+    /// and fills in `sent_len` for each message that went out.
+    pub fn sendSlots(handle: Backend.NetHandle, slots: []Slot, flags: net.SendFlags) net.SendError!u32 {
+        if (!net.has_sendmmsg) {
+            const slot = &slots[0];
+            const iov = net.iovecConstFromSlice(slot.data);
+            slot.sent_len = try net.sendmsg(handle, (&iov)[0..1], flags, slot.addr, slot.addr_len, slot.control);
+            return 1;
+        }
+        const batch_len: u32 = @intCast(@min(slots.len, max_batch));
+        var msgvec: [max_batch]net.mmsghdr = undefined;
+        var iovecs: [max_batch]net.iovec_const = undefined;
+        for (slots[0..batch_len], 0..) |slot, i| {
+            iovecs[i] = net.iovecConstFromSlice(slot.data);
+            msgvec[i] = .{
+                .hdr = .{
+                    .name = @ptrCast(@constCast(slot.addr)),
+                    .namelen = slot.addr_len,
+                    .iov = @ptrCast(&iovecs[i]),
+                    .iovlen = 1,
+                    .control = if (slot.control) |ctl| @constCast(ctl.ptr) else null,
+                    .controllen = if (slot.control) |ctl| @intCast(ctl.len) else 0,
+                    .flags = 0,
+                },
+                .len = 0,
+            };
+        }
+        const n = try net.sendmmsg(handle, &msgvec, batch_len, flags);
+        for (slots[0..n], msgvec[0..n]) |*slot, msg| slot.sent_len = msg.len;
+        return n;
     }
 };
 

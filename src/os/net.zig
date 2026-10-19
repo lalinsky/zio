@@ -1169,6 +1169,12 @@ pub const SendFlags = packed struct {
     eor: bool = false,
     oob: bool = false,
     fastopen: bool = false,
+    /// Fail with `error.WouldBlock` instead of blocking in the send syscall
+    /// when the socket can't take the data. On POSIX this is MSG_DONTWAIT and
+    /// holds regardless of the socket's blocking mode. Windows has no such
+    /// flag, so there it relies on the socket being in FIONBIO mode. It does
+    /// not stop an operation from waiting for the socket to become writable.
+    dontwait: bool = false,
 };
 
 fn sendFlagsToSys(flags: SendFlags) c_int {
@@ -1180,6 +1186,7 @@ fn sendFlagsToSys(flags: SendFlags) c_int {
     if (flags.eor and @hasDecl(MSG, "EOR")) sys_flags |= MSG.EOR;
     if (flags.oob and @hasDecl(MSG, "OOB")) sys_flags |= MSG.OOB;
     if (flags.fastopen and @hasDecl(MSG, "FASTOPEN")) sys_flags |= MSG.FASTOPEN;
+    if (flags.dontwait and @hasDecl(MSG, "DONTWAIT")) sys_flags |= MSG.DONTWAIT;
     return sys_flags;
 }
 
@@ -1538,7 +1545,12 @@ pub const has_recvmmsg = switch (builtin.os.tag) {
     else => false,
 };
 
-pub const mmsghdr = if (has_recvmmsg) posix.system.mmsghdr else struct {};
+pub const has_sendmmsg = switch (builtin.os.tag) {
+    .linux, .freebsd, .netbsd => true,
+    else => false,
+};
+
+pub const mmsghdr = if (has_recvmmsg or has_sendmmsg) posix.system.mmsghdr else struct {};
 
 pub fn recvmmsg(
     fd: fd_t,
@@ -1576,6 +1588,25 @@ const recvmmsg_libc = if (builtin.os.tag == .freebsd or builtin.os.tag == .netbs
     }.recvmmsg
 else
     void;
+
+pub fn sendmmsg(
+    fd: fd_t,
+    msgvec: [*]mmsghdr,
+    vlen: u32,
+    flags: SendFlags,
+) SendError!u32 {
+    const sys_flags = sendFlagsToSys(flags);
+
+    while (true) {
+        const rc = posix.system.sendmmsg(fd, msgvec, vlen, @intCast(sys_flags));
+
+        switch (posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            else => |err| return errnoToSendError(err),
+        }
+    }
+}
 
 pub fn sendmsg(
     fd: fd_t,

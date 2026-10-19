@@ -20,6 +20,7 @@ const NetSendTo = @import("../completion.zig").NetSendTo;
 const NetRecvMsg = @import("../completion.zig").NetRecvMsg;
 const NetRecvMmsg = @import("../completion.zig").NetRecvMmsg;
 const NetSendMsg = @import("../completion.zig").NetSendMsg;
+const NetSendMmsg = @import("../completion.zig").NetSendMmsg;
 const NetSendFile = @import("../completion.zig").NetSendFile;
 const NetPoll = @import("../completion.zig").NetPoll;
 const NetClose = @import("../completion.zig").NetClose;
@@ -120,6 +121,7 @@ pub fn capability(comptime op: Op) Support {
         .net_recvmsg,
         .net_recvmmsg,
         .net_sendmsg,
+        .net_sendmmsg,
         .net_poll,
         .net_shutdown,
         .net_close,
@@ -396,6 +398,7 @@ fn getFilter(completion: *Completion) i16 {
         .net_recvmsg => std.c.EVFILT.READ,
         .net_recvmmsg => std.c.EVFILT.READ,
         .net_sendmsg => std.c.EVFILT.WRITE,
+        .net_sendmmsg => std.c.EVFILT.WRITE,
         .net_poll => blk: {
             const poll_data = completion.cast(NetPoll);
             break :blk switch (poll_data.event) {
@@ -429,6 +432,7 @@ fn getIdent(completion: *Completion) usize {
         .net_recvmsg => @intCast(completion.cast(NetRecvMsg).handle),
         .net_recvmmsg => @intCast(completion.cast(NetRecvMmsg).handle),
         .net_sendmsg => @intCast(completion.cast(NetSendMsg).handle),
+        .net_sendmmsg => @intCast(completion.cast(NetSendMmsg).handle),
         .net_poll => @intCast(completion.cast(NetPoll).handle),
         .pipe_poll => @intCast(completion.cast(PipePoll).handle),
         inline .file_read_streaming, .file_write_streaming => |op| @intCast(completion.cast(op.toType()).handle),
@@ -643,6 +647,7 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
         .net_recvmsg,
         .net_recvmmsg,
         .net_sendmsg,
+        .net_sendmmsg,
         => sockreg.submitIo(self, state, c),
         .net_poll => sockreg.submitPoll(self, state, c),
 
@@ -999,6 +1004,23 @@ pub fn checkCompletion(comp: *Completion, event: *const std.c.Kevent) CheckResul
             }
             if (net.sendmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control)) |n| {
                 comp.setResult(.net_sendmsg, n);
+                return .completed;
+            } else |err| switch (err) {
+                error.WouldBlock => return .requeue,
+                else => {
+                    comp.setError(err);
+                    return .completed;
+                },
+            }
+        },
+        .net_sendmmsg => {
+            const data = comp.cast(NetSendMmsg);
+            if (handleKqueueError(event, net.errnoToSendError)) |err| {
+                comp.setError(err);
+                return .completed;
+            }
+            if (NetSendMmsg.sendSlots(data.handle, data.slots, data.flags)) |count| {
+                comp.setResult(.net_sendmmsg, count);
                 return .completed;
             } else |err| switch (err) {
                 error.WouldBlock => return .requeue,

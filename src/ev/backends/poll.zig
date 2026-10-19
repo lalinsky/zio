@@ -18,6 +18,7 @@ const NetSendTo = @import("../completion.zig").NetSendTo;
 const NetRecvMsg = @import("../completion.zig").NetRecvMsg;
 const NetRecvMmsg = @import("../completion.zig").NetRecvMmsg;
 const NetSendMsg = @import("../completion.zig").NetSendMsg;
+const NetSendMmsg = @import("../completion.zig").NetSendMmsg;
 const NetPoll = @import("../completion.zig").NetPoll;
 const PipePoll = @import("../completion.zig").PipePoll;
 const PipeClose = @import("../completion.zig").PipeClose;
@@ -91,6 +92,7 @@ pub fn capability(comptime op: Op) Support {
         .net_recvmsg,
         .net_recvmmsg,
         .net_sendmsg,
+        .net_sendmmsg,
         .net_poll,
         .net_shutdown,
         .net_close,
@@ -246,6 +248,7 @@ fn getEvents(completion: *Completion) @FieldType(net.pollfd, "events") {
         .net_recvmsg => net.POLL.IN,
         .net_recvmmsg => net.POLL.IN,
         .net_sendmsg => net.POLL.OUT,
+        .net_sendmmsg => net.POLL.OUT,
         .net_poll => blk: {
             const poll_data = completion.cast(NetPoll);
             break :blk switch (poll_data.event) {
@@ -278,6 +281,7 @@ fn getPollType(op: Op) PollEntryType {
         .net_recvmsg => .send_or_recv,
         .net_recvmmsg => .send_or_recv,
         .net_sendmsg => .send_or_recv,
+        .net_sendmmsg => .send_or_recv,
         .net_poll => .send_or_recv,
         .file_read_streaming, .file_write_streaming => if (builtin.os.tag == .windows) unreachable else .send_or_recv,
         .pipe_poll => if (builtin.os.tag == .windows) unreachable else .send_or_recv,
@@ -390,6 +394,7 @@ fn getHandle(completion: *Completion) NetHandle {
         .net_recvmsg => completion.cast(NetRecvMsg).handle,
         .net_recvmmsg => completion.cast(NetRecvMmsg).handle,
         .net_sendmsg => completion.cast(NetSendMsg).handle,
+        .net_sendmmsg => completion.cast(NetSendMmsg).handle,
         .net_poll => completion.cast(NetPoll).handle,
         // Pipe handles are only compatible with NetHandle on non-Windows (Windows uses IOCP)
         inline .file_read_streaming, .file_write_streaming => |op| if (builtin.os.tag == .windows) unreachable else completion.cast(op.toType()).handle,
@@ -496,6 +501,10 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
         },
         .net_sendmsg => {
             const data = c.cast(NetSendMsg);
+            self.submitSocketIo(state, data.handle, c);
+        },
+        .net_sendmmsg => {
+            const data = c.cast(NetSendMmsg);
             self.submitSocketIo(state, data.handle, c);
         },
         // Readiness only: nothing to try, wait for the event
@@ -810,6 +819,23 @@ pub fn checkCompletion(c: *Completion, item: *const net.pollfd) CheckResult {
             }
             if (net.sendmsg(data.handle, data.data.iovecs, data.flags, data.addr, data.addr_len, data.control)) |n| {
                 c.setResult(.net_sendmsg, n);
+                return .completed;
+            } else |err| switch (err) {
+                error.WouldBlock => return .requeue,
+                else => {
+                    c.setError(err);
+                    return .completed;
+                },
+            }
+        },
+        .net_sendmmsg => {
+            const data = c.cast(NetSendMmsg);
+            if (handlePollError(item, net.errnoToSendError)) |err| {
+                c.setError(err);
+                return .completed;
+            }
+            if (NetSendMmsg.sendSlots(data.handle, data.slots, data.flags)) |count| {
+                c.setResult(.net_sendmmsg, count);
                 return .completed;
             } else |err| switch (err) {
                 error.WouldBlock => return .requeue,
