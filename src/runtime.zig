@@ -548,6 +548,10 @@ pub const Executor = struct {
     // Used by getCurrentTaskOrNull() instead of the TLS current_context chain.
     current_task: ?*AnyTask,
 
+    // Spawns made while the ready queue was past the spawn backpressure
+    // threshold since the last backpressure yield (see registerTask).
+    spawns_past_threshold: u32 = 0,
+
     // Depth of no-suspend regions on this thread; see `beginNoSuspend`. Unlike
     // clearing `current_task`, this leaves the task identity visible to locks,
     // user log callbacks and the wake path's "inside the run loop" test.

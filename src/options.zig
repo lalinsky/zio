@@ -69,6 +69,16 @@ pub const Options = struct {
     /// it, the signature of a swallowed cancellation. The report prints the
     /// stack trace of the delivery and of the park, once per task.
     debug_cancel: bool = build_options.debug_cancel,
+    /// Let accept loops keep up on a busy executor: `accept` takes a
+    /// connection already waiting in the backlog without a trip through the
+    /// event loop, up to 128 in a row before it yields once, and a spawning
+    /// task yields to the tasks it started every 64 spawns past the
+    /// backpressure threshold rather than after each one. Accept loops are
+    /// asymmetric to the rest of an application (one task feeding thousands),
+    /// so without this a pinned executor with thousands of busy connections
+    /// accepts about one connection per pass over its run queue. Off by
+    /// default for now.
+    fast_accept: bool = build_options.fast_accept,
 };
 
 /// The resolved configuration. A `-fsingle-threaded` build has only one
