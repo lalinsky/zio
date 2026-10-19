@@ -18,6 +18,7 @@ const registerGroupTask = @import("group.zig").registerGroupTask;
 const unregisterGroupTask = @import("group.zig").unregisterGroupTask;
 const os = @import("os/root.zig");
 const Timestamp = @import("time.zig").Timestamp;
+const StackInfo = @import("coro/stack.zig").StackInfo;
 const zio_options = @import("options.zig").options;
 
 pub const Closure = struct {
@@ -575,6 +576,18 @@ pub const AnyTask = struct {
         self.coro.deinit();
     }
 
+    /// `releaseCoro` on the executor the task finished on, from its finish
+    /// cleanup: the stack goes to the executor's spawn cache while it has
+    /// room, for the next task spawned there, without the pool's lock.
+    pub fn releaseCoroLocal(self: *AnyTask, executor: *Executor) void {
+        if (self.coro.context.stack_info.allocation_len == 0) return;
+        if (!executor.spawn_cache.putStack(self.coro.context.stack_info)) {
+            return self.releaseCoro(executor.runtime);
+        }
+        self.coro.context.stack_info.allocation_len = 0;
+        self.coro.deinit();
+    }
+
     pub fn destroy(self: *AnyTask) void {
         const rt = self.getRuntime();
         self.releaseCoro(rt);
@@ -642,8 +655,13 @@ pub const AnyTask = struct {
         };
 
         // Acquire stack from pool and initialize context. Nothing below can
-        // fail, so the acquired stack needs no errdefer release here.
-        self.coro.context.stack_info = try executor.runtime.stack_pool.acquire();
+        // fail, so the acquired stack needs no errdefer release here. A task
+        // spawned on the executor running this code takes one from its
+        // spawn cache first.
+        self.coro.context.stack_info = if (runtime.getCurrentExecutorOrNull() == executor)
+            executor.spawn_cache.takeStack() orelse try executor.runtime.stack_pool.acquire()
+        else
+            try executor.runtime.stack_pool.acquire();
 
         // Copy context data into the allocation
         const context_dest = self.closure.getContextSlice(AnyTask, self);
@@ -873,6 +891,67 @@ pub fn spawnTask(
     return task;
 }
 
+/// The spawn cache of the executor running this code, if it belongs to
+/// `rt`.
+fn localCache(rt: *Runtime) ?*SpawnCache {
+    const executor = runtime.getCurrentExecutorOrNull() orelse return null;
+    if (executor.runtime != rt) return null;
+    return &executor.spawn_cache;
+}
+
+/// What tasks that ended on an executor leave behind for the next ones
+/// spawned there: their stacks and task allocations. Spawning a task and
+/// finishing one each took the runtime-wide stack pool's and task pool's
+/// locks, which every executor shares; with a task per request, that is
+/// millions of times a second across cores. Only the owning executor's
+/// thread touches its cache; what does not fit goes back to the pools, and
+/// the executor returns the rest when it stops (`drain`).
+pub const SpawnCache = struct {
+    pub const len = 32;
+    const Item = @FieldType(TaskPool, "pool").ItemPtr;
+
+    stacks: [len]StackInfo = undefined,
+    stack_count: u8 = 0,
+    tasks: [len]Item = undefined,
+    task_count: u8 = 0,
+
+    fn takeStack(self: *SpawnCache) ?StackInfo {
+        if (self.stack_count == 0) return null;
+        self.stack_count -= 1;
+        return self.stacks[self.stack_count];
+    }
+
+    fn putStack(self: *SpawnCache, info: StackInfo) bool {
+        if (self.stack_count == len) return false;
+        self.stacks[self.stack_count] = info;
+        self.stack_count += 1;
+        return true;
+    }
+
+    fn takeTask(self: *SpawnCache) ?[]align(Closure.task_alignment) u8 {
+        if (self.task_count == 0) return null;
+        self.task_count -= 1;
+        return self.tasks[self.task_count];
+    }
+
+    fn putTask(self: *SpawnCache, item: Item) bool {
+        if (self.task_count == len) return false;
+        self.tasks[self.task_count] = item;
+        self.task_count += 1;
+        return true;
+    }
+
+    /// Everything back to the runtime's pools.
+    pub fn drain(self: *SpawnCache, rt: *Runtime) void {
+        for (self.stacks[0..self.stack_count]) |info| rt.stack_pool.release(info);
+        self.stack_count = 0;
+        rt.task_pool.mutex.lock();
+        for (self.tasks[0..self.task_count]) |item| rt.task_pool.pool.destroy(item);
+        rt.task_pool.mutex.unlock();
+        self.task_count = 0;
+    }
+};
+
 pub const TaskPool = struct {
     pub const pool_item_size = std.mem.alignForward(usize, @sizeOf(AnyTask) + 128, 128);
 
@@ -891,6 +970,7 @@ pub const TaskPool = struct {
 
     pub fn alloc(self: *TaskPool, rt: *Runtime, size: usize) ![]align(Closure.task_alignment) u8 {
         if (size <= pool_item_size) {
+            if (localCache(rt)) |cache| if (cache.takeTask()) |item| return item;
             self.mutex.lock();
             defer self.mutex.unlock();
             const ptr = try self.pool.create();
@@ -902,6 +982,7 @@ pub const TaskPool = struct {
 
     pub fn free(self: *TaskPool, rt: *Runtime, slice: []align(Closure.task_alignment) u8) void {
         if (slice.len <= pool_item_size) {
+            if (localCache(rt)) |cache| if (cache.putTask(@ptrCast(@alignCast(slice.ptr)))) return;
             self.mutex.lock();
             defer self.mutex.unlock();
             self.pool.destroy(@ptrCast(slice.ptr));
