@@ -2527,6 +2527,7 @@ fn netSendOpImpl(
     clock: time.Clock,
 ) (Io.Cancelable || common.Timeoutable)!Io.Operation.NetSend.Result {
     const zio_flags = zioSendFlags(flags);
+    const deadline = timeout.toDeadlineOn(clock);
     var addrs: [max_mmsg_slots]zio_net.IpAddress = undefined;
     var slots: [max_mmsg_slots]ev.NetSendMmsg.Slot = undefined;
 
@@ -2544,7 +2545,17 @@ fn netSendOpImpl(
         }
 
         var op = ev.NetSendMmsg.init(stdIoHandleToZio(handle), slots[0..batch.len], zio_flags);
-        try timedWaitForIoClock(&op.c, timeout, clock);
+        timedWaitForIoClock(&op.c, deadline, clock) catch |err| {
+            // A failed wait means this batch sent nothing, but the earlier
+            // ones can't be taken back, so the caller gets their count, and a
+            // cancellation is left for its next cancellation point.
+            if (i == 0) return err;
+            switch (err) {
+                error.Canceled => runtime_mod.recancel(),
+                error.Timeout => {},
+            }
+            return .{ null, i };
+        };
         const sent = op.getResult() catch |err| return .{ sendErrToSocketSendErr(err), i };
         for (batch[0..sent], slots[0..sent]) |*msg, slot| msg.data_len = slot.sent_len;
         i += sent;
@@ -3986,6 +3997,40 @@ test "io: net UDP sendMany reports an error in the middle of a batch with the co
         try std.testing.expectEqual(4, msg.data.len);
         try std.testing.expectEqual(i, std.mem.readInt(u32, msg.data[0..4], .little));
     }
+}
+
+test "io: net sendManyTimeout reports the count sent before a timeout" {
+    // WSASendMsg only takes datagram sockets, and a datagram send never waits.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    // A stream socket whose peer never reads, so the send buffer fills up
+    // after the first batches and the rest waits until the timeout.
+    const address: Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var server = try address.listen(io, .{});
+    defer server.deinit(io);
+    const client = try server.socket.address.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    const conn = try server.accept(io);
+    defer conn.close(io);
+
+    var chunk: [64 * 1024]u8 = undefined;
+    @memset(&chunk, 0);
+    var messages: [1000]Io.net.OutgoingMessage = undefined;
+    for (&messages) |*m| {
+        m.* = .{ .address = &server.socket.address, .data_ptr = &chunk, .data_len = chunk.len };
+    }
+
+    const err, const sent = client.socket.sendManyTimeout(io, &messages, .{}, .{ .duration = .{
+        .raw = .fromMilliseconds(100),
+        .clock = .awake,
+    } });
+    try std.testing.expectEqual(null, err);
+    try std.testing.expect(sent > 0);
+    try std.testing.expect(sent < messages.len);
 }
 
 test "io: netLookup resolves numeric IPv4" {
