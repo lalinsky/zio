@@ -156,7 +156,7 @@ fn threadPoolCompletion(ctx: ?*anyopaque, work: *ev.Work) void {
 
     // Cancellation, if any, was already delivered in-band as the function's
     // error.Canceled result; nothing extra to do here beyond finishing.
-    finishTask(task.runtime, &task.awaitable);
+    finishTask(&task.awaitable);
 }
 
 /// Register a blocking task with the runtime and submit it for execution.
@@ -175,7 +175,6 @@ fn registerBlockingTask(rt: *Runtime, task: *AnyBlockingTask) error{RuntimeShutd
     // The extra incr orphans one reference and leaks the blocking-task allocation.
     // It is masked for pool-sized tasks (pool.deinit frees the backing buffer) and
     // only observable for tasks larger than pool_item_size (direct allocator path).
-    _ = rt.task_count.fetchAdd(1, .acq_rel);
     rt.thread_pool.submit(&task.work);
 }
 

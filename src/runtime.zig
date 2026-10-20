@@ -1338,7 +1338,7 @@ pub const Executor = struct {
                 self.pending_cleanup = .none;
                 task.state.store(.{ .tag = .finished }, .release);
                 task.releaseCoro(self.runtime);
-                finishTask(self.runtime, &task.awaitable);
+                finishTask(&task.awaitable);
             },
         }
     }
@@ -1629,7 +1629,6 @@ pub const Runtime = struct {
     main_executor: Executor,
     next_executor_index: std.atomic.Value(usize) = .init(0),
     workers: std.ArrayList(Worker) = .empty,
-    task_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), // Active task counter
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     // Worker lifecycle barriers, see runWorker(). A worker starts running
     // only once worker_start is .run, after every executor is registered, so
@@ -1869,8 +1868,9 @@ pub const Runtime = struct {
         // Stop worker executors and join threads (deinits their loops)
         self.shutdownWorkers();
 
-        // All tasks should be complete before deinit
-        std.debug.assert(self.task_count.load(.acquire) == 0);
+        // All tasks should be complete before deinit. A task holds its stack
+        // until it finishes, so the pool's count of stacks in use covers them.
+        std.debug.assert(self.stack_pool.in_use == 0);
 
         // Clean up ThreadPool (worker threads already joined by stop()).
         self.thread_pool.deinit();

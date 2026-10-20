@@ -786,12 +786,9 @@ const spawn_yield_threshold = 13;
 /// and schedules it on its executor.
 /// Returns error.RuntimeShutdown if the runtime is shutting down.
 pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
-    // Check if runtime is shutting down before incrementing counter
     if (rt.shutting_down.load(.acquire)) {
         return error.RuntimeShutdown;
     }
-
-    _ = rt.task_count.fetchAdd(1, .acq_rel);
 
     Executor.scheduleTask(task);
 
@@ -810,11 +807,7 @@ pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
     }
 }
 
-pub fn finishTask(rt: *Runtime, awaitable: *Awaitable) void {
-    // Decrement task count BEFORE marking complete to prevent race where
-    // waiting thread wakes up and sees non-zero task_count in deinit()
-    _ = rt.task_count.fetchSub(1, .acq_rel);
-
+pub fn finishTask(awaitable: *Awaitable) void {
     // Mark awaitable as complete and wake all waiters
     awaitable.markComplete();
 
