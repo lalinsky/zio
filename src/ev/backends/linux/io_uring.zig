@@ -1931,6 +1931,14 @@ fn recvFlagsToMsg(flags: net.RecvFlags) u32 {
 fn sendFlagsToMsg(flags: net.SendFlags) u32 {
     var msg_flags: u32 = 0;
     if (flags.no_signal) msg_flags |= linux.MSG.NOSIGNAL;
+    if (flags.confirm) msg_flags |= linux.MSG.CONFIRM;
+    if (flags.dont_route) msg_flags |= linux.MSG.DONTROUTE;
+    if (flags.eor) msg_flags |= linux.MSG.EOR;
+    if (flags.oob) msg_flags |= linux.MSG.OOB;
+    if (flags.fastopen) msg_flags |= linux.MSG.FASTOPEN;
+    // `dontwait` is left out: it only keeps the send syscall from blocking,
+    // and an SQE never blocks. As MSG_DONTWAIT it would post -EAGAIN instead
+    // of waiting for the socket to become writable.
     return msg_flags;
 }
 

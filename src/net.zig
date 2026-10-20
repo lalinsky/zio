@@ -3499,6 +3499,28 @@ test "Socket: receiveFromBatch keeps the first message when a later slot fails" 
     try std.testing.expectEqualStrings("aaa", messages[0].buf[0..messages[0].len]);
 }
 
+test "Socket: a send flag the socket doesn't support fails" {
+    // Only Linux rejects MSG_OOB on UDP; FreeBSD and Wine send the datagram
+    // anyway, and macOS fails with an errno zio doesn't map.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    var sender = try addr.bind(.{});
+    defer sender.close();
+    var receiver = try addr.bind(.{});
+    defer receiver.close();
+
+    // UDP has no out-of-band data, so the flag has to reach the kernel for
+    // this to fail.
+    var iov = [_]os.iovec_const{os.net.iovecConstFromSlice("x")};
+    var op = ev.NetSendMsg.init(sender.handle, .{ .iovecs = &iov }, .{ .oob = true }, &receiver.address.any, getSockAddrLen(&receiver.address.any), null);
+    try waitForIo(&op.c);
+    try std.testing.expectError(error.OperationNotSupported, op.getResult());
+}
+
 test "Socket: receiveFromBatch drains multiple queued datagrams" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();

@@ -48,6 +48,9 @@ All notable changes to this project will be documented in this file.
 - Under sustained load, tasks that overflowed an executor's run queue could wait until the
   load dropped, stalling some connections for seconds.
 
+- The io_uring backend ignored every send flag except `no_signal`, so a flag such as `oob`
+  or `eor` had no effect.
+
 - With pinned scheduling, tasks that overflowed a busy executor's run queue were taken back
   one per poll, so with many busy connections some waited hundreds of milliseconds.
 
