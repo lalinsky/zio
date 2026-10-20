@@ -1031,17 +1031,24 @@ pub const Executor = struct {
         // Refill from the overflow queue before draining the dispatched queue:
         // overflow tasks became runnable earlier, and a busy ring has room only
         // in the slots this pass freed, which a steady completion stream would
-        // fill on every pass. A busy ring takes one task per check, which bounds
-        // an overflow task's wait; this executor is often its only consumer, as
-        // stealing takes from rings and armSearcher does nothing while nobody is
-        // idle. An empty ring takes a batch. Overflow work counts as work, so a
-        // local ring spill (which doesn't wake the loop) can't put this executor
-        // to sleep.
+        // fill on every pass. Overflow work counts as work, so a local ring
+        // spill (which doesn't wake the loop) can't put this executor to sleep.
         if (!self.run_queue.overflow.isEmpty()) {
-            if (self.run_queue.isEmpty()) {
-                _ = self.run_queue.refill(self.overflowBatch(), .block);
+            if (migrates) {
+                // The shared queue: a busy ring takes one task per check, which
+                // bounds an overflow task's wait while leaving the rest to the
+                // other executors; this executor is often its only consumer, as
+                // stealing takes from rings and armSearcher does nothing while
+                // nobody is idle. An empty ring takes a batch.
+                if (self.run_queue.isEmpty()) {
+                    _ = self.run_queue.refill(self.overflowBatch(), .block);
+                } else {
+                    _ = self.run_queue.refill(1, .try_only);
+                }
             } else {
-                _ = self.run_queue.refill(1, .try_only);
+                // This executor's own queue, which nobody else drains: take
+                // as many as the ring has room for.
+                _ = self.run_queue.fillFromOverflow();
             }
         }
         // Task wakes can enter the dispatched queue outside any poll: an
@@ -1145,7 +1152,13 @@ pub const Executor = struct {
             return null;
         }
 
-        const node = self.run_queue.pop() orelse return null;
+        const node = self.run_queue.pop() orelse blk: {
+            // Pinned: the ring ran dry within the tick while tasks wait in
+            // its overflow; take them now rather than after a poll.
+            if (migrates or self.run_queue.overflow.isEmpty()) return null;
+            if (self.run_queue.fillFromOverflow() == 0) return null;
+            break :blk self.run_queue.pop() orelse return null;
+        };
         self.spendQuantum();
         return AnyTask.fromWaitNode(node);
     }
