@@ -18,6 +18,9 @@ All notable changes to this project will be documented in this file.
 - `Socket.sendMany` now sends datagrams in batches with `sendmmsg` on Linux, FreeBSD
   and NetBSD, instead of one `sendmsg` and event loop round trip per datagram.
 
+- Spawning and finishing a task no longer updates a counter shared by all executors,
+  which slowed down spawn-heavy programs on many cores.
+
 ### Added
 
 - Added `local_address` to `IpAddress.ConnectOptions`, to connect from a specific local
