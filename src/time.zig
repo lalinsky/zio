@@ -517,9 +517,14 @@ pub const Timeout = union(enum) {
     /// If already a deadline or none, returns self unchanged.
     /// If a duration, converts to deadline using the current monotonic time.
     pub fn toDeadline(self: Timeout) Timeout {
+        return self.toDeadlineOn(.monotonic);
+    }
+
+    /// Like `toDeadline`, with the deadline measured on `clock`.
+    pub fn toDeadlineOn(self: Timeout, clock: Clock) Timeout {
         return switch (self) {
             .none, .deadline => self,
-            .duration => |d| .{ .deadline = os.time.now(.monotonic).addDuration(d) },
+            .duration => |d| .{ .deadline = os.time.now(clock).addDuration(d) },
         };
     }
 

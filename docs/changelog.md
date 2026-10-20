@@ -36,6 +36,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `std.Io` `sendManyTimeout` lost the count of messages already sent when it timed out or
+  was canceled, and restarted the timeout for each message.
+
 - An `AutoCancel` or `withTimeout` deadline that passed just after the operation finished
   no longer fails the task's next operation with `error.Canceled`.
 
