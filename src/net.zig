@@ -3500,8 +3500,9 @@ test "Socket: receiveFromBatch keeps the first message when a later slot fails" 
 }
 
 test "Socket: a send flag the socket doesn't support fails" {
-    // Under Wine, a UDP send with MSG_OOB goes out anyway.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    // Only Linux rejects MSG_OOB on UDP; FreeBSD and Wine send the datagram
+    // anyway, and macOS fails with an errno zio doesn't map.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
