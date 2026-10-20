@@ -109,6 +109,9 @@ fixes continue on the `zig-0.16` branch.
 - Socket, file and rename operations report more specific errors in many cases that used
   to be `error.Unexpected`.
 
+- On FreeBSD, batched UDP sends and receives used the wrong declarations for `sendmmsg` and
+  `recvmmsg`, which only worked by chance on little-endian systems.
+
 - The built-in DNS resolver now resolves `localhost` without querying DNS, and reports
   canonical names from `/etc/hosts` like glibc.
 
