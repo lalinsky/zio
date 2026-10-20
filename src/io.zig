@@ -4000,6 +4000,9 @@ test "io: net UDP sendMany reports an error in the middle of a batch with the co
 }
 
 test "io: net sendManyTimeout reports the count sent before a timeout" {
+    // WSASendMsg only takes datagram sockets, and a datagram send never waits.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
     const io = rt.io();
