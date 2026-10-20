@@ -1202,7 +1202,7 @@ pub const NetRecvMmsg = struct {
                 else => |e| return e,
             };
             for (0..n) |i| {
-                self.slots[i].received_len = msgvec[i].len;
+                self.slots[i].received_len = @intCast(msgvec[i].len);
                 self.slots[i].addr_len = msgvec[i].hdr.namelen;
                 self.slots[i].msg_flags = msgvec[i].hdr.flags;
             }
@@ -1329,7 +1329,7 @@ pub const NetSendMmsg = struct {
             };
         }
         const n = try net.sendmmsg(handle, &msgvec, batch_len, flags);
-        for (slots[0..n], msgvec[0..n]) |*slot, msg| slot.sent_len = msg.len;
+        for (slots[0..n], msgvec[0..n]) |*slot, msg| slot.sent_len = @intCast(msg.len);
         return n;
     }
 };
