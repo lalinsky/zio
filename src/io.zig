@@ -2245,7 +2245,14 @@ fn acceptNow(server: Io.net.Socket.Handle, peer_addr: *zio_net.Address, peer_add
     }
     _ = runtime_mod.getCurrentExecutorOrNull() orelse return null;
     const task = runtime_mod.getCurrentTaskOrNull() orelse return null;
-    if (task.checkCancel()) |_| {} else |_| return null; // the loop path reports it
+    // A pending cancel goes to the loop path, which reports it. Checking
+    // consumes it, so it is put back: lost here, the loop path would park
+    // on the accept with no cancel left to wake it (a server's drain then
+    // waits for that accept loop for good).
+    task.checkCancel() catch {
+        task.recancel();
+        return null;
+    };
     while (true) {
         const handle = os_net.accept(stdIoHandleToZio(server), &peer_addr.any, peer_addr_len, .{ .nonblocking = true }) catch |err| switch (err) {
             error.ConnectionAborted => continue,
@@ -3564,6 +3571,32 @@ test "io: net TCP accept takes a backlog of waiting connections" {
                 const accepted = try server.accept(io);
                 accepted.close(io);
             }
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: net TCP accept reports a cancel pending before it, with a connection waiting" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn run(io: Io) !void {
+            var server = try Io.net.IpAddress.listen(&.{ .ip4 = .loopback(0) }, io, .{ .reuse_address = true });
+            defer server.deinit(io);
+            // A connection waits in the backlog, so an accept that missed
+            // the cancel returns it instead of parking for good.
+            const client = try Io.net.IpAddress.connect(&server.socket.address, io, .{ .mode = .stream });
+            defer client.close(io);
+
+            // Canceled before its first accept, as an accept loop is when
+            // its server stops right after starting it.
+            _ = runtime_mod.getCurrentTask().setCanceled(.user);
+            const accepted = server.accept(io);
+            if (accepted) |s| s.close(io) else |_| {}
+            try std.testing.expectError(error.Canceled, accepted);
         }
     };
 
