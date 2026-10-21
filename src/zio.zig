@@ -114,6 +114,7 @@ test {
     _ = @import("io.zig");
     _ = @import("random.zig");
     _ = @import("task.zig");
+    _ = @import("ready_watch.zig");
     _ = @import("stderr.zig");
     _ = @import("os/syscall_cancel.zig");
     _ = @import("compat.zig");

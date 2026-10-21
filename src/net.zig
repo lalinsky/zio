@@ -25,6 +25,8 @@ const fillBuf = @import("utils/writer.zig").fillBuf;
 
 const Handle = ev.Backend.NetHandle;
 
+pub const ReadyWatch = @import("ready_watch.zig").ReadyWatch;
+
 pub const max_vecs = 16;
 
 pub const has_unix_sockets = switch (builtin.os.tag) {

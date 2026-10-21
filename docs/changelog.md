@@ -23,6 +23,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Added `net.ReadyWatch`, a one-shot callback when a socket becomes readable or writable,
+  run on the executor that armed it, with no task waiting. `disarm` guarantees the
+  callback won't run once it returns. A server can park idle connections this way and
+  spawn a task from the callback (`spawnInto(.local, ...)` works from a loop callback)
+  when data arrives.
+
 - Added `local_address` to `IpAddress.ConnectOptions`, to connect from a specific local
   address.
 

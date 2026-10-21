@@ -362,8 +362,10 @@ pub fn getNextExecutor(rt: *Runtime) error{RuntimeShutdown}!*Executor {
 pub const Placement = union(enum) {
     /// Let the runtime pick the executor. This is what `spawn` does.
     auto,
-    /// The executor of the calling thread. Fails with `error.InvalidPlacement`
-    /// when called from a thread that is not an executor of this runtime.
+    /// The executor of the calling thread, whether a task or a loop callback
+    /// (such as a `net.ReadyWatch` callback) is running there. Fails with
+    /// `error.InvalidPlacement` when called from a thread that is not an
+    /// executor of this runtime.
     local,
     /// The executor with the given index, from zero up to the executor count.
     executor: ExecutorId,
@@ -518,6 +520,9 @@ pub const Executor = struct {
 
     stealing: Stealing = .{},
 
+    // Readiness watches armed here (see `net.ReadyWatch`).
+    watches: @import("ready_watch.zig").Home = .{},
+
     // Deferred cleanup for the task that just yielded away from this executor.
     // Processed by the next coroutine to run (at landing sites: startFn, yield resume, run loop).
     pending_cleanup: TaskCleanup = .none,
@@ -638,6 +643,7 @@ pub const Executor = struct {
         Coroutine.clearCurrent();
 
         self.loop.deinit();
+        self.watches.deinit(self.runtime.allocator);
 
         cleanupStackGrowth();
     }
