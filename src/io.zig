@@ -2195,24 +2195,7 @@ fn netAcceptImpl(_: ?*anyopaque, server: Io.net.Socket.Handle, _: Io.net.Server.
         var peer_addr: zio_net.Address = undefined;
         var peer_addr_len: os_net.socklen_t = @sizeOf(zio_net.Address);
 
-        var op = ev.NetAccept.init(stdIoHandleToZio(server), &peer_addr.any, &peer_addr_len);
-        try waitForIo(&op.c);
-        const handle = op.getResult() catch |err| switch (err) {
-            error.ConnectionAborted => continue,
-            error.WouldBlock => return error.WouldBlock,
-            error.ProcessFdQuotaExceeded => return error.ProcessFdQuotaExceeded,
-            error.SystemFdQuotaExceeded => return error.SystemFdQuotaExceeded,
-            error.SystemResources => return error.SystemResources,
-            error.SocketNotListening => return error.SocketNotListening,
-            error.ProtocolFailure => return error.ProtocolFailure,
-            error.BlockedByFirewall => return error.BlockedByFirewall,
-            error.NetworkDown => return error.NetworkDown,
-            error.Canceled => return error.Canceled,
-            error.FileDescriptorNotASocket,
-            error.OperationNotSupported,
-            error.Unexpected,
-            => return error.Unexpected,
-        };
+        const handle = if (acceptNow(server, &peer_addr, &peer_addr_len)) |h| h else try acceptWait(server, &peer_addr, &peer_addr_len) orelse continue;
 
         switch (peer_addr.any.family) {
             os_net.AF.INET, os_net.AF.INET6 => os_net.setNoDelay(handle, true) catch {},
@@ -2229,6 +2212,81 @@ fn netAcceptImpl(_: ?*anyopaque, server: Io.net.Socket.Handle, _: Io.net.Server.
             },
         };
     }
+}
+
+/// Direct accepts in a row on this executor thread; see `acceptNow`.
+threadlocal var accept_burst: u8 = 0;
+/// Tokio's per-task coop budget.
+const max_accept_burst = 128;
+
+/// With `fast_accept` (otherwise null at once): accept a connection already
+/// waiting in the backlog without going through
+/// the loop, as Go's and Tokio's accept do; null when none is waiting (or on
+/// an error, which the loop path then reports).
+///
+/// Going through the loop parks the task even when the accept completes at
+/// once, and the park puts it behind every other ready task: with thousands
+/// of busy connections on one executor, the acceptor took one connection per
+/// pass over the run queue (~70/s at 4096 connections) while the backlog
+/// waited. The tick budget is no bound here either, since the busy
+/// connections have spent most of it by the time the acceptor runs. So, like
+/// Tokio, the acceptor gets a budget of its own: up to `max_accept_burst`
+/// connections in a row, then one trip through the loop, which yields.
+///
+/// Listening sockets are nonblocking on every POSIX backend (zio opens them
+/// so; servers set O_NONBLOCK on inherited ones, as the epoll backend's own
+/// optimistic accept already requires), so this never blocks the executor.
+fn acceptNow(server: Io.net.Socket.Handle, peer_addr: *zio_net.Address, peer_addr_len: *os_net.socklen_t) ?ev.Backend.NetHandle {
+    if (!zio_options.fast_accept) return null;
+    if (builtin.os.tag == .windows) return null;
+    if (accept_burst >= max_accept_burst) {
+        accept_burst = 0;
+        return null;
+    }
+    _ = runtime_mod.getCurrentExecutorOrNull() orelse return null;
+    const task = runtime_mod.getCurrentTaskOrNull() orelse return null;
+    // A pending cancel goes to the loop path, which reports it. Checking
+    // consumes it, so it is put back: lost here, the loop path would park
+    // on the accept with no cancel left to wake it (a server's drain then
+    // waits for that accept loop for good).
+    task.checkCancel() catch {
+        task.recancel();
+        return null;
+    };
+    while (true) {
+        const handle = os_net.accept(stdIoHandleToZio(server), &peer_addr.any, peer_addr_len, .{ .nonblocking = true }) catch |err| switch (err) {
+            error.ConnectionAborted => continue,
+            else => {
+                accept_burst = 0;
+                return null;
+            },
+        };
+        accept_burst += 1;
+        return handle;
+    }
+}
+
+/// Accept through the loop: wait until a connection arrives. Null means the
+/// connection was aborted before it was accepted; try again.
+fn acceptWait(server: Io.net.Socket.Handle, peer_addr: *zio_net.Address, peer_addr_len: *os_net.socklen_t) Io.net.Server.AcceptError!?ev.Backend.NetHandle {
+    var op = ev.NetAccept.init(stdIoHandleToZio(server), &peer_addr.any, peer_addr_len);
+    try waitForIo(&op.c);
+    return op.getResult() catch |err| switch (err) {
+        error.ConnectionAborted => null,
+        error.WouldBlock => return error.WouldBlock,
+        error.ProcessFdQuotaExceeded => return error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded => return error.SystemFdQuotaExceeded,
+        error.SystemResources => return error.SystemResources,
+        error.SocketNotListening => return error.SocketNotListening,
+        error.ProtocolFailure => return error.ProtocolFailure,
+        error.BlockedByFirewall => return error.BlockedByFirewall,
+        error.NetworkDown => return error.NetworkDown,
+        error.Canceled => return error.Canceled,
+        error.FileDescriptorNotASocket,
+        error.OperationNotSupported,
+        error.Unexpected,
+        => return error.Unexpected,
+    };
 }
 
 fn openErrToBindErr(err: OpenOrCancel) Io.net.IpAddress.BindError {
@@ -3499,6 +3557,63 @@ test "io: net TCP listen/connect/accept handshake" {
             future.await(io);
             const client = try connect_result;
             defer client.close(io);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: net TCP accept takes a backlog of waiting connections" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const n = 32;
+    const Worker = struct {
+        fn run(io: Io) !void {
+            var server = try Io.net.IpAddress.listen(
+                &.{ .ip4 = .loopback(0) },
+                io,
+                .{ .reuse_address = true },
+            );
+            defer server.deinit(io);
+
+            // Every connection is in the backlog before the first accept, so
+            // with `fast_accept` they are all taken directly.
+            var clients: [n]Io.net.Stream = undefined;
+            for (&clients) |*c| c.* = try Io.net.IpAddress.connect(&server.socket.address, io, .{ .mode = .stream });
+            defer for (clients) |c| c.close(io);
+
+            for (0..n) |_| {
+                const accepted = try server.accept(io);
+                accepted.close(io);
+            }
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: net TCP accept reports a cancel pending before it, with a connection waiting" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn run(io: Io) !void {
+            var server = try Io.net.IpAddress.listen(&.{ .ip4 = .loopback(0) }, io, .{ .reuse_address = true });
+            defer server.deinit(io);
+            // A connection waits in the backlog, so an accept that missed
+            // the cancel returns it instead of parking for good.
+            const client = try Io.net.IpAddress.connect(&server.socket.address, io, .{ .mode = .stream });
+            defer client.close(io);
+
+            // Canceled before its first accept, as an accept loop is when
+            // its server stops right after starting it.
+            _ = runtime_mod.getCurrentTask().setCanceled(.user);
+            const accepted = server.accept(io);
+            if (accepted) |s| s.close(io) else |_| {}
+            try std.testing.expectError(error.Canceled, accepted);
         }
     };
 
