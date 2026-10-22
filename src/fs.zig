@@ -1961,12 +1961,8 @@ test "File: streaming prep carries the file's pollable routing" {
     file.prepWriteStreaming(&op, .fromSlice("x", &iov));
     try std.testing.expectEqual(file.pollable, op.pollable);
 
-    // Streaming I/O on regular files is not supported on Windows; the prep
-    // itself is platform-independent, so only the submit half is gated.
-    if (builtin.os.tag != .windows) {
-        try waitForIo(&op.c);
-        try std.testing.expectEqual(1, try op.getResult());
-    }
+    try waitForIo(&op.c);
+    try std.testing.expectEqual(1, try op.getResult());
 
     file.close();
 }

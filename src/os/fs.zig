@@ -1325,28 +1325,61 @@ pub fn read(fd: fd_t, buffer: []u8) FileReadError!usize {
     }
 }
 
+/// One ReadFile or WriteFile at the handle's current position, for `readv`
+/// and `writev` on Windows. Without an OVERLAPPED, unless the handle was
+/// opened for overlapped I/O, as files are when the backend completes file
+/// I/O itself (IOCP, see `fileOpenWork`): Windows keeps no file pointer for
+/// such a handle and refuses a call without an OVERLAPPED with
+/// ERROR_INVALID_PARAMETER. There the position is the one the file object
+/// holds (SetFilePointerEx reads and sets it), given in an OVERLAPPED and
+/// moved past what was transferred; the call is waited for here, and the
+/// event's low bit keeps its completion off the port the handle is
+/// associated with. A handle without a position (a pipe) gets offset 0,
+/// which it ignores.
+fn windowsStreamingTransfer(
+    comptime direction: enum { read, write },
+    fd: fd_t,
+    ptr: if (direction == .write) [*]const u8 else [*]u8,
+    len: w.DWORD,
+) union(enum) { bytes: w.DWORD, failed: w.Win32Error } {
+    const call = if (direction == .write) w.WriteFile else w.ReadFile;
+    if (!w.isOverlapped(fd)) {
+        var n: w.DWORD = 0;
+        if (call(fd, ptr, len, &n, null) == w.FALSE) return .{ .failed = w.GetLastError() };
+        return .{ .bytes = n };
+    }
+    var position: w.LARGE_INTEGER = 0;
+    const seekable = w.SetFilePointerEx(fd, 0, &position, w.FILE_CURRENT) != w.FALSE;
+    const event = w.CreateEventExW(null, null, w.CREATE_EVENT_MANUAL_RESET, w.EVENT_ALL_ACCESS) orelse
+        return .{ .failed = w.GetLastError() };
+    defer _ = w.CloseHandle(event);
+    var overlapped = std.mem.zeroes(w.OVERLAPPED);
+    const offset: u64 = if (seekable) @intCast(position) else 0;
+    overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.Offset = @truncate(offset);
+    overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.OffsetHigh = @truncate(offset >> 32);
+    overlapped.hEvent = @ptrFromInt(@intFromPtr(event) | 1);
+    if (call(fd, ptr, len, null, &overlapped) == w.FALSE) {
+        const err = w.GetLastError();
+        if (err != .IO_PENDING) return .{ .failed = err };
+    }
+    var n: w.DWORD = 0;
+    if (w.GetOverlappedResult(fd, &overlapped, &n, w.TRUE) == w.FALSE) return .{ .failed = w.GetLastError() };
+    if (seekable) _ = w.SetFilePointerEx(fd, position + n, null, w.FILE_BEGIN);
+    return .{ .bytes = n };
+}
+
 /// Read from file descriptor using readv() - for pipes and stream-like fds
 pub fn readv(fd: fd_t, buffers: []iovec) FileReadError!usize {
     if (builtin.os.tag == .windows) {
         var total_read: usize = 0;
         for (buffers) |buffer| {
-            var bytes_read: w.DWORD = undefined;
-
-            const success = w.ReadFile(
-                fd,
-                buffer.buf,
-                @intCast(buffer.len),
-                &bytes_read,
-                null,
-            );
-
-            if (success == w.FALSE) {
-                const err = w.GetLastError();
-                switch (err) {
+            const bytes_read = switch (windowsStreamingTransfer(.read, fd, buffer.buf, @intCast(buffer.len))) {
+                .bytes => |n| n,
+                .failed => |err| switch (err) {
                     .HANDLE_EOF => return if (total_read == 0) 0 else total_read,
                     else => return errnoToFileReadError(err),
-                }
-            }
+                },
+            };
 
             total_read += bytes_read;
             if (bytes_read < buffer.len) break;
@@ -1407,19 +1440,10 @@ pub fn writev(fd: fd_t, buffers: []const iovec_const) FileWriteError!usize {
     if (builtin.os.tag == .windows) {
         var total_written: usize = 0;
         for (buffers) |buffer| {
-            var bytes_written: w.DWORD = undefined;
-
-            const success = w.WriteFile(
-                fd,
-                buffer.buf,
-                @intCast(buffer.len),
-                &bytes_written,
-                null,
-            );
-
-            if (success == w.FALSE) {
-                return errnoToFileWriteError(w.GetLastError());
-            }
+            const bytes_written = switch (windowsStreamingTransfer(.write, fd, buffer.buf, @intCast(buffer.len))) {
+                .bytes => |n| n,
+                .failed => |err| return errnoToFileWriteError(err),
+            };
 
             total_written += bytes_written;
             if (bytes_written < buffer.len) break;

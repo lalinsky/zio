@@ -4252,10 +4252,13 @@ test "io: file positional read/write round-trip" {
 
 test "io: file streaming read advances position and reports EOF" {
     // On Windows, zio opens files with FILE_FLAG_OVERLAPPED (for IOCP). Such
-    // handles have no implicit file position, so ReadFile/WriteFile without an
-    // OVERLAPPED struct fails with INVALID_PARAMETER. Streaming requires
-    // per-handle position tracking which we don't implement.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    // handles have no implicit file position: streaming I/O reads and moves
+    // the position the file object holds (os/fs.zig, windowsStreamingTransfer),
+    // which seeks move too.
+    // With the poll backend, Windows files are opened for synchronous I/O,
+    // where a positional write (an OVERLAPPED with an offset) also moves the
+    // file pointer, so the writePositional below leaves it at the end.
+    if (builtin.os.tag == .windows and ev.backend == .poll) return error.SkipZigTest;
 
     var t = try TestDirFixture.init();
     defer t.deinit();
@@ -4282,9 +4285,6 @@ test "io: file streaming read advances position and reports EOF" {
 }
 
 test "io: file streaming write advances position and appends" {
-    // See note on Windows in the streaming-read test above.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
     var t = try TestDirFixture.init();
     defer t.deinit();
     const io = t.rt.io();
@@ -4307,10 +4307,6 @@ test "io: file streaming write advances position and appends" {
 }
 
 test "io: file seek moves the streaming position" {
-    // See note on Windows in the streaming-read test above: without an implicit
-    // file position there is nothing for a seek to move.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
     var t = try TestDirFixture.init();
     defer t.deinit();
     const io = t.rt.io();
@@ -5251,8 +5247,8 @@ test "io: operateTimeout net_receive times out when no data arrives" {
 }
 
 test "io: batch awaitAsync executes operations linearly" {
-    // file_read_streaming uses iovec which doesn't work on Windows regular files
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    // See the Windows poll note in the streaming read test above.
+    if (builtin.os.tag == .windows and ev.backend == .poll) return error.SkipZigTest;
 
     var t = try TestDirFixture.init();
     defer t.deinit();
