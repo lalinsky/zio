@@ -1334,8 +1334,11 @@ pub fn read(fd: fd_t, buffer: []u8) FileReadError!usize {
 /// holds (SetFilePointerEx reads and sets it), given in an OVERLAPPED and
 /// moved past what was transferred; the call is waited for here, and the
 /// event's low bit keeps its completion off the port the handle is
-/// associated with. A handle without a position (a pipe) gets offset 0,
-/// which it ignores.
+/// associated with. A handle without a position (a pipe: SetFilePointerEx
+/// fails with ERROR_INVALID_FUNCTION, as `isPollable` checks) gets offset
+/// 0, which it ignores; any other failure to read the position is
+/// returned, since offset 0 on a file would write over its start and keep
+/// a read loop from reaching the end.
 fn windowsStreamingTransfer(
     comptime direction: enum { read, write },
     fd: fd_t,
@@ -1350,6 +1353,10 @@ fn windowsStreamingTransfer(
     }
     var position: w.LARGE_INTEGER = 0;
     const seekable = w.SetFilePointerEx(fd, 0, &position, w.FILE_CURRENT) != w.FALSE;
+    if (!seekable) {
+        const err = w.GetLastError();
+        if (err != .INVALID_FUNCTION) return .{ .failed = err };
+    }
     const event = w.CreateEventExW(null, null, w.CREATE_EVENT_MANUAL_RESET, w.EVENT_ALL_ACCESS) orelse
         return .{ .failed = w.GetLastError() };
     defer _ = w.CloseHandle(event);
