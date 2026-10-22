@@ -1339,6 +1339,20 @@ pub fn read(fd: fd_t, buffer: []u8) FileReadError!usize {
 /// 0, which it ignores; any other failure to read the position is
 /// returned, since offset 0 on a file would write over its start and keep
 /// a read loop from reaching the end.
+///
+/// The documentation says the system keeps no file pointer for overlapped
+/// handles; what this relies on is the file system driver still storing
+/// the position SetFilePointerEx sets in the file object
+/// (FILE_OBJECT.CurrentByteOffset), as the fastfat sample does with no
+/// synchronous-I/O check, and as Wine does. The .NET Framework's FileStream
+/// did the same on its overlapped handles until .NET 6 dropped it for speed:
+/// https://github.com/microsoft/referencesource/blob/master/mscorlib/system/io/filestream.cs
+/// https://learn.microsoft.com/dotnet/core/compatibility/core-libraries/6.0/filestream-position-updates-after-readasync-writeasync-completion
+///
+/// Keep the update absolute (FILE_BEGIN at position + n), not a relative
+/// FILE_CURRENT move: a comment in that FileStream source says WriteFile
+/// does move the pointer of an overlapped handle on a UNC path, and a
+/// relative move would then count the transfer twice.
 fn windowsStreamingTransfer(
     comptime direction: enum { read, write },
     fd: fd_t,
