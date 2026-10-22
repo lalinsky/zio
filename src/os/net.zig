@@ -310,6 +310,20 @@ pub const OpenError = error{
     Unexpected,
 };
 
+/// Windows fails the next receive on an unconnected UDP socket with
+/// WSAECONNRESET when an ICMP port unreachable comes back for a datagram it
+/// sent earlier (and with WSAENETRESET for an ICMP time exceeded), unlike
+/// POSIX systems: one peer that went away would break the receive loop
+/// that serves all the others. Both reports are turned off, as libuv and Go
+/// do. Best-effort.
+fn disableUdpResetReports(sock: fd_t) void {
+    const off: windows.BOOL = windows.FALSE;
+    var returned: windows.DWORD = 0;
+    for ([_]windows.DWORD{ windows.SIO_UDP_CONNRESET, windows.SIO_UDP_NETRESET }) |code| {
+        _ = windows.WSAIoctl(sock, code, &off, @sizeOf(windows.BOOL), null, 0, &returned, null, null);
+    }
+}
+
 pub fn socket(domain: Domain, socket_type: Type, protocol: Protocol, flags: OpenFlags) OpenError!fd_t {
     switch (builtin.os.tag) {
         .windows => {
@@ -329,6 +343,7 @@ pub fn socket(domain: Domain, socket_type: Type, protocol: Protocol, flags: Open
                 var mode: c_ulong = 1;
                 _ = windows.ioctlsocket(sock, windows.FIONBIO, &mode);
             }
+            if (socket_type == .dgram) disableUdpResetReports(sock);
             return sock;
         },
         else => {

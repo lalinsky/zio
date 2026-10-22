@@ -3521,6 +3521,32 @@ test "Socket: a send flag the socket doesn't support fails" {
     try std.testing.expectError(error.OperationNotSupported, op.getResult());
 }
 
+test "Socket: a UDP receive is not failed by an ICMP error for an earlier datagram" {
+    // Windows fails the next receive with WSAECONNRESET once an ICMP port
+    // unreachable comes back for a datagram sent to a closed port, unless
+    // SIO_UDP_CONNRESET is off. POSIX systems never report it on an
+    // unconnected socket.
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    var socket = try addr.bind(.{});
+    defer socket.close();
+    var peer = try addr.bind(.{});
+    defer peer.close();
+
+    var gone = try addr.bind(.{});
+    const gone_address = gone.address;
+    gone.close();
+
+    _ = try socket.sendTo(gone_address, "lost", .none);
+    _ = try peer.sendTo(socket.address, "hello", .none);
+
+    var buf: [64]u8 = undefined;
+    const result = try socket.receiveFrom(&buf, .{ .duration = .fromSeconds(1) });
+    try std.testing.expectEqualStrings("hello", buf[0..result.len]);
+}
+
 test "Socket: receiveFromBatch drains multiple queued datagrams" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
