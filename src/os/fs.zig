@@ -1371,7 +1371,14 @@ fn windowsStreamingTransfer(
     }
     var n: w.DWORD = 0;
     if (w.GetOverlappedResult(fd, &overlapped, &n, w.TRUE) == w.FALSE) return .{ .failed = w.GetLastError() };
-    if (seekable) _ = w.SetFilePointerEx(fd, position + n, null, w.FILE_BEGIN);
+    // If the position cannot be moved past what was transferred, this
+    // transfer is reported as failed: the position still says it never
+    // happened, so the caller's view matches the file object's, and a retry
+    // reads the same bytes again or writes the same bytes to the same place.
+    // Returning the count instead would let the next call repeat or
+    // overwrite them silently.
+    if (seekable and w.SetFilePointerEx(fd, position + n, null, w.FILE_BEGIN) == w.FALSE)
+        return .{ .failed = w.GetLastError() };
     return .{ .bytes = n };
 }
 
@@ -1382,9 +1389,11 @@ pub fn readv(fd: fd_t, buffers: []iovec) FileReadError!usize {
         for (buffers) |buffer| {
             const bytes_read = switch (windowsStreamingTransfer(.read, fd, buffer.buf, @intCast(buffer.len))) {
                 .bytes => |n| n,
+                // What earlier buffers took is counted (the position is past
+                // it); the error, unless it is the end, comes on the next call.
                 .failed => |err| switch (err) {
-                    .HANDLE_EOF => return if (total_read == 0) 0 else total_read,
-                    else => return errnoToFileReadError(err),
+                    .HANDLE_EOF => return total_read,
+                    else => return if (total_read > 0) total_read else errnoToFileReadError(err),
                 },
             };
 
@@ -1449,7 +1458,7 @@ pub fn writev(fd: fd_t, buffers: []const iovec_const) FileWriteError!usize {
         for (buffers) |buffer| {
             const bytes_written = switch (windowsStreamingTransfer(.write, fd, buffer.buf, @intCast(buffer.len))) {
                 .bytes => |n| n,
-                .failed => |err| return errnoToFileWriteError(err),
+                .failed => |err| return if (total_written > 0) total_written else errnoToFileWriteError(err),
             };
 
             total_written += bytes_written;
