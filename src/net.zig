@@ -316,73 +316,81 @@ pub const IpAddress = extern union {
     }
 
     pub fn parseIp4(buf: []const u8, port: u16) !IpAddress {
+        return initIp4(try parseIp4Bytes(buf), port);
+    }
+
+    /// Dotted-decimal only: four octets, no signs, no leading zeros.
+    fn parseIp4Bytes(buf: []const u8) ![4]u8 {
         var addr: [4]u8 = undefined;
         var octets = std.mem.splitScalar(u8, buf, '.');
         var i: usize = 0;
         while (octets.next()) |octet| : (i += 1) {
             if (i >= 4) return error.InvalidIpAddress;
-            addr[i] = std.fmt.parseInt(u8, octet, 10) catch return error.InvalidIpAddress;
+            if (octet.len == 0 or octet.len > 3 or (octet.len > 1 and octet[0] == '0')) return error.InvalidIpAddress;
+            var value: u16 = 0;
+            for (octet) |c| {
+                if (!std.ascii.isDigit(c)) return error.InvalidIpAddress;
+                value = value * 10 + (c - '0');
+            }
+            if (value > 255) return error.InvalidIpAddress;
+            addr[i] = @intCast(value);
         }
         if (i != 4) return error.InvalidIpAddress;
-        return initIp4(addr, port);
+        return addr;
     }
 
+    /// RFC 4291 text form: eight groups of 1-4 hex digits, one `::` for one or
+    /// more zero groups, and an optional dotted IPv4 address as the last 32 bits.
     pub fn parseIp6(buf: []const u8, port: u16) !IpAddress {
+        var groups: [8]u16 = @splat(0);
+        var count: usize = 0;
+        var gap: ?usize = null;
+        var rest = buf;
+        if (std.mem.startsWith(u8, rest, "::")) {
+            gap = 0;
+            rest = rest[2..];
+        }
+        while (rest.len > 0) {
+            const end = std.mem.findScalar(u8, rest, ':') orelse rest.len;
+            const part = rest[0..end];
+            if (std.mem.findScalar(u8, part, '.') != null) {
+                if (end != rest.len or count > 6) return error.InvalidIpAddress;
+                const ip4 = try parseIp4Bytes(part);
+                groups[count] = @as(u16, ip4[0]) << 8 | ip4[1];
+                groups[count + 1] = @as(u16, ip4[2]) << 8 | ip4[3];
+                count += 2;
+                break;
+            }
+            if (part.len == 0 or part.len > 4 or count == 8) return error.InvalidIpAddress;
+            var value: u16 = 0;
+            for (part) |c| {
+                value = value << 4 | (std.fmt.charToDigit(c, 16) catch return error.InvalidIpAddress);
+            }
+            groups[count] = value;
+            count += 1;
+            rest = rest[end..];
+            if (rest.len == 0) break;
+            rest = rest[1..];
+            if (rest.len == 0) return error.InvalidIpAddress; // trailing ':'
+            if (rest[0] == ':') {
+                if (gap != null) return error.InvalidIpAddress;
+                gap = count;
+                rest = rest[1..];
+            }
+        }
+        if (gap) |g| {
+            if (count == 8) return error.InvalidIpAddress;
+            const tail = count - g;
+            @memmove(groups[8 - tail ..], groups[g..count]);
+            @memset(groups[g .. 8 - tail], 0);
+        } else if (count != 8) {
+            return error.InvalidIpAddress;
+        }
+
         var addr: [16]u8 = undefined;
-        var tail: [16]u8 = undefined;
-        var ip_slice: []u8 = addr[0..];
-
-        var x: u16 = 0;
-        var saw_any_digits = false;
-        var index: usize = 0;
-        var abbrv = false;
-
-        for (buf, 0..) |c, i| {
-            if (c == ':') {
-                if (!saw_any_digits) {
-                    if (abbrv) return error.InvalidIpAddress; // ':::'
-                    if (i != 0) abbrv = true;
-                    @memset(ip_slice[index..], 0);
-                    ip_slice = tail[0..];
-                    index = 0;
-                    continue;
-                }
-                if (index == 14) return error.InvalidIpAddress;
-                ip_slice[index] = @as(u8, @truncate(x >> 8));
-                index += 1;
-                ip_slice[index] = @as(u8, @truncate(x));
-                index += 1;
-
-                x = 0;
-                saw_any_digits = false;
-            } else {
-                const digit = std.fmt.charToDigit(c, 16) catch return error.InvalidIpAddress;
-                const ov = @mulWithOverflow(x, 16);
-                if (ov[1] != 0) return error.InvalidIpAddress;
-                x = ov[0];
-                const ov2 = @addWithOverflow(x, digit);
-                if (ov2[1] != 0) return error.InvalidIpAddress;
-                x = ov2[0];
-                saw_any_digits = true;
-            }
+        for (groups, 0..) |group, i| {
+            std.mem.writeInt(u16, addr[i * 2 ..][0..2], group, .big);
         }
-
-        if (!saw_any_digits and !abbrv) return error.InvalidIpAddress;
-        if (!abbrv and index < 14) return error.InvalidIpAddress;
-
-        if (index == 14) {
-            ip_slice[14] = @as(u8, @truncate(x >> 8));
-            ip_slice[15] = @as(u8, @truncate(x));
-        } else {
-            ip_slice[index] = @as(u8, @truncate(x >> 8));
-            index += 1;
-            ip_slice[index] = @as(u8, @truncate(x));
-            index += 1;
-            if (abbrv) {
-                @memcpy(addr[16 - index ..][0..index], ip_slice[0..index]);
-            }
-        }
-
         return initIp6(addr, port, 0, 0);
     }
 
@@ -396,22 +404,22 @@ pub const IpAddress = extern union {
 
     pub fn parseIpAndPort(name: []const u8) !IpAddress {
         // For IPv6: [addr]:port
-        if (std.mem.indexOf(u8, name, "[")) |_| {
-            const start = std.mem.indexOf(u8, name, "[") orelse return error.InvalidFormat;
-            const end = std.mem.indexOf(u8, name, "]") orelse return error.InvalidFormat;
-            const colon = std.mem.lastIndexOf(u8, name, ":") orelse return error.InvalidFormat;
-            if (colon <= end) return error.InvalidFormat;
-            const addr_str = name[start + 1 .. end];
-            const port_str = name[colon + 1 ..];
-            const port = try std.fmt.parseInt(u16, port_str, 10);
-            return parseIp6(addr_str, port);
+        if (std.mem.startsWith(u8, name, "[")) {
+            const end = std.mem.findScalar(u8, name, ']') orelse return error.InvalidFormat;
+            if (end + 1 >= name.len or name[end + 1] != ':') return error.InvalidFormat;
+            return parseIp6(name[1..end], try parsePort(name[end + 2 ..]));
         }
         // For IPv4: addr:port
         const colon = std.mem.lastIndexOf(u8, name, ":") orelse return error.InvalidFormat;
-        const addr_str = name[0..colon];
-        const port_str = name[colon + 1 ..];
-        const port = try std.fmt.parseInt(u16, port_str, 10);
-        return parseIp4(addr_str, port);
+        return parseIp4(name[0..colon], try parsePort(name[colon + 1 ..]));
+    }
+
+    /// Decimal digits only; std.fmt.parseInt would also take a sign and underscores.
+    fn parsePort(text: []const u8) !u16 {
+        for (text) |c| {
+            if (!std.ascii.isDigit(c)) return error.InvalidCharacter;
+        }
+        return std.fmt.parseInt(u16, text, 10);
     }
 
     /// Returns the port in native endian.
@@ -1507,6 +1515,52 @@ test "IpAddress: getFamily" {
 
     const ipv6 = try IpAddress.parseIp6("::1", 80);
     try std.testing.expectEqual(IpAddress.Family.ipv6, ipv6.getFamily());
+}
+
+test "IpAddress: parseIp accepts only valid addresses" {
+    const valid = [_]struct { []const u8, [16]u8 }{
+        .{ "::", @splat(0) },
+        .{ "1::", .{ 0, 1 } ++ @as([14]u8, @splat(0)) },
+        .{ "1:2:3:4:5:6:7::", .{ 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 0 } },
+        .{ "::ffff:1.2.3.4", .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 1, 2, 3, 4 } },
+        .{ "64:ff9b::1.2.3.4", .{ 0, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4 } },
+        .{ "ABCD::ef", .{ 0xab, 0xcd } ++ @as([12]u8, @splat(0)) ++ .{ 0, 0xef } },
+    };
+    for (valid) |case| {
+        const addr = try IpAddress.parseIp(case[0], 0);
+        try std.testing.expectEqual(case[1], addr.in6.addr);
+    }
+
+    const invalid = [_][]const u8{
+        "01.2.3.4",          "1.2.3.+4",              "1.2.3.04", "256.1.1.1",
+        "::1:2:3:4:5:6:7:8", "1:2:3:4:5:6:7:8::",     ":1::2",    "1::2:",
+        "00001::",           "1:2::3:4::5",           ":::",      "1::2.3.4.5:6",
+        "::ffff:01.2.3.4",   "1:2:3:4:5:6:7:1.2.3.4",
+    };
+    for (invalid) |text| {
+        try std.testing.expectError(error.InvalidIpAddress, IpAddress.parseIp(text, 0));
+    }
+}
+
+test "IpAddress: parseIpAndPort rejects text around the address and loose ports" {
+    for ([_][]const u8{ "x[::1]y:80", "[::1]]:80", "[::1]x:80", "[::1]:8_0", "1.2.3.4:+80", "[::1]:", "[::1]" }) |text| {
+        try std.testing.expect(std.meta.isError(IpAddress.parseIpAndPort(text)));
+    }
+}
+
+test "IpAddress: parseIpAndPort reads what format writes" {
+    for ([_][]const u8{ "1.2.3.4", "::ffff:1.2.3.4", "fe80::1", "::" }) |text| {
+        const addr = try IpAddress.parseIp(text, 8080);
+        var buf: [64]u8 = undefined;
+        const printed = try std.fmt.bufPrint(&buf, "{f}", .{addr});
+        const parsed = try IpAddress.parseIpAndPort(printed);
+        try std.testing.expectEqual(addr.getFamily(), parsed.getFamily());
+        try std.testing.expectEqual(addr.getPort(), parsed.getPort());
+        switch (addr.getFamily()) {
+            .ipv4 => try std.testing.expectEqual(addr.in.addr, parsed.in.addr),
+            .ipv6 => try std.testing.expectEqual(addr.in6.addr, parsed.in6.addr),
+        }
+    }
 }
 
 test "tcpConnectToAddress: basic" {
