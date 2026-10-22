@@ -1244,6 +1244,12 @@ pub const SO_UPDATE_CONNECT_CONTEXT: i32 = 0x7010;
 
 // WSAIoctl codes
 pub const SIO_GET_EXTENSION_FUNCTION_POINTER: DWORD = 0xc8000006;
+/// _WSAIOW(IOC_VENDOR, 12): whether an ICMP port unreachable for an earlier
+/// datagram fails the next receive on a UDP socket with WSAECONNRESET.
+pub const SIO_UDP_CONNRESET: DWORD = 0x9800000C;
+/// _WSAIOW(IOC_VENDOR, 15): the same for an ICMP time exceeded, as
+/// WSAENETRESET.
+pub const SIO_UDP_NETRESET: DWORD = 0x9800000F;
 
 /// Errors that can occur when converting a path to wide string.
 pub const PathToWideError = error{
