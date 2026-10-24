@@ -21,6 +21,10 @@ All notable changes to this project will be documented in this file.
 - Spawning and finishing a task no longer updates a counter shared by all executors,
   which slowed down spawn-heavy programs on many cores.
 
+- The blocking thread pool now starts a new thread whenever no idle one can take a job,
+  up to a default `max_threads` of 512 (was twice the CPU count). The `scale_threshold`
+  option is removed.
+
 ### Added
 
 - Added `local_address` to `IpAddress.ConnectOptions`, to connect from a specific local
@@ -63,6 +67,9 @@ All notable changes to this project will be documented in this file.
 
 - Fixed a panic in `Runtime.init` with more than one executor when logging through
   `zio.debug_io` (#804).
+
+- On Windows, writes to stdout or stderr could wait until a pending stdin read finished,
+  because the thread pool queued them behind it (#839).
 
 ## [0.19.0] - 2026-10-05
 
