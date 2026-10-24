@@ -2292,7 +2292,7 @@ test "runtime: spawnBlocking runs on a machinery thread" {
 }
 
 test "runtime: spawnBlocking cancel interrupts a blocking syscall on the worker" {
-    if (!os.syscall_cancel.enabled) return error.SkipZigTest;
+    if (!os.syscall_cancel.uses_signal) return error.SkipZigTest;
 
     const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
     defer runtime.deinit();

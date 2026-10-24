@@ -363,6 +363,10 @@ pub extern "kernel32" fn DuplicateHandle(
 // Thread/process functions
 pub extern "kernel32" fn GetCurrentThread() callconv(.winapi) HANDLE;
 pub extern "kernel32" fn GetCurrentProcess() callconv(.winapi) HANDLE;
+pub extern "kernel32" fn CancelSynchronousIo(hThread: HANDLE) callconv(.winapi) BOOL;
+
+/// Thread access right required by `CancelSynchronousIo`.
+pub const THREAD_TERMINATE: DWORD = 0x0001;
 
 // APC functions
 pub extern "kernel32" fn QueueUserAPC(
