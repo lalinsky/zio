@@ -1292,22 +1292,30 @@ pub fn pwritev(fd: fd_t, buffers: []const iovec_const, offset: u64) FileWriteErr
 /// Read from file descriptor - for pipes and stream-like fds
 pub fn read(fd: fd_t, buffer: []u8) FileReadError!usize {
     if (builtin.os.tag == .windows) {
-        var bytes_read: w.DWORD = undefined;
-        const success = w.ReadFile(
-            fd,
-            buffer.ptr,
-            @intCast(buffer.len),
-            &bytes_read,
-            null,
-        );
-        if (success == w.FALSE) {
-            const err = w.GetLastError();
-            switch (err) {
-                .HANDLE_EOF => return 0,
-                else => return errnoToFileReadError(err),
+        const sc = try syscall_cancel.Syscall.begin();
+        defer sc.finish();
+        while (true) {
+            var bytes_read: w.DWORD = undefined;
+            const success = w.ReadFile(
+                fd,
+                buffer.ptr,
+                @intCast(buffer.len),
+                &bytes_read,
+                null,
+            );
+            if (success == w.FALSE) {
+                const err = w.GetLastError();
+                switch (err) {
+                    .HANDLE_EOF => return 0,
+                    .OPERATION_ABORTED => {
+                        try sc.checkCancel();
+                        continue;
+                    },
+                    else => return errnoToFileReadError(err),
+                }
             }
+            return bytes_read;
         }
-        return bytes_read;
     }
 
     const sc = try syscall_cancel.Syscall.begin();
@@ -1328,22 +1336,31 @@ pub fn read(fd: fd_t, buffer: []u8) FileReadError!usize {
 /// Read from file descriptor using readv() - for pipes and stream-like fds
 pub fn readv(fd: fd_t, buffers: []iovec) FileReadError!usize {
     if (builtin.os.tag == .windows) {
+        const sc = try syscall_cancel.Syscall.begin();
+        defer sc.finish();
         var total_read: usize = 0;
         for (buffers) |buffer| {
             var bytes_read: w.DWORD = undefined;
 
-            const success = w.ReadFile(
-                fd,
-                buffer.buf,
-                @intCast(buffer.len),
-                &bytes_read,
-                null,
-            );
+            while (true) {
+                const success = w.ReadFile(
+                    fd,
+                    buffer.buf,
+                    @intCast(buffer.len),
+                    &bytes_read,
+                    null,
+                );
+                if (success != w.FALSE) break;
 
-            if (success == w.FALSE) {
                 const err = w.GetLastError();
                 switch (err) {
-                    .HANDLE_EOF => return if (total_read == 0) 0 else total_read,
+                    .HANDLE_EOF => return total_read,
+                    .OPERATION_ABORTED => {
+                        // Bytes already read are consumed input: return them;
+                        // the cancel surfaces at the next cancellation point.
+                        sc.checkCancel() catch |e| return if (total_read == 0) e else total_read;
+                        continue;
+                    },
                     else => return errnoToFileReadError(err),
                 }
             }
@@ -1373,18 +1390,29 @@ pub fn readv(fd: fd_t, buffers: []iovec) FileReadError!usize {
 /// Write to file descriptor - for pipes and stream-like fds
 pub fn write(fd: fd_t, buffer: []const u8) FileWriteError!usize {
     if (builtin.os.tag == .windows) {
-        var bytes_written: w.DWORD = undefined;
-        const success = w.WriteFile(
-            fd,
-            buffer.ptr,
-            @intCast(buffer.len),
-            &bytes_written,
-            null,
-        );
-        if (success == w.FALSE) {
-            return errnoToFileWriteError(w.GetLastError());
+        const sc = try syscall_cancel.Syscall.begin();
+        defer sc.finish();
+        while (true) {
+            var bytes_written: w.DWORD = undefined;
+            const success = w.WriteFile(
+                fd,
+                buffer.ptr,
+                @intCast(buffer.len),
+                &bytes_written,
+                null,
+            );
+            if (success == w.FALSE) {
+                const err = w.GetLastError();
+                switch (err) {
+                    .OPERATION_ABORTED => {
+                        try sc.checkCancel();
+                        continue;
+                    },
+                    else => return errnoToFileWriteError(err),
+                }
+            }
+            return bytes_written;
         }
-        return bytes_written;
     }
 
     const sc = try syscall_cancel.Syscall.begin();
@@ -1405,20 +1433,32 @@ pub fn write(fd: fd_t, buffer: []const u8) FileWriteError!usize {
 /// Write to file descriptor using writev() - for pipes and stream-like fds
 pub fn writev(fd: fd_t, buffers: []const iovec_const) FileWriteError!usize {
     if (builtin.os.tag == .windows) {
+        const sc = try syscall_cancel.Syscall.begin();
+        defer sc.finish();
         var total_written: usize = 0;
         for (buffers) |buffer| {
             var bytes_written: w.DWORD = undefined;
 
-            const success = w.WriteFile(
-                fd,
-                buffer.buf,
-                @intCast(buffer.len),
-                &bytes_written,
-                null,
-            );
+            while (true) {
+                const success = w.WriteFile(
+                    fd,
+                    buffer.buf,
+                    @intCast(buffer.len),
+                    &bytes_written,
+                    null,
+                );
+                if (success != w.FALSE) break;
 
-            if (success == w.FALSE) {
-                return errnoToFileWriteError(w.GetLastError());
+                const err = w.GetLastError();
+                switch (err) {
+                    .OPERATION_ABORTED => {
+                        // Bytes already written can't be taken back: report
+                        // them; the cancel surfaces at the next cancellation point.
+                        sc.checkCancel() catch |e| return if (total_written == 0) e else total_written;
+                        continue;
+                    },
+                    else => return errnoToFileWriteError(err),
+                }
             }
 
             total_written += bytes_written;

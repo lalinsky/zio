@@ -463,7 +463,7 @@ pub const Waiter = struct {
 
     fn waitFutex(d: *Direct, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         if (cancel_mode == .allow_cancel) {
-            const sc = try syscall_cancel.Syscall.begin();
+            const sc = try syscall_cancel.Syscall.beginWait();
             defer sc.finish();
             while (true) {
                 const current = d.notify.state.load(.acquire);
@@ -499,7 +499,7 @@ pub const Waiter = struct {
 
     fn timedWaitFutex(d: *Direct, expected: u32, timeout: Timeout, comptime cancel_mode: Executor.YieldCancelMode) TimedWaitError(cancel_mode)!void {
         if (cancel_mode == .allow_cancel) {
-            const sc = try syscall_cancel.Syscall.begin();
+            const sc = try syscall_cancel.Syscall.beginWait();
             defer sc.finish();
             const deadline = timeout.toDeadline();
             while (true) {
@@ -809,7 +809,7 @@ test "Waiter: futex-based timed wait with timeout" {
 }
 
 test "Waiter: cancelable futex park returns Canceled via the bound token" {
-    if (!syscall_cancel.enabled) return error.SkipZigTest;
+    if (!syscall_cancel.uses_signal) return error.SkipZigTest;
 
     // Normally the thread pool installs this; do it ourselves since the test
     // drives a bare worker thread with no pool.
@@ -1000,7 +1000,7 @@ test "blockInPlaceReserved: runs while another job holds the only worker" {
 }
 
 test "blockInPlace: cancellation interrupts a blocking syscall on the worker" {
-    if (!os.syscall_cancel.enabled) return;
+    if (!os.syscall_cancel.uses_signal) return;
 
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();

@@ -2781,12 +2781,71 @@ test "Dir: resolve_beneath blocks parent escape" {
 
 extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
 
+test "File: canceling a blocking read of a synchronous Windows pipe interrupts the worker" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const w = os.windows;
+
+    // A pipe from CreatePipe is synchronous, like an inherited stdin, so the
+    // read runs as a blocking ReadFile on a thread-pool worker.
+    var read_end: w.HANDLE = undefined;
+    var write_end: w.HANDLE = undefined;
+    if (w.CreatePipe(&read_end, &write_end, null, 0) == w.FALSE) return error.Unexpected;
+    defer _ = w.CloseHandle(read_end);
+    defer _ = w.CloseHandle(write_end);
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const reader = struct {
+        fn call(handle: Handle, result: *(File.ReadStreamingError!usize)) void {
+            const file: File = .{ .fd = handle, .pollable = false, .preferred_mode = .streaming };
+            var buf: [16]u8 = undefined;
+            var storage: [1]os.iovec = undefined;
+            result.* = file.readStreaming(.fromSlice(&buf, &storage));
+        }
+    };
+
+    // If the cancel never lands, unblock the read with data after 5s, so the
+    // test fails instead of hanging.
+    const Watchdog = struct {
+        write_end: w.HANDLE,
+        finished: std.atomic.Value(bool) = .init(false),
+        fired: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            for (0..5000) |_| {
+                if (self.finished.load(.acquire)) return;
+                os.time.sleep(.fromMilliseconds(1));
+            }
+            self.fired.store(true, .release);
+            var n: w.DWORD = undefined;
+            _ = w.WriteFile(self.write_end, "x", 1, &n, null);
+        }
+    };
+    var watchdog: Watchdog = .{ .write_end = write_end };
+    const watchdog_thread = try std.Thread.spawn(.{}, Watchdog.run, .{&watchdog});
+
+    var result: File.ReadStreamingError!usize = 0;
+    var handle = try rt.spawn(reader.call, .{ read_end, &result });
+
+    // Let the worker reach the blocking read, then cancel. The loop resends the
+    // cancel each tick until the worker acknowledges.
+    try rt.sleep(.fromMilliseconds(50));
+    handle.cancel();
+    handle.join();
+    watchdog.finished.store(true, .release);
+    watchdog_thread.join();
+
+    try std.testing.expect(!watchdog.fired.load(.acquire));
+    try std.testing.expectError(error.Canceled, result);
+}
+
 test "Dir: canceling a blocking open interrupts the worker" {
     // Only exercises the thread-pool-delegated path (kqueue/poll and friends);
     // backends that open natively (io_uring) cancel via the backend instead, and
     // the SIGURG mechanism is POSIX-only.
     if (ev.Backend.capability(.file_open) != .no) return;
-    if (!os.syscall_cancel.enabled) return;
+    if (!os.syscall_cancel.uses_signal) return;
 
     // A FIFO opened O_RDONLY with no writer blocks in the worker's openat(). On
     // POSIX the open is unconditionally blocking (O_NONBLOCK is applied only

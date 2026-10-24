@@ -46,6 +46,9 @@ All notable changes to this project will be documented in this file.
 - An `AutoCancel` or `withTimeout` deadline that passed just after the operation finished
   no longer fails the task's next operation with `error.Canceled`.
 
+- On Windows, canceling a read or write of stdin, stdout or another synchronous pipe
+  waited until it finished, such as a stdin read until the user pressed Enter.
+
 - A cancel was lost when `std.Io.Group.async` could not spawn its task and ran it on the
   caller instead.
 
