@@ -213,7 +213,6 @@ test "ev.ThreadPool: regular work still scales when reserved work occupies max_t
     try thread_pool.init(std.testing.allocator, .{
         .min_threads = 0,
         .max_threads = 1,
-        .scale_threshold = 1,
     });
     defer thread_pool.deinit();
     defer thread_pool.stop();
@@ -258,4 +257,115 @@ test "ev.ThreadPool: regular work still scales when reserved work occupies max_t
     try std.testing.expect(regular.ran.load(.acquire));
 
     reserved.gate.set();
+}
+
+/// A job that signals it started, then blocks until the shared gate opens.
+const GatedJob = struct {
+    started: ResetEvent,
+    gate: *ResetEvent,
+    work: ev.Work,
+
+    fn init(self: *GatedJob, gate: *ResetEvent) void {
+        self.* = .{ .started = .init(), .gate = gate, .work = undefined };
+        self.work = ev.Work.init(&main, @ptrCast(self));
+    }
+
+    fn deinit(self: *GatedJob) void {
+        self.started.deinit();
+    }
+
+    fn main(work: *ev.Work) void {
+        const self: *GatedJob = @ptrCast(@alignCast(work.userdata));
+        self.started.set();
+        self.gate.wait();
+    }
+};
+
+test "ev.ThreadPool: work does not queue behind a blocked worker" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var thread_pool: ev.ThreadPool = undefined;
+    try thread_pool.init(std.testing.allocator, .{
+        .min_threads = 0,
+        .max_threads = 4,
+    });
+    defer thread_pool.deinit();
+    defer thread_pool.stop();
+
+    var gate = ResetEvent.init();
+    defer gate.deinit();
+    defer gate.set();
+
+    // Like a console read on Windows, which blocks until the user types a line.
+    var blocker: GatedJob = undefined;
+    blocker.init(&gate);
+    defer blocker.deinit();
+    thread_pool.submit(&blocker.work);
+    blocker.started.wait();
+
+    var second: GatedJob = undefined;
+    second.init(&gate);
+    defer second.deinit();
+    thread_pool.submit(&second.work);
+    second.started.wait();
+}
+
+test "ev.ThreadPool: concurrent blocking work gets a worker each" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var thread_pool: ev.ThreadPool = undefined;
+    try thread_pool.init(std.testing.allocator, .{
+        .min_threads = 0,
+        .max_threads = 10,
+    });
+    defer thread_pool.deinit();
+    defer thread_pool.stop();
+
+    var gate = ResetEvent.init();
+    defer gate.deinit();
+    defer gate.set();
+
+    var jobs: [10]GatedJob = undefined;
+    for (&jobs) |*job| job.init(&gate);
+    defer for (&jobs) |*job| job.deinit();
+
+    for (&jobs) |*job| thread_pool.submit(&job.work);
+    for (&jobs) |*job| job.started.wait();
+}
+
+test "ev.ThreadPool: an idle worker is counted for one queued job only" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var thread_pool: ev.ThreadPool = undefined;
+    try thread_pool.init(std.testing.allocator, .{
+        .min_threads = 1,
+        .max_threads = 4,
+    });
+    defer thread_pool.deinit();
+    defer thread_pool.stop();
+
+    var spins: usize = 0;
+    while (thread_pool.idle_threads.load(.monotonic) < 1) {
+        spins += 1;
+        if (spins > 100_000_000) return error.TimedOut;
+        os_thread.yield();
+    }
+
+    var gate = ResetEvent.init();
+    defer gate.deinit();
+    defer gate.set();
+
+    // Both are submitted before the parked worker wakes, so both submits see it
+    // as idle. Only the first may count on it; the second needs a new worker.
+    var first: GatedJob = undefined;
+    first.init(&gate);
+    defer first.deinit();
+    var second: GatedJob = undefined;
+    second.init(&gate);
+    defer second.deinit();
+    thread_pool.submit(&first.work);
+    thread_pool.submit(&second.work);
+
+    first.started.wait();
+    second.started.wait();
 }
