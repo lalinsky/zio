@@ -23,6 +23,7 @@ const endShield = runtime_mod.endShield;
 const checkCancel = runtime_mod.checkCancel;
 
 const spawnTask = @import("task.zig").spawnTask;
+const CanceledStatus = @import("task.zig").CanceledStatus;
 const spawnBlockingTask = @import("blocking_task.zig").spawnBlockingTask;
 const Awaitable = @import("awaitable.zig").Awaitable;
 const Group = @import("group.zig").Group;
@@ -354,20 +355,41 @@ fn groupAsyncImpl(
     start: *const fn (context: *const anyopaque) void,
 ) void {
     if (userdata == null) {
-        start(context.ptr);
+        groupStartInline(context.ptr, start);
         return;
     }
     const rt, const mode = decodeUserdata(userdata);
     const g = Group.fromStd(group);
     switch (mode) {
         .regular => groupSpawnTask(g, rt, context, context_alignment, start, .auto) catch {
-            start(context.ptr);
+            groupStartInline(context.ptr, start);
         },
         .blocking => groupSpawnBlockingTask(g, rt, context, context_alignment, start, .{ .reserve_thread = true }) catch {
-            start(context.ptr);
-            return;
+            groupStartInline(context.ptr, start);
         },
     }
+}
+
+/// Runs a group task on the caller, for when it could not be spawned.
+///
+/// It then runs as the caller's task, so a cancel it takes was meant for the
+/// caller, and `Io.Group.async` drops the `error.Canceled` the function
+/// returns. Put the cancel back, so the caller's next cancelation point, or the
+/// next group task run here, reports it. A cancel the caller had taken before
+/// is left alone, as it is the caller's to handle.
+fn groupStartInline(context: *const anyopaque, start: *const fn (context: *const anyopaque) void) void {
+    const task = runtime_mod.getCurrentTaskOrNull() orelse return start(context);
+    const before: CanceledStatus = @bitCast(task.canceled_status.load(.acquire));
+    start(context);
+    const after: CanceledStatus = @bitCast(task.canceled_status.load(.acquire));
+    const taken_before = isUnderCancel(before) and before.pending_errors == 0;
+    if (isUnderCancel(after) and after.pending_errors == 0 and !taken_before) {
+        task.recancel();
+    }
+}
+
+fn isUnderCancel(status: CanceledStatus) bool {
+    return status.user_canceled or status.auto_canceled > 0;
 }
 
 fn groupConcurrentImpl(
@@ -5061,6 +5083,106 @@ test "io: group runs spawned tasks to completion" {
 
     var handle = try rt.spawn(Worker.run, .{rt.io()});
     try handle.join();
+}
+
+test "io: a cancel taken by a group task run on the caller reaches the caller" {
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{});
+    const rt = try Runtime.init(failing.allocator(), .{});
+    defer rt.deinit();
+
+    const Test = struct {
+        canceled: std.atomic.Value(u32) = .init(0),
+        canceled_after: bool = false,
+
+        const Padding = [@import("task.zig").TaskPool.pool_item_size]u8;
+
+        fn sleeper(t: *@This(), io: Io, _: Padding) Io.Cancelable!void {
+            io.sleep(.fromSeconds(5), .awake) catch |err| {
+                _ = t.canceled.fetchAdd(1, .acq_rel);
+                return err;
+            };
+        }
+
+        fn worker(t: *@This(), io: Io, alloc: *std.testing.FailingAllocator) Io.Cancelable!void {
+            // With no memory for the tasks, the group runs them right here.
+            // They take too much for the task pool, so they are not taken
+            // from its free list, but allocated.
+            alloc.fail_index = alloc.alloc_index;
+            defer alloc.fail_index = std.math.maxInt(usize);
+            var group: Io.Group = .init;
+            group.async(io, sleeper, .{ t, io, undefined });
+            group.async(io, sleeper, .{ t, io, undefined });
+            group.await(io) catch |err| {
+                t.canceled_after = true;
+                return err;
+            };
+            io.checkCancel() catch |err| {
+                t.canceled_after = true;
+                return err;
+            };
+        }
+
+        fn run(t: *@This(), io: Io, alloc: *std.testing.FailingAllocator) !void {
+            var future = try io.concurrent(worker, .{ t, io, alloc });
+            try io.sleep(.fromMilliseconds(50), .awake);
+            try std.testing.expectError(error.Canceled, future.cancel(io));
+        }
+    };
+
+    var t: Test = .{};
+    var handle = try rt.spawn(Test.run, .{ &t, rt.io(), &failing });
+    try handle.join();
+    // The first task took the cancel, the second got it back, and so did the
+    // caller after them.
+    try std.testing.expectEqual(2, t.canceled.load(.acquire));
+    try std.testing.expect(t.canceled_after);
+}
+
+test "io: a group task run on the caller leaves a cancel the caller took alone" {
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{});
+    const rt = try Runtime.init(failing.allocator(), .{});
+    defer rt.deinit();
+
+    const Test = struct {
+        slept: bool = false,
+        canceled_after: bool = false,
+
+        const Padding = [@import("task.zig").TaskPool.pool_item_size]u8;
+
+        fn sleeper(t: *@This(), io: Io, _: Padding) Io.Cancelable!void {
+            try io.sleep(.fromMilliseconds(10), .awake);
+            t.slept = true;
+        }
+
+        fn worker(t: *@This(), io: Io, alloc: *std.testing.FailingAllocator) Io.Cancelable!void {
+            // Take the cancel, and go on as if cleaning up after it.
+            io.sleep(.fromSeconds(5), .awake) catch {};
+
+            // As in the test above, the group runs the task right here.
+            alloc.fail_index = alloc.alloc_index;
+            defer alloc.fail_index = std.math.maxInt(usize);
+            var group: Io.Group = .init;
+            group.async(io, sleeper, .{ t, io, undefined });
+            group.await(io) catch {
+                t.canceled_after = true;
+            };
+            io.checkCancel() catch {
+                t.canceled_after = true;
+            };
+        }
+
+        fn run(t: *@This(), io: Io, alloc: *std.testing.FailingAllocator) !void {
+            var future = try io.concurrent(worker, .{ t, io, alloc });
+            try io.sleep(.fromMilliseconds(50), .awake);
+            try future.cancel(io);
+        }
+    };
+
+    var t: Test = .{};
+    var handle = try rt.spawn(Test.run, .{ &t, rt.io(), &failing });
+    try handle.join();
+    try std.testing.expect(t.slept);
+    try std.testing.expect(!t.canceled_after);
 }
 
 test "io: operateTimeout net_receive succeeds when data is ready" {
