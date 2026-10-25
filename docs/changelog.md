@@ -32,6 +32,8 @@ All notable changes to this project will be documented in this file.
 
 - Added `Dir.sync`, to make files created, renamed or deleted in a directory durable.
 
+- Wine is now a supported platform, tested in CI alongside native Windows.
+
 - Added `CompletionQueue.submitAndWait`, to run a single event loop operation from a task
   without setting up a queue.
 

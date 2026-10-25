@@ -31,7 +31,7 @@ pub const zio_options: zio.Options = .{ .scheduling = .pinned };
 
 ## Features
 
-- Support for Linux (`io_uring` with automatic `epoll` fallback), Windows (`iocp`), macOS/FreeBSD/NetBSD/OpenBSD (`kqueue`), and many other systems (`poll`).
+- Support for Linux (`io_uring` with automatic `epoll` fallback), Windows and Wine (`iocp`), macOS/FreeBSD/NetBSD/OpenBSD (`kqueue`), and many other systems (`poll`).
 - User-mode coroutine context switching for `x86_64`, `x86`, `aarch64`, `arm`, `thumb`, `riscv32`, `riscv64`, `loongarch64` and `powerpc64` architectures.
 - Growable stacks for the coroutines implemented by auto-extending virtual memory reservations.
 - Single-threaded or multi-threaded coroutine scheduler, with or without work-stealing.
