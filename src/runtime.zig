@@ -679,6 +679,14 @@ pub const Executor = struct {
         self.loop.setTimer(timer, timeout);
     }
 
+    /// Move a timer armed on this executor's loop to a new timeout. See
+    /// `Loop.rearmTimer`. A no-suspend region, see `loopAdd`.
+    pub fn loopRearmTimer(self: *Executor, timer: *ev.Timer, timeout: time.Timeout) bool {
+        self.no_suspend += 1;
+        defer self.no_suspend -= 1;
+        return self.loop.rearmTimer(timer, timeout);
+    }
+
     pub const YieldCancelMode = enum { allow_cancel, no_cancel };
 
     inline fn bump(self: *Executor, comptime field: []const u8, n: u64) void {

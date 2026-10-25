@@ -417,6 +417,11 @@ pub const LoopState = struct {
             .duration => |d| timer.deadline = self.nowFor(timer.clock).addDuration(d),
             .deadline => |ts| timer.deadline = ts,
         }
+        if (Timer.can_extend) {
+            // A deadline too far out to tell from `closed` cannot be extended.
+            const open = timer.deadline.value & Timer.closed == 0;
+            timer.extended.store(if (open) timer.deadline.value else Timer.closed, .monotonic);
+        }
         self.timers[clockIndex(timer.clock)].insert(timer);
     }
 
@@ -424,6 +429,26 @@ pub const LoopState = struct {
     pub fn disarmTimer(self: *LoopState, timer: *Timer) void {
         self.timers[clockIndex(timer.clock)].remove(timer);
         timer.deadline = .zero;
+        if (Timer.can_extend) timer.extended.store(Timer.closed, .monotonic);
+    }
+
+    /// For a timer whose `deadline` has passed: when its extended deadline
+    /// has not, move it there in the heap and return true. Otherwise close
+    /// it, committing it to fire; an `extend` racing this either lands first
+    /// and is honored, or finds it closed.
+    fn postponeTimer(self: *LoopState, timer: *Timer, now: Timestamp) bool {
+        if (!Timer.can_extend) return false;
+        var w = timer.extended.load(.monotonic);
+        while (true) {
+            if (w & Timer.closed == 0 and w > now.value) {
+                const heap = &self.timers[clockIndex(timer.clock)];
+                heap.remove(timer);
+                timer.deadline = .{ .value = w };
+                heap.insert(timer);
+                return true;
+            }
+            w = timer.extended.cmpxchgWeak(w, Timer.closed, .monotonic, .monotonic) orelse return false;
+        }
     }
 
     /// Add a canceled-but-blocked work to the cancel-resend list (idempotent).
@@ -658,6 +683,25 @@ pub const Loop = struct {
         self.state.armTimer(timer);
     }
 
+    /// Move an armed timer to a new timeout, if it is still armed on this
+    /// loop and neither fired nor claimed by a cancel pass: its callback has
+    /// not run and will not run for the old deadline. Returns false, leaving
+    /// it untouched, otherwise; `clearTimer` and `setTimer` then do the same
+    /// in two steps.
+    pub fn rearmTimer(self: *Loop, timer: *Timer, timeout: Timeout) bool {
+        self.state.lockTimers();
+        defer self.state.unlockTimers();
+        // First, so this lock is the one that covers the fields read below.
+        if (timer.c.getLoop() != self) return false;
+        const st = timer.c.loadState();
+        if (st.phase != .running or st.cancel_inflight or timer.c.has_result) return false;
+        self.state.updateNow();
+        timer.timeout = timeout;
+        self.state.disarmTimer(timer);
+        self.state.armTimer(timer);
+        return true;
+    }
+
     /// Clear a timer without completing it (works immediately, no cancellation
     /// completion required). Thread-safe: may be called from a thread that does
     /// not own the loop (a migrated task clearing its sleep timer).
@@ -758,10 +802,11 @@ pub const Loop = struct {
                     self.state.unlockTimers();
                     return;
                 }
-                // Set the result under the timer lock: clearTimer keys
-                // "already fired/canceled, hands off" on it.
-                timer.c.setError(error.Canceled);
+                // Disarm first, closing the timer to `extend`, which does not
+                // take this lock. Set the result under the lock: clearTimer
+                // keys "already fired/canceled, hands off" on it.
                 self.state.disarmTimer(timer);
+                timer.c.setError(error.Canceled);
                 self.state.unlockTimers();
                 self.state.markCompleted(&timer.c);
             },
@@ -1044,6 +1089,7 @@ pub const Loop = struct {
                         }
                         break;
                     }
+                    if (self.state.postponeTimer(timer, now_clock)) continue;
                     timer.c.setResult(.timer, {});
                     self.state.disarmTimer(timer);
                     batch[batch_count] = timer;
