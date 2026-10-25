@@ -96,17 +96,18 @@ pub const AutoCancel = struct {
     /// cannot. Only the wall clocks are valid for a timer; the CPU-time clocks
     /// are rejected when the timer is armed.
     pub fn setClock(self: *AutoCancel, timeout: Timeout, clock: Clock) void {
-        // Retire the previous arm before touching this struct again. Two
-        // things make that necessary: a timer still live on another
-        // executor's loop cannot be re-armed from this one, and a callback
-        // in flight is still writing `triggered` and `fired`, which the
-        // resets below would race. `setTimer` asserts both.
-        //
-        // TODO: a re-arm could take the new deadline and the in-flight race
-        // together, under the owning loop's timer lock where `phase` and
-        // `has_result` can be read without racing, instead of disarming and
-        // arming again. `Loop.clearTimer` has the states that would need
-        // telling apart.
+        // Still armed on this executor's loop, in this clock's heap, and not
+        // yet fired: the callback has not run since the arm that reset
+        // `triggered` and `fired`, so only the deadline has to move.
+        if (timeout != .none and self.timer.clock == clock) {
+            if (getCurrentTask().getExecutor().loopRearmTimer(&self.timer, timeout)) return;
+        }
+
+        // Otherwise retire the previous arm before touching this struct
+        // again. Two things make that necessary: a timer still live on
+        // another executor's loop cannot be re-armed from this one, and a
+        // callback in flight is still writing `triggered` and `fired`, which
+        // the resets below would race. `setTimer` asserts both.
         self.clear();
 
         // Waiting forever means no timer at all.
@@ -407,6 +408,46 @@ test "AutoCancel: set, clear, and re-set" {
     };
 
     return error.TestUnexpectedResult;
+}
+
+test "AutoCancel: re-arming a live timer moves its deadline either way" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var timeout: AutoCancel = .init;
+    defer timeout.clear();
+
+    timeout.set(.fromMilliseconds(10));
+    timeout.set(.fromSeconds(60));
+    try rt.sleep(.fromMilliseconds(50));
+
+    timeout.set(.fromMilliseconds(10));
+    rt.sleep(.fromMilliseconds(500)) catch |err| {
+        try std.testing.expect(timeout.check(err));
+        return;
+    };
+    return error.TestUnexpectedResult;
+}
+
+test "AutoCancel: re-arming a timer that fired unnoticed takes its cancel back" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var timeout: AutoCancel = .init;
+    defer timeout.clear();
+
+    timeout.set(.fromMilliseconds(10));
+
+    // The timer fires while no cancellation point can report it.
+    rt.beginShield();
+    rt.sleep(.fromMilliseconds(50)) catch unreachable;
+    rt.endShield();
+
+    // Fired, so this has to go the long way round, through `clear`.
+    try std.testing.expect(timeout.fired.load(.acquire).done);
+    timeout.set(.fromSeconds(60));
+    try std.testing.expect(!timeout.triggered.load(.monotonic));
+    try rt.sleep(.fromMilliseconds(1));
 }
 
 test "AutoCancel: set with Duration.max clears prior timer" {
@@ -810,14 +851,26 @@ test "AutoCancel: re-armed while the previous arm is still live on another execu
     // re-arms a timer that is still sitting in some loop's heap. After a
     // migration that loop is not the one the task is running on, which is
     // what `setTimer` refuses to do.
+    //
+    // Whichever way a `set` goes, it leaves the timer on the loop of the
+    // executor the task runs on: moving it in place on another loop's heap
+    // would do it under the wrong lock.
+    const Counts = struct {
+        moved: std.atomic.Value(u32) = .init(0),
+        elsewhere: std.atomic.Value(u32) = .init(0),
+    };
     const worker = struct {
-        fn call(rounds: usize) void {
+        fn call(rounds: usize, counts: *Counts) void {
             var timeout: AutoCancel = .init;
             defer timeout.clear();
 
             var round: usize = 0;
             while (round < rounds) : (round += 1) {
+                const before = timeout.timer.c.getLoop();
                 timeout.set(.fromSeconds(60));
+                const here = &getCurrentTask().getExecutor().loop;
+                if (before != null and before != here) _ = counts.moved.fetchAdd(1, .monotonic);
+                if (timeout.timer.c.getLoop() != here) _ = counts.elsewhere.fetchAdd(1, .monotonic);
                 var spin: usize = 0;
                 while (spin < 16) : (spin += 1) yield() catch {};
             }
@@ -829,11 +882,15 @@ test "AutoCancel: re-armed while the previous arm is still live on another execu
     const rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
     defer rt.deinit();
 
+    var counts: Counts = .{};
     var handles: [8]JoinHandle(void) = undefined;
     for (&handles) |*handle| {
-        handle.* = try rt.spawn(worker, .{@as(usize, 200)});
+        handle.* = try rt.spawn(worker, .{ @as(usize, 200), &counts });
     }
     for (&handles) |*handle| handle.join();
+
+    try std.testing.expectEqual(0, counts.elsewhere.load(.monotonic));
+    if (counts.moved.load(.monotonic) == 0) return error.SkipZigTest;
 }
 
 test "AutoCancel: set arms against the monotonic clock" {

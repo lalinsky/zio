@@ -658,6 +658,25 @@ pub const Loop = struct {
         self.state.armTimer(timer);
     }
 
+    /// Move an armed timer to a new timeout, if it is still armed on this
+    /// loop and neither fired nor claimed by a cancel pass: its callback has
+    /// not run and will not run for the old deadline. Returns false, leaving
+    /// it untouched, otherwise; `clearTimer` and `setTimer` then do the same
+    /// in two steps.
+    pub fn rearmTimer(self: *Loop, timer: *Timer, timeout: Timeout) bool {
+        self.state.lockTimers();
+        defer self.state.unlockTimers();
+        // First, so this lock is the one that covers the fields read below.
+        if (timer.c.getLoop() != self) return false;
+        const st = timer.c.loadState();
+        if (st.phase != .running or st.cancel_inflight or timer.c.has_result) return false;
+        self.state.updateNow();
+        timer.timeout = timeout;
+        self.state.disarmTimer(timer);
+        self.state.armTimer(timer);
+        return true;
+    }
+
     /// Clear a timer without completing it (works immediately, no cancellation
     /// completion required). Thread-safe: may be called from a thread that does
     /// not own the loop (a migrated task clearing its sleep timer).
