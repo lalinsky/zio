@@ -417,6 +417,9 @@ pub const LoopState = struct {
             .duration => |d| timer.deadline = self.nowFor(timer.clock).addDuration(d),
             .deadline => |ts| timer.deadline = ts,
         }
+        // A deadline too far out to tell from `closed` cannot be extended.
+        const open = timer.deadline.value & Timer.closed == 0;
+        timer.extended.store(if (open) timer.deadline.value else Timer.closed, .monotonic);
         self.timers[clockIndex(timer.clock)].insert(timer);
     }
 
@@ -424,6 +427,25 @@ pub const LoopState = struct {
     pub fn disarmTimer(self: *LoopState, timer: *Timer) void {
         self.timers[clockIndex(timer.clock)].remove(timer);
         timer.deadline = .zero;
+        timer.extended.store(Timer.closed, .monotonic);
+    }
+
+    /// For a timer whose `deadline` has passed: when its extended deadline
+    /// has not, move it there in the heap and return true. Otherwise close
+    /// it, committing it to fire; an `extend` racing this either lands first
+    /// and is honored, or finds it closed.
+    fn postponeTimer(self: *LoopState, timer: *Timer, now: Timestamp) bool {
+        var w = timer.extended.load(.monotonic);
+        while (true) {
+            if (w & Timer.closed == 0 and w > now.value) {
+                const heap = &self.timers[clockIndex(timer.clock)];
+                heap.remove(timer);
+                timer.deadline = .{ .value = w };
+                heap.insert(timer);
+                return true;
+            }
+            w = timer.extended.cmpxchgWeak(w, Timer.closed, .monotonic, .monotonic) orelse return false;
+        }
     }
 
     /// Add a canceled-but-blocked work to the cancel-resend list (idempotent).
@@ -777,10 +799,11 @@ pub const Loop = struct {
                     self.state.unlockTimers();
                     return;
                 }
-                // Set the result under the timer lock: clearTimer keys
-                // "already fired/canceled, hands off" on it.
-                timer.c.setError(error.Canceled);
+                // Disarm first, closing the timer to `extend`, which does not
+                // take this lock. Set the result under the lock: clearTimer
+                // keys "already fired/canceled, hands off" on it.
                 self.state.disarmTimer(timer);
+                timer.c.setError(error.Canceled);
                 self.state.unlockTimers();
                 self.state.markCompleted(&timer.c);
             },
@@ -1063,6 +1086,7 @@ pub const Loop = struct {
                         }
                         break;
                     }
+                    if (self.state.postponeTimer(timer, now_clock)) continue;
                     timer.c.setResult(.timer, {});
                     self.state.disarmTimer(timer);
                     batch[batch_count] = timer;

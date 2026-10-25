@@ -18,6 +18,7 @@ const os = @import("../os/root.zig");
 const net = @import("../os/net.zig");
 const fs = @import("../os/fs.zig");
 const Timestamp = @import("../time.zig").Timestamp;
+const TimeInt = @import("../time.zig").TimeInt;
 const Timeout = @import("../time.zig").Timeout;
 const Clock = @import("../time.zig").Clock;
 
@@ -600,8 +601,31 @@ pub const Timer = struct {
     clock: Clock = .awake,
     deadline: Timestamp = .zero,
     heap: HeapNode(Timer) = .{},
+    /// The deadline the timer is due at, which `extend` moves later without
+    /// the heap knowing; `deadline` is never after it. The scan that finds
+    /// `deadline` passed re-inserts the timer at this one when it has not.
+    /// `closed` while the timer is not armed, and from when it is committed
+    /// to completing: a fire and an extension are decided by one CAS on this
+    /// word.
+    extended: std.atomic.Value(TimeInt) = .init(closed),
 
     pub const Error = Cancelable;
+
+    pub const closed: TimeInt = 1 << (@bitSizeOf(TimeInt) - 1);
+
+    /// Move an armed timer's deadline to `deadline`, a timestamp on its own
+    /// clock, without taking the loop's timer lock. Only later: returns
+    /// false, changing nothing, for an earlier deadline, or for a timer that
+    /// is not armed or has already been committed to fire or to be canceled.
+    /// A cancel requested before this but not yet processed still wins: the
+    /// extension succeeds and the timer completes with `error.Canceled`.
+    pub fn extend(timer: *Timer, deadline: Timestamp) bool {
+        var w = timer.extended.load(.monotonic);
+        while (true) {
+            if (w & closed != 0 or deadline.value < w or deadline.value & closed != 0) return false;
+            w = timer.extended.cmpxchgWeak(w, deadline.value, .monotonic, .monotonic) orelse return true;
+        }
+    }
 
     pub fn init(timeout: Timeout) Timer {
         return .{

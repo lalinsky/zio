@@ -380,3 +380,87 @@ test "duration timer armed after a long idle poll is not backdated" {
     try std.testing.expect(elapsed_ms <= 1500);
     std.log.info("post-idle arm: expected=500ms, actual={d}ms", .{elapsed_ms});
 }
+
+fn countFires(_: *Loop, c: *@import("../completion.zig").Completion) void {
+    const count: *u32 = @ptrCast(@alignCast(c.userdata.?));
+    count.* += 1;
+}
+
+test "extend moves a timer later, and it fires once, at the extended deadline" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    var fires: u32 = 0;
+    var timer: Timer = .init(.{ .duration = .zero });
+    timer.c.userdata = &fires;
+    timer.c.callback = countFires;
+
+    var wall_timer = time.Stopwatch.start();
+    loop.setTimer(&timer, .{ .duration = .fromMilliseconds(20) });
+    const later = Timestamp.now(.awake).addDuration(.fromMilliseconds(80));
+    try std.testing.expect(timer.extend(later));
+    // Only later: an earlier deadline needs the heap.
+    try std.testing.expect(!timer.extend(Timestamp.now(.awake).addDuration(.fromMilliseconds(10))));
+
+    try loop.run();
+    const elapsed = wall_timer.read();
+
+    try std.testing.expectEqual(1, fires);
+    try std.testing.expectEqual(.dead, timer.c.loadState().phase);
+    try std.testing.expect(elapsed.toMilliseconds() >= 75);
+    try std.testing.expect(!timer.extend(Timestamp.now(.awake).addDuration(.fromSeconds(60))));
+}
+
+test "extend refuses a timer that is not armed" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    var timer: Timer = .init(.{ .duration = .zero });
+    const later = Timestamp.now(.awake).addDuration(.fromSeconds(60));
+    try std.testing.expect(!timer.extend(later));
+
+    loop.setTimer(&timer, .{ .duration = .fromSeconds(1) });
+    try std.testing.expect(loop.clearTimer(&timer));
+    try std.testing.expect(!timer.extend(later));
+}
+
+test "extend loses to a fire that is already committed" {
+    // `do_not_call_callbacks` holds the fired timer before its callback,
+    // which is the window an extension from another thread could land in.
+    var loop: Loop = undefined;
+    try loop.init(.{ .do_not_call_callbacks = true });
+    defer loop.deinit();
+
+    var fires: u32 = 0;
+    var timer: Timer = .init(.{ .duration = .zero });
+    timer.c.userdata = &fires;
+    timer.c.callback = countFires;
+
+    loop.setTimer(&timer, .{ .duration = .zero });
+    try loop.poll(.max);
+    try std.testing.expect(!timer.extend(Timestamp.now(.awake).addDuration(.fromSeconds(60))));
+
+    loop.nextDispatched().?.call(&loop);
+    try std.testing.expectEqual(1, fires);
+}
+
+test "extend moves a wall-clock timer later" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    var fires: u32 = 0;
+    var timer: Timer = .initClock(.{ .duration = .zero }, .real);
+    timer.c.userdata = &fires;
+    timer.c.callback = countFires;
+
+    var wall_timer = time.Stopwatch.start();
+    loop.setTimer(&timer, .{ .duration = .fromMilliseconds(20) });
+    try std.testing.expect(timer.extend(Timestamp.now(.real).addDuration(.fromMilliseconds(80))));
+
+    try loop.run();
+    try std.testing.expectEqual(1, fires);
+    try std.testing.expect(wall_timer.read().toMilliseconds() >= 75);
+}
