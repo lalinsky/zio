@@ -2541,7 +2541,7 @@ fn zioSendFlags(flags: Io.net.SendFlags) os_net.SendFlags {
 /// is part of the contract, so a caller that gets fewer than it passed
 /// re-submits the rest; that is what lets the batch path below send just one,
 /// and how this loop continues after a batch that came back short.
-fn netSendOpImpl(
+noinline fn netSendOpImpl(
     handle: Io.net.Socket.Handle,
     messages: []Io.net.OutgoingMessage,
     flags: Io.net.SendFlags,
@@ -2675,7 +2675,7 @@ fn hasControl(messages: []const Io.net.IncomingMessage) bool {
 
 const max_mmsg_slots = 64;
 
-fn netReceiveMmsg(
+noinline fn netReceiveMmsg(
     o: *const Io.Operation.NetReceive,
     timeout: time.Timeout,
     clock: time.Clock,
