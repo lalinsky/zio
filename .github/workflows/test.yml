@@ -51,9 +51,10 @@ jobs:
 
     - name: Install Wine
       if: matrix.config.wine
+      timeout-minutes: 5
       run: |
         sudo apt-get update -q -y
-        sudo apt-get install -q -y wine64
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -q -y wine64
 
     - name: Build and test for each backend
       shell: bash
