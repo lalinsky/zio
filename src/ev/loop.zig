@@ -417,9 +417,11 @@ pub const LoopState = struct {
             .duration => |d| timer.deadline = self.nowFor(timer.clock).addDuration(d),
             .deadline => |ts| timer.deadline = ts,
         }
-        // A deadline too far out to tell from `closed` cannot be extended.
-        const open = timer.deadline.value & Timer.closed == 0;
-        timer.extended.store(if (open) timer.deadline.value else Timer.closed, .monotonic);
+        if (Timer.can_extend) {
+            // A deadline too far out to tell from `closed` cannot be extended.
+            const open = timer.deadline.value & Timer.closed == 0;
+            timer.extended.store(if (open) timer.deadline.value else Timer.closed, .monotonic);
+        }
         self.timers[clockIndex(timer.clock)].insert(timer);
     }
 
@@ -427,7 +429,7 @@ pub const LoopState = struct {
     pub fn disarmTimer(self: *LoopState, timer: *Timer) void {
         self.timers[clockIndex(timer.clock)].remove(timer);
         timer.deadline = .zero;
-        timer.extended.store(Timer.closed, .monotonic);
+        if (Timer.can_extend) timer.extended.store(Timer.closed, .monotonic);
     }
 
     /// For a timer whose `deadline` has passed: when its extended deadline
@@ -435,6 +437,7 @@ pub const LoopState = struct {
     /// it, committing it to fire; an `extend` racing this either lands first
     /// and is honored, or finds it closed.
     fn postponeTimer(self: *LoopState, timer: *Timer, now: Timestamp) bool {
+        if (!Timer.can_extend) return false;
         var w = timer.extended.load(.monotonic);
         while (true) {
             if (w & Timer.closed == 0 and w > now.value) {

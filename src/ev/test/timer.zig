@@ -387,6 +387,8 @@ fn countFires(_: *Loop, c: *@import("../completion.zig").Completion) void {
 }
 
 test "extend moves a timer later, and it fires once, at the extended deadline" {
+    if (!Timer.can_extend) return error.SkipZigTest;
+
     var loop: Loop = undefined;
     try loop.init(.{});
     defer loop.deinit();
@@ -447,6 +449,8 @@ test "extend loses to a fire that is already committed" {
 }
 
 test "extend moves a wall-clock timer later" {
+    if (!Timer.can_extend) return error.SkipZigTest;
+
     var loop: Loop = undefined;
     try loop.init(.{});
     defer loop.deinit();

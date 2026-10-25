@@ -606,12 +606,15 @@ pub const Timer = struct {
     /// `deadline` passed re-inserts the timer at this one when it has not.
     /// `closed` while the timer is not armed, and from when it is committed
     /// to completing: a fire and an extension are decided by one CAS on this
-    /// word.
-    extended: std.atomic.Value(TimeInt) = .init(closed),
+    /// word. Absent where it would not be lock-free.
+    extended: if (can_extend) std.atomic.Value(TimeInt) else void = if (can_extend) .init(closed) else {},
 
     pub const Error = Cancelable;
 
     pub const closed: TimeInt = 1 << (@bitSizeOf(TimeInt) - 1);
+
+    /// 32-bit targets have no 64-bit atomics; `extend` always fails there.
+    pub const can_extend = @bitSizeOf(usize) >= @bitSizeOf(TimeInt);
 
     /// Move an armed timer's deadline to `deadline`, a timestamp on its own
     /// clock, without taking the loop's timer lock. Only later: returns
@@ -620,6 +623,7 @@ pub const Timer = struct {
     /// A cancel requested before this but not yet processed still wins: the
     /// extension succeeds and the timer completes with `error.Canceled`.
     pub fn extend(timer: *Timer, deadline: Timestamp) bool {
+        if (!can_extend) return false;
         var w = timer.extended.load(.monotonic);
         while (true) {
             if (w & closed != 0 or deadline.value < w or deadline.value & closed != 0) return false;
