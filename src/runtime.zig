@@ -850,7 +850,7 @@ pub const Executor = struct {
                 // One EWMA step per quantum, applied per batch (tokio's scheme).
                 const alpha = 1.0 - std.math.pow(f64, 1.0 - task_ns_ewma_alpha, n);
                 self.task_ns_ewma = alpha * (elapsed / n) + (1.0 - alpha) * self.task_ns_ewma;
-                self.tick_task_budget = @intFromFloat(std.math.clamp(tick_target_ns / self.task_ns_ewma, 2.0, max_tick_budget));
+                self.tick_task_budget = @intFromFloat(std.math.clamp(tick_target_ns / self.task_ns_ewma, @as(f64, @floatFromInt(zio_options.min_tick_budget)), max_tick_budget));
             }
             self.tick_started_at = tick_now;
             self.tick_task_count = 0;
