@@ -300,7 +300,9 @@ pub const ThreadPool = struct {
         // pool, so waiting would starve the worker needed to release it. See
         // `runtime.ThreadRole`.
         runtime.setThreadRole(.machinery);
+        os.syscall_cancel.bindThread();
         self.runTasks();
+        os.syscall_cancel.unbindThread();
         self.removeThread(worker_id);
     }
 
