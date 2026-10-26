@@ -16,6 +16,7 @@ pub fn build(b: *std.Build) void {
     const scheduler_metrics = b.option(bool, "scheduler_metrics", "Count scheduler events (parks, steals, wake batches) in per-executor counters readable via Runtime.schedulerMetrics (default true)");
     const overflow_busy_take = b.option(u32, "overflow_busy_take", "EXPERIMENT: tasks a busy executor takes from the overflow queue per tick, 0 = fair share (default 1)");
     const overflow_interval = b.option(u32, "overflow_interval", "EXPERIMENT: run one overflow task directly every N quanta, 0 = off (default 0)");
+    const tick_target_us = b.option(u32, "tick_target_us", "EXPERIMENT: task time per scheduler tick before polling I/O (default 100)");
     const debug_cancel = b.option(bool, "debug_cancel", "Report tasks that keep running after swallowing error.Canceled, with stack traces (default false)");
 
     const build_options: BuildOptions = .{
@@ -27,6 +28,7 @@ pub fn build(b: *std.Build) void {
         .debug_cancel = debug_cancel orelse false,
         .overflow_busy_take = overflow_busy_take orelse 1,
         .overflow_interval = overflow_interval orelse 0,
+        .tick_target_us = tick_target_us orelse 100,
     };
 
     const zio = b.addModule("zio", .{
@@ -144,6 +146,7 @@ const BuildOptions = struct {
     debug_cancel: bool,
     overflow_busy_take: u32,
     overflow_interval: u32,
+    tick_target_us: u32,
 
     // Enums are passed as tag names and mapped back to zio's own types in
     // src/options.zig.
@@ -157,6 +160,7 @@ const BuildOptions = struct {
         options.addOption(bool, "debug_cancel", self.debug_cancel);
         options.addOption(u32, "overflow_busy_take", self.overflow_busy_take);
         options.addOption(u32, "overflow_interval", self.overflow_interval);
+        options.addOption(u32, "tick_target_us", self.tick_target_us);
         return options;
     }
 };

@@ -702,7 +702,7 @@ pub const Executor = struct {
     }
 
     /// Aim to poll I/O roughly this often while running tasks back-to-back.
-    const tick_target_ns = 100_000;
+    const tick_target_ns = @as(u64, zio_options.tick_target_us) * 1000;
     /// Budget until the first measurement (Go's scheduler / tokio's event_interval).
     const initial_tick_budget = 61;
     /// Budget clamp: at least 2 to make progress between polls, capped so a

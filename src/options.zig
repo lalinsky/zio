@@ -71,6 +71,7 @@ pub const Options = struct {
     debug_cancel: bool = build_options.debug_cancel,
     overflow_busy_take: u32 = build_options.overflow_busy_take,
     overflow_interval: u32 = build_options.overflow_interval,
+    tick_target_us: u32 = build_options.tick_target_us,
 };
 
 /// The resolved configuration. A `-fsingle-threaded` build has only one
