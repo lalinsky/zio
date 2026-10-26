@@ -282,18 +282,21 @@ pub const Duration = struct {
     pub const ParseError = error{InvalidDuration};
 
     /// Parses a duration string in Go-style format (e.g., "1h30m45s", "500ms", "1.5us").
-    pub fn parse(s: []const u8) ParseError!Duration {
+    pub fn parse(input: []const u8) ParseError!Duration {
+        // Like Go, accept a leading '+' and a bare "0"; durations can't be negative
+        const s = if (std.mem.startsWith(u8, input, "+")) input[1..] else input;
         if (s.len == 0) return error.InvalidDuration;
+        if (std.mem.eql(u8, s, "0")) return fromNanoseconds(0);
 
         const max_val = std.math.maxInt(u64);
         var ns: u64 = 0;
         var i: usize = 0;
 
         while (i < s.len) {
-            // Parse integer part
+            // Parse integer part; it may be empty before a fraction (".5s")
             const int_start = i;
             while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {}
-            if (i == int_start) return error.InvalidDuration;
+            const has_int = i > int_start;
 
             var int_part: u64 = 0;
             for (s[int_start..i]) |c| {
@@ -307,11 +310,12 @@ pub const Duration = struct {
             // Parse optional fractional part using float64 (like Go does for precision)
             var frac: f64 = 0;
             var frac_scale: f64 = 1;
+            var has_frac = false;
             if (i < s.len and s[i] == '.') {
                 i += 1;
                 const frac_start = i;
                 while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {}
-                if (i == frac_start) return error.InvalidDuration;
+                has_frac = i > frac_start;
 
                 // Parse fraction digits, stopping accumulation on overflow (like Go's leadingFraction)
                 for (s[frac_start..i]) |c| {
@@ -322,15 +326,18 @@ pub const Duration = struct {
                 }
             }
 
-            // Parse unit
+            // A number needs a digit on at least one side of the '.' ("1.s" is fine)
+            if (!has_int and !has_frac) return error.InvalidDuration;
+
+            // Parse unit: everything up to the next number, as in Go
             if (i >= s.len) return error.InvalidDuration;
             const unit_start = i;
-            while (i < s.len and s[i] >= 'a' and s[i] <= 'z') : (i += 1) {}
+            while (i < s.len and s[i] != '.' and (s[i] < '0' or s[i] > '9')) : (i += 1) {}
             const unit = s[unit_start..i];
 
             const multiplier: u64 = if (std.mem.eql(u8, unit, "ns"))
                 1
-            else if (std.mem.eql(u8, unit, "us"))
+            else if (std.mem.eql(u8, unit, "us") or std.mem.eql(u8, unit, "µs") or std.mem.eql(u8, unit, "μs"))
                 ns_per_us
             else if (std.mem.eql(u8, unit, "ms"))
                 ns_per_ms
@@ -792,6 +799,14 @@ test "Duration: parse" {
         .{ .input = "100ms", .expected = 100_000_000 },
         .{ .input = "2h", .expected = 7_200_000_000_000 },
         .{ .input = "30m", .expected = 1_800_000_000_000 },
+        // Go also accepts these
+        .{ .input = "0", .expected = 0 },
+        .{ .input = "+1s", .expected = 1_000_000_000 },
+        .{ .input = ".5s", .expected = 500_000_000 },
+        .{ .input = "1.s", .expected = 1_000_000_000 },
+        .{ .input = "1m.5s", .expected = 60_500_000_000 },
+        .{ .input = "2µs", .expected = 2_000 },
+        .{ .input = "2μs", .expected = 2_000 },
     };
 
     for (cases) |case| {
@@ -808,6 +823,11 @@ test "Duration: parse" {
     try std.testing.expectError(error.InvalidDuration, Duration.parse("1"));
     try std.testing.expectError(error.InvalidDuration, Duration.parse("1."));
     try std.testing.expectError(error.InvalidDuration, Duration.parse("1x"));
+    try std.testing.expectError(error.InvalidDuration, Duration.parse(".s"));
+    try std.testing.expectError(error.InvalidDuration, Duration.parse("+"));
+    try std.testing.expectError(error.InvalidDuration, Duration.parse("-1s"));
+    try std.testing.expectError(error.InvalidDuration, Duration.parse("00"));
+    try std.testing.expectError(error.InvalidDuration, Duration.parse("1 s"));
 
     // Integer part overflow: number too large for u64
     try std.testing.expectError(error.InvalidDuration, Duration.parse("99999999999999999999999999999s"));
