@@ -423,6 +423,13 @@ pub const SchedulerMetrics = struct {
     drain_woken: u64 = 0,
     /// Sleepers woken by batched wake decisions.
     batch_wake_claims: u64 = 0,
+    /// EXPERIMENT: ticks that ran a task; tasks they ran; the budget each
+    /// had; ticks that spent the budget / overran tick_target_ns.
+    ticks: u64 = 0,
+    tick_tasks: u64 = 0,
+    tick_budget: u64 = 0,
+    ticks_exhausted: u64 = 0,
+    ticks_expired: u64 = 0,
     pub fn add(self: *SchedulerMetrics, other: SchedulerMetrics) void {
         inline for (compat.fieldNames(SchedulerMetrics)) |name| {
             @field(self, name) += @field(other, name);
@@ -815,6 +822,17 @@ pub const Executor = struct {
                 try self.loop.poll(.zero);
             } else {
                 try self.parkAndSearch(check_ready);
+            }
+
+            if (self.tick_task_count > 0) {
+                self.bump("ticks", 1);
+                self.bump("tick_tasks", self.tick_task_count);
+                self.bump("tick_budget", self.tick_task_budget);
+                if (self.tick_expired) {
+                    self.bump("ticks_expired", 1);
+                } else if (self.tick_task_count >= self.tick_task_budget) {
+                    self.bump("ticks_exhausted", 1);
+                }
             }
 
             // Retune the tick budget from this batch. Skipped when we may have
@@ -1805,6 +1823,14 @@ pub const Runtime = struct {
                 var delta = total;
                 delta.sub(last);
                 last = total;
+                if (delta.ticks > 0) log.info("ticks: n={d} tasks/tick={d} budget/tick={d} exhausted={d}% expired={d}% dry={d}%", .{
+                    delta.ticks,
+                    delta.tick_tasks / delta.ticks,
+                    delta.tick_budget / delta.ticks,
+                    delta.ticks_exhausted * 100 / delta.ticks,
+                    delta.ticks_expired * 100 / delta.ticks,
+                    (delta.ticks - delta.ticks_exhausted - delta.ticks_expired) * 100 / delta.ticks,
+                });
                 log.info("scheduler: parks probe={d} full={d} baton={d} elections={d} steals={d}/{d} hint_hits={d} rescues={d} drains={d} woken={d} batch_claims={d}", .{
                     delta.parks_doze,
                     delta.parks_full,
