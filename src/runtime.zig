@@ -507,6 +507,7 @@ pub const Executor = struct {
     // Quanta left until the next clock checkpoint (cheaper than a modulo on
     // the hot path).
     tick_checkpoint_countdown: u32 = checkpoint_interval,
+    overflow_countdown: u32 = zio_options.overflow_interval,
 
     // Scheduler event counters; written only by this executor's thread.
     metrics: MetricsStorage = metrics_storage_init,
@@ -1051,7 +1052,8 @@ pub const Executor = struct {
                 if (self.run_queue.isEmpty()) {
                     _ = self.run_queue.refill(self.overflowBatch(), .block);
                 } else {
-                    _ = self.run_queue.refill(1, .try_only);
+                    const take: usize = if (zio_options.overflow_busy_take == 0) self.overflowBatch() else zio_options.overflow_busy_take;
+                    _ = self.run_queue.refill(take, .try_only);
                 }
             } else {
                 // This executor's own queue, which nobody else drains: take
@@ -1158,6 +1160,18 @@ pub const Executor = struct {
         // can't starve timers or I/O.
         if (!self.tickBudgetLeft()) {
             return null;
+        }
+
+        if (migrates and zio_options.overflow_interval != 0) {
+            self.overflow_countdown -|= 1;
+            if (self.overflow_countdown == 0) {
+                self.overflow_countdown = zio_options.overflow_interval;
+                var one: [1]*WaitNode = undefined;
+                if (self.run_queue.overflow.popBatch(&one, .try_only) == 1) {
+                    self.spendQuantum();
+                    return AnyTask.fromWaitNode(one[0]);
+                }
+            }
         }
 
         const node = self.run_queue.pop() orelse blk: {

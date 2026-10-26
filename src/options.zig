@@ -69,6 +69,8 @@ pub const Options = struct {
     /// it, the signature of a swallowed cancellation. The report prints the
     /// stack trace of the delivery and of the park, once per task.
     debug_cancel: bool = build_options.debug_cancel,
+    overflow_busy_take: u32 = build_options.overflow_busy_take,
+    overflow_interval: u32 = build_options.overflow_interval,
 };
 
 /// The resolved configuration. A `-fsingle-threaded` build has only one
