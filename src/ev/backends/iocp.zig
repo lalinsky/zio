@@ -29,6 +29,7 @@ const FileSync = @import("../completion.zig").FileSync;
 const PipeCreate = @import("../completion.zig").PipeCreate;
 const FileReadStreaming = @import("../completion.zig").FileReadStreaming;
 const FileWriteStreaming = @import("../completion.zig").FileWriteStreaming;
+const FileOpenResult = @import("../completion.zig").FileOpenResult;
 const PipeClose = @import("../completion.zig").PipeClose;
 const ProcessWait = @import("../completion.zig").ProcessWait;
 
@@ -184,8 +185,9 @@ pub const supports_recvmmsg = false;
 
 pub fn capability(comptime op: Op) Support {
     return switch (op) {
-        // Streaming (positionless) read/write uses overlapped ReadFile/WriteFile
-        // only for non-seekable handles. Seekable handles use the thread pool.
+        // Streaming read/write uses overlapped ReadFile/WriteFile on handles zio
+        // opened and associated with the port: at offset zero for non-seekable
+        // ones, at the file position for files. Other handles use the thread pool.
         .file_read_streaming, .file_write_streaming => .maybe,
         .file_open,
         .file_create,
@@ -495,11 +497,14 @@ pub fn deinit(self: *Self) void {
     self.shared_state.release();
 }
 
-/// Post-process a file handle after it's been opened/created in the thread pool.
-/// Associates the file handle with the IOCP port for async I/O operations.
-pub fn postProcessFileHandle(self: *Self, handle: fs.fd_t) !void {
+/// Post-process a file handle after the thread pool opened or created it:
+/// associate it with the IOCP port, so the loop can drive I/O on it. A
+/// seekable file is then streamed by the loop at its own position rather than
+/// on the thread pool, whose blocking ReadFile/WriteFile an overlapped handle
+/// refuses.
+pub fn postProcessFileHandle(self: *Self, result: *FileOpenResult) !void {
     const iocp_result = windows.CreateIoCompletionPort(
-        handle,
+        result.fd,
         self.shared_state.iocp,
         0,
         0,
@@ -508,6 +513,44 @@ pub fn postProcessFileHandle(self: *Self, handle: fs.fd_t) !void {
     if (iocp_result != self.shared_state.iocp) {
         return error.Unexpected;
     }
+
+    if (result.streaming_route == .thread_pool) result.streaming_route = .loop_file;
+}
+
+/// The position a `loop_file` handle is streamed at, for the OVERLAPPED of a
+/// streaming op. Windows keeps no file pointer for an overlapped handle, and
+/// ReadFile/WriteFile on one neither use nor move it. But the file object
+/// still holds the position SetFilePointerEx sets (the file system driver
+/// stores it in FILE_OBJECT.CurrentByteOffset; Microsoft's fastfat sample
+/// does so without a synchronous-I/O check), and seeks already move it. So a
+/// streaming op starts at that position and, once complete,
+/// `advanceStreamingPosition` moves it past what was transferred. The .NET
+/// Framework's FileStream kept the pointer of its overlapped handles the same
+/// way until .NET 6 dropped it for speed:
+/// https://learn.microsoft.com/dotnet/core/compatibility/core-libraries/6.0/filestream-doesnt-sync-offset-with-os
+fn streamingFilePosition(handle: windows.HANDLE) union(enum) { position: u64, failed: windows.Win32Error } {
+    var position: windows.LARGE_INTEGER = undefined;
+    if (windows.SetFilePointerEx(handle, 0, &position, windows.FILE_CURRENT) == .FALSE) {
+        return .{ .failed = windows.GetLastError() };
+    }
+    return .{ .position = @intCast(position) };
+}
+
+/// Set the position of a `loop_file` handle past the `transferred` bytes of a
+/// completed streaming op, whose start offset is in `overlapped`. Absolute
+/// (FILE_BEGIN), never a relative FILE_CURRENT move: a comment in the .NET
+/// Framework's FileStream source says WriteFile does move the pointer of an
+/// overlapped handle on a UNC path, and a relative move would then count the
+/// transfer twice. Returns false with the Win32 error set. The caller then
+/// fails the op: the position still says the transfer never happened, so a
+/// retry reads the same bytes again or writes the same bytes to the same
+/// place, whereas reporting the count would let the next op silently repeat
+/// or overwrite them.
+fn advanceStreamingPosition(handle: windows.HANDLE, overlapped: *const windows.OVERLAPPED, transferred: windows.DWORD) bool {
+    const start = @as(u64, overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.OffsetHigh) << 32 |
+        overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.Offset;
+    const position: windows.LARGE_INTEGER = @intCast(start + transferred);
+    return windows.SetFilePointerEx(handle, position, null, windows.FILE_BEGIN) != .FALSE;
 }
 
 // Dummy APC procedure - we just need to interrupt the wait
@@ -767,8 +810,9 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
             };
         },
 
-        // Streaming (positionless) I/O — used for pipes and stdio. Only pollable
-        // (non-seekable) fds reach here; seekable fds go to the thread pool.
+        // Streaming (current-position) I/O. Only handles zio opened reach here:
+        // non-seekable ones at offset zero, files at their position. Other
+        // handles go to the thread pool.
         .file_read_streaming => {
             const data = c.cast(FileReadStreaming);
             self.submitFileReadStreaming(state, data) catch |err| {
@@ -1559,8 +1603,21 @@ fn submitFileReadStreaming(self: *Self, state: *LoopState, data: *FileReadStream
         return;
     }
 
-    // Initialize OVERLAPPED with zero offset (streaming has no offset)
+    // A non-seekable handle ignores the offset; a file is read at its position.
     data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
+    if (data.streaming_route.? == .loop_file) {
+        switch (streamingFilePosition(data.handle)) {
+            .position => |position| {
+                data.c.internal.overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.Offset = @truncate(position);
+                data.c.internal.overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.OffsetHigh = @truncate(position >> 32);
+            },
+            .failed => |err| {
+                data.c.setError(fs.errnoToFileReadError(@fromBackingInt(@intCast(@backingInt(err)))));
+                state.markCompletedFromBackend(&data.c);
+                return;
+            },
+        }
+    }
 
     // ReadFile only supports a single buffer, so we read into the first iovec
     // TODO: Handle multiple iovecs with multiple ReadFile calls
@@ -1605,8 +1662,21 @@ fn submitFileWriteStreaming(self: *Self, state: *LoopState, data: *FileWriteStre
         return;
     }
 
-    // Initialize OVERLAPPED with zero offset (streaming has no offset)
+    // A non-seekable handle ignores the offset; a file is written at its position.
     data.c.internal.overlapped = std.mem.zeroes(windows.OVERLAPPED);
+    if (data.streaming_route.? == .loop_file) {
+        switch (streamingFilePosition(data.handle)) {
+            .position => |position| {
+                data.c.internal.overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.Offset = @truncate(position);
+                data.c.internal.overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME.OffsetHigh = @truncate(position >> 32);
+            },
+            .failed => |err| {
+                data.c.setError(fs.errnoToFileWriteError(@fromBackingInt(@intCast(@backingInt(err)))));
+                state.markCompletedFromBackend(&data.c);
+                return;
+            },
+        }
+    }
 
     // WriteFile only supports a single buffer, so we write from the first iovec
     // TODO: Handle multiple iovecs with multiple WriteFile calls
@@ -2263,6 +2333,10 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 } else {
                     c.setError(fs.errnoToFileReadError(err));
                 }
+            } else if (data.streaming_route.? == .loop_file and
+                !advanceStreamingPosition(data.handle, &data.c.internal.overlapped, bytes_transferred))
+            {
+                c.setError(fs.errnoToFileReadError(@fromBackingInt(@intCast(@backingInt(windows.GetLastError())))));
             } else {
                 c.setResult(.file_read_streaming, @intCast(bytes_transferred));
             }
@@ -2284,6 +2358,10 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
             if (result == .FALSE) {
                 const err = windows.GetLastError();
                 c.setError(fs.errnoToFileWriteError(@fromBackingInt(@intCast(@backingInt(err)))));
+            } else if (data.streaming_route.? == .loop_file and
+                !advanceStreamingPosition(data.handle, &data.c.internal.overlapped, bytes_transferred))
+            {
+                c.setError(fs.errnoToFileWriteError(@fromBackingInt(@intCast(@backingInt(windows.GetLastError())))));
             } else {
                 c.setResult(.file_write_streaming, @intCast(bytes_transferred));
             }

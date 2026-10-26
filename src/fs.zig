@@ -19,7 +19,7 @@ const waitForIoUncancelable = @import("common.zig").waitForIoUncancelable;
 const timedWaitForIo = @import("common.zig").timedWaitForIo;
 const fillBuf = @import("utils/writer.zig").fillBuf;
 const random = @import("random.zig").random;
-const probePollable = @import("ev/backends/common.zig").probePollable;
+const probeStreamingRoute = @import("ev/backends/common.zig").probeStreamingRoute;
 const Timeout = @import("time.zig").Timeout;
 
 pub const Handle = os.fs.fd_t;
@@ -128,8 +128,8 @@ pub fn createPipe() (os.fs.PipeError || Cancelable)!PipePair {
     try waitForIo(&op.c);
     const fds = try op.getResult();
     return .{
-        .read = File{ .fd = fds[0], .pollable = true },
-        .write = File{ .fd = fds[1], .pollable = true },
+        .read = File{ .fd = fds[0], .streaming_route = .pollable },
+        .write = File{ .fd = fds[1], .streaming_route = .pollable },
     };
 }
 
@@ -152,16 +152,16 @@ pub fn stderr() File {
 /// all: both the overlapped streaming path and the positional file_read/
 /// file_write path would issue a blocking overlapped operation on the loop
 /// thread and stall every task. The only path that works is the thread pool's
-/// blocking ReadFile/WriteFile, reached by a streaming op with pollable=false.
-/// So force `pollable = false` (route to the thread pool) and `.streaming`
-/// (so the Reader/Writer issues streaming ops, never positional). This holds
-/// for consoles, inherited pipes, and file redirection alike. On POSIX the std
-/// handles behave like any other fd.
+/// blocking ReadFile/WriteFile, reached by a streaming op routed there. So
+/// route to the thread pool and set `.streaming` (so the Reader/Writer issues
+/// streaming ops, never positional). This holds for consoles, inherited pipes,
+/// and file redirection alike. On POSIX the std handles behave like any other
+/// fd.
 fn stdioFile(fd: Handle) File {
     if (builtin.os.tag == .windows) {
-        return .{ .fd = fd, .pollable = false, .preferred_mode = .streaming };
+        return .{ .fd = fd, .streaming_route = .thread_pool, .preferred_mode = .streaming };
     }
-    return .{ .fd = fd, .pollable = probePollable(fd) };
+    return .{ .fd = fd, .streaming_route = probeStreamingRoute(fd) };
 }
 
 pub fn stat(path: []const u8) Dir.StatError!os.fs.FileStatInfo {
@@ -201,7 +201,7 @@ pub const Dir = struct {
         var op = ev.FileOpen.init(self.fd, path, flags);
         try waitForIo(&op.c);
         const result = try op.getResult();
-        return .{ .fd = result.fd, .pollable = result.pollable };
+        return .{ .fd = result.fd, .streaming_route = result.streaming_route };
     }
 
     pub const CreateDirError = os.fs.DirCreateDirError || Cancelable;
@@ -218,7 +218,7 @@ pub const Dir = struct {
         var op = ev.FileCreate.init(self.fd, path, flags);
         try waitForIo(&op.c);
         const result = try op.getResult();
-        return .{ .fd = result.fd, .pollable = result.pollable };
+        return .{ .fd = result.fd, .streaming_route = result.streaming_route };
     }
 
     pub const CreateAtomicFileOptions = struct {
@@ -1203,23 +1203,23 @@ fn removeTempFile(dir: Dir, sub_path: []const u8) void {
 
 pub const File = struct {
     fd: Handle,
-    /// Whether `fd` is pollable (non-seekable) and can be driven by the event
-    /// loop for streaming I/O. Set from the open/create result; `null` when
-    /// unknown (e.g. constructed via `fromFd`). When false, streaming ops are
-    /// routed to the thread pool.
-    pollable: ?bool = null,
-    /// Explicit Reader/Writer `Mode` hint. `null` means infer from `pollable`.
-    /// Set when seekability and loop-drivability disagree (e.g. a Windows
-    /// console: non-seekable, so `.streaming`, but not loop-drivable).
+    /// How streaming I/O on `fd` reaches the OS. Set from the open/create
+    /// result; `null` when unknown (e.g. constructed via `fromFd`), in which
+    /// case the loop probes the handle on the first streaming op.
+    streaming_route: ?ev.StreamingRoute = null,
+    /// Explicit Reader/Writer `Mode` hint. `null` means infer from
+    /// `streaming_route`. Set when seekability and loop-drivability disagree
+    /// (e.g. a Windows console: non-seekable, so `.streaming`, but not
+    /// loop-drivable).
     preferred_mode: ?Mode = null,
 
     pub const ReadError = os.fs.FileReadError || Cancelable;
     pub const WriteError = os.fs.FileWriteError || Cancelable;
 
     /// Whether the Reader/Writer issues positional (offset-based) or streaming
-    /// (current-position) I/O ops. Independent of `File.pollable`, which decides
-    /// event-loop vs thread-pool routing: a console, for example, is `.streaming`
-    /// yet not loop-drivable.
+    /// (current-position) I/O ops. Independent of `File.streaming_route`, which
+    /// decides event-loop vs thread-pool routing: a console, for example, is
+    /// `.streaming` yet not loop-drivable.
     pub const Mode = enum {
         /// Use positional I/O (pread/pwrite) with explicit offset.
         positional,
@@ -1252,17 +1252,17 @@ pub const File = struct {
     }
 
     /// Fill `op` with a streaming read at the current file position. Carries
-    /// this file's `pollable` routing (event loop vs thread pool).
+    /// this file's streaming route (event loop vs thread pool).
     pub fn prepReadStreaming(self: File, op: *ev.FileReadStreaming, buf: ev.ReadBuf) void {
         op.* = ev.FileReadStreaming.init(self.fd, buf);
-        op.pollable = self.pollable;
+        op.streaming_route = self.streaming_route;
     }
 
     /// Fill `op` with a streaming write at the current file position. Carries
-    /// this file's `pollable` routing (event loop vs thread pool).
+    /// this file's streaming route (event loop vs thread pool).
     pub fn prepWriteStreaming(self: File, op: *ev.FileWriteStreaming, buf: ev.WriteBuf) void {
         op.* = ev.FileWriteStreaming.init(self.fd, buf);
-        op.pollable = self.pollable;
+        op.streaming_route = self.streaming_route;
     }
 
     /// Fill `op` with a stat of this file.
@@ -1471,14 +1471,11 @@ pub const File = struct {
 };
 
 /// Pick the Reader/Writer mode for a file: an explicit `preferred_mode` wins,
-/// otherwise infer from `pollable` (non-seekable -> streaming, seekable or
-/// unknown -> positional).
+/// otherwise infer from the streaming route (non-seekable -> streaming,
+/// seekable or unknown -> positional).
 pub fn resolveMode(file: File) File.Mode {
     if (file.preferred_mode) |m| return m;
-    return if (file.pollable) |p|
-        if (p) .streaming else .positional
-    else
-        .positional;
+    return if (file.streaming_route == .pollable) .streaming else .positional;
 }
 
 /// File reader that implements std.Io.Reader interface.
@@ -1948,7 +1945,7 @@ test "File: prep functions drive concurrent reads through a CompletionQueue" {
     file.close();
 }
 
-test "File: streaming prep carries the file's pollable routing" {
+test "File: streaming prep carries the file's streaming route" {
     var t = try TestDirFixture.init();
     defer t.deinit();
 
@@ -1959,14 +1956,10 @@ test "File: streaming prep carries the file's pollable routing" {
     var iov: [1]os.iovec_const = undefined;
     var op: ev.FileWriteStreaming = undefined;
     file.prepWriteStreaming(&op, .fromSlice("x", &iov));
-    try std.testing.expectEqual(file.pollable, op.pollable);
+    try std.testing.expectEqual(file.streaming_route, op.streaming_route);
 
-    // Streaming I/O on regular files is not supported on Windows; the prep
-    // itself is platform-independent, so only the submit half is gated.
-    if (builtin.os.tag != .windows) {
-        try waitForIo(&op.c);
-        try std.testing.expectEqual(1, try op.getResult());
-    }
+    try waitForIo(&op.c);
+    try std.testing.expectEqual(1, try op.getResult());
 
     file.close();
 }
@@ -2798,7 +2791,7 @@ test "File: canceling a blocking read of a synchronous Windows pipe interrupts t
 
     const reader = struct {
         fn call(handle: Handle, result: *(File.ReadStreamingError!usize)) void {
-            const file: File = .{ .fd = handle, .pollable = false, .preferred_mode = .streaming };
+            const file: File = .{ .fd = handle, .streaming_route = .thread_pool, .preferred_mode = .streaming };
             var buf: [16]u8 = undefined;
             var storage: [1]os.iovec = undefined;
             result.* = file.readStreaming(.fromSlice(&buf, &storage));
