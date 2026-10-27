@@ -38,8 +38,10 @@ pub const Hosts = struct {
         try hosts.by_name.ensureTotalCapacity(allocator, 32);
 
         while (try takeLine(reader)) |line| {
-            const trimmed = std.mem.trim(u8, line, " \t\r");
-            if (trimmed.len == 0 or trimmed[0] == '#') continue;
+            // hosts(5): text from a '#' to the end of the line is a comment
+            const content = line[0 .. std.mem.findScalar(u8, line, '#') orelse line.len];
+            const trimmed = std.mem.trim(u8, content, " \t\r");
+            if (trimmed.len == 0) continue;
 
             var fields = std.mem.splitAny(u8, trimmed, " \t");
             const addr_str = fields.next() orelse continue;
@@ -52,7 +54,6 @@ pub const Hosts = struct {
             var canonical_name: ?[]const u8 = null;
             while (fields.next()) |name| {
                 if (name.len == 0) continue;
-                if (name[0] == '#') break;
                 if (first_name) {
                     first_name = false;
                     if (net.HostName.validate(name)) |_| {
@@ -143,4 +144,20 @@ test "an invalid first name is no canonical name" {
 
     try std.testing.expect(hosts.lookupByName("alias.test").?.canonical_name == null);
     try std.testing.expect(hosts.lookupByName("my_host").?.canonical_name == null);
+}
+
+test "a comment can start inside a field" {
+    const input =
+        \\10.0.0.1 a.test#note b.test
+        \\10.0.0.2#note c.test
+        \\  # indented comment
+    ;
+    var reader = std.Io.Reader.fixed(input);
+    var hosts = try Hosts.parse(std.testing.allocator, &reader);
+    defer hosts.deinit();
+
+    try std.testing.expectEqual(1, hosts.lookupByName("a.test").?.addrs.len);
+    try std.testing.expect(hosts.lookupByName("a.test#note") == null);
+    try std.testing.expect(hosts.lookupByName("b.test") == null);
+    try std.testing.expect(hosts.lookupByName("c.test") == null);
 }
