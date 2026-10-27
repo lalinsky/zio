@@ -698,7 +698,7 @@ pub const Executor = struct {
     /// Tasks a busy ring takes from the shared overflow queue per check. Checks
     /// come once per tick, so this caps how fast busy executors drain what full
     /// rings spill; a fair share instead piles work behind a ring already busy.
-    const busy_overflow_batch = 5;
+    const busy_overflow_batch = 3;
     /// Budget until the first measurement (Go's scheduler / tokio's event_interval).
     const initial_tick_budget = 61;
     /// Budget clamp: at least 2 to make progress between polls, capped so a
