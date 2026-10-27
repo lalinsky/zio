@@ -13,6 +13,8 @@ const Clock = @import("../time.zig").Clock;
 const compat = @import("../compat.zig");
 const Queue = @import("queue.zig").Queue;
 const Heap = @import("heap.zig").Heap;
+const TimerWheel = @import("timer_wheel.zig").TimerWheel;
+const use_timer_wheel = @import("../options.zig").options.timer_wheel;
 const Work = @import("completion.zig").Work;
 const DelegatedWork = @import("completion.zig").DelegatedWork;
 const FileRead = @import("completion.zig").FileRead;
@@ -144,7 +146,12 @@ fn timerDeadlineLess(_: void, a: *Timer, b: *Timer) bool {
     return a.deadline.value < b.deadline.value;
 }
 
-const TimerHeap = Heap(Timer, void, timerDeadlineLess);
+/// Slots of 2^17 ns (131us), 256 of them: 33.5ms of wheel.
+const TimerHeap = if (use_timer_wheel)
+    TimerWheel(Timer, timerDeadlineLess, 17, 256)
+else
+    Heap(Timer, void, timerDeadlineLess);
+const empty_timers: TimerHeap = if (use_timer_wheel) .{} else .{ .context = {} };
 
 /// Timers are kept in one heap per wall-clock domain, since their deadlines
 /// live in different epochs and can only be compared within a clock. The
@@ -245,11 +252,7 @@ pub const LoopState = struct {
     tick: u64 = 0,
     now: [wall_clock_count]Timestamp = .{ .zero, .zero, .zero },
     now_tick: [wall_clock_count]u64 = .{ 0, 0, 0 },
-    timers: [wall_clock_count]TimerHeap = .{
-        .{ .context = {} },
-        .{ .context = {} },
-        .{ .context = {} },
-    },
+    timers: [wall_clock_count]TimerHeap = @splat(empty_timers),
 
     /// Intrusive list of thread-pool-delegated works whose cancellation has been
     /// requested but whose worker is still blocked in the canceled syscall. Each
@@ -1059,6 +1062,7 @@ pub const Loop = struct {
                 var batch_count: usize = 0;
 
                 self.state.lockTimers();
+                if (use_timer_wheel) self.state.timers[idx].advance(self.state.nowFor(clock).value);
                 // `nowFor` is read inside the loop, so an empty heap reads no
                 // clock at all; for boot/real the first read fills the cache.
                 while (self.state.timers[idx].peek()) |timer| {
@@ -1526,4 +1530,5 @@ pub const Loop = struct {
 
 test {
     _ = @import("tests.zig");
+    _ = @import("timer_wheel.zig");
 }

@@ -12,6 +12,7 @@ const posix = @import("../os/posix.zig");
 const Loop = @import("loop.zig").Loop;
 const Backend = @import("backend.zig").Backend;
 const HeapNode = @import("heap.zig").HeapNode;
+const WheelLoc = @import("timer_wheel.zig").WheelLoc;
 const ReadBuf = @import("buf.zig").ReadBuf;
 const WriteBuf = @import("buf.zig").WriteBuf;
 const os = @import("../os/root.zig");
@@ -601,6 +602,7 @@ pub const Timer = struct {
     clock: Clock = .awake,
     deadline: Timestamp = .zero,
     heap: HeapNode(Timer) = .{},
+    wheel_loc: WheelLoc = .none,
     /// The deadline the timer is due at, which `extend` moves later without
     /// the heap knowing; `deadline` is never after it. The scan that finds
     /// `deadline` passed re-inserts the timer at this one when it has not.

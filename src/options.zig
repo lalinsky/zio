@@ -69,6 +69,8 @@ pub const Options = struct {
     /// it, the signature of a swallowed cancellation. The report prints the
     /// stack trace of the delivery and of the park, once per task.
     debug_cancel: bool = build_options.debug_cancel,
+    /// EXPERIMENT: keep timers in a `TimerWheel` instead of a pairing heap.
+    timer_wheel: bool = build_options.timer_wheel,
 };
 
 /// The resolved configuration. A `-fsingle-threaded` build has only one
