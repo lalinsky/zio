@@ -31,8 +31,8 @@ const SimpleQueue = @import("simple_queue.zig").SimpleQueue;
 const OsMutex = @import("../os/thread.zig").Mutex;
 
 /// Whether a drain may wait for the overflow queue's lock. A caller that already
-/// has work to run picks `try_only`: losing the race defers one task, whereas
-/// blocking would park a runnable executor in a futex.
+/// has work to run picks `try_only`: losing the race defers the drain to the
+/// next check, whereas blocking would park a runnable executor in a futex.
 pub const LockMode = enum { block, try_only };
 
 /// Thread-safe FIFO overflow queue with any number of producers and consumers: a

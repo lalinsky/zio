@@ -695,6 +695,10 @@ pub const Executor = struct {
 
     /// Aim to poll I/O roughly this often while running tasks back-to-back.
     const tick_target_ns = 100_000;
+    /// Tasks a busy ring takes from the shared overflow queue per check. Checks
+    /// come once per tick, so this caps how fast busy executors drain what full
+    /// rings spill; a fair share instead piles work behind a ring already busy.
+    const busy_overflow_batch = 3;
     /// Budget until the first measurement (Go's scheduler / tokio's event_interval).
     const initial_tick_budget = 61;
     /// Budget clamp: at least 2 to make progress between polls, capped so a
@@ -1043,15 +1047,15 @@ pub const Executor = struct {
         // spill (which doesn't wake the loop) can't put this executor to sleep.
         if (!self.run_queue.overflow.isEmpty()) {
             if (migrates) {
-                // The shared queue: a busy ring takes one task per check, which
-                // bounds an overflow task's wait while leaving the rest to the
-                // other executors; this executor is often its only consumer, as
-                // stealing takes from rings and armSearcher does nothing while
-                // nobody is idle. An empty ring takes a batch.
+                // The shared queue: a busy ring takes a few tasks per check,
+                // which bounds an overflow task's wait while leaving the rest
+                // to the other executors; this executor is often its only
+                // consumer, as stealing takes from rings and armSearcher does
+                // nothing while nobody is idle. An empty ring takes a batch.
                 if (self.run_queue.isEmpty()) {
                     _ = self.run_queue.refill(self.overflowBatch(), .block);
                 } else {
-                    _ = self.run_queue.refill(1, .try_only);
+                    _ = self.run_queue.refill(busy_overflow_batch, .try_only);
                 }
             } else {
                 // This executor's own queue, which nobody else drains: take
