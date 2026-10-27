@@ -15,6 +15,8 @@ pub fn build(b: *std.Build) void {
     const no_hacks = b.option(bool, "no-hacks", "Avoid unsafe performance tricks (bool smuggling, etc.)");
     const scheduler_metrics = b.option(bool, "scheduler_metrics", "Count scheduler events (parks, steals, wake batches) in per-executor counters readable via Runtime.schedulerMetrics (default true)");
     const timer_wheel = b.option(bool, "timer_wheel", "EXPERIMENT: keep timers in a wheel instead of a pairing heap (default true)");
+    const timer_wheel_coarse = b.option(bool, "timer_wheel_coarse", "EXPERIMENT: fire whole wheel slots once they end (default false)");
+    const timer_wheel_shift = b.option(u6, "timer_wheel_shift", "EXPERIMENT: wheel slots are 2^shift ns (default 17)");
     const debug_cancel = b.option(bool, "debug_cancel", "Report tasks that keep running after swallowing error.Canceled, with stack traces (default false)");
 
     const build_options: BuildOptions = .{
@@ -25,6 +27,8 @@ pub fn build(b: *std.Build) void {
         .scheduler_metrics = scheduler_metrics orelse true,
         .debug_cancel = debug_cancel orelse false,
         .timer_wheel = timer_wheel orelse true,
+        .timer_wheel_coarse = timer_wheel_coarse orelse false,
+        .timer_wheel_shift = timer_wheel_shift orelse 17,
     };
 
     const zio = b.addModule("zio", .{
@@ -141,6 +145,8 @@ const BuildOptions = struct {
     scheduler_metrics: bool,
     debug_cancel: bool,
     timer_wheel: bool,
+    timer_wheel_coarse: bool,
+    timer_wheel_shift: u6,
 
     // Enums are passed as tag names and mapped back to zio's own types in
     // src/options.zig.
@@ -153,6 +159,8 @@ const BuildOptions = struct {
         options.addOption(bool, "scheduler_metrics", self.scheduler_metrics);
         options.addOption(bool, "debug_cancel", self.debug_cancel);
         options.addOption(bool, "timer_wheel", self.timer_wheel);
+        options.addOption(bool, "timer_wheel_coarse", self.timer_wheel_coarse);
+        options.addOption(u6, "timer_wheel_shift", self.timer_wheel_shift);
         return options;
     }
 };

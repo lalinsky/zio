@@ -146,9 +146,9 @@ fn timerDeadlineLess(_: void, a: *Timer, b: *Timer) bool {
     return a.deadline.value < b.deadline.value;
 }
 
-/// Slots of 2^17 ns (131us), 256 of them: 33.5ms of wheel.
+const wheel_options = @import("../options.zig").options;
 const TimerHeap = if (use_timer_wheel)
-    TimerWheel(Timer, timerDeadlineLess, 17, 256)
+    TimerWheel(Timer, timerDeadlineLess, wheel_options.timer_wheel_shift, 256, wheel_options.timer_wheel_coarse)
 else
     Heap(Timer, void, timerDeadlineLess);
 const empty_timers: TimerHeap = if (use_timer_wheel) .{} else .{ .context = {} };
@@ -425,6 +425,7 @@ pub const LoopState = struct {
             const open = timer.deadline.value & Timer.closed == 0;
             timer.extended.store(if (open) timer.deadline.value else Timer.closed, .monotonic);
         }
+        if (use_timer_wheel) self.timers[clockIndex(timer.clock)].noteNow(self.nowFor(timer.clock).value);
         self.timers[clockIndex(timer.clock)].insert(timer);
     }
 
@@ -1067,8 +1068,9 @@ pub const Loop = struct {
                 // clock at all; for boot/real the first read fills the cache.
                 while (self.state.timers[idx].peek()) |timer| {
                     const now_clock = self.state.nowFor(clock);
-                    if (timer.deadline.value > now_clock.value) {
-                        var remaining = now_clock.durationTo(timer.deadline);
+                    const due_at: Timestamp = if (use_timer_wheel) .{ .value = TimerHeap.fireTime(timer) } else timer.deadline;
+                    if (due_at.value > now_clock.value) {
+                        var remaining = now_clock.durationTo(due_at);
                         // boot/real can't be tracked by the awake poll clock, so
                         // bound the wait to re-evaluate across suspend/steps.
                         if (clock != .awake and remaining.value > self.wall_clock_cap.value) {
@@ -1083,7 +1085,7 @@ pub const Loop = struct {
                         const fold = switch (modes[idx]) {
                             .fallback => true,
                             .native, .native_capped => blk: {
-                                wall_deadline[idx] = timer.deadline.value;
+                                wall_deadline[idx] = due_at.value;
                                 wall_remaining[idx] = remaining;
                                 break :blk modes[idx] == .native_capped;
                             },

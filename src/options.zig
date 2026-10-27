@@ -71,6 +71,10 @@ pub const Options = struct {
     debug_cancel: bool = build_options.debug_cancel,
     /// EXPERIMENT: keep timers in a `TimerWheel` instead of a pairing heap.
     timer_wheel: bool = build_options.timer_wheel,
+    /// EXPERIMENT: fire whole wheel slots once they end, up to a slot late.
+    timer_wheel_coarse: bool = build_options.timer_wheel_coarse,
+    /// EXPERIMENT: wheel slots are 2^shift ns.
+    timer_wheel_shift: u6 = build_options.timer_wheel_shift,
 };
 
 /// The resolved configuration. A `-fsingle-threaded` build has only one

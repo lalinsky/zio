@@ -22,6 +22,11 @@ pub const WheelLoc = enum(u8) { none, near, slot, far };
 /// The cursor only moves forward, and only to the current time, so a timer
 /// set far out never drags it ahead of the timers that are due sooner.
 ///
+/// With `coarse`, a slot fires as a whole once it has ended, so a timer fires
+/// up to one slot late but never early. `near` is then a plain list of timers
+/// that are due, and nothing is ever sorted: each timer is touched once when
+/// it is set and once when it fires. The cursor is the last slot that ended.
+///
 /// T needs `deadline: Timestamp`, `heap: HeapNode(T)` and `wheel_loc: WheelLoc`.
 /// A slot list links through `heap.prev`/`heap.next`. All methods but
 /// `isEmpty` must be called under the caller's lock.
@@ -30,6 +35,7 @@ pub fn TimerWheel(
     comptime less: *const fn (ctx: void, a: *T, b: *T) bool,
     comptime slot_shift: u6,
     comptime slot_count: usize,
+    comptime coarse: bool,
 ) type {
     comptime assert(std.math.isPowerOfTwo(slot_count) and slot_count >= 64);
 
@@ -40,11 +46,15 @@ pub fn TimerWheel(
         const words = slot_count / 64;
 
         near: TimerHeap = .{ .context = {} },
+        due_head: ?*T = null,
+        due_tail: ?*T = null,
         far: TimerHeap = .{ .context = {} },
         slots: [slot_count]?*T = @splat(null),
         /// One bit per slot with a non-empty list.
         occupied: [words]u64 = @splat(0),
         cursor: u64 = 0,
+        /// The latest time the caller reported, through `advance` or `noteNow`.
+        now: u64 = 0,
         /// Atomic so `isEmpty` can be read without the caller's lock.
         count: std.atomic.Value(usize) = .init(0),
 
@@ -68,7 +78,7 @@ pub fn TimerWheel(
         pub fn remove(self: *Self, v: *T) void {
             switch (v.wheel_loc) {
                 .none => unreachable,
-                .near => self.near.remove(v),
+                .near => if (coarse) self.unlinkDue(v) else self.near.remove(v),
                 .far => self.far.remove(v),
                 .slot => self.unlink(v),
             }
@@ -79,6 +89,11 @@ pub fn TimerWheel(
 
         /// The timer due first, or null when there is none.
         pub fn peek(self: *Self) ?*T {
+            if (coarse) {
+                if (self.due_head) |v| return v;
+                if (self.nextOccupied()) |idx| return self.slots[idx].?;
+                return self.far.peek();
+            }
             if (self.near.peek()) |v| return v;
             if (self.nextOccupied()) |idx| {
                 var best = self.slots[idx].?;
@@ -93,8 +108,16 @@ pub fn TimerWheel(
 
         /// Move the cursor to the slot of `now`, sorting every slot it passes
         /// into `near` and pulling what comes within reach out of `far`.
+        /// Report the current time, so that a timer already due when it is
+        /// set goes straight to the due list instead of waiting for its slot.
+        pub fn noteNow(self: *Self, now: u64) void {
+            if (now > self.now) self.now = now;
+        }
+
         pub fn advance(self: *Self, now: u64) void {
-            const target = now >> slot_shift;
+            self.noteNow(now);
+            if (coarse and now >> slot_shift == 0) return;
+            const target = (now >> slot_shift) - @intFromBool(coarse);
             if (target <= self.cursor) return;
             while (self.nextOccupied()) |idx| {
                 const abs = self.cursor + 1 + ((@as(u64, idx) -% (self.cursor + 1)) & mask);
@@ -113,9 +136,9 @@ pub fn TimerWheel(
 
         fn place(self: *Self, v: *T) void {
             const s = slotOf(v);
-            if (s <= self.cursor) {
+            if (s <= self.cursor or (coarse and v.deadline.value <= self.now)) {
                 v.wheel_loc = .near;
-                self.near.insert(v);
+                if (coarse) self.appendDue(v) else self.near.insert(v);
             } else if (s < self.cursor + slot_count) {
                 const idx: usize = @intCast(s & mask);
                 v.wheel_loc = .slot;
@@ -149,8 +172,28 @@ pub fn TimerWheel(
                 it = v.heap.next;
                 v.heap = .{};
                 v.wheel_loc = .near;
-                self.near.insert(v);
+                if (coarse) self.appendDue(v) else self.near.insert(v);
             }
+        }
+
+        /// When `v` fires: its deadline, or with `coarse` the end of its slot
+        /// while it still waits in one.
+        pub fn fireTime(v: *const T) u64 {
+            if (!coarse or v.wheel_loc == .near) return v.deadline.value;
+            const s = slotOf(v);
+            if (s >= std.math.maxInt(u64) >> slot_shift) return v.deadline.value;
+            return (s + 1) << slot_shift;
+        }
+
+        fn appendDue(self: *Self, v: *T) void {
+            v.heap = .{ .prev = self.due_tail };
+            if (self.due_tail) |tail| tail.heap.next = v else self.due_head = v;
+            self.due_tail = v;
+        }
+
+        fn unlinkDue(self: *Self, v: *T) void {
+            if (v.heap.next) |next| next.heap.prev = v.heap.prev else self.due_tail = v.heap.prev;
+            if (v.heap.prev) |prev| prev.heap.next = v.heap.next else self.due_head = v.heap.next;
         }
 
         /// The first occupied slot after the cursor, in wheel order.
@@ -178,7 +221,8 @@ const Elem = struct {
     }
 };
 
-const TestWheel = TimerWheel(Elem, Elem.less, 4, 64);
+const TestWheel = TimerWheel(Elem, Elem.less, 4, 64, false);
+const CoarseWheel = TimerWheel(Elem, Elem.less, 4, 64, true);
 
 fn popDue(w: *TestWheel, now: u64) ?*Elem {
     w.advance(now);
@@ -246,4 +290,33 @@ test "TimerWheel insert behind the cursor goes to near" {
     try std.testing.expectEqual(&late, popDue(&w, 5000).?);
     try std.testing.expectEqual(@as(?*Elem, null), popDue(&w, 5000));
     try std.testing.expectEqual(&soon, popDue(&w, 5050).?);
+}
+
+test "TimerWheel coarse fires never early and at most one slot late" {
+    var w: CoarseWheel = .{};
+    var elems: [300]Elem = undefined;
+    var prng = std.Random.DefaultPrng.init(7);
+    const r = prng.random();
+    for (&elems) |*e| e.* = .{ .deadline = .{ .value = r.uintLessThan(u64, 5000) } };
+    for (elems[0..150]) |*e| w.insert(e);
+
+    var now: u64 = 0;
+    var fired: usize = 0;
+    var inserted: usize = 150;
+    while (fired < elems.len) : (now += 3) {
+        if (inserted < elems.len and now % 30 == 0) {
+            elems[inserted].deadline.value = now + r.uintLessThan(u64, 3000);
+            w.insert(&elems[inserted]);
+            inserted += 1;
+        }
+        w.advance(now);
+        while (w.peek()) |e| {
+            if (CoarseWheel.fireTime(e) > now) break;
+            try std.testing.expect(e.deadline.value <= now);
+            try std.testing.expect(now - e.deadline.value < 16 + 3);
+            w.remove(e);
+            fired += 1;
+        }
+    }
+    try std.testing.expect(w.isEmpty());
 }
