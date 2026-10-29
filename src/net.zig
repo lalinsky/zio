@@ -2088,10 +2088,11 @@ fn checkSendSurvivesPeerHalfClose(addr: anytype, how: HalfCloseSend) !void {
         send_err: ?anyerror = null,
         sent: usize = 0,
         received: usize = 0,
+        parked_eventpoll: ?usize = null,
     };
 
     const Test = struct {
-        fn peerFn(srv: Server, out: *Outcome) !void {
+        fn peerFn(srv: Server, watch_bridge: bool, out: *Outcome) !void {
             const stream = try srv.accept(.{});
             defer stream.close();
             // Let the sender fill the buffers and park in a send.
@@ -2099,6 +2100,7 @@ fn checkSendSurvivesPeerHalfClose(addr: anytype, how: HalfCloseSend) !void {
             try stream.shutdown(.send);
             // Stay half-closed without reading while the sender is parked.
             try runtime_mod.sleep(.fromMilliseconds(500));
+            if (watch_bridge) out.parked_eventpoll = (try countFds()).eventpoll;
             var buf: [64 * 1024]u8 = undefined;
             while (true) {
                 const n = try stream.read(&buf, .none);
@@ -2141,12 +2143,17 @@ fn checkSendSurvivesPeerHalfClose(addr: anytype, how: HalfCloseSend) !void {
         }
     };
 
+    // Only SENDMSG has been seen to post -EAGAIN; a one-buffer send
+    // (IORING_OP_SEND) has not, so it is not watched.
+    const watch_bridge = how != .write and sendBridgeObservable(runtime);
+    const before: FdCounts = if (builtin.os.tag == .linux) try countFds() else .{ .total = 0, .eventpoll = 0 };
+
     var outcome: Outcome = .{};
 
     var group: Group = .init;
     defer group.cancel();
 
-    try group.spawn(Test.peerFn, .{ server, &outcome });
+    try group.spawn(Test.peerFn, .{ server, watch_bridge, &outcome });
     try group.spawn(Test.senderFn, .{ server, how, &outcome });
 
     try group.wait();
@@ -2154,6 +2161,11 @@ fn checkSendSurvivesPeerHalfClose(addr: anytype, how: HalfCloseSend) !void {
     try std.testing.expect(!group.hasFailed());
     try std.testing.expectEqual(total, outcome.sent);
     try std.testing.expectEqual(total, outcome.received);
+    if (outcome.parked_eventpoll) |parked| {
+        // This kernel waited without posting -EAGAIN: the bridge was not tested.
+        if (parked == before.eventpoll) return error.SkipZigTest;
+        try std.testing.expectEqual(before.eventpoll + 1, parked);
+    }
 }
 
 test "Stream: a parked vectored send survives a peer half-close (TCP)" {
