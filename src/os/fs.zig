@@ -3437,12 +3437,17 @@ pub fn dirRealPathFileZ(dir: fd_t, path: [*:0]const u8, buffer: []u8) DirRealPat
     // On non-Linux with libc, we can use realpath() directly for AT_FDCWD
     if (builtin.os.tag != .linux and builtin.link_libc and dir == posix.AT.FDCWD) {
         if (buffer.len < posix.PATH_MAX) return error.NameTooLong;
+        const sc = try syscall_cancel.Syscall.begin();
+        defer sc.finish();
         while (true) {
             if (std.c.realpath(path, buffer.ptr)) |_| {
                 return std.mem.indexOfScalar(u8, buffer, 0) orelse buffer.len;
             }
             const err: posix.system.E = @fromBackingInt(@intCast(std.c._errno().*));
-            if (err == .INTR) continue;
+            if (err == .INTR) {
+                try sc.checkCancel();
+                continue;
+            }
             return errnoToDirRealPathFileError(err);
         }
     }
@@ -3463,6 +3468,24 @@ pub fn dirRealPathFileZ(dir: fd_t, path: [*:0]const u8, buffer: []u8) DirRealPat
 
     // Now get the real path of the opened fd
     return dirRealPath(file_fd, buffer);
+}
+
+test "dirRealPathFileZ returns Canceled when the bound token is canceled" {
+    // The realpath() branch only runs on non-Linux with libc.
+    if (builtin.os.tag == .linux or builtin.os.tag == .windows) return error.SkipZigTest;
+    if (!builtin.link_libc) return error.SkipZigTest;
+    if (!syscall_cancel.enabled) return error.SkipZigTest;
+
+    // Bind a token to this thread the way a pool worker binds the token of the
+    // task it runs, then cancel it while it is idle: nothing is in flight, so
+    // no signal is sent and the cancel has to surface at the next syscall.
+    var token: syscall_cancel.Token = .{};
+    token.enter();
+    defer token.exit();
+    _ = token.cancel();
+
+    var buf: [posix.PATH_MAX]u8 = undefined;
+    try std.testing.expectError(error.Canceled, dirRealPathFileZ(cwd(), "/tmp", &buf));
 }
 
 fn errnoToDirRealPathFileError(errno: posix.system.E) DirRealPathFileError {
