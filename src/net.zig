@@ -2261,7 +2261,7 @@ test "Stream: cancel reaches a send parked in the -EAGAIN bridge" {
     try server.socket.setReceiveBufferSize(16 * 1024);
 
     const watch_bridge = sendBridgeObservable(runtime);
-    const before: FdCounts = if (builtin.os.tag == .linux) try countFds() else undefined;
+    const before: FdCounts = if (builtin.os.tag == .linux) try countFds() else .{ .total = 0, .eventpoll = 0 };
 
     const Outcome = struct {
         completed: bool = false,
@@ -2350,7 +2350,7 @@ fn checkSendEndsOnPeerClose(addr: anytype) !void {
     try server.socket.setReceiveBufferSize(16 * 1024);
 
     const watch_bridge = sendBridgeObservable(runtime);
-    const before: FdCounts = if (builtin.os.tag == .linux) try countFds() else undefined;
+    const before: FdCounts = if (builtin.os.tag == .linux) try countFds() else .{ .total = 0, .eventpoll = 0 };
 
     const Outcome = struct {
         completed: bool = false,
