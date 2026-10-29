@@ -191,8 +191,24 @@ pub const NetRecvData = struct {
     msg: linux.msghdr = undefined,
 };
 
+/// State of the bridge that waits for writability after a send CQE posts
+/// -EAGAIN. See netSendRetry.
+pub const SendRetry = struct {
+    /// Epoll fd watching the socket for EPOLLOUT while the bridge's poll is in
+    /// flight; -1 otherwise.
+    epfd: i32 = -1,
+    /// The poll fired and the send is issued again with MSG_DONTWAIT, so a
+    /// socket that is still full posts -EAGAIN at once.
+    resend: bool = false,
+
+    fn msgFlags(self: SendRetry) u32 {
+        return if (self.resend) linux.MSG.DONTWAIT else 0;
+    }
+};
+
 pub const NetSendData = struct {
     msg: linux.msghdr_const = undefined,
+    retry: SendRetry = .{},
 };
 
 pub const NetRecvFromData = struct {
@@ -201,6 +217,7 @@ pub const NetRecvFromData = struct {
 
 pub const NetSendToData = struct {
     msg: linux.msghdr_const = undefined,
+    retry: SendRetry = .{},
 };
 
 pub const NetRecvMsgData = struct {
@@ -214,11 +231,13 @@ pub const NetRecvMmsgData = struct {
 
 pub const NetSendMsgData = struct {
     msg: linux.msghdr_const = undefined,
+    retry: SendRetry = .{},
 };
 
 pub const NetSendMmsgData = struct {
     msg: linux.msghdr_const = undefined,
     iov: net.iovec_const = undefined,
+    retry: SendRetry = .{},
 };
 
 pub const FileOpenData = struct {
@@ -585,10 +604,16 @@ fn submitInner(self: *Self, state: *LoopState, comptime op: Op, c: *Completion, 
         },
         .net_send => {
             const data = c.cast(NetSend);
+            // `internal` survives completion reuse, and a deferred op comes
+            // back with is_new false, so reset before getSqeOrDefer.
+            if (is_new) data.internal.retry = .{};
             const sqe = self.getSqeOrDefer(c) orelse return;
-            if (data.buffer.iovecs.len == 1) {
+            const msg_flags = sendFlagsToMsg(data.flags) | data.internal.retry.msgFlags();
+            if (data.internal.retry.epfd != -1) {
+                sqe.prep_poll_add(data.internal.retry.epfd, linux.POLL.IN);
+            } else if (data.buffer.iovecs.len == 1) {
                 const iov = data.buffer.iovecs[0];
-                sqe.prep_send(data.handle, iov.base[0..iov.len], sendFlagsToMsg(data.flags));
+                sqe.prep_send(data.handle, iov.base[0..iov.len], msg_flags);
             } else {
                 data.internal.msg = .{
                     .name = null,
@@ -599,7 +624,7 @@ fn submitInner(self: *Self, state: *LoopState, comptime op: Op, c: *Completion, 
                     .controllen = 0,
                     .flags = 0,
                 };
-                sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags));
+                sqe.prep_sendmsg(data.handle, &data.internal.msg, msg_flags);
             }
             sqe.user_data = @intFromPtr(c);
         },
@@ -620,6 +645,7 @@ fn submitInner(self: *Self, state: *LoopState, comptime op: Op, c: *Completion, 
         },
         .net_sendto => {
             const data = c.cast(NetSendTo);
+            if (is_new) data.internal.retry = .{}; // See .net_send.
             data.internal.msg = .{
                 .name = @ptrCast(data.addr),
                 .namelen = data.addr_len,
@@ -630,7 +656,11 @@ fn submitInner(self: *Self, state: *LoopState, comptime op: Op, c: *Completion, 
                 .flags = 0,
             };
             const sqe = self.getSqeOrDefer(c) orelse return;
-            sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags));
+            if (data.internal.retry.epfd != -1) {
+                sqe.prep_poll_add(data.internal.retry.epfd, linux.POLL.IN);
+            } else {
+                sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags) | data.internal.retry.msgFlags());
+            }
             sqe.user_data = @intFromPtr(c);
         },
         .net_recvmsg => {
@@ -667,6 +697,7 @@ fn submitInner(self: *Self, state: *LoopState, comptime op: Op, c: *Completion, 
         },
         .net_sendmsg => {
             const data = c.cast(NetSendMsg);
+            if (is_new) data.internal.retry = .{}; // See .net_send.
             data.internal.msg = .{
                 .name = if (data.addr) |addr| @ptrCast(addr) else null,
                 .namelen = data.addr_len,
@@ -677,11 +708,16 @@ fn submitInner(self: *Self, state: *LoopState, comptime op: Op, c: *Completion, 
                 .flags = 0,
             };
             const sqe = self.getSqeOrDefer(c) orelse return;
-            sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags));
+            if (data.internal.retry.epfd != -1) {
+                sqe.prep_poll_add(data.internal.retry.epfd, linux.POLL.IN);
+            } else {
+                sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags) | data.internal.retry.msgFlags());
+            }
             sqe.user_data = @intFromPtr(c);
         },
         .net_sendmmsg => {
             const data = c.cast(NetSendMmsg);
+            if (is_new) data.internal.retry = .{}; // See .net_send.
             const slot = &data.slots[0];
             data.internal.iov = net.iovecConstFromSlice(slot.data);
             data.internal.msg = .{
@@ -694,7 +730,11 @@ fn submitInner(self: *Self, state: *LoopState, comptime op: Op, c: *Completion, 
                 .flags = 0,
             };
             const sqe = self.getSqeOrDefer(c) orelse return;
-            sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags));
+            if (data.internal.retry.epfd != -1) {
+                sqe.prep_poll_add(data.internal.retry.epfd, linux.POLL.IN);
+            } else {
+                sqe.prep_sendmsg(data.handle, &data.internal.msg, sendFlagsToMsg(data.flags) | data.internal.retry.msgFlags());
+            }
             sqe.user_data = @intFromPtr(c);
         },
         .net_poll => {
@@ -1180,6 +1220,73 @@ fn netSendFileAdvance(self: *Self, state: *LoopState, c: *Completion, res: i32) 
     }
 }
 
+/// Bridge an -EAGAIN on a send: the kernel can post it even without
+/// MSG_DONTWAIT (seen for IORING_OP_SENDMSG after the peer half-closes). Wait
+/// for writability, then issue the send again; submitInner preps both steps
+/// from `internal.retry`. Returns true if the CQE was consumed.
+///
+/// The wait polls an epoll fd that holds the socket for EPOLLOUT, not the
+/// socket itself: io_uring always adds EPOLLRDHUP to a poll's mask, and after
+/// the peer's FIN that bit stays set, so a poll on the socket fires at once.
+fn netSendRetry(self: *Self, state: *LoopState, comptime op: Op, c: *Completion, res: i32) bool {
+    const data = c.cast(op.toType());
+    const retry = &data.internal.retry;
+
+    if (retry.epfd != -1) {
+        // The poll on the epoll fd fired, failed, or was canceled.
+        closeSendRetryEpoll(retry);
+        if (sendRetryCanceled(self, state, c)) return true;
+        if (res < 0) return false;
+        // Writable, or an error or hangup that the send will report.
+        retry.resend = true;
+        self.resubmit(state, c);
+        return true;
+    }
+
+    // Also for dontwait, which only keeps the syscall from blocking (see
+    // SendFlags.dontwait).
+    if (res != -@as(i32, @backingInt(linux.E.AGAIN))) return false;
+    if (sendRetryCanceled(self, state, c)) return true;
+
+    retry.epfd = openSendRetryEpoll(data.handle) catch |err| {
+        c.setError(err);
+        state.markCompletedFromBackend(c);
+        return true;
+    };
+    self.resubmit(state, c);
+    return true;
+}
+
+/// Checked before the bridge issues any further SQE, as in netSendFileAdvance.
+fn sendRetryCanceled(self: *Self, state: *LoopState, c: *Completion) bool {
+    if (!c.loadState().cancel_requested) return false;
+    self.storeResult(c, -@as(i32, @backingInt(linux.E.CANCELED)));
+    state.markCompletedFromBackend(c);
+    return true;
+}
+
+fn openSendRetryEpoll(handle: net.fd_t) error{ SystemResources, Unexpected }!i32 {
+    const rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
+    const epfd: i32 = switch (linux.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .MFILE, .NFILE, .NOMEM => return error.SystemResources,
+        else => return error.Unexpected,
+    };
+    var event: linux.epoll_event = .{ .events = linux.EPOLL.OUT, .data = .{ .u64 = 0 } };
+    switch (linux.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, handle, &event))) {
+        .SUCCESS => return epfd,
+        else => |err| {
+            _ = linux.close(epfd);
+            return if (err == .NOMEM or err == .NOSPC) error.SystemResources else error.Unexpected;
+        },
+    }
+}
+
+fn closeSendRetryEpoll(retry: *SendRetry) void {
+    _ = linux.close(retry.epfd);
+    retry.epfd = -1;
+}
+
 /// Close the op-owned pipe (idempotent).
 fn netSendFileCleanup(self: *Self, c: *Completion) void {
     _ = self;
@@ -1398,6 +1505,15 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
             continue;
         }
 
+        // A send's -EAGAIN, or the poll bridging it, issues the next
+        // step rather than completing the op.
+        switch (completion.op) {
+            inline .net_send, .net_sendto, .net_sendmsg, .net_sendmmsg => |op| {
+                if (self.netSendRetry(state, op, completion, cqe.res)) continue;
+            },
+            else => {},
+        }
+
         // Multi-step sendfile: a CQE advances the splice chain rather than
         // completing the op.
         if (completion.op == .net_send_file) {
@@ -1433,6 +1549,14 @@ fn drainPending(self: *Self, state: *LoopState) void {
         if (c.loadState().cancel_requested) {
             // Complete canceled pending ops immediately rather than writing a SQE.
             // storeResult handles resource cleanup (e.g. allocated paths).
+            // A send whose bridge poll is unissued owns its epoll fd.
+            switch (c.op) {
+                inline .net_send, .net_sendto, .net_sendmsg, .net_sendmmsg => |op| {
+                    const retry = &c.cast(op.toType()).internal.retry;
+                    if (retry.epfd != -1) closeSendRetryEpoll(retry);
+                },
+                else => {},
+            }
             self.storeResult(c, -@as(i32, @backingInt(linux.E.CANCELED)));
             state.markCompletedFromBackend(c);
         } else {
@@ -1938,7 +2062,8 @@ fn sendFlagsToMsg(flags: net.SendFlags) u32 {
     if (flags.fastopen) msg_flags |= linux.MSG.FASTOPEN;
     // `dontwait` is left out: it only keeps the send syscall from blocking,
     // and an SQE never blocks. As MSG_DONTWAIT it would post -EAGAIN instead
-    // of waiting for the socket to become writable.
+    // of waiting for the socket to become writable. The kernel can still
+    // post -EAGAIN; see netSendRetry.
     return msg_flags;
 }
 

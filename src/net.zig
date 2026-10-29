@@ -2058,6 +2058,400 @@ test "Stream.Writer.sendFile cancellation unblocks a stalled transfer" {
     try std.testing.expectEqual(error.Canceled, outcome.writer_err.?);
 }
 
+const HalfCloseSend = enum {
+    /// Stream.write: one buffer, IORING_OP_SEND on io_uring.
+    write,
+    /// Stream.writeVec: two buffers, IORING_OP_SENDMSG through net_send.
+    write_vec,
+    /// Socket.sendMsg: two buffers, IORING_OP_SENDMSG through net_sendmsg.
+    send_msg,
+    /// ev.NetSend with flags.dontwait: two buffers, IORING_OP_SENDMSG.
+    write_vec_dontwait,
+};
+
+/// A sender parked on a full socket must keep waiting when the peer
+/// half-closes (shutdown SHUT_WR) without reading, and finish once the peer
+/// reads.
+fn checkSendSurvivesPeerHalfClose(addr: anytype, how: HalfCloseSend) !void {
+    const total = 4 * 1024 * 1024;
+
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const server = try addr.listen(.{});
+    defer server.close();
+    // Small buffers (the accepted TCP socket inherits the receive size) so the
+    // sender fills them and parks long before `total` is sent.
+    try server.socket.setReceiveBufferSize(16 * 1024);
+
+    const Outcome = struct {
+        send_err: ?anyerror = null,
+        sent: usize = 0,
+        received: usize = 0,
+        parked_eventpoll: ?usize = null,
+    };
+
+    const Test = struct {
+        fn peerFn(srv: Server, watch_bridge: bool, out: *Outcome) !void {
+            const stream = try srv.accept(.{});
+            defer stream.close();
+            // Let the sender fill the buffers and park in a send.
+            try runtime_mod.sleep(.fromMilliseconds(100));
+            try stream.shutdown(.send);
+            // Stay half-closed without reading while the sender is parked.
+            try runtime_mod.sleep(.fromMilliseconds(500));
+            if (watch_bridge) out.parked_eventpoll = (try countFds()).eventpoll;
+            var buf: [64 * 1024]u8 = undefined;
+            while (true) {
+                const n = try stream.read(&buf, .none);
+                if (n == 0) break;
+                out.received += n;
+            }
+        }
+
+        fn senderFn(srv: Server, send_how: HalfCloseSend, out: *Outcome) void {
+            send(srv, send_how, out) catch |err| {
+                out.send_err = err;
+            };
+        }
+
+        fn send(srv: Server, send_how: HalfCloseSend, out: *Outcome) !void {
+            const stream = try srv.socket.address.connect(.{});
+            defer stream.close();
+            try stream.socket.setSendBufferSize(16 * 1024);
+            const chunk: [16 * 1024]u8 = @splat('x');
+            while (out.sent < total) {
+                const left = total - out.sent;
+                const bufs: [2][]const u8 = .{ chunk[0..@min(left, chunk.len)], chunk[0..@min(left -| chunk.len, chunk.len)] };
+                out.sent += switch (send_how) {
+                    .write => try stream.write(bufs[0], .none),
+                    .write_vec => try stream.writeVec(&bufs, .none),
+                    .send_msg => blk: {
+                        var storage: [2]os.iovec_const = undefined;
+                        break :blk try stream.socket.sendMsg(.fromSlices(&bufs, &storage), null, null, .none);
+                    },
+                    .write_vec_dontwait => blk: {
+                        // Socket.send takes no flags, so use the op directly.
+                        var storage: [2]os.iovec_const = undefined;
+                        var op = ev.NetSend.init(stream.socket.handle, .fromSlices(&bufs, &storage), .{ .dontwait = true });
+                        try timedWaitForIo(&op.c, .none);
+                        break :blk try op.getResult();
+                    },
+                };
+            }
+            try stream.shutdown(.send);
+        }
+    };
+
+    // Only SENDMSG has been seen to post -EAGAIN; a one-buffer send
+    // (IORING_OP_SEND) has not, so it is not watched.
+    const watch_bridge = how != .write and sendBridgeObservable(runtime);
+    const before: FdCounts = if (builtin.os.tag == .linux) try countFds() else .{ .total = 0, .eventpoll = 0 };
+
+    var outcome: Outcome = .{};
+
+    var group: Group = .init;
+    defer group.cancel();
+
+    try group.spawn(Test.peerFn, .{ server, watch_bridge, &outcome });
+    try group.spawn(Test.senderFn, .{ server, how, &outcome });
+
+    try group.wait();
+    try std.testing.expectEqual(null, outcome.send_err);
+    try std.testing.expect(!group.hasFailed());
+    try std.testing.expectEqual(total, outcome.sent);
+    try std.testing.expectEqual(total, outcome.received);
+    if (outcome.parked_eventpoll) |parked| {
+        // This kernel waited without posting -EAGAIN: the bridge was not tested.
+        if (parked == before.eventpoll) return error.SkipZigTest;
+        try std.testing.expectEqual(before.eventpoll + 1, parked);
+    }
+}
+
+test "Stream: a parked vectored send survives a peer half-close (TCP)" {
+    try checkSendSurvivesPeerHalfClose(try IpAddress.parseIp4("127.0.0.1", 0), .write_vec);
+}
+
+test "Stream: a parked send survives a peer half-close (TCP)" {
+    try checkSendSurvivesPeerHalfClose(try IpAddress.parseIp4("127.0.0.1", 0), .write);
+}
+
+test "Stream: a parked sendMsg survives a peer half-close (TCP)" {
+    // WSASendMsg only supports datagram and raw sockets.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    try checkSendSurvivesPeerHalfClose(try IpAddress.parseIp4("127.0.0.1", 0), .send_msg);
+}
+
+test "Stream: a parked dontwait send survives a peer half-close (TCP)" {
+    try checkSendSurvivesPeerHalfClose(try IpAddress.parseIp4("127.0.0.1", 0), .write_vec_dontwait);
+}
+
+test "Stream: a parked vectored send survives a peer half-close (Unix)" {
+    if (!has_unix_sockets) return error.SkipZigTest;
+    const path = "zio-test-half-close-vec.sock";
+    os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), path) catch {};
+    defer os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), path) catch {};
+    try checkSendSurvivesPeerHalfClose(try UnixAddress.init(path), .write_vec);
+}
+
+test "Stream: a parked send survives a peer half-close (Unix)" {
+    if (!has_unix_sockets) return error.SkipZigTest;
+    const path = "zio-test-half-close.sock";
+    os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), path) catch {};
+    defer os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), path) catch {};
+    try checkSendSurvivesPeerHalfClose(try UnixAddress.init(path), .write);
+}
+
+test "Stream: a parked sendMsg survives a peer half-close (Unix)" {
+    if (!has_unix_sockets) return error.SkipZigTest;
+    // WSASendMsg only supports datagram and raw sockets.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const path = "zio-test-half-close-msg.sock";
+    os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), path) catch {};
+    defer os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), path) catch {};
+    try checkSendSurvivesPeerHalfClose(try UnixAddress.init(path), .send_msg);
+}
+
+test "Stream: a parked dontwait send survives a peer half-close (Unix)" {
+    if (!has_unix_sockets) return error.SkipZigTest;
+    const path = "zio-test-half-close-dontwait.sock";
+    os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), path) catch {};
+    defer os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), path) catch {};
+    try checkSendSurvivesPeerHalfClose(try UnixAddress.init(path), .write_vec_dontwait);
+}
+
+/// Open fds of this process, from /proc/self/fd (Linux only). On the io_uring
+/// engine only the send bridge creates epoll fds, so `eventpoll` going up by
+/// one shows that the bridge is waiting.
+const FdCounts = struct { total: usize, eventpoll: usize };
+
+fn countFds() !FdCounts {
+    const linux = std.os.linux;
+    const dir_rc = linux.open("/proc/self/fd", .{ .DIRECTORY = true, .CLOEXEC = true }, 0);
+    if (linux.errno(dir_rc) != .SUCCESS) return error.Unexpected;
+    const dir: linux.fd_t = @intCast(dir_rc);
+    defer _ = linux.close(dir);
+
+    var counts: FdCounts = .{ .total = 0, .eventpoll = 0 };
+    var buf: [4096]u8 align(8) = undefined;
+    while (true) {
+        const n_rc = linux.getdents64(dir, &buf, buf.len);
+        if (linux.errno(n_rc) != .SUCCESS) return error.Unexpected;
+        if (n_rc == 0) break;
+        var off: usize = 0;
+        while (off < n_rc) {
+            const entry: *align(1) const linux.dirent64 = @ptrCast(&buf[off]);
+            const name: [*:0]const u8 = @ptrCast(&buf[off + @offsetOf(linux.dirent64, "name")]);
+            off += entry.reclen;
+            const name_slice = std.mem.sliceTo(name, 0);
+            if (name_slice[0] == '.') continue;
+            // The directory's own fd is open only while counting.
+            if (try std.fmt.parseInt(linux.fd_t, name_slice, 10) == dir) continue;
+            counts.total += 1;
+            var link: [64]u8 = undefined;
+            const len_rc = linux.readlinkat(dir, name, &link, link.len);
+            if (linux.errno(len_rc) != .SUCCESS) continue; // closed meanwhile
+            if (std.mem.eql(u8, link[0..len_rc], "anon_inode:[eventpoll]")) counts.eventpoll += 1;
+        }
+    }
+    return counts;
+}
+
+/// Whether the io_uring send bridge can be watched with countFds.
+fn sendBridgeObservable(runtime: *Runtime) bool {
+    if (builtin.os.tag != .linux) return false;
+    if (comptime !@hasDecl(ev.Backend, "selectedEngine")) return false;
+    return runtime.main_executor.loop.backend.selectedEngine() == .io_uring;
+}
+
+test "Stream: cancel reaches a send parked in the -EAGAIN bridge" {
+    // On io_uring the cancel lands while the bridge's poll waits on its epoll
+    // fd. The short windows before that poll is issued and after it fires are
+    // not covered here.
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+    const server = try addr.listen(.{});
+    defer server.close();
+    try server.socket.setReceiveBufferSize(16 * 1024);
+
+    const watch_bridge = sendBridgeObservable(runtime);
+    const before: FdCounts = if (builtin.os.tag == .linux) try countFds() else .{ .total = 0, .eventpoll = 0 };
+
+    const Outcome = struct {
+        completed: bool = false,
+        send_err: ?anyerror = null,
+        sent: usize = 0,
+        peer_err: ?anyerror = null,
+    };
+
+    const Test = struct {
+        fn peerFn(srv: Server, out: *Outcome) void {
+            peer(srv) catch |err| {
+                out.peer_err = err;
+            };
+        }
+
+        fn peer(srv: Server) !void {
+            const stream = try srv.accept(.{});
+            defer stream.close();
+            try runtime_mod.sleep(.fromMilliseconds(100));
+            try stream.shutdown(.send);
+            // Hold the connection open, unread, until the test cancels us.
+            runtime_mod.sleep(.fromMilliseconds(60_000)) catch {};
+        }
+
+        fn senderFn(srv: Server, out: *Outcome) void {
+            defer out.completed = true;
+            send(srv, out) catch |err| {
+                out.send_err = err;
+            };
+        }
+
+        fn send(srv: Server, out: *Outcome) !void {
+            const stream = try srv.socket.address.connect(.{});
+            defer stream.close();
+            try stream.socket.setSendBufferSize(16 * 1024);
+            const chunk: [16 * 1024]u8 = @splat('x');
+            while (true) {
+                out.sent += try stream.writeVec(&.{ &chunk, &chunk }, .none);
+            }
+        }
+    };
+
+    var outcome: Outcome = .{};
+    var peer = try runtime.spawn(Test.peerFn, .{ server, &outcome });
+    defer peer.cancel();
+    var sender = try runtime.spawn(Test.senderFn, .{ server, &outcome });
+    defer sender.cancel();
+
+    // Past the peer's half-close, with the sender parked in a send, not in
+    // connect.
+    try runtime_mod.sleep(.fromMilliseconds(300));
+    try std.testing.expectEqual(@as(?anyerror, null), outcome.peer_err);
+    try std.testing.expectEqual(@as(?anyerror, null), outcome.send_err);
+    try std.testing.expect(!outcome.completed);
+    try std.testing.expect(outcome.sent >= 16 * 1024);
+    if (watch_bridge) {
+        const parked = try countFds();
+        // This kernel waited without posting -EAGAIN: no bridge to cancel.
+        if (parked.eventpoll == before.eventpoll) return error.SkipZigTest;
+        try std.testing.expectEqual(before.eventpoll + 1, parked.eventpoll);
+    }
+
+    sender.cancel();
+    try std.testing.expect(outcome.completed);
+    try std.testing.expectEqual(@as(?anyerror, error.Canceled), outcome.send_err);
+
+    peer.cancel();
+    try std.testing.expectEqual(@as(?anyerror, null), outcome.peer_err);
+    if (builtin.os.tag == .linux) {
+        // Both sockets and the bridge's epoll fd are closed.
+        const after = try countFds();
+        try std.testing.expectEqual(before.eventpoll, after.eventpoll);
+        try std.testing.expectEqual(before.total, after.total);
+    }
+}
+
+/// A send waiting in the -EAGAIN bridge must fail when the peer closes without
+/// reading: over TCP the unread data makes the close send an RST, over AF_UNIX
+/// the sender sees EPOLLHUP.
+fn checkSendEndsOnPeerClose(addr: anytype) !void {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const server = try addr.listen(.{});
+    defer server.close();
+    try server.socket.setReceiveBufferSize(16 * 1024);
+
+    const watch_bridge = sendBridgeObservable(runtime);
+    const before: FdCounts = if (builtin.os.tag == .linux) try countFds() else .{ .total = 0, .eventpoll = 0 };
+
+    const Outcome = struct {
+        completed: bool = false,
+        send_err: ?anyerror = null,
+        sent: usize = 0,
+    };
+
+    const Test = struct {
+        fn senderFn(srv: Server, out: *Outcome) void {
+            defer out.completed = true;
+            send(srv, out) catch |err| {
+                out.send_err = err;
+            };
+        }
+
+        fn send(srv: Server, out: *Outcome) !void {
+            const stream = try srv.socket.address.connect(.{});
+            defer stream.close();
+            try stream.socket.setSendBufferSize(16 * 1024);
+            const chunk: [16 * 1024]u8 = @splat('x');
+            while (true) {
+                out.sent += try stream.writeVec(&.{ &chunk, &chunk }, .none);
+            }
+        }
+    };
+
+    var outcome: Outcome = .{};
+    var sender = try runtime.spawn(Test.senderFn, .{ server, &outcome });
+    defer sender.cancel();
+
+    // This task is the peer.
+    const stream = try server.accept(.{});
+    var stream_open = true;
+    defer if (stream_open) stream.close();
+    try runtime_mod.sleep(.fromMilliseconds(100));
+    try stream.shutdown(.send);
+    try runtime_mod.sleep(.fromMilliseconds(200));
+    try std.testing.expectEqual(@as(?anyerror, null), outcome.send_err);
+    try std.testing.expect(!outcome.completed);
+    try std.testing.expect(outcome.sent >= 16 * 1024);
+    if (watch_bridge) {
+        const parked = try countFds();
+        // This kernel waited without posting -EAGAIN: no bridge to test.
+        if (parked.eventpoll == before.eventpoll) return error.SkipZigTest;
+        try std.testing.expectEqual(before.eventpoll + 1, parked.eventpoll);
+    }
+
+    // Close without reading.
+    stream.close();
+    stream_open = false;
+
+    // Watchdog: fail instead of hanging if the send never ends.
+    var waited_ms: u32 = 0;
+    while (!outcome.completed and waited_ms < 5000) : (waited_ms += 10) {
+        try runtime_mod.sleep(.fromMilliseconds(10));
+    }
+    const ended_by_itself = outcome.completed;
+    sender.cancel();
+    try std.testing.expect(ended_by_itself);
+    const err = outcome.send_err orelse return error.TestUnexpectedResult;
+    // Windows can end the send with WSAECONNABORTED instead of WSAECONNRESET.
+    const aborted = builtin.os.tag == .windows and err == error.ConnectionAborted;
+    if (err != error.ConnectionResetByPeer and err != error.BrokenPipe and !aborted) {
+        std.debug.print("send ended with {s}\n", .{@errorName(err)});
+        return error.TestUnexpectedResult;
+    }
+    if (builtin.os.tag == .linux) {
+        const after = try countFds();
+        try std.testing.expectEqual(before.eventpoll, after.eventpoll);
+        try std.testing.expectEqual(before.total, after.total);
+    }
+}
+
+test "Stream: a send in the -EAGAIN bridge ends on a peer reset (TCP)" {
+    try checkSendEndsOnPeerClose(try IpAddress.parseIp4("127.0.0.1", 0));
+}
+
+test "Stream: a send in the -EAGAIN bridge ends on a peer close (Unix)" {
+    if (!has_unix_sockets) return error.SkipZigTest;
+    const path = "zio-test-bridge-peer-close.sock";
+    os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), path) catch {};
+    defer os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), path) catch {};
+    try checkSendEndsOnPeerClose(try UnixAddress.init(path));
+}
+
 test "IpAddress: initIp4" {
     const addr = IpAddress.initIp4(@splat(0), 8080);
     try std.testing.expectEqual(os.net.AF.INET, addr.any.family);
