@@ -3437,12 +3437,17 @@ pub fn dirRealPathFileZ(dir: fd_t, path: [*:0]const u8, buffer: []u8) DirRealPat
     // On non-Linux with libc, we can use realpath() directly for AT_FDCWD
     if (builtin.os.tag != .linux and builtin.link_libc and dir == posix.AT.FDCWD) {
         if (buffer.len < posix.PATH_MAX) return error.NameTooLong;
+        const sc = try syscall_cancel.Syscall.begin();
+        defer sc.finish();
         while (true) {
             if (std.c.realpath(path, buffer.ptr)) |_| {
                 return std.mem.indexOfScalar(u8, buffer, 0) orelse buffer.len;
             }
             const err: posix.system.E = @fromBackingInt(@intCast(std.c._errno().*));
-            if (err == .INTR) continue;
+            if (err == .INTR) {
+                try sc.checkCancel();
+                continue;
+            }
             return errnoToDirRealPathFileError(err);
         }
     }
