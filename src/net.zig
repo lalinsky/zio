@@ -2165,6 +2165,8 @@ test "Stream: a parked send survives a peer half-close (TCP)" {
 }
 
 test "Stream: a parked sendMsg survives a peer half-close (TCP)" {
+    // WSASendMsg only supports datagram and raw sockets.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     try checkSendSurvivesPeerHalfClose(try IpAddress.parseIp4("127.0.0.1", 0), .send_msg);
 }
 
@@ -2190,6 +2192,8 @@ test "Stream: a parked send survives a peer half-close (Unix)" {
 
 test "Stream: a parked sendMsg survives a peer half-close (Unix)" {
     if (!has_unix_sockets) return error.SkipZigTest;
+    // WSASendMsg only supports datagram and raw sockets.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const path = "zio-test-half-close-msg.sock";
     os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), path) catch {};
     defer os.fs.dirDeleteFile(std.testing.allocator, os.fs.cwd(), path) catch {};
@@ -2411,7 +2415,9 @@ fn checkSendEndsOnPeerClose(addr: anytype) !void {
     sender.cancel();
     try std.testing.expect(ended_by_itself);
     const err = outcome.send_err orelse return error.TestUnexpectedResult;
-    if (err != error.ConnectionResetByPeer and err != error.BrokenPipe) {
+    // Windows can end the send with WSAECONNABORTED instead of WSAECONNRESET.
+    const aborted = builtin.os.tag == .windows and err == error.ConnectionAborted;
+    if (err != error.ConnectionResetByPeer and err != error.BrokenPipe and !aborted) {
         std.debug.print("send ended with {s}\n", .{@errorName(err)});
         return error.TestUnexpectedResult;
     }
