@@ -1644,7 +1644,7 @@ fn submitFileReadStreaming(self: *Self, state: *LoopState, data: *FileReadStream
             return;
         } else if (err != .IO_PENDING) {
             // Real error - complete immediately with error
-            log.err("ReadFile (pipe) failed: {}", .{err});
+            log.err("ReadFile (streaming) failed: {}", .{err});
             data.c.setError(fs.errnoToFileReadError(@fromBackingInt(@intCast(@backingInt(err)))));
             state.markCompletedFromBackend(&data.c);
             return;
@@ -1696,7 +1696,7 @@ fn submitFileWriteStreaming(self: *Self, state: *LoopState, data: *FileWriteStre
         const err = windows.GetLastError();
         if (err != .IO_PENDING) {
             // Real error - complete immediately with error
-            log.err("WriteFile (pipe) failed: {}", .{err});
+            log.err("WriteFile (streaming) failed: {}", .{err});
             data.c.setError(fs.errnoToFileWriteError(@fromBackingInt(@intCast(@backingInt(err)))));
             state.markCompletedFromBackend(&data.c);
             return;

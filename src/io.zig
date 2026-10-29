@@ -50,6 +50,7 @@ const process_impl = @import("process.zig");
 const zio_net = @import("net.zig");
 const zio_dns = @import("dns/root.zig");
 const fillBuf = @import("utils/writer.zig").fillBuf;
+const probePollable = @import("ev/backends/common.zig").probePollable;
 const MemoryPool = @import("utils/memory_pool.zig").MemoryPool;
 const zio_options = @import("options.zig").options;
 
@@ -60,18 +61,27 @@ const max_iovecs_len = 8;
 
 pub const debug_io: Io = .{ .userdata = null, .vtable = &vtable };
 
-/// Read the streaming route cached in `File.Flags`.
+/// Read the streaming route cached in `file`'s flags.
 ///
 /// When hacks are enabled, the `nonblocking` bool byte is overloaded:
 ///  - 0x01: pollable (opened non-blocking)
 ///  - 0xCC: thread pool (cached from a previous probe)
 ///  - 0xCF: a file the loop drives at its position (Windows IOCP)
 ///  - other: unknown (determine lazily)
-fn flagsReadRoute(flags: *const Io.File.Flags) ?ev.StreamingRoute {
+///
+/// Under `no_hacks`, `nonblocking` alone says whether the loop drives the
+/// handle. On IOCP that means the handle is overlapped and associated with the
+/// port, which is what std defines `nonblocking` to mean on Windows; whether it
+/// is a pipe or a file is then probed on each op.
+fn flagsReadRoute(file: Io.File) ?ev.StreamingRoute {
     if (zio_options.no_hacks) {
-        return if (flags.nonblocking) .pollable else null;
+        if (!file.flags.nonblocking) return null;
+        if (comptime ev.backend == .iocp) {
+            return if (probePollable(file.handle)) .pollable else .loop_file;
+        }
+        return .pollable;
     }
-    return switch (@as(*const u8, @ptrCast(flags)).*) {
+    return switch (@as(*const u8, @ptrCast(&file.flags)).*) {
         0x01 => .pollable,
         0xCC => .thread_pool,
         0xCF => .loop_file,
@@ -82,7 +92,7 @@ fn flagsReadRoute(flags: *const Io.File.Flags) ?ev.StreamingRoute {
 /// Write the streaming route into `File.Flags`.
 fn flagsWriteRoute(flags: *Io.File.Flags, route: ev.StreamingRoute) void {
     if (zio_options.no_hacks) {
-        flags.nonblocking = route == .pollable;
+        flags.nonblocking = route != .thread_pool;
         return;
     }
     @as(*u8, @ptrCast(flags)).* = switch (route) {
@@ -109,16 +119,25 @@ pub fn zioFileToStd(file: zio_fs.File) Io.File {
 ///
 /// On Windows, IOCP-driven positional I/O only works on handles zio opened and
 /// associated with its completion port (their streaming route is recorded in
-/// the flags). A handle whose route is unknown here was not opened by us
-/// (e.g. an inherited stdio handle obtained via `std.Io.File.stdin()`); an
+/// the flags). Any other handle, whether its route is unknown (e.g. an
+/// inherited stdio handle obtained via `std.Io.File.stdin()`) or known to be
+/// `thread_pool` (zio's own stdio files), was not associated with the port; an
 /// overlapped ReadFile/WriteFile on it would block the loop thread or never
 /// complete. Reporting `Unseekable` makes the reader/writer switch to the
-/// streaming path, which routes to the thread pool's blocking I/O. This relies
-/// on the flag-smuggling tri-state, so it is disabled under `no_hacks`.
+/// streaming path, which routes to the thread pool's blocking I/O. With the
+/// poll backend only an unknown route is rejected, which relies on the
+/// flag-smuggling tri-state, so it is disabled there under `no_hacks`.
 fn positionalUnsupported(file: Io.File) bool {
     if (comptime builtin.os.tag != .windows) return false;
+    if (comptime ev.backend == .iocp) {
+        // Checks the flag directly: under `no_hacks`, `flagsReadRoute` would
+        // probe the handle, and only "driven by the loop" matters here.
+        if (zio_options.no_hacks) return !file.flags.nonblocking;
+        const route = flagsReadRoute(file) orelse return true;
+        return route == .thread_pool;
+    }
     if (zio_options.no_hacks) return false;
-    return flagsReadRoute(&file.flags) == null;
+    return flagsReadRoute(file) == null;
 }
 
 pub const Mode = enum { regular, blocking };
@@ -552,7 +571,7 @@ fn fileReadStreamingImpl(
     if (count == 0) return 0;
 
     var op = ev.FileReadStreaming.init(stdIoHandleToZio(file.handle), .{ .iovecs = iovecs[0..count] });
-    op.streaming_route = flagsReadRoute(&file.flags);
+    op.streaming_route = flagsReadRoute(file);
     try timedWaitForIoClock(&op.c, timeout, clock);
     const n = op.getResult() catch |err| switch (err) {
         error.BrokenPipe, error.Unseekable => return error.Unexpected,
@@ -580,7 +599,7 @@ fn fileWriteStreamingImpl(
     const wbuf = ev.WriteBuf.fromSlices(slices[0..n], &iovecs);
 
     var op = ev.FileWriteStreaming.init(stdIoHandleToZio(file.handle), wbuf);
-    op.streaming_route = flagsReadRoute(&file.flags);
+    op.streaming_route = flagsReadRoute(file);
     try timedWaitForIoClock(&op.c, timeout, clock);
     return op.getResult() catch |err| switch (err) {
         error.Unseekable => error.Unexpected,
@@ -858,7 +877,7 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
                 stdIoHandleToZio(o.file.handle),
                 .{ .iovecs = data.file_read_streaming.iovecs[0..count] },
             );
-            data.file_read_streaming.op.streaming_route = flagsReadRoute(&o.file.flags);
+            data.file_read_streaming.op.streaming_route = flagsReadRoute(o.file);
             return &data.file_read_streaming.op.c;
         },
         .file_write_streaming => |*o| {
@@ -874,7 +893,7 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
                 stdIoHandleToZio(o.file.handle),
                 wbuf,
             );
-            data.file_write_streaming.op.streaming_route = flagsReadRoute(&o.file.flags);
+            data.file_write_streaming.op.streaming_route = flagsReadRoute(o.file);
             return &data.file_write_streaming.op.c;
         },
         .device_io_control => |*o| {
@@ -3249,7 +3268,7 @@ test "io: progressParentFile reads ZIG_PROGRESS" {
     };
     const file = try result;
     try std.testing.expectEqual(fd, file.handle);
-    try std.testing.expectEqual(null, flagsReadRoute(&file.flags));
+    try std.testing.expectEqual(null, flagsReadRoute(file));
 }
 
 test "io: debug_io answers process paths without a runtime" {
