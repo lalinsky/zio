@@ -14,6 +14,7 @@ const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;
 pub const RuntimeOptions = runtime.RuntimeOptions;
 pub const JoinHandle = runtime.JoinHandle;
+pub const CancelHandle = runtime.CancelHandle;
 pub const Placement = runtime.Placement;
 pub const ExecutorId = runtime.ExecutorId;
 

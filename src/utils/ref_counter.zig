@@ -67,6 +67,7 @@ pub fn RefCounter(comptime T: type) type {
         pub fn incr(self: *Self) void {
             const prev_ref_count = self.refs.fetchAdd(1, .monotonic);
             std.debug.assert(prev_ref_count > 0);
+            std.debug.assert(prev_ref_count < std.math.maxInt(T));
         }
 
         /// Decrements the reference count.
