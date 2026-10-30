@@ -2717,6 +2717,59 @@ test "runtime: CancelHandle.requestCancel from a thread outside the runtime" {
     try std.testing.expectError(error.Canceled, handle.join());
 }
 
+test "runtime: cancel keeps the caller's own cancellation" {
+    const Event = @import("sync/Event.zig");
+
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const slowCleanupTask = struct {
+        fn call(rt: *Runtime, cleaned_up: *bool) !void {
+            rt.sleep(.fromMilliseconds(1000)) catch |err| {
+                rt.beginShield();
+                defer rt.endShield();
+                try rt.sleep(.fromMilliseconds(50));
+                cleaned_up.* = true;
+                return err;
+            };
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    const cancelingTask = struct {
+        fn call(rt: *Runtime, ready: *Event, use_cancel_handle: bool) !void {
+            var cleaned_up = false;
+            var target = try rt.spawn(slowCleanupTask, .{ rt, &cleaned_up });
+            defer target.cancel();
+
+            ready.set();
+            // This task is canceled while it waits here.
+            if (use_cancel_handle) {
+                var cancel_handle = target.cancelHandle();
+                defer cancel_handle.deinit();
+                cancel_handle.cancel();
+            } else {
+                target.cancel();
+            }
+            if (!cleaned_up) return error.TestUnexpectedResult;
+
+            try checkCancel();
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    for ([_]bool{ false, true }) |use_cancel_handle| {
+        var ready: Event = .init;
+        var handle = try runtime.spawn(cancelingTask, .{ runtime, &ready, use_cancel_handle });
+        defer handle.cancel();
+
+        try ready.wait();
+        try runtime.sleep(.fromMilliseconds(10));
+        handle.requestCancel();
+        try std.testing.expectError(error.Canceled, handle.join());
+    }
+}
+
 test "runtime: recancel re-arms a delivered cancellation" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();
