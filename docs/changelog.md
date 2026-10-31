@@ -54,6 +54,9 @@ All notable changes to this project will be documented in this file.
 - A cancel was lost when `std.Io.Group.async` could not spawn its task and ran it on the
   caller instead.
 
+- On Windows, a streaming read or write of a file opened with the IOCP backend, as
+  `Dir.writeFile` and `File.readStreaming` do, failed with `error.Unexpected` (#738).
+
 - Sockets accepted with the io_uring backend were blocking and leaked into child processes,
   and on Windows a socket bound before `connect` failed to connect.
 
@@ -772,7 +775,6 @@ fixes continue on the `zig-0.16` branch.
 ### Fixed
 
 - Internal refactoring to handle data races on weakly ordered architectures in some cases.
-
 
 ## [0.9.0] - 2026-03-02
 

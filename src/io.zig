@@ -50,6 +50,7 @@ const process_impl = @import("process.zig");
 const zio_net = @import("net.zig");
 const zio_dns = @import("dns/root.zig");
 const fillBuf = @import("utils/writer.zig").fillBuf;
+const probePollable = @import("ev/backends/common.zig").probePollable;
 const MemoryPool = @import("utils/memory_pool.zig").MemoryPool;
 const zio_options = @import("options.zig").options;
 
@@ -60,40 +61,55 @@ const max_iovecs_len = 8;
 
 pub const debug_io: Io = .{ .userdata = null, .vtable = &vtable };
 
-/// Read the pollable-cache state from `File.Flags`.
+/// Read the streaming route cached in `file`'s flags.
 ///
 /// When hacks are enabled, the `nonblocking` bool byte is overloaded:
-///  - 0x01: known pollable (opened non-blocking)
-///  - 0xCC: known not pollable (cached from previous probe)
+///  - 0x01: pollable (opened non-blocking)
+///  - 0xCC: thread pool (cached from a previous probe)
+///  - 0xCF: a file the loop drives at its position (Windows IOCP)
 ///  - other: unknown (determine lazily)
-fn flagsReadPollable(flags: *const Io.File.Flags) ?bool {
+///
+/// Under `no_hacks`, `nonblocking` alone says whether the loop drives the
+/// handle. On IOCP that means the handle is overlapped and associated with the
+/// port, which is what std defines `nonblocking` to mean on Windows; whether it
+/// is a pipe or a file is then probed on each op.
+fn flagsReadRoute(file: Io.File) ?ev.StreamingRoute {
     if (zio_options.no_hacks) {
-        return if (flags.nonblocking) true else null;
+        if (!file.flags.nonblocking) return null;
+        if (comptime ev.backend == .iocp) {
+            return if (probePollable(file.handle)) .pollable else .loop_file;
+        }
+        return .pollable;
     }
-    return switch (@as(*const u8, @ptrCast(flags)).*) {
-        0x01 => true,
-        0xCC => false,
+    return switch (@as(*const u8, @ptrCast(&file.flags)).*) {
+        0x01 => .pollable,
+        0xCC => .thread_pool,
+        0xCF => .loop_file,
         else => null,
     };
 }
 
-/// Write the pollable verdict into `File.Flags`.
-fn flagsWritePollable(flags: *Io.File.Flags, pollable: bool) void {
+/// Write the streaming route into `File.Flags`.
+fn flagsWriteRoute(flags: *Io.File.Flags, route: ev.StreamingRoute) void {
     if (zio_options.no_hacks) {
-        flags.nonblocking = pollable;
+        flags.nonblocking = route != .thread_pool;
         return;
     }
-    @as(*u8, @ptrCast(flags)).* = if (pollable) 0x01 else 0xCC;
+    @as(*u8, @ptrCast(flags)).* = switch (route) {
+        .pollable => 0x01,
+        .thread_pool => 0xCC,
+        .loop_file => 0xCF,
+    };
 }
 
-/// Build a `std.Io.File` from a zio `fs.File`, carrying its pollable verdict in
+/// Build a `std.Io.File` from a zio `fs.File`, carrying its streaming route in
 /// the (possibly hack-encoded) flags so the std Reader/Writer picks the right
-/// streaming-vs-positional path. A `null` verdict is left unknown (probed
+/// streaming-vs-positional path. A `null` route is left unknown (probed
 /// lazily). Used by `fs.File.stdReader` / `fs.File.stdWriter`.
 pub fn zioFileToStd(file: zio_fs.File) Io.File {
     // nonblocking=false is the "unknown" encoding in both hack modes.
     var f: Io.File = .{ .handle = file.fd, .flags = .{ .nonblocking = false } };
-    if (file.pollable) |pollable| flagsWritePollable(&f.flags, pollable);
+    if (file.streaming_route) |route| flagsWriteRoute(&f.flags, route);
     return f;
 }
 
@@ -102,17 +118,26 @@ pub fn zioFileToStd(file: zio_fs.File) Io.File {
 /// Reader/Writer falls back to streaming.
 ///
 /// On Windows, IOCP-driven positional I/O only works on handles zio opened and
-/// associated with its completion port (their pollable verdict is recorded in
-/// the flags). A handle whose verdict is unknown here was not opened by us
-/// (e.g. an inherited stdio handle obtained via `std.Io.File.stdin()`); an
+/// associated with its completion port (their streaming route is recorded in
+/// the flags). Any other handle, whether its route is unknown (e.g. an
+/// inherited stdio handle obtained via `std.Io.File.stdin()`) or known to be
+/// `thread_pool` (zio's own stdio files), was not associated with the port; an
 /// overlapped ReadFile/WriteFile on it would block the loop thread or never
 /// complete. Reporting `Unseekable` makes the reader/writer switch to the
-/// streaming path, which routes to the thread pool's blocking I/O. This relies
-/// on the flag-smuggling tri-state, so it is disabled under `no_hacks`.
+/// streaming path, which routes to the thread pool's blocking I/O. With the
+/// poll backend only an unknown route is rejected, which relies on the
+/// flag-smuggling tri-state, so it is disabled there under `no_hacks`.
 fn positionalUnsupported(file: Io.File) bool {
     if (comptime builtin.os.tag != .windows) return false;
+    if (comptime ev.backend == .iocp) {
+        // Checks the flag directly: under `no_hacks`, `flagsReadRoute` would
+        // probe the handle, and only "driven by the loop" matters here.
+        if (zio_options.no_hacks) return !file.flags.nonblocking;
+        const route = flagsReadRoute(file) orelse return true;
+        return route == .thread_pool;
+    }
     if (zio_options.no_hacks) return false;
-    return flagsReadPollable(&file.flags) == null;
+    return flagsReadRoute(file) == null;
 }
 
 pub const Mode = enum { regular, blocking };
@@ -546,7 +571,7 @@ fn fileReadStreamingImpl(
     if (count == 0) return 0;
 
     var op = ev.FileReadStreaming.init(stdIoHandleToZio(file.handle), .{ .iovecs = iovecs[0..count] });
-    op.pollable = flagsReadPollable(&file.flags);
+    op.streaming_route = flagsReadRoute(file);
     try timedWaitForIoClock(&op.c, timeout, clock);
     const n = op.getResult() catch |err| switch (err) {
         error.BrokenPipe, error.Unseekable => return error.Unexpected,
@@ -574,7 +599,7 @@ fn fileWriteStreamingImpl(
     const wbuf = ev.WriteBuf.fromSlices(slices[0..n], &iovecs);
 
     var op = ev.FileWriteStreaming.init(stdIoHandleToZio(file.handle), wbuf);
-    op.pollable = flagsReadPollable(&file.flags);
+    op.streaming_route = flagsReadRoute(file);
     try timedWaitForIoClock(&op.c, timeout, clock);
     return op.getResult() catch |err| switch (err) {
         error.Unseekable => error.Unexpected,
@@ -852,7 +877,7 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
                 stdIoHandleToZio(o.file.handle),
                 .{ .iovecs = data.file_read_streaming.iovecs[0..count] },
             );
-            data.file_read_streaming.op.pollable = flagsReadPollable(&o.file.flags);
+            data.file_read_streaming.op.streaming_route = flagsReadRoute(o.file);
             return &data.file_read_streaming.op.c;
         },
         .file_write_streaming => |*o| {
@@ -868,7 +893,7 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
                 stdIoHandleToZio(o.file.handle),
                 wbuf,
             );
-            data.file_write_streaming.op.pollable = flagsReadPollable(&o.file.flags);
+            data.file_write_streaming.op.streaming_route = flagsReadRoute(o.file);
             return &data.file_write_streaming.op.c;
         },
         .device_io_control => |*o| {
@@ -1360,7 +1385,7 @@ fn dirCreateFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options:
     const result = op.getResult() catch |err| return openErrToFileErr(err);
     var file: Io.File = undefined;
     file.handle = result.fd;
-    flagsWritePollable(&file.flags, result.pollable);
+    flagsWriteRoute(&file.flags, result.streaming_route);
     errdefer fileCloseImpl(null, &.{file});
     try applyOpenLock(file, options.lock, options.lock_nonblocking);
     return file;
@@ -1433,7 +1458,7 @@ fn dirOpenFileImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: I
     const result = op.getResult() catch |err| return openErrToFileErr(err);
     var file: Io.File = undefined;
     file.handle = result.fd;
-    flagsWritePollable(&file.flags, result.pollable);
+    flagsWriteRoute(&file.flags, result.streaming_route);
     errdefer fileCloseImpl(null, &.{file});
     try applyOpenLock(file, options.lock, options.lock_nonblocking);
     return file;
@@ -3243,7 +3268,7 @@ test "io: progressParentFile reads ZIG_PROGRESS" {
     };
     const file = try result;
     try std.testing.expectEqual(fd, file.handle);
-    try std.testing.expectEqual(null, flagsReadPollable(&file.flags));
+    try std.testing.expectEqual(null, flagsReadRoute(file));
 }
 
 test "io: debug_io answers process paths without a runtime" {
@@ -4273,11 +4298,11 @@ test "io: file positional read/write round-trip" {
 }
 
 test "io: file streaming read advances position and reports EOF" {
-    // On Windows, zio opens files with FILE_FLAG_OVERLAPPED (for IOCP). Such
-    // handles have no implicit file position, so ReadFile/WriteFile without an
-    // OVERLAPPED struct fails with INVALID_PARAMETER. Streaming requires
-    // per-handle position tracking which we don't implement.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    // With the poll backend, Windows files are opened for synchronous I/O, and
+    // on such a handle a positional write (an OVERLAPPED with an offset) also
+    // moves the file pointer, so the writePositional below leaves it at the
+    // end and the streaming read sees EOF.
+    if (builtin.os.tag == .windows and ev.backend == .poll) return error.SkipZigTest;
 
     var t = try TestDirFixture.init();
     defer t.deinit();
@@ -4304,9 +4329,6 @@ test "io: file streaming read advances position and reports EOF" {
 }
 
 test "io: file streaming write advances position and appends" {
-    // See note on Windows in the streaming-read test above.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
     var t = try TestDirFixture.init();
     defer t.deinit();
     const io = t.rt.io();
@@ -4318,8 +4340,14 @@ test "io: file streaming write advances position and appends" {
     defer file.close(io);
 
     try std.testing.expectEqual(5, try file.writeStreaming(io, "HELLO", &.{}, 1));
-    try std.testing.expectEqual(6, try file.writeStreaming(io, "", &.{ " ", "WORLD" }, 1));
-    try std.testing.expectEqual(3, try file.writeStreaming(io, "", &.{"!"}, 3));
+
+    // A vectored write may be short (the IOCP backend writes one buffer per
+    // op), so the vectored part goes through the Writer, which writes the rest.
+    var write_buffer: [4]u8 = undefined;
+    var writer = file.writerStreaming(io, &write_buffer);
+    try writer.interface.writeAll(" WORLD");
+    try writer.interface.splatByteAll('!', 3);
+    try writer.interface.flush();
 
     try std.testing.expectEqual(14, try file.length(io));
 
@@ -4329,10 +4357,6 @@ test "io: file streaming write advances position and appends" {
 }
 
 test "io: file seek moves the streaming position" {
-    // See note on Windows in the streaming-read test above: without an implicit
-    // file position there is nothing for a seek to move.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
     var t = try TestDirFixture.init();
     defer t.deinit();
     const io = t.rt.io();
@@ -5373,8 +5397,8 @@ test "io: operateTimeout net_receive times out when no data arrives" {
 }
 
 test "io: batch awaitAsync executes operations linearly" {
-    // file_read_streaming uses iovec which doesn't work on Windows regular files
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    // See the Windows poll note in the streaming read test above.
+    if (builtin.os.tag == .windows and ev.backend == .poll) return error.SkipZigTest;
 
     var t = try TestDirFixture.init();
     defer t.deinit();

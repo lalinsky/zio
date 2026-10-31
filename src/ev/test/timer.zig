@@ -350,7 +350,7 @@ test "duration timer armed after a long idle poll is not backdated" {
     var read_iovecs: [1]fs.iovec = undefined;
     const read_buf = ReadBuf.fromSlice(&read_data, &read_iovecs);
     var stream_read: FileReadStreaming = .init(pipefd[0], read_buf);
-    stream_read.pollable = true;
+    stream_read.streaming_route = .pollable;
     loop.add(&stream_read.c);
 
     const thread = try std.Thread.spawn(.{}, struct {
