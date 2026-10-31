@@ -548,6 +548,25 @@ pub const AnyTask = struct {
         return true;
     }
 
+    /// Like `cancel`, but a no-op once a user cancellation was requested, so any
+    /// number of callers can request it without queueing more errors.
+    pub fn requestCancel(self: *AnyTask) void {
+        var current = self.canceled_status.load(.acquire);
+        while (true) {
+            var status: CanceledStatus = @bitCast(current);
+            if (status.user_canceled) return;
+            status.user_canceled = true;
+            status.pending_errors += 1;
+            const new: u32 = @bitCast(status);
+            if (self.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
+                current = prev;
+                continue;
+            }
+            break;
+        }
+        self.wake();
+    }
+
     /// Cancel this task by setting canceled status and waking it if suspended.
     pub fn cancel(self: *AnyTask) void {
         if (self.setCanceled(.user) != null) {

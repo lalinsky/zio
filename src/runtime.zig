@@ -278,6 +278,23 @@ pub fn JoinHandle(comptime T: type) type {
             self.finishAwaitable(awaitable);
         }
 
+        /// Request cancellation without waiting for the task to complete.
+        /// The task sees `error.Canceled` at its next cancellation point.
+        ///
+        /// No-op if the task has already completed, after `join()` or `detach()`,
+        /// or if its cancellation was already requested.
+        pub fn requestCancel(self: *const Self) void {
+            const awaitable = self.awaitable orelse return;
+            if (awaitable.hasResult()) return;
+            awaitable.requestCancel();
+        }
+
+        /// Returns a handle that can cancel the task independently of this one,
+        /// from any task or thread. It must be released with `deinit()`.
+        pub fn cancelHandle(self: *const Self) CancelHandle {
+            return .init(self.awaitable);
+        }
+
         /// Detach the task, allowing it to run in the background.
         ///
         /// After detaching, the result is no longer retrievable.
@@ -297,6 +314,67 @@ pub fn JoinHandle(comptime T: type) type {
         }
     };
 }
+
+/// A handle that can cancel a task without owning its result, from any task
+/// or thread. It keeps a reference to the task, so it stays valid after the
+/// task completes, and canceling it then is a no-op.
+///
+/// Obtained from `JoinHandle.cancelHandle()` or, by a task for itself, from
+/// `CancelHandle.current()`. Must be released with `deinit()`, before the
+/// runtime is deinitialized.
+pub const CancelHandle = struct {
+    awaitable: ?*Awaitable,
+
+    fn init(awaitable: ?*Awaitable) CancelHandle {
+        if (awaitable) |a| a.ref_count.incr();
+        return .{ .awaitable = awaitable };
+    }
+
+    /// Returns a handle to the currently running task.
+    /// Panics if called from a thread without an active executor context.
+    /// Not for the main task, which never completes.
+    pub fn current() CancelHandle {
+        const task = getCurrentTask();
+        std.debug.assert(task != &getCurrentExecutor().main_task);
+        return .init(&task.awaitable);
+    }
+
+    /// Release the reference to the task.
+    pub fn deinit(self: *CancelHandle) void {
+        const awaitable = self.awaitable orelse return;
+        awaitable.release();
+        self.awaitable = null;
+    }
+
+    /// Check if the task has completed.
+    pub fn isFinished(self: CancelHandle) bool {
+        const awaitable = self.awaitable orelse return true;
+        return awaitable.hasResult();
+    }
+
+    /// Request cancellation without waiting for the task to complete.
+    /// The task sees `error.Canceled` at its next cancellation point.
+    ///
+    /// No-op if the task has already completed, or if its cancellation was
+    /// already requested. A task may request its own cancellation.
+    pub fn requestCancel(self: CancelHandle) void {
+        const awaitable = self.awaitable orelse return;
+        if (awaitable.hasResult()) return;
+        awaitable.requestCancel();
+    }
+
+    /// Request cancellation and wait for the task to complete.
+    ///
+    /// No-op if the task has already completed. Must not be called by the task
+    /// on itself, which would wait forever; use `requestCancel()` for that.
+    pub fn cancel(self: CancelHandle) void {
+        const awaitable = self.awaitable orelse return;
+        if (awaitable.hasResult()) return;
+        if (getCurrentTaskOrNull()) |task| std.debug.assert(&task.awaitable != awaitable);
+        awaitable.cancel();
+        _ = select.waitUntilComplete(awaitable);
+    }
+};
 
 // Generic data structures (private)
 const WaitNode = @import("utils/wait_queue.zig").WaitNode;
@@ -2477,6 +2555,219 @@ test "runtime: shielded sleep is not cancelable" {
 
     // Ensure the sleep completed (took at least 50ms)
     try std.testing.expect(timer.read().toMilliseconds() >= 40);
+}
+
+test "runtime: JoinHandle.requestCancel does not wait for the task" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const sleepingTask = struct {
+        fn call(rt: *Runtime) !void {
+            try rt.sleep(.fromMilliseconds(1000));
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    var handle = try runtime.spawn(sleepingTask, .{runtime});
+    defer handle.cancel();
+
+    // Let the task park in its sleep.
+    try runtime.sleep(.fromMilliseconds(10));
+
+    handle.requestCancel();
+    try std.testing.expect(!handle.hasResult());
+
+    var timer = time.Stopwatch.start();
+    try std.testing.expectError(error.Canceled, handle.join());
+    try std.testing.expect(timer.read().toMilliseconds() <= 500);
+
+    // A no-op once the result was taken.
+    handle.requestCancel();
+}
+
+test "runtime: CancelHandle outlives the task" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const quickTask = struct {
+        fn call() i32 {
+            return 42;
+        }
+    }.call;
+
+    var handle = try runtime.spawn(quickTask, .{});
+    var cancel_handle = handle.cancelHandle();
+    defer cancel_handle.deinit();
+
+    try std.testing.expectEqual(42, handle.join());
+    try std.testing.expect(cancel_handle.isFinished());
+
+    // The task is done and its join handle released, but the reference held
+    // here keeps it valid: both are no-ops.
+    cancel_handle.requestCancel();
+    cancel_handle.cancel();
+}
+
+test "runtime: CancelHandle.current lets another task cancel this one" {
+    const Event = @import("sync/Event.zig");
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    defer runtime.deinit();
+
+    const Shared = struct {
+        handle: CancelHandle = .{ .awaitable = null },
+        ready: Event = .init,
+    };
+
+    const sleepingTask = struct {
+        fn call(rt: *Runtime, shared: *Shared) !void {
+            shared.handle = .current();
+            shared.ready.set();
+            try rt.sleep(.fromMilliseconds(1000));
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    var shared: Shared = .{};
+    defer shared.handle.deinit();
+
+    var handle = try runtime.spawn(sleepingTask, .{ runtime, &shared });
+    defer handle.cancel();
+
+    try shared.ready.wait();
+
+    var timer = time.Stopwatch.start();
+    shared.handle.cancel();
+    try std.testing.expect(shared.handle.isFinished());
+    try std.testing.expect(timer.read().toMilliseconds() <= 500);
+    try std.testing.expectError(error.Canceled, handle.join());
+}
+
+test "runtime: CancelHandle.requestCancel racing the task's completion" {
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
+    defer runtime.deinit();
+
+    const quickTask = struct {
+        fn call(finished: *std.atomic.Value(usize)) void {
+            _ = finished.fetchAdd(1, .release);
+        }
+    }.call;
+
+    const n = 1000;
+    var finished: std.atomic.Value(usize) = .init(0);
+    for (0..n) |_| {
+        var handle = try runtime.spawn(quickTask, .{&finished});
+        var cancel_handle = handle.cancelHandle();
+        // The handle's reference is now the only one keeping the task alive
+        // past its completion.
+        handle.detach();
+        cancel_handle.requestCancel();
+        cancel_handle.deinit();
+    }
+
+    while (finished.load(.acquire) < n) try runtime.sleep(.fromMilliseconds(1));
+}
+
+test "runtime: CancelHandle.requestCancel is idempotent" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const cleaningTask = struct {
+        fn call(rt: *Runtime) !void {
+            rt.sleep(.fromMilliseconds(1000)) catch |err| {
+                // Cleanup through a cancellation point is not canceled again.
+                try rt.sleep(.fromMilliseconds(1));
+                return err;
+            };
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    var handle = try runtime.spawn(cleaningTask, .{runtime});
+    defer handle.cancel();
+    var cancel_handle = handle.cancelHandle();
+    defer cancel_handle.deinit();
+
+    try runtime.sleep(.fromMilliseconds(10));
+    for (0..300) |_| cancel_handle.requestCancel();
+
+    try std.testing.expectError(error.Canceled, handle.join());
+}
+
+test "runtime: CancelHandle.requestCancel from a thread outside the runtime" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const sleepingTask = struct {
+        fn call(rt: *Runtime) !void {
+            try rt.sleep(.fromMilliseconds(1000));
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    var handle = try runtime.spawn(sleepingTask, .{runtime});
+    defer handle.cancel();
+    var cancel_handle = handle.cancelHandle();
+    defer cancel_handle.deinit();
+
+    try runtime.sleep(.fromMilliseconds(10));
+    const thread = try std.Thread.spawn(.{}, CancelHandle.requestCancel, .{cancel_handle});
+    thread.join();
+
+    try std.testing.expectError(error.Canceled, handle.join());
+}
+
+test "runtime: cancel keeps the caller's own cancellation" {
+    const Event = @import("sync/Event.zig");
+
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const slowCleanupTask = struct {
+        fn call(rt: *Runtime, cleaned_up: *bool) !void {
+            rt.sleep(.fromMilliseconds(1000)) catch |err| {
+                rt.beginShield();
+                defer rt.endShield();
+                try rt.sleep(.fromMilliseconds(50));
+                cleaned_up.* = true;
+                return err;
+            };
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    const cancelingTask = struct {
+        fn call(rt: *Runtime, ready: *Event, use_cancel_handle: bool) !void {
+            var cleaned_up = false;
+            var target = try rt.spawn(slowCleanupTask, .{ rt, &cleaned_up });
+            defer target.cancel();
+
+            ready.set();
+            // This task is canceled while it waits here.
+            if (use_cancel_handle) {
+                var cancel_handle = target.cancelHandle();
+                defer cancel_handle.deinit();
+                cancel_handle.cancel();
+            } else {
+                target.cancel();
+            }
+            if (!cleaned_up) return error.TestUnexpectedResult;
+
+            try checkCancel();
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    for ([_]bool{ false, true }) |use_cancel_handle| {
+        var ready: Event = .init;
+        var handle = try runtime.spawn(cancelingTask, .{ runtime, &ready, use_cancel_handle });
+        defer handle.cancel();
+
+        try ready.wait();
+        try runtime.sleep(.fromMilliseconds(10));
+        handle.requestCancel();
+        try std.testing.expectError(error.Canceled, handle.join());
+    }
 }
 
 test "runtime: recancel re-arms a delivered cancellation" {

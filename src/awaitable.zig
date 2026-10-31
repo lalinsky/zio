@@ -50,6 +50,14 @@ pub const Awaitable = struct {
         }
     }
 
+    /// Request cancellation once: further requests are no-ops.
+    pub fn requestCancel(self: *Awaitable) void {
+        switch (self.kind) {
+            .task => AnyTask.fromAwaitable(self).requestCancel(),
+            .blocking_task => AnyBlockingTask.fromAwaitable(self).cancel(),
+        }
+    }
+
     /// Registers a waiter to be notified when the awaitable completes, or
     /// claims the select if it already did.
     /// This is part of the Future protocol for select().
