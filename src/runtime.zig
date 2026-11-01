@@ -894,13 +894,14 @@ pub const Executor = struct {
             if (migrates) self.updateBacklog(!self.run_queue.isEmpty());
             if (has_work) {
                 try self.loop.poll(.zero);
+                self.drainDispatched();
             } else {
                 try self.parkAndSearch(check_ready);
             }
 
             // Retune the tick budget from this batch. Skipped when we may have
             // slept in parkAndSearch — sleep time would poison the estimate.
-            // The cached snapshot: every path above ends in a `loop.poll`,
+            // The cached snapshot: every path above runs a `loop.poll`,
             // which refreshes it on return.
             const tick_now = self.loop.now();
             // Skip the retune on the fresh-drain entry pass: tick_task_count
