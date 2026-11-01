@@ -980,7 +980,7 @@ pub fn errnoToSendError(err: E) SendError {
             return switch (err) {
                 .SUCCESS => unreachable,
                 .AGAIN => error.WouldBlock,
-                .ACCES => error.AccessDenied,
+                .ACCES, .PERM => error.AccessDenied,
                 .CONNRESET => error.ConnectionResetByPeer,
                 .CONNABORTED => error.ConnectionAborted,
                 .TIMEDOUT => error.ConnectionTimedOut,
