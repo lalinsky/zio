@@ -682,6 +682,8 @@ pub const IpAddress = extern union {
         }
 
         try socket.bind(.{ .ip = self });
+        // Accepted sockets inherit TCP_NODELAY from the listener.
+        socket.setNoDelay(true) catch {};
         try socket.listen(options.kernel_backlog);
 
         return .{ .socket = socket };
@@ -1225,6 +1227,11 @@ pub const Server = struct {
 
     /// Accepts the next incoming connection.
     ///
+    /// TCP connections come with Nagle's algorithm disabled. They inherit
+    /// that from the listener, which `IpAddress.listen` sets up; a listener
+    /// created some other way needs `setNoDelay` on the listening socket
+    /// before connections arrive.
+    ///
     /// `ConnectionAborted` is not reported: it means a connection sitting in the
     /// accept queue went away before we got to it, which says nothing about the
     /// listener, so the next connection is taken instead. The timeout covers the
@@ -1243,7 +1250,6 @@ pub const Server = struct {
                 else => |e| return e,
             };
             const address: Address = .fromPosix(&peer_addr.any, peer_addr_len);
-            if (address.getType() == .ip) os.net.setNoDelay(handle, true) catch {};
             return .{ .socket = .{ .handle = handle, .address = address } };
         }
     }

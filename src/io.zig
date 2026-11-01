@@ -2201,6 +2201,10 @@ fn netListenIpImpl(_: ?*anyopaque, address: *const Io.net.IpAddress, options: Io
     }
 
     socket.bind(.{ .ip = zio_addr }) catch |err| return bindErrToListenErr(err);
+    // Accepted sockets inherit TCP_NODELAY from the listener.
+    if (options.mode == .stream and options.protocol == .tcp) {
+        socket.setNoDelay(true) catch {};
+    }
     socket.listen(options.kernel_backlog) catch |err| return listenErrToListenErr(err);
 
     return .{
@@ -2235,11 +2239,6 @@ fn netAcceptImpl(_: ?*anyopaque, server: Io.net.Socket.Handle, _: Io.net.Server.
             error.Unexpected,
             => return error.Unexpected,
         };
-
-        switch (peer_addr.any.family) {
-            os_net.AF.INET, os_net.AF.INET6 => os_net.setNoDelay(handle, true) catch {},
-            else => {},
-        }
 
         return .{
             .handle = handle,
