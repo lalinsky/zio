@@ -868,13 +868,27 @@ pub const Executor = struct {
         self.tick_started_at = Timestamp.now(.monotonic);
 
         while (true) {
-            // Process ready coroutines
-            while (self.getNextTask()) |next_task| {
-                updateParentContext(next_task, &self.main_task.coro.context);
-                self.current_task = next_task;
-                next_task.coro.step();
-                self.current_task = null;
-                self.processCleanup();
+            // Process ready coroutines. When the ring runs dry with budget
+            // left, completions that finished since the last drain (ops that
+            // completed inside loop.add) are more work for this tick: drain
+            // them and keep going instead of polling first.
+            while (true) {
+                while (self.getNextTask()) |next_task| {
+                    updateParentContext(next_task, &self.main_task.coro.context);
+                    self.current_task = next_task;
+                    next_task.coro.step();
+                    self.current_task = null;
+                    self.processCleanup();
+                }
+                if (!self.tickBudgetLeft() or self.loop.state.dispatched.empty()) break;
+                // Overflow tasks became runnable earlier; checkLocalWork
+                // takes them before the dispatched queue.
+                if (!self.run_queue.overflow.isEmpty()) break;
+                self.drainDispatched();
+                if (self.run_queue.isEmpty()) break;
+                // A ready main task returns after the next poll, not after
+                // the tasks drained with it.
+                if (check_ready and self.main_task.state.load(.acquire).tag == .ready) break;
             }
 
             // Quanta spent this cycle mean tasks ran here: a busy executor
