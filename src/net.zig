@@ -1244,7 +1244,11 @@ pub const Server = struct {
             var peer_addr_len: os.net.socklen_t = @sizeOf(Address);
 
             var op = ev.NetAccept.init(self.socket.handle, &peer_addr.any, &peer_addr_len);
-            try timedWaitForIo(&op.c, deadline);
+            if (deadline == .none) {
+                try common.waitForIoPreferInline(&op.c);
+            } else {
+                try timedWaitForIo(&op.c, deadline);
+            }
             const handle = op.getResult() catch |err| switch (err) {
                 error.ConnectionAborted => continue,
                 else => |e| return e,

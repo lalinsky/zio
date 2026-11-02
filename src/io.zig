@@ -2222,7 +2222,7 @@ fn netAcceptImpl(_: ?*anyopaque, server: Io.net.Socket.Handle, _: Io.net.Server.
         var peer_addr_len: os_net.socklen_t = @sizeOf(zio_net.Address);
 
         var op = ev.NetAccept.init(stdIoHandleToZio(server), &peer_addr.any, &peer_addr_len);
-        try waitForIo(&op.c);
+        try common.waitForIoPreferInline(&op.c);
         const handle = op.getResult() catch |err| switch (err) {
             error.ConnectionAborted => continue,
             error.WouldBlock => return error.WouldBlock,

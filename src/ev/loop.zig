@@ -613,6 +613,14 @@ pub const Loop = struct {
         return self.state.dispatched.pop();
     }
 
+    /// Take `completion` out of the dispatched queue if it is the last one
+    /// there, as a null-callback completion that finished inside `add` is.
+    /// Returns whether it was.
+    pub fn takeLastDispatched(self: *Loop, completion: *Completion) bool {
+        if (self.state.dispatched.tail != completion) return false;
+        return self.state.dispatched.remove(completion);
+    }
+
     pub fn stopped(self: *const Loop) bool {
         return self.state.stopped;
     }
