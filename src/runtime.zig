@@ -566,6 +566,10 @@ pub const Executor = struct {
     // executor forces an I/O poll.
     tick_task_count: u32 = 0,
 
+    // Spawns made by the running task since the executor last switched tasks;
+    // reset on every switch, see registerTask.
+    spawn_streak: u32 = 0,
+
     // How many quanta fit in tick_target_ns, re-estimated after each tick from
     // task_ns_ewma. Counting against this approximates a time-based poll
     // interval without reading the clock on the hot path.
@@ -853,6 +857,7 @@ pub const Executor = struct {
         // no-suspend region.
         self.current_task = null;
         defer self.current_task = &self.main_task;
+        defer self.spawn_streak = 0;
 
         // Process deferred cleanup (e.g. main task's park/reschedule)
         self.processCleanup();
@@ -872,6 +877,7 @@ pub const Executor = struct {
             while (self.getNextTask()) |next_task| {
                 updateParentContext(next_task, &self.main_task.coro.context);
                 self.current_task = next_task;
+                self.spawn_streak = 0;
                 next_task.coro.step();
                 self.current_task = null;
                 self.processCleanup();
@@ -1455,6 +1461,7 @@ pub const Executor = struct {
         // path it is set to the target task just before the switch; on the fall-back
         // path it stays null and the run loop keeps it null until it steps a task.
         self.current_task = null;
+        self.spawn_streak = 0;
         if (self.getNextTask()) |next_task| {
             updateParentContext(next_task, &self.main_task.coro.context);
             self.current_task = next_task;
