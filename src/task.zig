@@ -797,8 +797,8 @@ pub fn TaskLocal(comptime T: type) type {
 const getPlacementExecutor = @import("runtime.zig").getPlacementExecutor;
 const Placement = @import("runtime.zig").Placement;
 
-/// Ready-queue length past which a spawning task yields to let new tasks start.
-const spawn_yield_threshold = 13;
+/// Spawns a task may make without switching out before it yields.
+const spawn_streak_limit = 13;
 
 /// Register a task with the runtime and schedule it for execution.
 /// Increments its reference count, adds the task to the runtime's task list,
@@ -813,13 +813,15 @@ pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
 
     if (runtime.getCurrentExecutorOrNull()) |current_executor| {
         if (current_executor.runtime == task.runtime) {
-            // Backpressure for spawn loops: once the ready queue grows past the
-            // threshold, yield so new tasks start running instead of piling up
-            // (distinct from maybeYield's time-slice check). Only needed when
-            // no other executor can steal the backlog.
-            if (!rt.stealingActive() and current_executor.run_queue.len() >= spawn_yield_threshold) {
+            // Spawn backpressure: lets the new tasks start before the spawner
+            // piles up more. Only needed when no other executor can steal the
+            // backlog.
+            if (!rt.stealingActive()) {
                 if (current_executor.current_task) |spawner| {
-                    spawner.yield(.reschedule, .no_cancel);
+                    current_executor.spawn_streak += 1;
+                    if (current_executor.spawn_streak >= spawn_streak_limit) {
+                        spawner.yield(.reschedule, .no_cancel);
+                    }
                 }
             }
         }
