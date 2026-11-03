@@ -1884,6 +1884,45 @@ test "File: reading a directory returns IsDir" {
     try std.testing.expectError(error.IsDir, file.read(&buffer, 0));
 }
 
+test "File: opening a directory with allow_directory=false returns IsDir" {
+    var t = try TestDirFixture.init();
+    defer t.deinit();
+
+    if (builtin.os.tag == .windows) {
+        try std.testing.expectError(error.AccessDenied, t.dir.openFile(".", .{ .allow_directory = false }));
+    } else {
+        try std.testing.expectError(error.IsDir, t.dir.openFile(".", .{ .allow_directory = false }));
+    }
+}
+
+test "File: opening a regular file with allow_directory=false works" {
+    var t = try TestDirFixture.init();
+    defer t.deinit();
+
+    var created = try t.dir.createFile("file.txt", .{});
+    created.close();
+
+    var file = try t.dir.openFile("file.txt", .{ .allow_directory = false });
+    defer file.close();
+}
+
+test "File: opening a directory with allow_directory=false and resolve_beneath returns IsDir" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var t = try TestDirFixture.init();
+    defer t.deinit();
+
+    // This goes through openat2(), which has its own success path.
+    if (t.dir.openFile(".", .{ .allow_directory = false, .resolve_beneath = true })) |file| {
+        file.close();
+        return error.TestUnexpectedResult;
+    } else |err| switch (err) {
+        error.IsDir => {},
+        error.Unsupported => {}, // openat2 is missing on kernels older than 5.6
+        else => return err,
+    }
+}
+
 test "File: basic read and write" {
     var t = try TestDirFixture.init();
     defer t.deinit();
