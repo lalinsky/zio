@@ -111,8 +111,9 @@ pub const FileOpenMode = enum {
 pub const FileOpenFlags = struct {
     mode: FileOpenMode = .read_only,
     nonblocking: bool = false,
-    /// When false, opening a directory path returns error.IsDir.
-    /// On Windows this is enforced without extra syscalls (no FILE_FLAG_BACKUP_SEMANTICS).
+    /// When false, opening a directory path fails: error.IsDir on POSIX,
+    /// error.AccessDenied on Windows, where the open fails without
+    /// FILE_FLAG_BACKUP_SEMANTICS.
     /// On POSIX an extra fstat is required; defaults to true to avoid the overhead.
     allow_directory: bool = true,
     /// When false, if the final path component is a symlink the open fails with
@@ -676,6 +677,37 @@ pub const FileSetTimestampsError = error{
     Unexpected,
 };
 
+/// Enforces the allow_directory flag after a successful open.
+///
+/// On POSIX, opening a directory in read-only mode succeeds, so the kernel
+/// gives us no error to report. The only way to know what we opened is to
+/// ask the file descriptor.
+///
+/// The caller must leave its cancelable syscall region before calling this:
+/// fstat() opens its own region and cancelable syscalls do not nest.
+fn enforceAllowDirectory(fd: fd_t, flags: FileOpenFlags) FileOpenError!fd_t {
+    if (flags.allow_directory) return fd;
+
+    const info = fstat(fd) catch |err| {
+        // The close error does not matter here, the open error does.
+        close(fd) catch {};
+        return switch (err) {
+            error.AccessDenied => error.AccessDenied,
+            error.Canceled => error.Canceled,
+            error.SystemResources => error.SystemResources,
+            error.Unexpected => error.Unexpected,
+            // The other errors cannot happen for a freshly opened fd.
+            else => unexpectedError(err),
+        };
+    };
+
+    if (info.kind == .directory) {
+        close(fd) catch {};
+        return error.IsDir;
+    }
+    return fd;
+}
+
 /// Open an existing file using openat() syscall
 pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: FileOpenFlags) FileOpenError!fd_t {
     if (builtin.os.tag == .windows) {
@@ -773,7 +805,10 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
             while (true) {
                 const rc = posix.sys.openat2(dir, path_z.ptr, &how);
                 switch (posix.errno(rc)) {
-                    .SUCCESS => return @intCast(rc),
+                    .SUCCESS => {
+                        sc.finish();
+                        return enforceAllowDirectory(@intCast(rc), flags);
+                    },
                     .INTR => {
                         try sc.checkCancel();
                         continue;
@@ -810,7 +845,8 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
                         std.log.warn("failed to enable direct I/O (F_NOCACHE) on fd {d}: {s}, caching remains enabled", .{ opened_fd, @tagName(err) });
                     }
                 }
-                return opened_fd;
+                sc.finish();
+                return enforceAllowDirectory(opened_fd, flags);
             },
             // EINTR is either the cancellation SIGURG (checkCancel -> Canceled) or
             // a spurious/foreign wake, in which case we retry the open.

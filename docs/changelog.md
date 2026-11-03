@@ -42,6 +42,10 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Opening a directory with `allow_directory = false` now fails on POSIX with
+  `error.IsDir`, instead of returning a file handle. On Windows it still fails with
+  `error.AccessDenied`.
+
 - `std.Io` `sendManyTimeout` lost the count of messages already sent when it timed out or
   was canceled, and restarted the timeout for each message.
 
