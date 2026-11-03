@@ -99,6 +99,10 @@ pub fn capability(comptime op: Op) Support {
         // These opcodes postdate the minimum kernel accepted by ring setup and
         // are resolved from IORING_REGISTER_PROBE at runtime.
         .file_set_size, .process_wait => .maybe,
+        // The ring cannot tell a directory from a file, so an open with
+        // allow_directory = false needs the fstat() in fs.openat() and goes to
+        // the thread pool instead.
+        .file_open => .maybe,
         .file_set_permissions,
         .file_set_owner,
         .file_set_timestamps,
@@ -139,7 +143,6 @@ pub fn capability(comptime op: Op) Support {
         .net_shutdown,
         .net_close,
         .net_send_file,
-        .file_open,
         .file_create,
         .file_close,
         .file_read,
@@ -493,13 +496,16 @@ fn probeAndStoreFeatures(ring: *linux.IoUring, shared_state: *SharedState) void 
     );
 }
 
-pub fn supports(self: *const Self, comptime op: Op, _: *op.toType()) bool {
+pub fn supports(self: *const Self, comptime op: Op, data: *op.toType()) bool {
     comptime std.debug.assert(capability(op) == .maybe);
     if (comptime op == .file_set_size) {
         return self.shared_state.ftruncate_support.load(.monotonic) == .yes;
     }
     if (comptime op == .process_wait) {
         return self.shared_state.waitid_support.load(.monotonic) == .yes;
+    }
+    if (comptime op == .file_open) {
+        return data.flags.allow_directory;
     }
     @compileError("unhandled runtime io_uring capability: " ++ @tagName(op));
 }
