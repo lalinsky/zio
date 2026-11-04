@@ -459,7 +459,7 @@ test "Pipe: write and read" {
     var write_iovecs: [1]fs.iovec_const = undefined;
     const write_buf = WriteBuf.fromSlice(write_data, &write_iovecs);
     var stream_write: FileWriteStreaming = .init(pipefd[1], write_buf);
-    stream_write.pollable = true;
+    stream_write.streaming_route = .pollable;
     loop.add(&stream_write.c);
     try loop.run();
     const written = try stream_write.getResult();
@@ -470,7 +470,7 @@ test "Pipe: write and read" {
     var read_iovecs: [1]fs.iovec = undefined;
     const read_buf = ReadBuf.fromSlice(&read_data, &read_iovecs);
     var stream_read: FileReadStreaming = .init(pipefd[0], read_buf);
-    stream_read.pollable = true;
+    stream_read.streaming_route = .pollable;
     loop.add(&stream_read.c);
     try loop.run();
     const read_len = try stream_read.getResult();

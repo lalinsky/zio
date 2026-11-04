@@ -1362,13 +1362,31 @@ pub const NetSendMmsg = struct {
     }
 };
 
-/// Result of a file open/create: the new fd plus whether it is pollable
-/// (non-seekable). The pollable verdict is determined when the backend opens the
-/// file via the thread pool (always false on backends with native open/streaming
-/// and on Windows), letting callers seed streaming ops without re-probing.
+/// How a streaming (current-position) read or write on a handle is carried
+/// out. Decided when zio opens the handle, or by probing a handle it did not
+/// open the first time a streaming op is submitted on it.
+pub const StreamingRoute = enum(u8) {
+    /// A non-seekable handle (pipe, socket, tty) the event loop drives: by
+    /// readiness on POSIX, by an overlapped operation at offset zero on IOCP.
+    pollable,
+    /// A seekable file the event loop drives itself at the file's own position.
+    /// Only the IOCP backend produces it, for files it opened and associated
+    /// with its completion port; other backends send seekable files to the
+    /// thread pool.
+    loop_file,
+    /// Blocking read/write on the thread pool: seekable files on backends
+    /// without a native path for them, and handles the loop cannot drive, such
+    /// as inherited standard handles on Windows.
+    thread_pool,
+};
+
+/// Result of a file open/create: the new fd plus its streaming route. The
+/// route is determined when the backend opens the file via the thread pool
+/// (`thread_pool` on backends with a native open), letting callers seed
+/// streaming ops without re-probing.
 pub const FileOpenResult = struct {
     fd: fs.fd_t,
-    pollable: bool = false,
+    streaming_route: StreamingRoute = .thread_pool,
 };
 
 /// State for file/dir operations delegated to the thread pool. This is Loop
@@ -1535,12 +1553,10 @@ pub const FileReadStreaming = struct {
     route: RouteData(.file_read_streaming) = .none,
     handle: fs.fd_t,
     buffer: ReadBuf,
-    /// Whether `handle` is pollable (non-seekable). `null` until classified by
-    /// capability resolution on first submission; backends with a readiness
-    /// path use the poll path when true and the thread pool when false. Callers
-    /// may seed a cached value to skip re-classification, and may read it back
-    /// afterwards.
-    pollable: ?bool = null,
+    /// How the operation reaches the OS. `null` until classified by capability
+    /// resolution on first submission. Callers may seed a value they know from
+    /// opening the handle to skip re-classification.
+    streaming_route: ?StreamingRoute = null,
 
     pub const Error = fs.FileReadError || Cancelable;
 
@@ -1565,12 +1581,10 @@ pub const FileWriteStreaming = struct {
     route: RouteData(.file_write_streaming) = .none,
     handle: fs.fd_t,
     buffer: WriteBuf,
-    /// Whether `handle` is pollable (non-seekable). `null` until classified by
-    /// capability resolution on first submission; backends with a readiness
-    /// path use the poll path when true and the thread pool when false. Callers
-    /// may seed a cached value to skip re-classification, and may read it back
-    /// afterwards.
-    pollable: ?bool = null,
+    /// How the operation reaches the OS. `null` until classified by capability
+    /// resolution on first submission. Callers may seed a value they know from
+    /// opening the handle to skip re-classification.
+    streaming_route: ?StreamingRoute = null,
 
     pub const Error = fs.FileWriteError || Cancelable;
 

@@ -15,6 +15,7 @@ const FileRead = @import("../completion.zig").FileRead;
 const FileWrite = @import("../completion.zig").FileWrite;
 const FileReadStreaming = @import("../completion.zig").FileReadStreaming;
 const FileWriteStreaming = @import("../completion.zig").FileWriteStreaming;
+const StreamingRoute = @import("../completion.zig").StreamingRoute;
 const FileSync = @import("../completion.zig").FileSync;
 const FileSetSize = @import("../completion.zig").FileSetSize;
 const FileSyncRange = @import("../completion.zig").FileSyncRange;
@@ -126,26 +127,30 @@ pub fn probePollable(handle: fs.fd_t) bool {
     }
 }
 
-/// Resolve and cache whether a streaming operation can use a readiness-based
-/// backend. Unknown Windows handles are deliberately delegated: unlike handles
-/// opened by zio, they are not known to be associated with our IOCP port.
+/// The streaming route of a handle zio did not open, probed on first use. On
+/// Windows it is never driven by the loop: unlike a handle opened by zio, it
+/// is not known to be associated with the IOCP port.
+pub fn probeStreamingRoute(handle: fs.fd_t) StreamingRoute {
+    if (builtin.os.tag == .windows) return .thread_pool;
+    return if (probePollable(handle)) .pollable else .thread_pool;
+}
+
+/// Resolve and cache how a streaming operation reaches the OS, and report
+/// whether the backend drives it itself (true) or delegates it to the thread
+/// pool (false).
 pub fn resolveStreamingSupport(data: anytype) bool {
-    if (data.pollable) |pollable| return pollable;
-
-    if (builtin.os.tag == .windows) {
-        data.pollable = false;
-        return false;
-    }
-
-    const pollable = probePollable(data.handle);
-    data.pollable = pollable;
-    return pollable;
+    const route = data.streaming_route orelse blk: {
+        const route = probeStreamingRoute(data.handle);
+        data.streaming_route = route;
+        break :blk route;
+    };
+    return route != .thread_pool;
 }
 
 pub fn handleFileOpen(c: *Completion, allocator: std.mem.Allocator) void {
     const data = c.cast(FileOpen);
     if (fs.openat(allocator, data.dir, data.path, data.flags)) |fd| {
-        c.setResult(.file_open, .{ .fd = fd, .pollable = probePollable(fd) });
+        c.setResult(.file_open, .{ .fd = fd, .streaming_route = if (probePollable(fd)) .pollable else .thread_pool });
     } else |err| {
         c.setError(err);
     }
@@ -155,7 +160,7 @@ pub fn handleFileOpen(c: *Completion, allocator: std.mem.Allocator) void {
 pub fn handleFileCreate(c: *Completion, allocator: std.mem.Allocator) void {
     const data = c.cast(FileCreate);
     if (fs.createat(allocator, data.dir, data.path, data.flags)) |fd| {
-        c.setResult(.file_create, .{ .fd = fd, .pollable = probePollable(fd) });
+        c.setResult(.file_create, .{ .fd = fd, .streaming_route = if (probePollable(fd)) .pollable else .thread_pool });
     } else |err| {
         c.setError(err);
     }
@@ -341,7 +346,7 @@ pub fn fileOpenWork(work: *Work) void {
 
     // If the file was successfully opened, give the backend a chance to post-process the handle
     if (@hasDecl(@TypeOf(loop.backend), "postProcessFileHandle")) {
-        loop.backend.postProcessFileHandle(file_open.result_private_do_not_touch.fd) catch |err| {
+        loop.backend.postProcessFileHandle(&file_open.result_private_do_not_touch) catch |err| {
             // Failed to post-process - close the file and set error
             fs.close(file_open.result_private_do_not_touch.fd) catch {};
             file_open.c.has_result = false;
@@ -367,7 +372,7 @@ pub fn fileCreateWork(work: *Work) void {
 
     // If the file was successfully created, give the backend a chance to post-process the handle
     if (@hasDecl(@TypeOf(loop.backend), "postProcessFileHandle")) {
-        loop.backend.postProcessFileHandle(file_create.result_private_do_not_touch.fd) catch |err| {
+        loop.backend.postProcessFileHandle(&file_create.result_private_do_not_touch) catch |err| {
             // Failed to post-process - close the file and set error
             fs.close(file_create.result_private_do_not_touch.fd) catch {};
             file_create.c.has_result = false;
