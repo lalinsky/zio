@@ -801,9 +801,12 @@ const Placement = @import("runtime.zig").Placement;
 const spawn_streak_limit = 13;
 
 /// Register a task with the runtime and schedule it for execution.
-/// Increments its reference count, adds the task to the runtime's task list,
-/// and schedules it on its executor.
 /// Returns error.RuntimeShutdown if the runtime is shutting down.
+///
+/// Once `scheduleTask` returns, another executor can run the task to the end
+/// and free it, and for a group task the caller holds no reference of its own.
+/// So nothing after that line reads the task. `rt` is the task's runtime:
+/// `spawnTask` creates the task on an executor of `rt`.
 pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
     if (rt.shutting_down.load(.acquire)) {
         return error.RuntimeShutdown;
@@ -812,7 +815,7 @@ pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
     Executor.scheduleTask(task);
 
     if (runtime.getCurrentExecutorOrNull()) |current_executor| {
-        if (current_executor.runtime == task.runtime) {
+        if (current_executor.runtime == rt) {
             // Spawn backpressure: lets the new tasks start before the spawner
             // piles up more. Only needed when no other executor can steal the
             // backlog.
