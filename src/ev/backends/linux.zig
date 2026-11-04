@@ -40,8 +40,9 @@ pub fn Backend(comptime mode: Mode) type {
         /// timeouts), and the kernel rebases an absolute CLOCK_REALTIME timer
         /// across a clock step, so neither needs a cap.
         pub const wall_timer_modes: [3]WallTimerMode = .{ .fallback, .native, .native };
-        // In auto mode a delegated open means epoll was selected; probePollable
-        // applies O_NONBLOCK after opening, matching the old epoll behavior.
+        // In auto mode a delegated open usually means epoll was selected, but
+        // io_uring also delegates an open with allow_directory = false;
+        // probePollable applies O_NONBLOCK after opening either way.
         pub const supports_nonblocking_file_io = mode == .io_uring;
         pub const supports_recv_dontwait = true;
         pub const supports_recvmmsg = mode == .epoll;
