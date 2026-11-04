@@ -2500,7 +2500,7 @@ fn statToFileStat(stat_buf: posix.system.Stat) FileStatInfo {
 /// The result saturates at the limits of i64 instead of overflowing: a file can
 /// have a timestamp outside the range of i64 nanoseconds (the year 2262 and
 /// later, or before 1677).
-fn nanosFromTimestamp(sec: i64, nsec: i64) i64 {
+pub fn nanosFromTimestamp(sec: i64, nsec: i64) i64 {
     return sec *| std.time.ns_per_s +| nsec;
 }
 

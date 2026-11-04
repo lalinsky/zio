@@ -1970,7 +1970,14 @@ fn statxToFileStat(statx: linux.Statx) fs.FileStatInfo {
 }
 
 fn statxTimeToNanos(ts: linux.statx_timestamp) i64 {
-    return @as(i64, ts.sec) * std.time.ns_per_s + ts.nsec;
+    return fs.nanosFromTimestamp(ts.sec, ts.nsec);
+}
+
+test "statxToFileStat: a timestamp past the i64 range does not overflow" {
+    var statx: linux.Statx = std.mem.zeroes(linux.Statx);
+    statx.atime.sec = 16_000_000_000;
+    const info = statxToFileStat(statx);
+    try std.testing.expectEqual(std.math.maxInt(i64), info.atime);
 }
 
 fn storeRecvMmsgResult(c: *Completion, res: i32, _: u32) void {
