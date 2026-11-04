@@ -2497,11 +2497,13 @@ fn statToFileStat(stat_buf: posix.system.Stat) FileStatInfo {
 
 /// Converts a timestamp to nanoseconds since the Unix epoch.
 ///
-/// The result saturates at the limits of i64 instead of overflowing: a file can
+/// The result is clamped to the limits of i64 instead of overflowing: a file can
 /// have a timestamp outside the range of i64 nanoseconds (the year 2262 and
-/// later, or before 1677).
+/// later, or before 1677). The calculation is done in i128 and clamped once, so
+/// the nanoseconds are not kept as an offset after the clamp.
 pub fn nanosFromTimestamp(sec: i64, nsec: i64) i64 {
-    return sec *| std.time.ns_per_s +| nsec;
+    const ns: i128 = @as(i128, sec) * std.time.ns_per_s + nsec;
+    return @intCast(std.math.clamp(ns, std.math.minInt(i64), std.math.maxInt(i64)));
 }
 
 fn timespecToNanos(ts: posix.system.timespec) i64 {
@@ -2542,6 +2544,12 @@ test "nanosFromTimestamp: a timestamp past the i64 range does not overflow" {
     // The year 2477 does not fit into i64 nanoseconds.
     try std.testing.expectEqual(std.math.maxInt(i64), nanosFromTimestamp(16_000_000_000, 0));
     try std.testing.expectEqual(std.math.minInt(i64), nanosFromTimestamp(-16_000_000_000, 0));
+}
+
+test "nanosFromTimestamp: a timestamp past the i64 range is clamped exactly" {
+    // The nanoseconds must not survive the clamp as an offset.
+    try std.testing.expectEqual(std.math.maxInt(i64), nanosFromTimestamp(16_000_000_000, 500_000_000));
+    try std.testing.expectEqual(std.math.minInt(i64), nanosFromTimestamp(-16_000_000_000, 500_000_000));
 }
 
 pub fn errnoToFileStatError(errno: posix.system.E) FileStatError {
