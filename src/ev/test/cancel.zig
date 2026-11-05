@@ -321,7 +321,7 @@ test "cancel: multiple timers, cancel one" {
 
 test "cancel: work after completion is no-op" {
     var thread_pool: ev.ThreadPool = undefined;
-    try thread_pool.init(std.testing.allocator, .{
+    try thread_pool.init(.{
         .min_threads = 1,
         .max_threads = 1,
     });
@@ -330,8 +330,8 @@ test "cancel: work after completion is no-op" {
     var loop: Loop = undefined;
     try loop.init(.{ .thread_pool = &thread_pool });
     defer loop.deinit();
-    // Join the pool's threads before the loop is torn down: completion
-    // callbacks wake the loop, so the loop must outlive the pool's threads.
+    // Stop the pool before the loop is torn down: completion
+    // callbacks wake the loop, so the loop must outlive the pool's workers.
     defer thread_pool.stop();
 
     const TestFn = struct {
@@ -363,7 +363,7 @@ test "cancel: work before run" {
     var blocker_event: os.ResetEvent = .init();
 
     var thread_pool: ev.ThreadPool = undefined;
-    try thread_pool.init(std.testing.allocator, .{
+    try thread_pool.init(.{
         .min_threads = 1,
         .max_threads = 1,
     });
@@ -372,8 +372,8 @@ test "cancel: work before run" {
     var loop: Loop = undefined;
     try loop.init(.{ .thread_pool = &thread_pool });
     defer loop.deinit();
-    // Teardown order (defers run LIFO): unblock the worker, then join the pool's
-    // threads while the loop is still alive (completion callbacks wake the loop),
+    // Teardown order (defers run LIFO): unblock the worker, then wait for the pool's
+    // workers to exit while the loop is still alive (completion callbacks wake the loop),
     // then deinit the loop, then free the pool.
     defer thread_pool.stop();
     defer blocker_event.set();
@@ -431,7 +431,7 @@ test "cancel: work double cancel is idempotent" {
     var blocker_event: os.ResetEvent = .init();
 
     var thread_pool: ev.ThreadPool = undefined;
-    try thread_pool.init(std.testing.allocator, .{
+    try thread_pool.init(.{
         .min_threads = 1,
         .max_threads = 1,
     });
@@ -440,8 +440,8 @@ test "cancel: work double cancel is idempotent" {
     var loop: Loop = undefined;
     try loop.init(.{ .thread_pool = &thread_pool });
     defer loop.deinit();
-    // Teardown order (defers run LIFO): unblock the worker, then join the pool's
-    // threads while the loop is still alive (completion callbacks wake the loop),
+    // Teardown order (defers run LIFO): unblock the worker, then wait for the pool's
+    // workers to exit while the loop is still alive (completion callbacks wake the loop),
     // then deinit the loop, then free the pool.
     defer thread_pool.stop();
     defer blocker_event.set();
@@ -499,7 +499,7 @@ test "cancel: queued work via thread pool cancel" {
     var blocker_event: os.ResetEvent = .init();
 
     var thread_pool: ThreadPool = undefined;
-    try thread_pool.init(std.testing.allocator, .{
+    try thread_pool.init(.{
         .min_threads = 1,
         .max_threads = 1,
     });

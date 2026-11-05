@@ -1818,7 +1818,7 @@ pub const Runtime = struct {
         if (comptime have_sig_pipe) sig_pipe_guard.acquire();
         errdefer if (comptime have_sig_pipe) sig_pipe_guard.release();
 
-        try self.thread_pool.init(allocator, options.thread_pool);
+        try self.thread_pool.init(options.thread_pool);
         errdefer self.thread_pool.deinit();
 
         try self.executors.ensureTotalCapacity(allocator, num_executors);
@@ -1968,10 +1968,10 @@ pub const Runtime = struct {
             self.metrics_monitor = null;
         }
 
-        // Stop and join the thread pool first, while all executor loops are
-        // still alive. Thread-pool completion callbacks wake the owning loop
-        // (writing its eventfd), so the pool's worker threads must be fully
-        // joined before any loop is torn down. stop() leaves the pool object
+        // Stop the thread pool first, while all executor loops are still
+        // alive. Thread-pool completion callbacks wake the owning loop
+        // (writing its eventfd), so the pool's workers must all be done with
+        // it before any loop is torn down. stop() leaves the pool object
         // valid (in shutdown mode), so any late submissions from executors being
         // shut down are safely dropped.
         self.thread_pool.stop();
@@ -1983,7 +1983,7 @@ pub const Runtime = struct {
         // until it finishes, so the pool's count of stacks in use covers them.
         std.debug.assert(self.stack_pool.in_use == 0);
 
-        // Clean up ThreadPool (worker threads already joined by stop()).
+        // Clean up ThreadPool (its workers were already done in stop()).
         self.thread_pool.deinit();
 
         // Worker executors clean themselves up via defer in runWorker.

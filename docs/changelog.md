@@ -18,6 +18,8 @@ All notable changes to this project will be documented in this file.
 - `Socket.sendMany` now sends datagrams in batches with `sendmmsg` on Linux, FreeBSD
   and NetBSD, instead of one `sendmsg` and event loop round trip per datagram.
 
+- `ev.ThreadPool.init` no longer takes an allocator.
+
 - Spawning and finishing a task no longer updates a counter shared by all executors,
   which slowed down spawn-heavy programs on many cores.
 
@@ -65,6 +67,8 @@ All notable changes to this project will be documented in this file.
 
 - Under sustained load, tasks that overflowed an executor's run queue could wait until the
   load dropped, stalling some connections for seconds.
+
+- Each thread-pool worker that retired after its idle timeout leaked its thread stack (#879).
 
 - The io_uring backend ignored every send flag except `no_signal`, so a flag such as `oob`
   or `eor` had no effect.

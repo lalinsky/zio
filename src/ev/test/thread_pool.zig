@@ -3,10 +3,12 @@ const builtin = @import("builtin");
 const ev = @import("../root.zig");
 const os_thread = @import("../../os/thread.zig");
 const ResetEvent = os_thread.ResetEvent;
+const os_time = @import("../../os/time.zig");
+const Duration = @import("../../time.zig").Duration;
 
 test "ev.ThreadPool: one task" {
     var thread_pool: ev.ThreadPool = undefined;
-    try thread_pool.init(std.testing.allocator, .{
+    try thread_pool.init(.{
         .min_threads = 1,
         .max_threads = 1,
     });
@@ -17,8 +19,8 @@ test "ev.ThreadPool: one task" {
         .thread_pool = &thread_pool,
     });
     defer loop.deinit();
-    // Join the pool's threads before the loop is torn down: completion
-    // callbacks wake the loop, so the loop must outlive the pool's threads.
+    // Stop the pool before the loop is torn down: completion
+    // callbacks wake the loop, so the loop must outlive the pool's workers.
     defer thread_pool.stop();
 
     const TestFn = struct {
@@ -44,7 +46,7 @@ test "ev.ThreadPool: reserved work runs even when the pool is saturated" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
     var thread_pool: ev.ThreadPool = undefined;
-    try thread_pool.init(std.testing.allocator, .{
+    try thread_pool.init(.{
         .min_threads = 0,
         .max_threads = 1,
     });
@@ -103,7 +105,7 @@ test "ev.ThreadPool: reserved work is taken ahead of older regular work" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
     var thread_pool: ev.ThreadPool = undefined;
-    try thread_pool.init(std.testing.allocator, .{
+    try thread_pool.init(.{
         .min_threads = 0,
         .max_threads = 1,
     });
@@ -163,7 +165,7 @@ test "ev.ThreadPool: reserved work reuses an idle worker instead of spawning" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
     var thread_pool: ev.ThreadPool = undefined;
-    try thread_pool.init(std.testing.allocator, .{
+    try thread_pool.init(.{
         .min_threads = 2,
         .max_threads = 10,
     });
@@ -210,7 +212,7 @@ test "ev.ThreadPool: regular work still scales when reserved work occupies max_t
     if (builtin.single_threaded) return error.SkipZigTest;
 
     var thread_pool: ev.ThreadPool = undefined;
-    try thread_pool.init(std.testing.allocator, .{
+    try thread_pool.init(.{
         .min_threads = 0,
         .max_threads = 1,
     });
@@ -285,7 +287,7 @@ test "ev.ThreadPool: work does not queue behind a blocked worker" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
     var thread_pool: ev.ThreadPool = undefined;
-    try thread_pool.init(std.testing.allocator, .{
+    try thread_pool.init(.{
         .min_threads = 0,
         .max_threads = 4,
     });
@@ -314,7 +316,7 @@ test "ev.ThreadPool: concurrent blocking work gets a worker each" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
     var thread_pool: ev.ThreadPool = undefined;
-    try thread_pool.init(std.testing.allocator, .{
+    try thread_pool.init(.{
         .min_threads = 0,
         .max_threads = 10,
     });
@@ -337,7 +339,7 @@ test "ev.ThreadPool: an idle worker is counted for one queued job only" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
     var thread_pool: ev.ThreadPool = undefined;
-    try thread_pool.init(std.testing.allocator, .{
+    try thread_pool.init(.{
         .min_threads = 1,
         .max_threads = 4,
     });
@@ -368,4 +370,125 @@ test "ev.ThreadPool: an idle worker is counted for one queued job only" {
 
     first.started.wait();
     second.started.wait();
+}
+
+/// Signals when it has started, then waits `delay` before recording that it
+/// finished.
+const SlowJob = struct {
+    started: ResetEvent,
+    finished: std.atomic.Value(bool) = .init(false),
+    delay: Duration,
+    work: ev.Work,
+
+    fn init(self: *SlowJob, delay: Duration) void {
+        self.* = .{ .started = .init(), .delay = delay, .work = undefined };
+        self.work = ev.Work.init(&main, @ptrCast(self));
+    }
+
+    fn deinit(self: *SlowJob) void {
+        self.started.deinit();
+    }
+
+    fn main(work: *ev.Work) void {
+        const self: *SlowJob = @ptrCast(@alignCast(work.userdata));
+        self.started.set();
+        os_time.sleep(self.delay);
+        self.finished.store(true, .release);
+    }
+};
+
+fn waitForNoWorkers(thread_pool: *ev.ThreadPool) !void {
+    var waited_ms: usize = 0;
+    while (thread_pool.running_threads.load(.monotonic) > 0) {
+        if (waited_ms > 5_000) return error.TimedOut;
+        os_time.sleep(.fromMilliseconds(1));
+        waited_ms += 1;
+    }
+    // Workers release their count under `queue_mutex`, so taking it here makes
+    // everything they did before that visible, including their writes to jobs
+    // the caller is about to reuse.
+    thread_pool.queue_mutex.lock();
+    thread_pool.queue_mutex.unlock();
+}
+
+test "ev.ThreadPool: stop waits for a busy worker to exit" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var thread_pool: ev.ThreadPool = undefined;
+    try thread_pool.init(.{
+        .min_threads = 0,
+        .max_threads = 1,
+    });
+    defer thread_pool.deinit();
+
+    var job: SlowJob = undefined;
+    job.init(.fromMilliseconds(50));
+    defer job.deinit();
+    thread_pool.submit(&job.work);
+    job.started.wait();
+
+    thread_pool.stop();
+    try std.testing.expect(job.finished.load(.acquire));
+    try std.testing.expectEqual(0, thread_pool.running_threads.load(.monotonic));
+}
+
+test "ev.ThreadPool: a retired worker leaves no stack behind" {
+    if (builtin.single_threaded or builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var thread_pool: ev.ThreadPool = undefined;
+    try thread_pool.init(.{
+        .min_threads = 0,
+        .max_threads = 1,
+        .idle_timeout_ms = 1,
+    });
+    defer thread_pool.deinit();
+
+    // Each burst spawns a worker, which retires once idle. A worker thread that
+    // is neither joined nor detached keeps its whole stack mapped after it
+    // exits, so leaked workers show up as address-space growth.
+    var gate = ResetEvent.init();
+    defer gate.deinit();
+    gate.set();
+
+    var baseline_kib: u64 = 0;
+    for (0..10) |burst| {
+        var job: GatedJob = undefined;
+        job.init(&gate);
+        defer job.deinit();
+        thread_pool.submit(&job.work);
+        job.started.wait();
+        try waitForNoWorkers(&thread_pool);
+        if (burst == 0) baseline_kib = try vmSizeKiB();
+    }
+
+    // A worker releases its count just before its thread exits, so a stack can
+    // still be mapped for a moment after the last burst. Leaked stacks never
+    // go away, so give the exiting threads a bounded time to finish.
+    const stack_kib = std.Thread.SpawnConfig.default_stack_size / 1024;
+    var waited_ms: usize = 0;
+    while (try vmSizeKiB() -| baseline_kib >= 3 * stack_kib) {
+        if (waited_ms > 1_000) return error.TestUnexpectedResult;
+        os_time.sleep(.fromMilliseconds(10));
+        waited_ms += 10;
+    }
+}
+
+fn vmSizeKiB() !u64 {
+    const linux = std.os.linux;
+    var buf: [4096]u8 = undefined;
+    const rc = linux.open("/proc/self/status", .{}, 0);
+    if (linux.errno(rc) != .SUCCESS) return error.Unexpected;
+    const fd: linux.fd_t = @intCast(rc);
+    defer _ = linux.close(fd);
+    const n = linux.read(fd, &buf, buf.len);
+    if (linux.errno(n) != .SUCCESS) return error.Unexpected;
+    var lines = std.mem.splitScalar(u8, buf[0..n], '\n');
+    while (lines.next()) |line| {
+        const key = "VmSize:";
+        if (!std.mem.startsWith(u8, line, key)) continue;
+        // The value is followed by its unit: "VmSize:    94076 kB".
+        var fields = std.mem.tokenizeAny(u8, line[key.len..], " \t");
+        return std.fmt.parseInt(u64, fields.next() orelse return error.Unexpected, 10);
+    }
+    return error.Unexpected;
 }
