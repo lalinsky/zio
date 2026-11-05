@@ -42,9 +42,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- Reading the metadata of a file with an extreme timestamp (the year 2262 and later,
-  or before 1677) no longer panics. The timestamp is now clamped to the limits of
-  i64 nanoseconds.
+- On POSIX, reading the metadata of a file with an extreme timestamp (the year 2262
+  and later, or before 1677) no longer panics. The timestamp is now clamped to the
+  limits of i64 nanoseconds.
 - `std.Io` `sendManyTimeout` lost the count of messages already sent when it timed out or
   was canceled, and restarted the timeout for each message.
 
