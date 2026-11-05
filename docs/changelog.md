@@ -56,6 +56,9 @@ All notable changes to this project will be documented in this file.
 - A cancel was lost when `std.Io.Group.async` could not spawn its task and ran it on the
   caller instead.
 
+- A canceled `sendFile` reported `error.Canceled` even when part of the file had already
+  been sent, so the caller lost track of how much went out (#885).
+
 - Canceling a blocking call on a thread-pool worker could interrupt a worker thread that had
   already exited.
 

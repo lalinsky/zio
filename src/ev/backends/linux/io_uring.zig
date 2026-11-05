@@ -1209,6 +1209,14 @@ fn netSendFileIssue(self: *Self, c: *Completion) void {
 fn netSendFileAdvance(self: *Self, state: *LoopState, c: *Completion, res: i32) void {
     const data = c.cast(NetSendFile);
 
+    // Bytes a splice delivered to the socket count toward the result even
+    // when a cancel ends the chain right here.
+    if (res > 0 and !data.internal.polling and data.internal.stage == .to_socket) {
+        const n: usize = @intCast(res);
+        data.internal.in_pipe -= n;
+        data.internal.sent += n;
+    }
+
     // A cancel request can land between steps, and the kernel cancel only
     // catches the SQE that was in flight when it was submitted — checked
     // before issuing ANY further SQE (including the -EAGAIN poll bridge below:
@@ -1268,8 +1276,6 @@ fn netSendFileAdvance(self: *Self, state: *LoopState, c: *Completion, res: i32) 
                 state.markCompletedFromBackend(c);
                 return;
             }
-            data.internal.in_pipe -= n;
-            data.internal.sent += n;
             if (data.internal.in_pipe > 0) {
                 self.netSendFileIssue(c);
             } else if (!data.internal.eof and data.internal.read_remaining > 0) {
@@ -1929,8 +1935,9 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
             // netSendFileAdvance.
             const data = c.cast(NetSendFile);
             self.netSendFileCleanup(c);
-            if (res < 0) {
-                const errno: linux.E = @fromBackingInt(@intCast(-res));
+            const errno: linux.E = if (res < 0) @fromBackingInt(@intCast(-res)) else .SUCCESS;
+            // A cancel only wins when nothing was sent (see NetSendFile).
+            if (res < 0 and !(errno == .CANCELED and data.internal.sent > 0)) {
                 c.setError(switch (data.internal.stage) {
                     .to_pipe => fs.errnoToFileReadError(errno),
                     .to_socket => net.errnoToSendError(errno),
