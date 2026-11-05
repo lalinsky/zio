@@ -404,6 +404,11 @@ fn waitForNoWorkers(thread_pool: *ev.ThreadPool) !void {
         os_time.sleep(.fromMilliseconds(1));
         waited_ms += 1;
     }
+    // Workers release their count under `queue_mutex`, so taking it here makes
+    // everything they did before that visible, including their writes to jobs
+    // the caller is about to reuse.
+    thread_pool.queue_mutex.lock();
+    thread_pool.queue_mutex.unlock();
 }
 
 test "ev.ThreadPool: stop waits for a busy worker to exit" {
@@ -456,9 +461,16 @@ test "ev.ThreadPool: a retired worker leaves no stack behind" {
         if (burst == 0) baseline_kib = try vmSizeKiB();
     }
 
-    const growth_kib = try vmSizeKiB() -| baseline_kib;
+    // A worker releases its count just before its thread exits, so a stack can
+    // still be mapped for a moment after the last burst. Leaked stacks never
+    // go away, so give the exiting threads a bounded time to finish.
     const stack_kib = std.Thread.SpawnConfig.default_stack_size / 1024;
-    try std.testing.expect(growth_kib < 3 * stack_kib);
+    var waited_ms: usize = 0;
+    while (try vmSizeKiB() -| baseline_kib >= 3 * stack_kib) {
+        if (waited_ms > 1_000) return error.TestUnexpectedResult;
+        os_time.sleep(.fromMilliseconds(10));
+        waited_ms += 10;
+    }
 }
 
 fn vmSizeKiB() !u64 {
