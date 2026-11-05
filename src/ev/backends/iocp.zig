@@ -2078,9 +2078,12 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 &flags,
             );
 
-            // A failed chunk still reports the bytes it sent before it stopped.
-            data.internal.total += bytes_transferred;
-            data.internal.left -= bytes_transferred;
+            // A failed chunk still reports the bytes it sent before it
+            // stopped, in the completion entry; WSAGetOverlappedResult leaves
+            // its count unset on failure.
+            const chunk_sent: windows.DWORD = if (result == windows.FALSE) entry.dwNumberOfBytesTransferred else bytes_transferred;
+            data.internal.total += chunk_sent;
+            data.internal.left -= chunk_sent;
 
             if (result == windows.FALSE) {
                 const err = net.errnoToSendError(windows.WSAGetLastError());

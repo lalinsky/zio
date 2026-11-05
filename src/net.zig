@@ -2101,16 +2101,30 @@ test "Stream.Writer.sendFile reports the bytes sent before a cancellation" {
         after: ?anyerror = null,
     };
 
+    // Reads the first chunk and reports it, so the sender is known to be
+    // partway through. Then stops reading, so the send stalls, until told to
+    // drain the rest, and reports the total it received.
     const ServerTask = struct {
-        fn run(server_port: *Channel(u16)) void {
-            const addr = IpAddress.parseIp4("127.0.0.1", 0) catch return;
-            const server = addr.listen(.{}) catch return;
+        fn run(server_port: *Channel(u16), first_read: *Channel(void), drain: *Channel(void), received: *Channel(usize)) !void {
+            const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+            const server = try addr.listen(.{});
             defer server.close();
-            server.socket.setReceiveBufferSize(64 * 1024) catch return;
-            server_port.send(server.socket.address.ip.getPort()) catch return;
-            var stream = server.accept(.{}) catch return;
+            try server.socket.setReceiveBufferSize(64 * 1024);
+            try server_port.send(server.socket.address.ip.getPort());
+            var stream = try server.accept(.{});
             defer stream.close();
-            runtime_mod.sleep(.fromMilliseconds(60_000)) catch {}; // until canceled
+
+            var buf: [4096]u8 = undefined;
+            var total_received = try stream.read(&buf, .none);
+            try first_read.send({});
+
+            try drain.receive();
+            while (true) {
+                const n = try stream.read(&buf, .none);
+                if (n == 0) break;
+                total_received += n;
+            }
+            try received.send(total_received);
         }
     };
 
@@ -2141,24 +2155,36 @@ test "Stream.Writer.sendFile reports the bytes sent before a cancellation" {
 
     var server_port_buf: [1]u16 = undefined;
     var server_port_ch = Channel(u16).init(&server_port_buf);
+    var first_read_buf: [1]void = undefined;
+    var first_read_ch = Channel(void).init(&first_read_buf);
+    var drain_buf: [1]void = undefined;
+    var drain_ch = Channel(void).init(&drain_buf);
+    var received_buf: [1]usize = undefined;
+    var received_ch = Channel(usize).init(&received_buf);
 
     var outcome: Outcome = .{};
-    var server = try runtime.spawn(ServerTask.run, .{&server_port_ch});
+    var server = try runtime.spawn(ServerTask.run, .{ &server_port_ch, &first_read_ch, &drain_ch, &received_ch });
     defer server.cancel();
     var sender = try runtime.spawn(Sender.run, .{ io, &server_port_ch, &outcome });
     defer sender.cancel();
-    // Let the sender connect and fill the socket buffers, then block in the send.
-    try runtime_mod.sleep(.fromMilliseconds(100));
+
+    // Once the first bytes arrived, give the sender time to fill the socket
+    // buffers and block in the send, then cancel it.
+    try first_read_ch.receive();
+    try runtime_mod.sleep(.fromMilliseconds(50));
     sender.cancel();
 
     // The bytes that went out are reported and the reader is advanced past
     // them; the cancellation shows up at the next cancellation point instead.
     try std.testing.expect(outcome.completed);
     const sent = try outcome.send_result;
-    try std.testing.expect(sent > 0);
     try std.testing.expect(sent < total);
     try std.testing.expectEqual(sent, outcome.pos);
     try std.testing.expectEqual(error.Canceled, outcome.after.?);
+
+    // The sender closed its end, so the server reads exactly what was sent.
+    try drain_ch.send({});
+    try std.testing.expectEqual(sent, try received_ch.receive());
 }
 
 test "IpAddress: initIp4" {
