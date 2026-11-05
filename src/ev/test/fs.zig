@@ -5,14 +5,14 @@ const os = @import("../../os/root.zig");
 
 test "File: open/close" {
     var thread_pool: ev.ThreadPool = undefined;
-    try thread_pool.init(std.testing.allocator, .{ .min_threads = 1, .max_threads = 4 });
+    try thread_pool.init(.{ .min_threads = 1, .max_threads = 4 });
     defer thread_pool.deinit();
 
     var loop: ev.Loop = undefined;
     try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
     defer loop.deinit();
-    // Join the pool's threads before the loop is torn down: completion
-    // callbacks wake the loop, so the loop must outlive the pool's threads.
+    // Stop the pool before the loop is torn down: completion
+    // callbacks wake the loop, so the loop must outlive the pool's workers.
     defer thread_pool.stop();
 
     const cwd = os.fs.cwd();
@@ -84,14 +84,14 @@ test "File: open/close" {
 
 test "File: rename/delete" {
     var thread_pool: ev.ThreadPool = undefined;
-    try thread_pool.init(std.testing.allocator, .{ .min_threads = 1, .max_threads = 4 });
+    try thread_pool.init(.{ .min_threads = 1, .max_threads = 4 });
     defer thread_pool.deinit();
 
     var loop: ev.Loop = undefined;
     try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
     defer loop.deinit();
-    // Join the pool's threads before the loop is torn down: completion
-    // callbacks wake the loop, so the loop must outlive the pool's threads.
+    // Stop the pool before the loop is torn down: completion
+    // callbacks wake the loop, so the loop must outlive the pool's workers.
     defer thread_pool.stop();
 
     const cwd = os.fs.cwd();
@@ -167,14 +167,14 @@ test "File: rename/delete" {
 
 test "File: read EOF" {
     var thread_pool: ev.ThreadPool = undefined;
-    try thread_pool.init(std.testing.allocator, .{ .min_threads = 1, .max_threads = 4 });
+    try thread_pool.init(.{ .min_threads = 1, .max_threads = 4 });
     defer thread_pool.deinit();
 
     var loop: ev.Loop = undefined;
     try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
     defer loop.deinit();
-    // Join the pool's threads before the loop is torn down: completion
-    // callbacks wake the loop, so the loop must outlive the pool's threads.
+    // Stop the pool before the loop is torn down: completion
+    // callbacks wake the loop, so the loop must outlive the pool's workers.
     defer thread_pool.stop();
 
     const cwd = os.fs.cwd();
@@ -227,14 +227,14 @@ test "File: read EOF" {
 
 test "File: size" {
     var thread_pool: ev.ThreadPool = undefined;
-    try thread_pool.init(std.testing.allocator, .{ .min_threads = 1, .max_threads = 4 });
+    try thread_pool.init(.{ .min_threads = 1, .max_threads = 4 });
     defer thread_pool.deinit();
 
     var loop: ev.Loop = undefined;
     try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
     defer loop.deinit();
-    // Join the pool's threads before the loop is torn down: completion
-    // callbacks wake the loop, so the loop must outlive the pool's threads.
+    // Stop the pool before the loop is torn down: completion
+    // callbacks wake the loop, so the loop must outlive the pool's workers.
     defer thread_pool.stop();
 
     const cwd = os.fs.cwd();
@@ -300,14 +300,14 @@ test "File: size" {
 
 test "File: stat" {
     var thread_pool: ev.ThreadPool = undefined;
-    try thread_pool.init(std.testing.allocator, .{ .min_threads = 1, .max_threads = 4 });
+    try thread_pool.init(.{ .min_threads = 1, .max_threads = 4 });
     defer thread_pool.deinit();
 
     var loop: ev.Loop = undefined;
     try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
     defer loop.deinit();
-    // Join the pool's threads before the loop is torn down: completion
-    // callbacks wake the loop, so the loop must outlive the pool's threads.
+    // Stop the pool before the loop is torn down: completion
+    // callbacks wake the loop, so the loop must outlive the pool's workers.
     defer thread_pool.stop();
 
     const cwd = os.fs.cwd();
@@ -361,14 +361,14 @@ test "File: stat" {
 
 test "File: stat_path" {
     var thread_pool: ev.ThreadPool = undefined;
-    try thread_pool.init(std.testing.allocator, .{ .min_threads = 1, .max_threads = 4 });
+    try thread_pool.init(.{ .min_threads = 1, .max_threads = 4 });
     defer thread_pool.deinit();
 
     var loop: ev.Loop = undefined;
     try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
     defer loop.deinit();
-    // Join the pool's threads before the loop is torn down: completion
-    // callbacks wake the loop, so the loop must outlive the pool's threads.
+    // Stop the pool before the loop is torn down: completion
+    // callbacks wake the loop, so the loop must outlive the pool's workers.
     defer thread_pool.stop();
 
     const cwd = os.fs.cwd();

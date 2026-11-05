@@ -23,7 +23,7 @@ test "ProcessWait: wait for child process exit code 0" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     var tp: ThreadPool = undefined;
-    try tp.init(std.testing.allocator, .{ .min_threads = 1 });
+    try tp.init(.{ .min_threads = 1 });
     defer tp.deinit();
 
     var loop: Loop = undefined;
@@ -48,7 +48,7 @@ test "ProcessWait: wait for child process exit code 1" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     var tp: ThreadPool = undefined;
-    try tp.init(std.testing.allocator, .{ .min_threads = 1 });
+    try tp.init(.{ .min_threads = 1 });
     defer tp.deinit();
 
     var loop: Loop = undefined;
@@ -73,7 +73,7 @@ test "ProcessWait: wait for child process killed by signal" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     var tp: ThreadPool = undefined;
-    try tp.init(std.testing.allocator, .{ .min_threads = 1 });
+    try tp.init(.{ .min_threads = 1 });
     defer tp.deinit();
 
     var loop: Loop = undefined;
