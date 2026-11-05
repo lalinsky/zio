@@ -1205,28 +1205,42 @@ test "waitUntilComplete: re-arms the caller's cancellation in join" {
 }
 
 test "waitUntilComplete: re-arms the caller's cancellation in JoinHandle.cancel" {
+    const Event = @import("sync/Event.zig");
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
+    const Ctx = struct {
+        // Set by the child once the parent's cancel reached it, so the
+        // parent is known to be waiting in `JoinHandle.cancel`.
+        parent_waiting: Event = .init,
+        // Set by the test once the parent's own cancel was requested; the
+        // child keeps the parent waiting until then.
+        go: Event = .init,
+    };
+
     const T = struct {
-        fn child() void {
-            // Swallows its cancellation, then keeps the parent waiting.
+        fn child(ctx: *Ctx) void {
+            // Swallows its cancellation.
             rt_mod.sleep(.fromSeconds(60)) catch {};
-            rt_mod.sleep(.fromMilliseconds(100)) catch {};
+            ctx.parent_waiting.set();
+            // The parent forwards its own cancel here, which may end this
+            // wait early; either way the parent saw its cancel first.
+            ctx.go.wait() catch {};
         }
 
-        fn parent(r: *Runtime) !void {
-            var handle = try r.spawn(child, .{});
-            rt_mod.sleep(.fromMilliseconds(1)) catch return error.TestUnexpectedResult;
+        fn parent(r: *Runtime, ctx: *Ctx) !void {
+            var handle = try r.spawn(child, .{ctx});
             handle.cancel();
             try std.testing.expectError(error.Canceled, rt_mod.checkCancel());
         }
     };
 
-    var handle = try rt.spawn(T.parent, .{rt});
+    var ctx: Ctx = .{};
+    var handle = try rt.spawn(T.parent, .{ rt, &ctx });
     defer handle.cancel();
 
-    try rt.sleep(.fromMilliseconds(20));
-    handle.cancel();
+    try ctx.parent_waiting.wait();
+    handle.requestCancel();
+    ctx.go.set();
     try handle.join();
 }
