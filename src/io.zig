@@ -839,6 +839,13 @@ fn batchAwaitConcurrentImpl(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io
             },
             error.Canceled => {
                 batchCancelPending(batch, state);
+                // Operations that completed regardless are results the caller
+                // must see, so they are returned and the cancellation is left
+                // for the next cancellation point.
+                if (batch.completed.head != .none) {
+                    runtime_mod.recancel();
+                    return;
+                }
                 return error.Canceled;
             },
         };
@@ -5882,6 +5889,71 @@ test "io: batch cancel does not report canceled operations" {
         // slots must be available to `addAt` again
         batch.cancel(io);
         try std.testing.expect(batch.next() == null);
+    }
+}
+
+test "io: batch awaitConcurrent canceled while an operation completes keeps its result" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    var sock1 = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sock1.close(io);
+    var sock2 = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sock2.close(io);
+    var sender = try Io.net.IpAddress.bind(&.{ .ip4 = .loopback(0) }, io, .{ .mode = .dgram });
+    defer sender.close(io);
+
+    // Already waiting, so the receive can complete as soon as it is submitted.
+    try sender.send(io, &sock1.address, "hello");
+
+    const Outcome = struct {
+        result: Io.Batch.AwaitConcurrentError!void = error.ConcurrencyUnavailable,
+        completed: ?u32 = null,
+        // What the next cancellation point reports after the await returned.
+        after: ?anyerror = null,
+    };
+
+    const Receiver = struct {
+        fn run(receiver_io: Io, s1: Io.net.Socket.Handle, s2: Io.net.Socket.Handle, out: *Outcome) void {
+            var storage: [2]Io.Operation.Storage = undefined;
+            var batch: Io.Batch = .init(&storage);
+            defer batch.cancel(receiver_io);
+
+            var msg1: Io.net.IncomingMessage = .init;
+            var buf1: [16]u8 = undefined;
+            _ = batch.add(.{ .net_receive = .{ .socket_handle = s1, .message_buffer = (&msg1)[0..1], .data_buffer = &buf1, .flags = .{} } });
+            var msg2: Io.net.IncomingMessage = .init;
+            var buf2: [16]u8 = undefined;
+            _ = batch.add(.{ .net_receive = .{ .socket_handle = s2, .message_buffer = (&msg2)[0..1], .data_buffer = &buf2, .flags = .{} } });
+
+            // The wait sees the cancel before the receive's result is handed
+            // back, so the result shows up while the batch is being canceled.
+            var self_handle = runtime_mod.CancelHandle.current();
+            self_handle.requestCancel();
+            self_handle.deinit();
+
+            out.result = batch.awaitConcurrent(receiver_io, .none);
+            if (batch.next()) |completion| out.completed = completion.index;
+            receiver_io.sleep(.fromSeconds(60), .awake) catch |err| {
+                out.after = err;
+            };
+        }
+    };
+
+    var outcome: Outcome = .{};
+    var receiver = try rt.spawn(Receiver.run, .{ io, sock1.handle, sock2.handle, &outcome });
+    receiver.join();
+
+    // Either the cancel stopped both receives, or the datagram is reported
+    // and the cancel is left for the next cancellation point. A Canceled
+    // await never leaves a result behind.
+    if (outcome.result) |_| {
+        try std.testing.expectEqual(0, outcome.completed.?);
+        try std.testing.expectEqual(error.Canceled, outcome.after.?);
+    } else |err| {
+        try std.testing.expectEqual(error.Canceled, err);
+        try std.testing.expectEqual(null, outcome.completed);
     }
 }
 
