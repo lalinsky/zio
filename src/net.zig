@@ -2188,6 +2188,9 @@ test "Stream.Writer.sendFile reports the bytes sent before a cancellation" {
     try std.testing.expectEqual(error.Canceled, outcome.after.?);
 
     // The sender closed its end, so the server reads exactly what was sent.
+    // Windows resets the connection when a TransmitFile is aborted, so the
+    // peer can't read the rest there.
+    if (builtin.os.tag == .windows) return;
     try drain_ch.send({});
     try std.testing.expectEqual(sent, try (try events_ch.receive()));
 }
