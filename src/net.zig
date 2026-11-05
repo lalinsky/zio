@@ -2101,11 +2101,18 @@ test "Stream.Writer.sendFile reports the bytes sent before a cancellation" {
         after: ?anyerror = null,
     };
 
-    // Reads the first chunk and reports it, so the sender is known to be
-    // partway through. Then stops reading, so the send stalls, until told to
-    // drain the rest, and reports the total it received.
+    // Reads the first chunk and reports its size, so the sender is known to
+    // be partway through. Then stops reading, so the send stalls, until told
+    // to drain the rest, and reports the total it received. A failure is
+    // reported in place of either, so the test fails instead of waiting.
     const ServerTask = struct {
-        fn run(server_port: *Channel(u16), first_read: *Channel(void), drain: *Channel(void), received: *Channel(usize)) !void {
+        fn run(server_port: *Channel(u16), events: *Channel(anyerror!usize), drain: *Channel(void)) void {
+            serve(server_port, events, drain) catch |err| {
+                events.send(err) catch return;
+            };
+        }
+
+        fn serve(server_port: *Channel(u16), events: *Channel(anyerror!usize), drain: *Channel(void)) !void {
             const addr = try IpAddress.parseIp4("127.0.0.1", 0);
             const server = try addr.listen(.{});
             defer server.close();
@@ -2116,7 +2123,7 @@ test "Stream.Writer.sendFile reports the bytes sent before a cancellation" {
 
             var buf: [4096]u8 = undefined;
             var total_received = try stream.read(&buf, .none);
-            try first_read.send({});
+            try events.send(total_received);
 
             try drain.receive();
             while (true) {
@@ -2124,7 +2131,7 @@ test "Stream.Writer.sendFile reports the bytes sent before a cancellation" {
                 if (n == 0) break;
                 total_received += n;
             }
-            try received.send(total_received);
+            try events.send(total_received);
         }
     };
 
@@ -2155,22 +2162,20 @@ test "Stream.Writer.sendFile reports the bytes sent before a cancellation" {
 
     var server_port_buf: [1]u16 = undefined;
     var server_port_ch = Channel(u16).init(&server_port_buf);
-    var first_read_buf: [1]void = undefined;
-    var first_read_ch = Channel(void).init(&first_read_buf);
+    var events_buf: [2]anyerror!usize = undefined;
+    var events_ch = Channel(anyerror!usize).init(&events_buf);
     var drain_buf: [1]void = undefined;
     var drain_ch = Channel(void).init(&drain_buf);
-    var received_buf: [1]usize = undefined;
-    var received_ch = Channel(usize).init(&received_buf);
 
     var outcome: Outcome = .{};
-    var server = try runtime.spawn(ServerTask.run, .{ &server_port_ch, &first_read_ch, &drain_ch, &received_ch });
+    var server = try runtime.spawn(ServerTask.run, .{ &server_port_ch, &events_ch, &drain_ch });
     defer server.cancel();
     var sender = try runtime.spawn(Sender.run, .{ io, &server_port_ch, &outcome });
     defer sender.cancel();
 
     // Once the first bytes arrived, give the sender time to fill the socket
     // buffers and block in the send, then cancel it.
-    try first_read_ch.receive();
+    _ = try (try events_ch.receive());
     try runtime_mod.sleep(.fromMilliseconds(50));
     sender.cancel();
 
@@ -2184,7 +2189,7 @@ test "Stream.Writer.sendFile reports the bytes sent before a cancellation" {
 
     // The sender closed its end, so the server reads exactly what was sent.
     try drain_ch.send({});
-    try std.testing.expectEqual(sent, try received_ch.receive());
+    try std.testing.expectEqual(sent, try (try events_ch.receive()));
 }
 
 test "IpAddress: initIp4" {
