@@ -108,6 +108,13 @@ pub const Token = struct {
     /// become `blocked`, so it is always valid when the canceller observes
     /// `blocked` via an acquiring CAS.
     handle: std.atomic.Value(?Handle) = .init(null),
+    /// Cancellers currently inside `signal()` that may be using `handle`.
+    /// `exit()` waits for it to drop to zero, so the bound worker thread, and
+    /// with it the `pthread_t` or Windows handle, stays alive while any
+    /// canceller can still pass the handle to `pthread_kill` or
+    /// `CancelSynchronousIo`. A worker thread can exit and be freed once it
+    /// returns from `exit()`.
+    signalers: std.atomic.Value(u32) = .init(0),
 
     // When disabled the field is never accessed, but it still has to have a
     // defined in-memory layout: `std.atomic.Value` is an extern struct, and only
@@ -131,7 +138,10 @@ pub const Token = struct {
     pub fn exit(self: *Token) void {
         if (!enabled) return;
         current = null;
-        self.handle.store(null, .monotonic);
+        // Pairs with `signal()`: either the canceller loads `null`, or this
+        // load sees it counted and waits until it is done with the handle.
+        self.handle.store(null, .seq_cst);
+        while (self.signalers.load(.seq_cst) != 0) thread.yield();
     }
 
     /// Canceller side: request cancellation. Returns `true` if the worker is
@@ -164,7 +174,9 @@ pub const Token = struct {
         // Only meaningful while the worker is blocked-and-canceling; any other
         // state means it already woke up (or never was blocked).
         if (self.state.load(.acquire) != .blocked_canceling) return false;
-        const handle = self.handle.load(.monotonic) orelse return false;
+        _ = self.signalers.fetchAdd(1, .seq_cst);
+        defer _ = self.signalers.fetchSub(1, .release);
+        const handle = self.handle.load(.seq_cst) orelse return false;
         if (!uses_signal) {
             if (windows.CancelSynchronousIo(handle) != windows.FALSE) return false;
             // NOT_FOUND: the worker has not entered the call yet, so try again.
@@ -457,4 +469,47 @@ test "syscall_cancel: CancelSynchronousIo interrupts a blocking pipe read" {
 
     t.join();
     try std.testing.expectError(error.Canceled, w.result);
+}
+
+test "syscall_cancel: exit waits for a canceller that may be using the handle" {
+    if (!enabled) return;
+
+    // Stand in for a canceller that loaded the handle in `signal()` and was
+    // descheduled before calling `pthread_kill`/`CancelSynchronousIo`: the
+    // worker must not leave `exit()`, and so must not be able to exit its
+    // thread, until that canceller is done.
+    var token: Token = .{};
+
+    const Worker = struct {
+        token: *Token,
+        entered: std.atomic.Value(bool) = .init(false),
+        go: std.atomic.Value(bool) = .init(false),
+        exited: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            bindThread();
+            defer unbindThread();
+            self.token.enter();
+            self.entered.store(true, .release);
+            while (!self.go.load(.acquire)) time.sleep(Duration.fromMicroseconds(10));
+            self.token.exit();
+            self.exited.store(true, .release);
+        }
+    };
+
+    var w: Worker = .{ .token = &token };
+    const t = try std.Thread.spawn(.{}, Worker.run, .{&w});
+    while (!w.entered.load(.acquire)) time.sleep(Duration.fromMicroseconds(10));
+
+    _ = token.signalers.fetchAdd(1, .seq_cst);
+    const had_handle = token.handle.load(.seq_cst) != null;
+    w.go.store(true, .release);
+    time.sleep(Duration.fromMilliseconds(20));
+    const exited_while_signaling = w.exited.load(.acquire);
+    _ = token.signalers.fetchSub(1, .release);
+    t.join();
+
+    try std.testing.expect(had_handle or !uses_signal);
+    try std.testing.expect(!exited_while_signaling);
+    try std.testing.expect(w.exited.load(.acquire));
 }

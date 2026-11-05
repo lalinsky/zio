@@ -54,6 +54,9 @@ All notable changes to this project will be documented in this file.
 - A cancel was lost when `std.Io.Group.async` could not spawn its task and ran it on the
   caller instead.
 
+- Canceling a blocking call on a thread-pool worker could interrupt a worker thread that had
+  already exited.
+
 - On Windows, a streaming read or write of a file opened with the IOCP backend, as
   `Dir.writeFile` and `File.readStreaming` do, failed with `error.Unexpected` (#738).
 
