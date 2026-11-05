@@ -5935,9 +5935,13 @@ test "io: batch awaitConcurrent canceled while an operation completes keeps its 
 
             out.result = batch.awaitConcurrent(receiver_io, .none);
             if (batch.next()) |completion| out.completed = completion.index;
-            receiver_io.sleep(.fromSeconds(60), .awake) catch |err| {
-                out.after = err;
-            };
+            // Only a normal return leaves the cancel for later; an
+            // error.Canceled return already delivered it.
+            if (out.result) |_| {
+                receiver_io.checkCancel() catch |err| {
+                    out.after = err;
+                };
+            } else |_| {}
         }
     };
 
