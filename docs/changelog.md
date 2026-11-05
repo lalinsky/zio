@@ -59,6 +59,9 @@ All notable changes to this project will be documented in this file.
 - Canceling a blocking call on a thread-pool worker could interrupt a worker thread that had
   already exited.
 
+- `std.Io` `Batch.awaitConcurrent` returned `error.Canceled` even when some operations had
+  already completed, so a caller using `try` dropped their results (#886).
+
 - On Windows, a streaming read or write of a file opened with the IOCP backend, as
   `Dir.writeFile` and `File.readStreaming` do, failed with `error.Unexpected` (#738).
 
