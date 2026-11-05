@@ -65,6 +65,9 @@ All notable changes to this project will be documented in this file.
 - Sockets accepted with the io_uring backend were blocking and leaked into child processes,
   and on Windows a socket bound before `connect` failed to connect.
 
+- With the epoll and kqueue backends, a timeout or cancel of one of several tasks receiving
+  or accepting on the same socket could crash or hang the program (#880).
+
 - Under sustained load, tasks that overflowed an executor's run queue could wait until the
   load dropped, stalling some connections for seconds.
 

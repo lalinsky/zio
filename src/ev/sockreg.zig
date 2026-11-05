@@ -294,10 +294,16 @@ pub fn service(self: anytype, state: anytype, fd: net.fd_t, dir: Dir, event: any
         serviced_waiter = true;
         switch (Backend.checkCompletion(c, event)) {
             .completed => {
+                // `detach` relies on this: the result is set under the shard
+                // lock, in the same critical section that unlinks the op.
+                std.debug.assert(c.has_result);
                 _ = entry.waiters(dir).remove(c);
                 to_finish.push(c);
             },
-            .requeue => break, // drained to EAGAIN for this direction
+            .requeue => {
+                std.debug.assert(!c.has_result);
+                break; // drained to EAGAIN for this direction
+            },
         }
     }
     // Latch a readiness edge that no live waiter consumed so a racing parker
@@ -322,15 +328,20 @@ pub fn service(self: anytype, state: anytype, fd: net.fd_t, dir: Dir, event: any
 /// The shard lock makes that answer exact rather than advisory: `service` runs
 /// the syscall and sets the result while holding the same lock it removes the
 /// waiter under, so "still in the queue" and "no result set yet" are the same
-/// condition. The reverse - inferring it from the `.completed` phase - would
+/// condition. The answer is taken from `has_result`, not from the queue: an op
+/// `service` claimed sits in its private finish list, whose links it rewrites
+/// after unlocking, and `Queue.remove` would mistake a linked op there for a
+/// member of the waiter queue. Inferring it from the `.completed` phase would
 /// race, because `service` deliberately marks the op completed only after
-/// dropping the lock.
+/// dropping the lock (a cancel pass could otherwise dispatch, and free, an op
+/// still linked in that finish list).
 pub fn detach(self: anytype, target: *Completion) bool {
     const fd = netHandle(target);
     const dir = dirForOp(target);
     const shard = self.shared.sock_table.shardForFd(fd);
     shard.mutex.lock();
     defer shard.mutex.unlock();
+    if (target.has_result) return false;
     // A live parked op always has an entry: detach only runs while the op is not
     // yet completed (loop.cancel and cancelLocal both bail on the `.completed`
     // phase), and an entry is only dropped by `unregister` on close, which
@@ -340,7 +351,11 @@ pub fn detach(self: anytype, target: *Completion) bool {
     // the op - so claiming it here would double-complete an op that is already on
     // its way out. Leaving it alone is the safe default.
     const entry = shard.map.getPtr(@as(u32, @bitCast(fd))) orelse return false;
-    return entry.waiters(dir).remove(target);
+    // No result means the op is still parked here: submission is synchronous on
+    // the canceling loop's thread, so there is no half-submitted state to see.
+    const removed = entry.waiters(dir).remove(target);
+    std.debug.assert(removed);
+    return removed;
 }
 
 /// Tear down the shared registration for a socket fd about to be closed. Closing
@@ -436,4 +451,77 @@ pub fn submitPoll(self: anytype, state: anytype, c: *Completion) void {
             .retry => {}, // re-probe
         }
     }
+}
+
+test "sockreg: cancel of an op that service already finished leaves it alone" {
+    // service finishes A, B and C in one pass and leaves D parked. While it
+    // completes A, a cancel of B (still linked in service's finish list) must
+    // report it as already claimed, and must not touch the waiter queue.
+    const ReadBuf = @import("buf.zig").ReadBuf;
+    const fd: net.fd_t = 42;
+
+    const Event = struct { requeue: *Completion };
+
+    const FakeBackend = struct {
+        shared: struct { sock_table: Table = .{} } = .{},
+
+        const CheckResult = enum { completed, requeue };
+
+        pub fn checkCompletion(c: *Completion, event: *const Event) CheckResult {
+            if (c == event.requeue) return .requeue;
+            c.setResult(.net_recv, 1);
+            return .completed;
+        }
+    };
+
+    const FakeState = struct {
+        backend: *FakeBackend,
+        cancel_target: *Completion,
+        detached: ?bool = null,
+        finished: [4]?*Completion = @splat(null),
+        finished_count: usize = 0,
+
+        pub fn markCompletedFromBackend(self: *@This(), c: *Completion) void {
+            if (self.detached == null) self.detached = detach(self.backend, self.cancel_target);
+            self.finished[self.finished_count] = c;
+            self.finished_count += 1;
+        }
+    };
+
+    var buf: [1]u8 = undefined;
+    var iov: [1]os.iovec = undefined;
+    var ops: [4]NetRecv = undefined;
+    for (&ops) |*op| {
+        op.* = .init(fd, ReadBuf.fromSlice(&buf, &iov), .{});
+        _ = op.c.enterRunning();
+    }
+    const a = &ops[0].c;
+    const b = &ops[1].c;
+    const c = &ops[2].c;
+    const d = &ops[3].c;
+
+    var backend: FakeBackend = .{};
+    backend.shared.sock_table.acquire(std.testing.allocator);
+    defer backend.shared.sock_table.release();
+
+    const shard = backend.shared.sock_table.shardForFd(fd);
+    const gop = try shard.map.getOrPut(std.testing.allocator, @as(u32, @bitCast(fd)));
+    gop.value_ptr.* = .{};
+    for ([_]*Completion{ a, b, c, d }) |op| gop.value_ptr.waiters(.read).push(op);
+
+    var state: FakeState = .{ .backend = &backend, .cancel_target = b };
+    service(&backend, &state, fd, .read, &Event{ .requeue = d });
+
+    try std.testing.expectEqual(false, state.detached.?);
+    try std.testing.expectEqualSlices(?*Completion, &.{ a, b, c, null }, &state.finished);
+
+    const waiters = shard.map.getPtr(@as(u32, @bitCast(fd))).?.waiters(.read);
+    try std.testing.expectEqual(d, waiters.head.?);
+    try std.testing.expectEqual(d, waiters.tail.?);
+    try std.testing.expectEqual(null, d.next);
+    try std.testing.expectEqual(null, d.prev);
+
+    // D is still parked, so a cancel claims it.
+    try std.testing.expect(detach(&backend, d));
+    try std.testing.expectEqual(null, waiters.head);
 }
