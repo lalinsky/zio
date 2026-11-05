@@ -29,6 +29,9 @@ test "ProcessWait: wait for child process exit code 0" {
     var loop: Loop = undefined;
     try loop.init(.{ .thread_pool = &tp });
     defer loop.deinit();
+    // Stop the pool before the loop is torn down: completion
+    // callbacks wake the loop, so the loop must outlive the pool's workers.
+    defer tp.stop();
 
     const io = std.testing.io;
     var child = try std.process.spawn(io, .{ .argv = argv_exit0 });
@@ -54,6 +57,9 @@ test "ProcessWait: wait for child process exit code 1" {
     var loop: Loop = undefined;
     try loop.init(.{ .thread_pool = &tp });
     defer loop.deinit();
+    // Stop the pool before the loop is torn down: completion
+    // callbacks wake the loop, so the loop must outlive the pool's workers.
+    defer tp.stop();
 
     const io = std.testing.io;
     var child = try std.process.spawn(io, .{ .argv = argv_exit1 });
@@ -79,6 +85,9 @@ test "ProcessWait: wait for child process killed by signal" {
     var loop: Loop = undefined;
     try loop.init(.{ .thread_pool = &tp });
     defer loop.deinit();
+    // Stop the pool before the loop is torn down: completion
+    // callbacks wake the loop, so the loop must outlive the pool's workers.
+    defer tp.stop();
 
     const io = std.testing.io;
     var child = try std.process.spawn(io, .{ .argv = argv_kill_self });
