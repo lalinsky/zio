@@ -973,6 +973,9 @@ pub const NetSend = struct {
 /// the `Fallback` state below: read a chunk from the file into `buf`, send it to
 /// the socket, repeat until EOF or `remaining` is exhausted. Socket short-writes
 /// drain the remaining buffer before the next read.
+///
+/// A cancel that lands after some bytes were sent finishes the op with that
+/// count instead of `error.Canceled`, since those bytes can't be taken back.
 pub const NetSendFile = struct {
     c: Completion,
     result_private_do_not_touch: usize = undefined,

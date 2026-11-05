@@ -724,6 +724,18 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
         // completion once the owner marks it completed. The kqueue registration is
         // persistent and left in place for the fd's lifetime.
         if (!sockreg.detach(self, target)) return;
+        // A sendfile parked partway through reports what it sent (see
+        // NetSendFile).
+        if (comptime capability(.net_send_file) == .yes) {
+            if (target.op == .net_send_file) {
+                const sent = target.cast(NetSendFile).internal.sent;
+                if (sent > 0) {
+                    target.setResult(.net_send_file, sent);
+                    state.markCompletedFromBackend(target);
+                    return;
+                }
+            }
+        }
     } else {
         self.removeFromPollQueue(target);
     }

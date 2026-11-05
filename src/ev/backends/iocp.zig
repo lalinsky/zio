@@ -2078,13 +2078,23 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 &flags,
             );
 
+            // A failed chunk still reports the bytes it sent before it
+            // stopped, in the completion entry; WSAGetOverlappedResult leaves
+            // its count unset on failure.
+            const chunk_sent: windows.DWORD = if (result == windows.FALSE) entry.dwNumberOfBytesTransferred else bytes_transferred;
+            data.internal.total += chunk_sent;
+            data.internal.left -= chunk_sent;
+
             if (result == windows.FALSE) {
-                const err = windows.WSAGetLastError();
-                c.setError(net.errnoToSendError(err));
+                const err = net.errnoToSendError(windows.WSAGetLastError());
+                // A cancel only wins when nothing was sent (see NetSendFile).
+                if (err == error.Canceled and data.internal.total > 0) {
+                    c.setResult(.net_send_file, data.internal.total);
+                } else {
+                    c.setError(err);
+                }
                 state.markCompletedFromBackend(c);
             } else {
-                data.internal.total += bytes_transferred;
-                data.internal.left -= bytes_transferred;
                 if (data.internal.left == 0) {
                     // Whole requested range sent.
                     c.setResult(.net_send_file, data.internal.total);
@@ -2094,7 +2104,8 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                     // re-arm. CancelIoEx already returned NOT_FOUND (the chunk
                     // had already completed), so we must check the flag here to
                     // avoid issuing a new TransmitFile that no cancel will reach.
-                    c.setError(error.Canceled);
+                    // The chunks already sent are the result.
+                    c.setResult(.net_send_file, data.internal.total);
                     state.markCompletedFromBackend(c);
                 } else if (self.armNetSendFile(data)) |armed| {
                     // File larger than the per-call cap: next chunk is in flight,

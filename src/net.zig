@@ -2068,6 +2068,133 @@ test "Stream.Writer.sendFile cancellation unblocks a stalled transfer" {
     try std.testing.expectEqual(error.Canceled, outcome.writer_err.?);
 }
 
+test "Stream.Writer.sendFile reports the bytes sent before a cancellation" {
+    const Io = std.Io;
+    const path = "test-native-sendfile-cancel-progress";
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .thread_pool = .{} });
+    defer runtime.deinit();
+    const io = runtime.io();
+
+    // Much larger than the socket buffers, which both ends pin small, so the
+    // send stalls partway once they fill and the peer never reads.
+    const total = 4 * 1024 * 1024;
+    {
+        var f = try Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+        defer f.close(io);
+        var fw_buf: [4096]u8 = undefined;
+        var fw = f.writer(io, &fw_buf);
+        const zeros: [4096]u8 = @splat(0);
+        var written: usize = 0;
+        while (written < total) : (written += zeros.len) {
+            try fw.interface.writeAll(&zeros);
+        }
+        try fw.interface.flush();
+    }
+    defer Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    const Outcome = struct {
+        completed: bool = false,
+        send_result: anyerror!usize = error.Unexpected,
+        pos: u64 = 0,
+        // What the next cancellation point reports after the send returned.
+        after: ?anyerror = null,
+    };
+
+    // Reads the first chunk and reports its size, so the sender is known to
+    // be partway through. Then stops reading, so the send stalls, until told
+    // to drain the rest, and reports the total it received. A failure is
+    // reported in place of either, so the test fails instead of waiting.
+    const ServerTask = struct {
+        fn run(server_port: *Channel(u16), events: *Channel(anyerror!usize), drain: *Channel(void)) void {
+            serve(server_port, events, drain) catch |err| {
+                events.send(err) catch return;
+            };
+        }
+
+        fn serve(server_port: *Channel(u16), events: *Channel(anyerror!usize), drain: *Channel(void)) !void {
+            const addr = try IpAddress.parseIp4("127.0.0.1", 0);
+            const server = try addr.listen(.{});
+            defer server.close();
+            try server.socket.setReceiveBufferSize(64 * 1024);
+            try server_port.send(server.socket.address.ip.getPort());
+            var stream = try server.accept(.{});
+            defer stream.close();
+
+            var buf: [4096]u8 = undefined;
+            var total_received = try stream.read(&buf, .none);
+            try events.send(total_received);
+
+            try drain.receive();
+            while (true) {
+                const n = try stream.read(&buf, .none);
+                if (n == 0) break;
+                total_received += n;
+            }
+            try events.send(total_received);
+        }
+    };
+
+    const Sender = struct {
+        fn run(client_io: Io, server_port: *Channel(u16), out: *Outcome) !void {
+            defer out.completed = true;
+            const port = try server_port.receive();
+            var f = try Io.Dir.cwd().openFile(client_io, path, .{});
+            defer f.close(client_io);
+            var fr_buf: [4096]u8 = undefined;
+            var fr = f.reader(client_io, &fr_buf);
+
+            const addr = try IpAddress.parseIp4("127.0.0.1", port);
+            var stream = try tcpConnectToAddress(addr, .{});
+            defer stream.close();
+            try stream.socket.setSendBufferSize(64 * 1024);
+
+            var wbuf: [4096]u8 = undefined;
+            var writer = stream.writer(&wbuf);
+            // A single call, so its result is the op's own result.
+            out.send_result = writer.interface.sendFile(&fr, .unlimited);
+            out.pos = fr.pos;
+            runtime_mod.sleep(.fromMilliseconds(60_000)) catch |err| {
+                out.after = err;
+            };
+        }
+    };
+
+    var server_port_buf: [1]u16 = undefined;
+    var server_port_ch = Channel(u16).init(&server_port_buf);
+    var events_buf: [2]anyerror!usize = undefined;
+    var events_ch = Channel(anyerror!usize).init(&events_buf);
+    var drain_buf: [1]void = undefined;
+    var drain_ch = Channel(void).init(&drain_buf);
+
+    var outcome: Outcome = .{};
+    var server = try runtime.spawn(ServerTask.run, .{ &server_port_ch, &events_ch, &drain_ch });
+    defer server.cancel();
+    var sender = try runtime.spawn(Sender.run, .{ io, &server_port_ch, &outcome });
+    defer sender.cancel();
+
+    // Once the first bytes arrived, give the sender time to fill the socket
+    // buffers and block in the send, then cancel it.
+    _ = try (try events_ch.receive());
+    try runtime_mod.sleep(.fromMilliseconds(50));
+    sender.cancel();
+
+    // The bytes that went out are reported and the reader is advanced past
+    // them; the cancellation shows up at the next cancellation point instead.
+    try std.testing.expect(outcome.completed);
+    const sent = try outcome.send_result;
+    try std.testing.expect(sent < total);
+    try std.testing.expectEqual(sent, outcome.pos);
+    try std.testing.expectEqual(error.Canceled, outcome.after.?);
+
+    // The sender closed its end, so the server reads exactly what was sent.
+    // Windows resets the connection when a TransmitFile is aborted, so the
+    // peer can't read the rest there.
+    if (builtin.os.tag == .windows) return;
+    try drain_ch.send({});
+    try std.testing.expectEqual(sent, try (try events_ch.receive()));
+}
+
 test "IpAddress: initIp4" {
     const addr = IpAddress.initIp4(@splat(0), 8080);
     try std.testing.expectEqual(os.net.AF.INET, addr.any.family);
