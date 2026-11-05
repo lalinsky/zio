@@ -282,16 +282,17 @@ pub fn service(self: anytype, state: anytype, fd: net.fd_t, dir: Dir, event: any
         return;
     };
 
-    var serviced_waiter = false;
+    // Latch a readiness edge that no waiter consumed so a racing parker
+    // retries instead of sleeping for an edge that already passed.
+    entry.readyPtr(dir).* = entry.waiters(dir).head == null;
+
     var to_finish: Queue(Completion) = .{};
     var iter: ?*Completion = entry.waiters(dir).head;
     while (iter) |c| {
         iter = c.next;
-        if (c.loadState().phase != .running) {
-            _ = entry.waiters(dir).remove(c);
-            continue;
-        }
-        serviced_waiter = true;
+        // Both ways out of the queue (this loop and `detach`) unlink the op
+        // before it is marked completed, so a parked op is always running.
+        std.debug.assert(c.loadState().phase == .running);
         switch (Backend.checkCompletion(c, event)) {
             .completed => {
                 // `detach` relies on this: the result is set under the shard
@@ -306,11 +307,6 @@ pub fn service(self: anytype, state: anytype, fd: net.fd_t, dir: Dir, event: any
             },
         }
     }
-    // Latch a readiness edge that no live waiter consumed so a racing parker
-    // retries instead of sleeping for an edge that already passed. Stale
-    // (completed/dead) waiters that were skipped above don't count — they
-    // consume no edge, so a queue holding only stale waiters must still latch.
-    entry.readyPtr(dir).* = !serviced_waiter;
     shard.mutex.unlock();
 
     while (to_finish.pop()) |c| {
