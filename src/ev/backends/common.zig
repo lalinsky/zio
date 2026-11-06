@@ -170,14 +170,9 @@ fn rejectDirectoryIfForbidden(fd: fs.fd_t, flags: fs.FileOpenFlags) fs.FileOpenE
     const info = fs.fstat(fd) catch |err| {
         fs.close(fd) catch {};
         return switch (err) {
-            error.AccessDenied => return error.AccessDenied,
-            error.Canceled => return error.Canceled,
-            error.SystemResources => return error.SystemResources,
-            error.Unexpected => return error.Unexpected,
-            // Cannot happen for a freshly opened fd.
-            error.InvalidFileDescriptor => return error.Unexpected,
-            // The other errors cannot happen for a freshly opened fd.
-            else => unexpectedError(err),
+            // Cannot happen for a freshly opened fd; report it as a bug.
+            error.InvalidFileDescriptor => unexpectedError(err),
+            else => |e| e,
         };
     };
     if (info.kind == .directory) {

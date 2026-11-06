@@ -435,6 +435,8 @@ test "File: opening a directory with allow_directory=false returns IsDir" {
     // refuses directories at CreateFileW time and reports AccessDenied.
     switch (comptime ev.Backend.capability(.file_open)) {
         .no => if (builtin.os.tag == .windows) {
+            // TODO(#383 step 3): becomes error.IsDir once CreateFileW's
+            // AccessDenied is mapped through GetFileAttributesW.
             try std.testing.expectError(error.AccessDenied, file_open.getResult());
         } else {
             try std.testing.expectError(error.IsDir, file_open.getResult());
@@ -446,13 +448,16 @@ test "File: opening a directory with allow_directory=false returns IsDir" {
             try loop.run();
             try file_close.getResult();
         },
-        .maybe => if (file_open.getResult()) |res| {
-            var file_close = ev.FileClose.init(res.fd);
+        // Only the Linux auto backend is .maybe here, so the engine that
+        // was actually selected decides which route the open took.
+        .maybe => if (loop.backend.selectedEngine() == .io_uring) {
+            const fd = (try file_open.getResult()).fd;
+            var file_close = ev.FileClose.init(fd);
             loop.add(&file_close.c);
             try loop.run();
             try file_close.getResult();
-        } else |err| {
-            try std.testing.expectError(error.IsDir, err);
+        } else {
+            try std.testing.expectError(error.IsDir, file_open.getResult());
         },
     }
 }
@@ -472,7 +477,11 @@ test "File: opening a regular file with allow_directory=false works" {
     var file_create = ev.FileCreate.init(cwd, "test-allow-directory", .{ .read = true, .truncate = true, .mode = 0o664 });
     loop.add(&file_create.c);
     try loop.run();
-    _ = try file_create.getResult();
+    const created_fd = (try file_create.getResult()).fd;
+    var create_close = ev.FileClose.init(created_fd);
+    loop.add(&create_close.c);
+    try loop.run();
+    try create_close.getResult();
 
     var file_open = ev.FileOpen.init(cwd, "test-allow-directory", .{ .mode = .read_only, .allow_directory = false });
     loop.add(&file_open.c);
@@ -516,7 +525,9 @@ test "File: opening a FIFO with allow_directory=false is unchanged" {
     // Writer in the background, so the checked open completes.
     const Writer = struct {
         fn run(p: []const u8) void {
-            const fd = std.posix.openat(std.posix.AT.FDCWD, p, .{ .ACCMODE = .WRONLY }, 0) catch return;
+            const fd = std.posix.openat(std.posix.AT.FDCWD, p, .{ .ACCMODE = .WRONLY }, 0) catch |err| {
+                std.debug.panic("fifo writer open failed: {}", .{err});
+            };
             _ = std.posix.system.close(fd);
         }
     };
@@ -532,7 +543,12 @@ test "File: opening a FIFO with allow_directory=false is unchanged" {
     switch (comptime ev.Backend.capability(.file_open)) {
         .no => try std.testing.expectEqual(.pollable, fd.streaming_route),
         .yes => try std.testing.expectEqual(.thread_pool, fd.streaming_route),
-        .maybe => {},
+        // Only the Linux auto backend is .maybe here.
+        .maybe => if (loop.backend.selectedEngine() == .io_uring) {
+            try std.testing.expectEqual(.thread_pool, fd.streaming_route);
+        } else {
+            try std.testing.expectEqual(.pollable, fd.streaming_route);
+        },
     }
 
     var file_close = ev.FileClose.init(fd.fd);
