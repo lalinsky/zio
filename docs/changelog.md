@@ -20,6 +20,8 @@ All notable changes to this project will be documented in this file.
 
 - `ev.ThreadPool.init` no longer takes an allocator.
 
+- `select` accepts at most 64 futures, checked at compile time, matching `std.Io`'s select.
+
 - Spawning and finishing a task no longer updates a counter shared by all executors,
   which slowed down spawn-heavy programs on many cores.
 
