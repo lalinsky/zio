@@ -410,3 +410,135 @@ test "File: stat_path" {
     try loop.run();
     try file_delete.getResult();
 }
+
+extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
+
+test "File: opening a directory with allow_directory=false returns IsDir" {
+    var thread_pool: ev.ThreadPool = undefined;
+    try thread_pool.init(.{ .min_threads = 1, .max_threads = 4 });
+    defer thread_pool.deinit();
+
+    var loop: ev.Loop = undefined;
+    try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
+    defer loop.deinit();
+    defer thread_pool.stop();
+
+    const cwd = os.fs.cwd();
+
+    var file_open = ev.FileOpen.init(cwd, ".", .{ .mode = .read_only, .allow_directory = false });
+    loop.add(&file_open.c);
+    try loop.run();
+    try std.testing.expectEqual(.dead, file_open.c.loadState().phase);
+    try std.testing.expectEqual(true, file_open.c.has_result);
+    // The thread pool route checks the opened fd; backends that open
+    // files natively (io_uring, iocp) do not at this layer. Windows
+    // refuses directories at CreateFileW time and reports AccessDenied.
+    switch (comptime ev.Backend.capability(.file_open)) {
+        .no => if (builtin.os.tag == .windows) {
+            try std.testing.expectError(error.AccessDenied, file_open.getResult());
+        } else {
+            try std.testing.expectError(error.IsDir, file_open.getResult());
+        },
+        .yes => {
+            const fd = (try file_open.getResult()).fd;
+            var file_close = ev.FileClose.init(fd);
+            loop.add(&file_close.c);
+            try loop.run();
+            try file_close.getResult();
+        },
+        .maybe => if (file_open.getResult()) |res| {
+            var file_close = ev.FileClose.init(res.fd);
+            loop.add(&file_close.c);
+            try loop.run();
+            try file_close.getResult();
+        } else |err| {
+            try std.testing.expectError(error.IsDir, err);
+        },
+    }
+}
+
+test "File: opening a regular file with allow_directory=false works" {
+    var thread_pool: ev.ThreadPool = undefined;
+    try thread_pool.init(.{ .min_threads = 1, .max_threads = 4 });
+    defer thread_pool.deinit();
+
+    var loop: ev.Loop = undefined;
+    try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
+    defer loop.deinit();
+    defer thread_pool.stop();
+
+    const cwd = os.fs.cwd();
+
+    var file_create = ev.FileCreate.init(cwd, "test-allow-directory", .{ .read = true, .truncate = true, .mode = 0o664 });
+    loop.add(&file_create.c);
+    try loop.run();
+    _ = try file_create.getResult();
+
+    var file_open = ev.FileOpen.init(cwd, "test-allow-directory", .{ .mode = .read_only, .allow_directory = false });
+    loop.add(&file_open.c);
+    try loop.run();
+    try std.testing.expectEqual(.dead, file_open.c.loadState().phase);
+    const fd = (try file_open.getResult()).fd;
+
+    var file_close = ev.FileClose.init(fd);
+    loop.add(&file_close.c);
+    try loop.run();
+    try file_close.getResult();
+
+    var file_delete = ev.DirDeleteFile.init(cwd, "test-allow-directory");
+    loop.add(&file_delete.c);
+    try loop.run();
+    try file_delete.getResult();
+}
+
+test "File: opening a FIFO with allow_directory=false is unchanged" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var thread_pool: ev.ThreadPool = undefined;
+    try thread_pool.init(.{ .min_threads = 1, .max_threads = 4 });
+    defer thread_pool.deinit();
+
+    var loop: ev.Loop = undefined;
+    try loop.init(.{ .allocator = std.testing.allocator, .thread_pool = &thread_pool });
+    defer loop.deinit();
+    defer thread_pool.stop();
+
+    const cwd = os.fs.cwd();
+
+    // A FIFO opened read-only with no writer blocks in the open. The
+    // directory check must not change that: it runs after the open
+    // succeeds and lets non-directories through untouched.
+    const path = "test-allow-directory.fifo";
+    _ = std.c.unlink(path);
+    try std.testing.expectEqual(0, mkfifo(path, 0o600));
+    defer _ = std.c.unlink(path);
+
+    // Writer in the background, so the checked open completes.
+    const Writer = struct {
+        fn run(p: []const u8) void {
+            const fd = std.posix.openat(std.posix.AT.FDCWD, p, .{ .ACCMODE = .WRONLY }, 0) catch return;
+            _ = std.posix.system.close(fd);
+        }
+    };
+    var writer_thread = try std.Thread.spawn(.{}, Writer.run, .{path});
+
+    var file_open = ev.FileOpen.init(cwd, path, .{ .mode = .read_only, .allow_directory = false });
+    loop.add(&file_open.c);
+    try loop.run();
+    try std.testing.expectEqual(.dead, file_open.c.loadState().phase);
+    const fd = try file_open.getResult();
+    // The thread pool route probes the fd and marks a FIFO pollable;
+    // a native open leaves the streaming route at the default.
+    switch (comptime ev.Backend.capability(.file_open)) {
+        .no => try std.testing.expectEqual(.pollable, fd.streaming_route),
+        .yes => try std.testing.expectEqual(.thread_pool, fd.streaming_route),
+        .maybe => {},
+    }
+
+    var file_close = ev.FileClose.init(fd.fd);
+    loop.add(&file_close.c);
+    try loop.run();
+    try file_close.getResult();
+
+    writer_thread.join();
+}

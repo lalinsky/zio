@@ -44,6 +44,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Opening a directory with `allow_directory = false` returned a file handle instead of
+  `error.IsDir` on backends that open files on the thread pool.
 - `std.Io` `sendManyTimeout` lost the count of messages already sent when it timed out or
   was canceled, and restarted the timeout for each message.
 
