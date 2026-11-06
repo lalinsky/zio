@@ -307,8 +307,8 @@ const EPOCH_DIFF: i64 = 116444736000000000;
 /// Convert Windows FILETIME to nanoseconds since Unix epoch.
 /// FILETIME is 100-nanosecond intervals since January 1, 1601.
 /// Unix epoch is January 1, 1970.
-pub fn fileTimeToNanos(ft: FILETIME) i64 {
-    const ticks: i64 = (@as(i64, ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+pub fn fileTimeToNanos(ft: FILETIME) i96 {
+    const ticks: i96 = (@as(i96, ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
     return (ticks - EPOCH_DIFF) * 100;
 }
 

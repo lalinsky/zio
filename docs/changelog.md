@@ -49,6 +49,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Reading the metadata of a file with a timestamp after 2262 or before 1677 panicked (#383 follow-up found while working on it).
+
 - `std.Io` `sendManyTimeout` lost the count of messages already sent when it timed out or
   was canceled, and restarted the timeout for each message.
 
