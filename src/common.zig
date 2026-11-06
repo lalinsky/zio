@@ -21,6 +21,7 @@ const Executor = @import("runtime.zig").Executor;
 const WaitNode = @import("utils/wait_queue.zig").WaitNode;
 const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
 const os = @import("os/root.zig");
+const compat = @import("compat.zig");
 const syscall_cancel = os.syscall_cancel;
 
 /// Error set for operations that can be cancelled
@@ -90,20 +91,35 @@ pub const ClaimResult = enum {
 /// Stack-allocated waiter for async operations.
 ///
 /// Supports two modes:
-/// - `direct`: For single-future waiting. Owns the task and notify.
+/// - `direct`: For single-future waiting. Parks a task, or blocks a thread.
 /// - `select`: For multi-future select(). Points to a parent direct waiter.
 ///
 /// Usage:
 /// ```zig
 /// var waiter = Waiter.init();
+/// defer waiter.deinit();
 /// future.asyncWait(&waiter);
 /// try waiter.wait(1, .allow_cancel);
 /// ```
 ///
-/// **A waiter is good for one wait.** The signal count only ever increases:
-/// `signal` adds to it and `wait` compares against it without consuming, so
-/// once a waiter has been signaled it satisfies every later `wait(1, ...)`
-/// immediately. Do not reuse one for a second, independent wait.
+/// A direct waiter on a task keeps its wake-up in the task's state word (see
+/// `AnyTask.State`), in the field for its kind: an ordinary wait, a mutex
+/// lock wait, or a select. One field serves one wait at a time, so a task may
+/// have at most one open wait of each kind, a mutex lock wait never opens
+/// another wait, and while an ordinary wait or a select is open the only wait
+/// that may start is a mutex lock wait. A wait is open from `init` until
+/// `deinit`; safe builds check the rules there.
+///
+/// **A waiter is good for one wait.** `wait` compares the signals received
+/// against `expected` without consuming them, so once a waiter has been
+/// signaled it satisfies every later `wait(1, ...)` immediately. Do not reuse
+/// one for a second, independent wait.
+///
+/// **An ordinary or lock waiter must be signaled exactly once.** Its signal
+/// flips a flag, so a second signal flips it back and the wait looks
+/// unsignaled. Sources guarantee this by removing the waiter from their queue
+/// before signaling it. A select parent counts its signals instead and takes
+/// any number.
 ///
 /// The one legitimate second call is the cancellation handshake, where both
 /// calls are waiting for the *same* signal:
@@ -134,16 +150,71 @@ pub const Waiter = struct {
     },
 
     /// Direct waiter for single-future waiting.
-    pub const Direct = struct {
-        notify: os.thread.Notify,
-        task: ?*AnyTask,
+    pub const Direct = union(enum) {
+        /// Parks a task. Its wake-up is counted in the task's state word.
+        task: TaskWait,
+        /// Blocks a thread on a futex: foreign threads, thread-pool workers,
+        /// and tasks inside a no-suspend region.
+        thread: os.thread.Notify,
 
-        pub fn init() Direct {
-            return .{
-                .notify = .init(),
-                // Waitable, not current: inside a no-suspend region the wait
-                // must block the thread, not park the task.
-                .task = getWaitableTaskOrNull(),
+        pub fn init(kind: Kind) Direct {
+            // Waitable, not current: inside a no-suspend region the wait
+            // must block the thread, not park the task.
+            if (getWaitableTaskOrNull()) |task| return .{ .task = .init(task, kind) };
+            return .{ .thread = .init() };
+        }
+    };
+
+    /// Which field of the task's state word a direct wait uses.
+    pub const Kind = enum {
+        /// Any wait other than the two below. Gets exactly one wake-up.
+        ordinary,
+        /// A `zio.Mutex` lock wait. Gets exactly one wake-up, and may be open
+        /// inside an ordinary wait or a select.
+        lock,
+        /// The parent waiter of a select. Gets one wake-up per signal its
+        /// arms send, and must outwait all of them.
+        select,
+    };
+
+    /// A direct wait of a task.
+    pub const TaskWait = struct {
+        task: *AnyTask,
+        kind: Kind,
+        /// The kind's field when the wait started: the flag value for
+        /// ordinary and lock waits, the counter for a select.
+        start: u16,
+
+        fn init(task: *AnyTask, kind: Kind) TaskWait {
+            if (compat.is_safe) {
+                const open = &task.open_waits;
+                std.debug.assert(!open.lock); // a lock wait opens no other wait
+                switch (kind) {
+                    .ordinary => {
+                        std.debug.assert(!open.ordinary and !open.select);
+                        open.ordinary = true;
+                    },
+                    .lock => open.lock = true,
+                    .select => {
+                        std.debug.assert(!open.ordinary and !open.select);
+                        open.select = true;
+                    },
+                }
+            }
+            const state = task.state.load(.acquire);
+            return .{ .task = task, .kind = kind, .start = switch (kind) {
+                .ordinary => @intFromBool(state.done),
+                .lock => @intFromBool(state.lock),
+                .select => state.select,
+            } };
+        }
+
+        /// Wake-ups this wait has received.
+        fn count(self: *const TaskWait, state: AnyTask.State) u32 {
+            return switch (self.kind) {
+                .ordinary => @intFromBool(@intFromBool(state.done) != self.start),
+                .lock => @intFromBool(@intFromBool(state.lock) != self.start),
+                .select => state.select -% self.start,
             };
         }
     };
@@ -184,10 +255,55 @@ pub const Waiter = struct {
         }
     };
 
-    /// Initialize a direct waiter for single-future waiting.
+    /// Initialize a direct waiter for an ordinary wait.
     pub fn init() Waiter {
-        return .{
-            .mode = .{ .direct = Direct.init() },
+        return .{ .mode = .{ .direct = Direct.init(.ordinary) } };
+    }
+
+    /// Initialize a direct waiter for a `zio.Mutex` lock wait.
+    pub fn initLock() Waiter {
+        return .{ .mode = .{ .direct = Direct.init(.lock) } };
+    }
+
+    /// Initialize the parent waiter of a select.
+    pub fn initSelectParent() Waiter {
+        return .{ .mode = .{ .direct = Direct.init(.select) } };
+    }
+
+    /// End a direct waiter's wait. Must run on the waiting task once every
+    /// wake-up the waiter can still receive has landed. Only checks the
+    /// nesting rules (safe builds); a no-op otherwise.
+    pub fn deinit(self: *Waiter) void {
+        if (!compat.is_safe) return;
+        switch (self.mode) {
+            .direct => |*d| switch (d.*) {
+                .task => |*t| {
+                    const open = &t.task.open_waits;
+                    switch (t.kind) {
+                        .ordinary => open.ordinary = false,
+                        .lock => open.lock = false,
+                        .select => open.select = false,
+                    }
+                },
+                .thread => {},
+            },
+            .select => {},
+        }
+    }
+
+    /// The task a direct waiter parks, or null when it blocks a thread.
+    pub fn directTask(self: *const Waiter) ?*AnyTask {
+        return switch (self.mode.direct) {
+            .task => |*t| t.task,
+            .thread => null,
+        };
+    }
+
+    /// Wake-ups this direct waiter has received so far.
+    pub fn signalCount(self: *const Waiter) u32 {
+        return switch (self.mode.direct) {
+            .task => |*t| t.count(t.task.state.load(.acquire)),
+            .thread => |*n| n.state.load(.acquire),
         };
     }
 
@@ -220,17 +336,22 @@ pub const Waiter = struct {
     }
 
     /// Signal this waiter.
-    /// For direct: increments signal count and wakes the task.
+    /// For direct: records the wake-up and wakes the waiter.
     /// For select: tries to claim winner slot, then signals the parent.
+    ///
+    /// The signal's publication is its last touch of the waiter's frame and,
+    /// for a task waiter, of the task, so the waiter may return the moment it
+    /// can see it. For a task the wake-up and the wake are one CAS on the
+    /// task's state word (see `Executor.scheduleTask`).
     pub fn signal(self: *Waiter) void {
         switch (self.mode) {
-            .direct => |*d| {
-                if (d.task) |task| {
-                    _ = d.notify.state.fetchAdd(1, .release);
-                    task.wake();
-                } else {
-                    d.notify.signal();
-                }
+            .direct => |*d| switch (d.*) {
+                .task => |*t| switch (t.kind) {
+                    .ordinary => Executor.scheduleTask(t.task, .done),
+                    .lock => Executor.scheduleTask(t.task, .lock),
+                    .select => Executor.scheduleTask(t.task, .select),
+                },
+                .thread => |*n| n.signal(),
             },
             .select => |*s| {
                 // Try to claim winner slot with our index. The CAS fails both
@@ -350,21 +471,6 @@ pub const Waiter = struct {
         return winner.cmpxchgStrong(NO_WINNER, arm, .acq_rel, .acquire) == null;
     }
 
-    /// Top bit of a direct waiter's notify state, set when its timeout timer
-    /// fired. It is deliberately not a signal: the timer never touches the
-    /// count, so the count keeps meaning "signals from real sources", and the
-    /// bit alone says the timeout won.
-    const timeout_flag: u32 = 1 << 31;
-
-    fn signalCount(state: u32) u32 {
-        return state & ~timeout_flag;
-    }
-
-    /// Whether this waiter's timeout timer fired.
-    fn timedOut(self: *const Waiter) bool {
-        return self.mode.direct.notify.state.load(.acquire) & timeout_flag != 0;
-    }
-
     /// Wait for at least `expected` signals, handling spurious wakeups internally.
     /// Only valid for direct waiters.
     ///
@@ -373,12 +479,10 @@ pub const Waiter = struct {
     /// See the note on `Waiter` - one waiter, one wait, plus the `.no_cancel`
     /// re-wait of the cancellation handshake.
     pub fn wait(self: *Waiter, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        const d = &self.mode.direct;
-        if (d.task) |task| {
-            return waitTask(d, task, expected, cancel_mode);
-        } else {
-            return waitFutex(d, expected, cancel_mode);
-        }
+        return switch (self.mode.direct) {
+            .task => |*t| waitTask(t, expected, cancel_mode),
+            .thread => |*n| waitFutex(n, expected, cancel_mode),
+        };
     }
 
     /// Error set of a timed wait: `error.Timeout` says the timer fired with no
@@ -411,11 +515,16 @@ pub const Waiter = struct {
             return;
         }
 
-        const d = &self.mode.direct;
-        const task = d.task orelse return timedWaitFutex(d, expected, futexTimeout(timeout, clock), cancel_mode);
+        const t = switch (self.mode.direct) {
+            .task => |*t| t,
+            .thread => |*n| return timedWaitFutex(n, expected, futexTimeout(timeout, clock), cancel_mode),
+        };
+        std.debug.assert(t.kind == .ordinary);
+        const task = t.task;
 
-        // Drop a flag left behind by an earlier timed wait on this waiter.
-        _ = d.notify.state.fetchAnd(~timeout_flag, .monotonic);
+        // The timer flips the state word's timer flag; a change from this
+        // value means it fired.
+        const timer_start = task.state.load(.acquire).timer;
 
         var timer: ev.Timer = .initClock(timeout, clock);
         timer.c.userdata = self;
@@ -425,10 +534,11 @@ pub const Waiter = struct {
         defer {
             // A clear that loses its race leaves the timer completing, and its
             // callback still runs against `timer`, which lives in this frame.
-            // The callback sets the flag before waking us, so parking on it
-            // keeps the frame alive for exactly as long as the callback needs.
+            // The callback reads what it needs from the frame before flipping
+            // the flag, so parking until the flag flips keeps the frame alive
+            // for exactly as long as the callback needs.
             if (!loopClearTimer(timer.c.getLoop().?, &timer)) {
-                while (!self.timedOut()) {
+                while (task.state.load(.acquire).timer == timer_start) {
                     task.yield(.park, .no_cancel);
                 }
             }
@@ -438,9 +548,9 @@ pub const Waiter = struct {
         // checked first, so a signal landing together with the timeout still
         // counts as a signal.
         while (true) {
-            const state = d.notify.state.load(.acquire);
-            if (signalCount(state) >= expected) return;
-            if (state & timeout_flag != 0) return error.Timeout;
+            const state = task.state.load(.acquire);
+            if (t.count(state) >= expected) return;
+            if (state.timer != timer_start) return error.Timeout;
             if (cancel_mode == .allow_cancel) {
                 try task.yield(.park, .allow_cancel);
             } else {
@@ -452,30 +562,29 @@ pub const Waiter = struct {
     /// Callback for the `timedWaitClock` timer.
     fn timeoutCallback(_: *ev.Loop, c: *ev.Completion) void {
         const self: *Waiter = @ptrCast(@alignCast(c.userdata.?));
-        const d = &self.mode.direct;
-        // Read the task before publishing: once the flag is visible the waiter
-        // may return and drop the frame holding the timer, so nothing below may
-        // touch `self` or the completion again.
-        const task = d.task.?;
-        _ = d.notify.state.fetchOr(timeout_flag, .release);
-        task.wake();
+        // Read the task first: once the flag flips the waiter may return and
+        // drop the frame holding the timer, and the task may finish. The flip
+        // is the wake (see `Executor.scheduleTask`), so it is the last touch
+        // of both.
+        const task = self.mode.direct.task.task;
+        Executor.scheduleTask(task, .timer);
     }
 
-    fn waitFutex(d: *Direct, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+    fn waitFutex(n: *os.thread.Notify, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         if (cancel_mode == .allow_cancel) {
             const sc = try syscall_cancel.Syscall.beginWait();
             defer sc.finish();
             while (true) {
-                const current = d.notify.state.load(.acquire);
-                if (signalCount(current) >= expected) return;
-                d.notify.wait(current);
+                const current = n.state.load(.acquire);
+                if (current >= expected) return;
+                n.wait(current);
                 try sc.checkCancel();
             }
         } else {
             while (true) {
-                const current = d.notify.state.load(.acquire);
-                if (signalCount(current) >= expected) return;
-                d.notify.wait(current);
+                const current = n.state.load(.acquire);
+                if (current >= expected) return;
+                n.wait(current);
             }
         }
     }
@@ -497,19 +606,19 @@ pub const Waiter = struct {
         };
     }
 
-    fn timedWaitFutex(d: *Direct, expected: u32, timeout: Timeout, comptime cancel_mode: Executor.YieldCancelMode) TimedWaitError(cancel_mode)!void {
+    fn timedWaitFutex(n: *os.thread.Notify, expected: u32, timeout: Timeout, comptime cancel_mode: Executor.YieldCancelMode) TimedWaitError(cancel_mode)!void {
         if (cancel_mode == .allow_cancel) {
             const sc = try syscall_cancel.Syscall.beginWait();
             defer sc.finish();
             const deadline = timeout.toDeadline();
             while (true) {
-                const current = d.notify.state.load(.acquire);
-                if (signalCount(current) >= expected) return;
+                const current = n.state.load(.acquire);
+                if (current >= expected) return;
                 const remaining = deadline.durationFromNow();
                 if (remaining.value <= 0) return error.Timeout;
-                d.notify.timedWait(current, remaining) catch {
-                    const final = d.notify.state.load(.acquire);
-                    if (signalCount(final) >= expected) return;
+                n.timedWait(current, remaining) catch {
+                    const final = n.state.load(.acquire);
+                    if (final >= expected) return;
                     return error.Timeout;
                 };
                 try sc.checkCancel();
@@ -517,22 +626,23 @@ pub const Waiter = struct {
         } else {
             const deadline = timeout.toDeadline();
             while (true) {
-                const current = d.notify.state.load(.acquire);
-                if (signalCount(current) >= expected) return;
+                const current = n.state.load(.acquire);
+                if (current >= expected) return;
                 const remaining = deadline.durationFromNow();
                 if (remaining.value <= 0) return error.Timeout;
-                d.notify.timedWait(current, remaining) catch {
-                    const final = d.notify.state.load(.acquire);
-                    if (signalCount(final) >= expected) return;
+                n.timedWait(current, remaining) catch {
+                    const final = n.state.load(.acquire);
+                    if (final >= expected) return;
                     return error.Timeout;
                 };
             }
         }
     }
 
-    fn waitTask(d: *Direct, task: *AnyTask, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        var current = signalCount(d.notify.state.load(.acquire));
-        if (current >= expected) return;
+    fn waitTask(t: *const TaskWait, expected: u32, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+        std.debug.assert(t.kind == .select or expected <= 1);
+        const task = t.task;
+        if (t.count(task.state.load(.acquire)) >= expected) return;
 
         // Park loop: yield until the condition is met.
         //
@@ -548,8 +658,7 @@ pub const Waiter = struct {
                 task.yield(.park, .no_cancel);
             }
 
-            current = signalCount(d.notify.state.load(.acquire));
-            if (current >= expected) return;
+            if (t.count(task.state.load(.acquire)) >= expected) return;
         }
     }
 
@@ -635,6 +744,7 @@ const CancelCheck = enum {
 
 fn waitForIoImpl(c: *ev.Completion, comptime cancel_check: CancelCheck, comptime delivery: Delivery) Cancelable!void {
     var waiter = Waiter.init();
+    defer waiter.deinit();
     c.userdata = &waiter;
     // Null callback: the loop hands the finished completion out through its
     // dispatched queue, and the executor signals the waiter when it drains
@@ -647,7 +757,7 @@ fn waitForIoImpl(c: *ev.Completion, comptime cancel_check: CancelCheck, comptime
     };
 
     // Blocking path: Execute synchronously without event loop
-    const task = waiter.mode.direct.task orelse {
+    const task = waiter.directTask() orelse {
         // TODO: Don't use std.heap.c_allocator - it should be passed as a parameter
         ev.executeBlocking(c, std.heap.c_allocator);
         return;
@@ -685,7 +795,7 @@ fn waitForIoImpl(c: *ev.Completion, comptime cancel_check: CancelCheck, comptime
     // (one that owns the socket) can signal before the wait, which then
     // returns without parking; charge the coop budget for that case so it
     // still hits a yield point.
-    const signaled_early = waiter.mode.direct.notify.state.load(.acquire) != 0;
+    const signaled_early = waiter.signalCount() != 0;
     waiter.wait(1, .allow_cancel) catch |err| switch (err) {
         error.Canceled => {
             // On cancellation, cancel the I/O and wait for completion
@@ -715,6 +825,7 @@ fn waitForIoImpl(c: *ev.Completion, comptime cancel_check: CancelCheck, comptime
 /// If called from a context without a runtime, executes the operation synchronously.
 pub fn waitForIoUncancelable(c: *ev.Completion) void {
     var waiter = Waiter.init();
+    defer waiter.deinit();
     c.userdata = &waiter;
     c.callback = null; // dispatched-queue delivery, see waitForIo
     c.flags = .{ .defer_callback = false };
@@ -724,7 +835,7 @@ pub fn waitForIoUncancelable(c: *ev.Completion) void {
     };
 
     // Blocking path: Execute synchronously without event loop
-    const task = waiter.mode.direct.task orelse {
+    const task = waiter.directTask() orelse {
         // TODO: Don't use std.heap.c_allocator - it should be passed as a parameter
         ev.executeBlocking(c, std.heap.c_allocator);
         return;
@@ -733,7 +844,7 @@ pub fn waitForIoUncancelable(c: *ev.Completion) void {
     // Async path: Submit to the event loop and wait for completion (no cancel)
     task.getExecutor().loopAdd(c);
     // See waitForIo.
-    const signaled_early = waiter.mode.direct.notify.state.load(.acquire) != 0;
+    const signaled_early = waiter.signalCount() != 0;
     waiter.wait(1, .no_cancel);
     if (signaled_early) {
         task.getExecutor().maybeYield(.reschedule, .no_cancel);
@@ -811,10 +922,7 @@ test "timedWaitForIo: completes before timeout" {
 test "Waiter: futex-based timed wait with timeout" {
     // Create waiter without task (blocking context)
     var waiter: Waiter = .{
-        .mode = .{ .direct = .{
-            .task = null,
-            .notify = .init(),
-        } },
+        .mode = .{ .direct = .{ .thread = .init() } },
     };
 
     var timer = Stopwatch.start();
@@ -844,7 +952,7 @@ test "Waiter: cancelable futex park returns Canceled via the bound token" {
     // Parked on the futex and never signaled to completion (expected stays 1),
     // so the only way out is cancellation.
     var waiter: Waiter = .{
-        .mode = .{ .direct = .{ .task = null, .notify = .init() } },
+        .mode = .{ .direct = .{ .thread = .init() } },
     };
 
     const Worker = struct {

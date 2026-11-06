@@ -115,6 +115,7 @@ pub fn wait(self: *Event) Cancelable!void {
 
     // Stack-allocated waiter - separates operation wait node from task wait node
     var waiter: Waiter = .init();
+    defer waiter.deinit();
 
     // Try to push to queue - only succeeds if event is not set (flag not set)
     if (!self.wait_queue.pushUnlessFlag(&waiter.node)) {
@@ -155,6 +156,7 @@ pub fn waitTimeout(self: *Event, timeout: Timeout) (Timeoutable || Cancelable)!v
 
     // Stack-allocated waiter - separates operation wait node from task wait node
     var waiter: Waiter = .init();
+    defer waiter.deinit();
 
     // Try to push to queue - only succeeds if event is not set (flag not set)
     if (!self.wait_queue.pushUnlessFlag(&waiter.node)) {
@@ -493,7 +495,8 @@ test "Event: a set that races the commit fence is not lost" {
 
     var event = Event.init;
 
-    var parent = Waiter.init();
+    var parent = Waiter.initSelectParent();
+    defer parent.deinit();
     var winner: std.atomic.Value(usize) = .init(NO_WINNER);
     var gen: std.atomic.Value(u32) = .init(0);
     var pending: std.atomic.Value(usize) = .init(NO_WINNER);

@@ -222,6 +222,13 @@ fn autoCancelCallback(
     const task = autocancel.task;
     var fired: AutoCancel.Fired = .{ .done = true };
 
+    // Publishing `fired` below lets `clear` return and the task finish before
+    // the wake at the end, so hold a reference across it. The task is alive
+    // here: `clear` cannot get past `fired.done`, and it must run before the
+    // frame holding this struct goes away.
+    if (task) |t| t.awaitable.ref_count.incr();
+    defer if (task) |t| t.awaitable.release();
+
     // Clear the associated task
     autocancel.task = null;
 
@@ -256,7 +263,8 @@ fn autoCancelCallback(
 
     // Wake unconditionally: the owner may be parked in `clear` waiting for the
     // flag even when the cancel did not take. A wake with nothing parked just
-    // leaves an awaken token, which the park loops consume harmlessly.
+    // leaves an awaken token, which the park loops consume harmlessly. The
+    // reference taken above keeps the task alive for it.
     if (task) |t| t.wake();
 }
 

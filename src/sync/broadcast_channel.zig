@@ -53,6 +53,7 @@ const BroadcastChannelImpl = struct {
             // immediately. Reusing one across iterations lets a woken-but-empty
             // consumer spin here, re-pushing a node that is still queued.
             var waiter: Waiter = .init();
+            defer waiter.deinit();
 
             self.mutex.lockUncancelable();
 
