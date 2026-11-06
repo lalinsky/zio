@@ -202,6 +202,10 @@ pub fn WaitResult(comptime T: type) type {
     };
 }
 
+/// Most futures one select can wait on. Bounds the signals a select can
+/// receive (see `drainRequeued` in `select`).
+const max_arms = 64;
+
 /// Behavior when a wait operation is canceled
 pub const CancelBehavior = enum {
     /// Propagate the cancellation error to the caller
@@ -277,6 +281,7 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     const U = SelectResult(S);
     const field_names = compat.fieldNames(S);
     const field_types = compat.fieldTypes(S);
+    if (field_names.len > max_arms) @compileError("select supports at most 64 futures");
 
     // Self-wait detection: check all futures for self-wait
     const task = getCurrentTask();
@@ -388,6 +393,23 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
             }
             return false;
         }
+
+        /// Wait for the signals a re-poll reported as .requeued: each comes
+        /// from a registration that was popped before the re-poll and is
+        /// still owed. Every such signal is a notification that tries to
+        /// claim this select, so once they have all landed the select either
+        /// has a winner or has a bounced arm to promote. That bounds the
+        /// signals one select can receive by its arm count: at most one
+        /// popped and one live registration per arm, plus the claim.
+        fn drainRequeued(
+            parent: *Waiter,
+            prior: u32,
+            win: *const std.atomic.Value(usize),
+            pend: *const std.atomic.Value(usize),
+        ) void {
+            parent.wait(prior, .no_cancel);
+            std.debug.assert(win.load(.acquire) != NO_WINNER or pend.load(.acquire) != NO_WINNER);
+        }
     };
 
     var canceled = false;
@@ -411,7 +433,9 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
                 // that skipped us may be parked by now; re-poll before we
                 // park, or both sides sleep through a valid pairing.
                 gen_seen = g;
+                const prior_before = prior_signals;
                 if (Poll.repoll(&futures, &waiters, &contexts, &registered, &prior_signals, &self_claimed, &requeued)) break :park;
+                if (prior_signals != prior_before) Poll.drainRequeued(&waiter, prior_signals, &winner, &pending_winner);
                 continue :park;
             }
             waiter.wait(consumed_wakes + 1, .allow_cancel) catch {
@@ -428,7 +452,9 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
             // A signal landed without a claim: the claimer saw our commit
             // fence. The readiness it reported is standing; re-poll finds it.
             consumed_wakes += 1;
+            const prior_before = prior_signals;
             if (Poll.repoll(&futures, &waiters, &contexts, &registered, &prior_signals, &self_claimed, &requeued)) break :park;
+            if (prior_signals != prior_before) Poll.drainRequeued(&waiter, prior_signals, &winner, &pending_winner);
         }
     }
 
@@ -498,7 +524,7 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
 /// Returns the index of the first awaitable to complete.
 /// Used by std.Io.selectImpl.
 pub fn selectAwaitables(awaitables: []const *Awaitable) Cancelable!usize {
-    const max_awaitables = 64;
+    const max_awaitables = max_arms;
     if (awaitables.len > max_awaitables) {
         @panic("selectAwaitables: too many awaitables (max 64)");
     }
