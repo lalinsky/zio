@@ -92,6 +92,7 @@ pub const init: Condition = .{};
 pub fn wait(self: *Condition, mutex: *Mutex) Cancelable!void {
     // Stack-allocated waiter - separates operation wait node from task wait node
     var waiter: Waiter = .init();
+    defer waiter.deinit();
 
     // Add to wait queue before releasing mutex
     self.wait_queue.push(&waiter.node);
@@ -165,6 +166,7 @@ pub fn waitUncancelable(self: *Condition, mutex: *Mutex) void {
 pub fn waitTimeout(self: *Condition, mutex: *Mutex, timeout: Timeout) (Timeoutable || Cancelable)!void {
     // Stack-allocated waiter - separates operation wait node from task wait node
     var waiter: Waiter = .init();
+    defer waiter.deinit();
 
     self.wait_queue.push(&waiter.node);
 

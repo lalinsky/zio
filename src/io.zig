@@ -2096,6 +2096,7 @@ fn sleepImpl(_: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
         return runtime_mod.yield();
     }
     var waiter: Waiter = .init();
+    defer waiter.deinit();
     // Nothing ever signals this waiter, so the timeout firing is the sleep
     // finishing.
     waiter.timedWaitClock(1, .fromStd(timeout), .fromStdTimeout(timeout), .allow_cancel) catch |err| switch (err) {

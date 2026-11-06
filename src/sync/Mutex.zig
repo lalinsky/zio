@@ -117,7 +117,8 @@ fn lockThread(self: *Mutex) void {
 
 fn lockSlow(self: *Mutex, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
     while (true) {
-        var waiter: Waiter = .init();
+        var waiter: Waiter = .initLock();
+        defer waiter.deinit();
         self.queue.push(&waiter.node);
 
         // Recheck after publishing the node, so an unlock that scanned an

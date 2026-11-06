@@ -19,6 +19,7 @@ const unregisterGroupTask = @import("group.zig").unregisterGroupTask;
 const os = @import("os/root.zig");
 const Timestamp = @import("time.zig").Timestamp;
 const zio_options = @import("options.zig").options;
+const compat = @import("compat.zig");
 
 pub const Closure = struct {
     start: Start,
@@ -202,6 +203,11 @@ pub const AnyTask = struct {
     /// Only ever accessed by the task itself, so it needs no synchronization.
     tls_head: ?*TaskLocalNode = null,
 
+    /// Which kinds of direct wait the task has open (see `Waiter`). Only kept
+    /// in safe builds, to check the nesting rules, and only accessed by the
+    /// task itself.
+    open_waits: if (compat.is_safe) OpenWaits else void = if (compat.is_safe) .{} else {},
+
     /// See `Options.debug_cancel`. Only accessed by the task itself.
     cancel_debug: if (zio_options.debug_cancel) CancelDebug else void = if (zio_options.debug_cancel) .{} else {},
 
@@ -224,23 +230,75 @@ pub const AnyTask = struct {
         if (zio_options.debug_cancel) self.cancel_debug.exempt -= 1;
     }
 
-    /// Task state and park token, packed into a single byte for atomic operations.
+    /// Task state, park token and the wake-ups of the task's waits, in one
+    /// word so that a wake-up and the wake are a single atomic step (see
+    /// `Executor.scheduleTask`). 32 bits, because not every target has a
+    /// 64-bit compare-and-swap.
     ///
     /// The `awaken` bit implements a NetBSD-style park token:
     /// - Set by wakers when the task is in `.ready` state (not yet parked)
     /// - Consumed by `processCleanup.park` to reschedule the task instead of
     ///   transitioning it to `.waiting` when the task was pre-woken
-    pub const State = packed struct(u8) {
+    ///
+    /// The wake-up fields belong to the task's direct waits (`Waiter`). A
+    /// wait notes the field when it starts and compares against that, so the
+    /// fields are never reset and the waiting task only ever reads them:
+    /// - `done` flips on the wake-up of an ordinary wait, which gets exactly
+    ///   one;
+    /// - `lock` flips on the wake-up of a `zio.Mutex` lock wait, which can be
+    ///   open inside an ordinary wait or a select;
+    /// - `timer` flips when an ordinary wait's timeout fires;
+    /// - `select` counts the wake-ups of a select, which can get several and
+    ///   must outwait all of them. It wraps; a select receives far fewer than
+    ///   its range (see `max_arms` in select.zig).
+    pub const State = packed struct(u32) {
         tag: Tag = .new,
         awaken: bool = false,
-        _: u4 = 0,
+        done: bool = false,
+        lock: bool = false,
+        timer: bool = false,
+        select: u16 = 0,
+        _: u10 = 0,
 
-        pub const Tag = enum(u3) {
+        pub const Tag = enum(u2) {
             new = 0,
             ready = 1,
             waiting = 2,
             finished = 3,
         };
+    };
+
+    /// What a wake changes in the state word besides making the task ready.
+    pub const WakeKind = enum {
+        /// A plain wake. The caller must own a reference to the task.
+        none,
+        /// The wake-up of the task's ordinary wait.
+        done,
+        /// The wake-up of the task's mutex lock wait.
+        lock,
+        /// The timeout of the task's ordinary wait fired.
+        timer,
+        /// A wake-up of the task's select.
+        select,
+
+        pub fn apply(comptime kind: WakeKind, state: State) State {
+            var new = state;
+            switch (kind) {
+                .none => {},
+                .done => new.done = !new.done,
+                .lock => new.lock = !new.lock,
+                .timer => new.timer = !new.timer,
+                .select => new.select +%= 1,
+            }
+            return new;
+        }
+    };
+
+    pub const OpenWaits = packed struct(u8) {
+        ordinary: bool = false,
+        lock: bool = false,
+        select: bool = false,
+        _: u5 = 0,
     };
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
@@ -579,9 +637,10 @@ pub const AnyTask = struct {
         }
     }
 
-    /// Wake this task (mark it as ready and schedule for execution).
+    /// Wake this task (mark it as ready and schedule for execution). The
+    /// caller must own a reference to the task.
     pub fn wake(self: *AnyTask) void {
-        Executor.scheduleTask(self);
+        Executor.scheduleTask(self, .none);
     }
 
     /// Return the coroutine's stack to the pool and retire its TSan fiber.
@@ -817,7 +876,7 @@ pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
         return error.RuntimeShutdown;
     }
 
-    Executor.scheduleTask(task);
+    Executor.scheduleTask(task, .none);
 
     if (runtime.getCurrentExecutorOrNull()) |current_executor| {
         if (current_executor.runtime == rt) {

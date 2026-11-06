@@ -302,7 +302,8 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     var pending_winner: std.atomic.Value(usize) = .init(NO_WINNER);
 
     // Parent waiter that select waiters will signal when they win
-    var waiter = Waiter.init();
+    var waiter = Waiter.initSelectParent();
+    defer waiter.deinit();
 
     // Allocate WaitContext struct on stack for futures that need per-wait state
     const ContextsType = WaitContextsType(S);
@@ -502,7 +503,7 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     // the request back for the next cancelable operation. A null task
     // binding means the wait blocked the thread and consumed nothing.
     if (canceled) {
-        if (waiter.mode.direct.task) |t| t.recancel();
+        if (waiter.directTask()) |t| t.recancel();
     }
 
     // Return result from winner.
@@ -534,7 +535,8 @@ pub fn selectAwaitables(awaitables: []const *Awaitable) Cancelable!usize {
     // Never written here: this select takes no commit fence (no channel
     // arms), so no notification can bounce. Present only to build the arms.
     var pending_winner: std.atomic.Value(usize) = .init(NO_WINNER);
-    var waiter = Waiter.init();
+    var waiter = Waiter.initSelectParent();
+    defer waiter.deinit();
     var waiters: [max_awaitables]Waiter = undefined;
 
     for (waiters[0..awaitables.len], 0..) |*w, i| {
@@ -593,7 +595,7 @@ pub fn selectAwaitables(awaitables: []const *Awaitable) Cancelable!usize {
     // operation. A null task binding means the wait blocked the thread and
     // consumed nothing.
     if (canceled) {
-        if (waiter.mode.direct.task) |t| t.recancel();
+        if (waiter.directTask()) |t| t.recancel();
     }
     return winner_index;
 }
@@ -606,6 +608,7 @@ fn waitInternal(future: anytype, comptime flags: WaitFlags) Cancelable!WaitResul
     }
 
     var waiter = Waiter.init();
+    defer waiter.deinit();
 
     // Allocate WaitContext if needed
     const WaitCtx = FutureWaitContext(@TypeOf(future));

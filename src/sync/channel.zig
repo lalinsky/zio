@@ -172,6 +172,7 @@ const ChannelImpl = struct {
         const recv = AsyncReceiveImpl{ .channel = self };
         var ctx: AsyncReceiveImpl.WaitContext = .{ .result_ptr = elem_ptr, .result_set = false };
         var waiter = Waiter.init();
+        defer waiter.deinit();
         waiter.node.userdata = @intFromPtr(&ctx);
         self.receiver_queue.push(&waiter.node);
         self.mutex.unlock();
@@ -186,7 +187,7 @@ const ChannelImpl = struct {
                 // binding means the wait blocked the thread and consumed
                 // nothing.
                 waiter.wait(1, .no_cancel);
-                if (waiter.mode.direct.task) |t| t.recancel();
+                if (waiter.directTask()) |t| t.recancel();
                 return recv.getResult(&ctx);
             }
             return err;
@@ -265,6 +266,7 @@ const ChannelImpl = struct {
         const send_op = AsyncSendImpl{ .channel = self };
         var ctx: AsyncSendImpl.WaitContext = .{ .item_ptr = elem_ptr };
         var waiter = Waiter.init();
+        defer waiter.deinit();
         waiter.node.userdata = @intFromPtr(&ctx);
         self.sender_queue.push(&waiter.node);
         self.mutex.unlock();
@@ -276,7 +278,7 @@ const ChannelImpl = struct {
                 // reports its result and the consumed cancellation request
                 // goes back for the next cancelable operation.
                 waiter.wait(1, .no_cancel);
-                if (waiter.mode.direct.task) |t| t.recancel();
+                if (waiter.directTask()) |t| t.recancel();
                 return send_op.getResult(&ctx);
             }
             return err;
@@ -1824,7 +1826,7 @@ test "Channel: close classifies select waiters before signaling" {
     const Helpers = struct {
         fn notifyState(waiter: *Waiter) u32 {
             return switch (waiter.mode) {
-                .direct => |*direct| direct.notify.state.load(.acquire),
+                .direct => waiter.signalCount(),
                 .select => unreachable,
             };
         }
@@ -1834,7 +1836,8 @@ test "Channel: close classifies select waiters before signaling" {
     var claimed_receive_channel = Channel(u32).init(&.{});
     var claimed_receive = claimed_receive_channel.asyncReceive();
     var claimed_receive_ctx: AsyncReceive(u32).WaitContext = .{};
-    var claimed_receive_parent = Waiter.init();
+    var claimed_receive_parent = Waiter.initSelectParent();
+    defer claimed_receive_parent.deinit();
     var claimed_receive_winner: std.atomic.Value(usize) = .init(NO_WINNER);
     var claimed_receive_gen: std.atomic.Value(u32) = .init(0);
     var claimed_receive_pending: std.atomic.Value(usize) = .init(NO_WINNER);
@@ -1851,7 +1854,8 @@ test "Channel: close classifies select waiters before signaling" {
     var claimed_send_channel = Channel(u32).init(&.{});
     var claimed_send = claimed_send_channel.asyncSend(42);
     var claimed_send_ctx: AsyncSend(u32).WaitContext = .{};
-    var claimed_send_parent = Waiter.init();
+    var claimed_send_parent = Waiter.initSelectParent();
+    defer claimed_send_parent.deinit();
     var claimed_send_winner: std.atomic.Value(usize) = .init(NO_WINNER);
     var claimed_send_gen: std.atomic.Value(u32) = .init(0);
     var claimed_send_pending: std.atomic.Value(usize) = .init(NO_WINNER);
@@ -1869,7 +1873,8 @@ test "Channel: close classifies select waiters before signaling" {
     var receive_channel = Channel(u32).init(&.{});
     var receive = receive_channel.asyncReceive();
     var receive_ctx: AsyncReceive(u32).WaitContext = .{};
-    var receive_parent = Waiter.init();
+    var receive_parent = Waiter.initSelectParent();
+    defer receive_parent.deinit();
     var receive_winner: std.atomic.Value(usize) = .init(1);
     var receive_gen: std.atomic.Value(u32) = .init(0);
     var receive_pending: std.atomic.Value(usize) = .init(NO_WINNER);
@@ -1885,7 +1890,8 @@ test "Channel: close classifies select waiters before signaling" {
     var send_channel = Channel(u32).init(&.{});
     var send = send_channel.asyncSend(42);
     var send_ctx: AsyncSend(u32).WaitContext = .{};
-    var send_parent = Waiter.init();
+    var send_parent = Waiter.initSelectParent();
+    defer send_parent.deinit();
     var send_winner: std.atomic.Value(usize) = .init(1);
     var send_gen: std.atomic.Value(u32) = .init(0);
     var send_pending: std.atomic.Value(usize) = .init(NO_WINNER);
@@ -2202,7 +2208,8 @@ test "Channel: a send behind a fenced receiver does not overtake the buffer" {
 
     var recv = channel.asyncReceive();
     var ctx: AsyncReceive(u32).WaitContext = .{};
-    var parent = Waiter.init();
+    var parent = Waiter.initSelectParent();
+    defer parent.deinit();
     var winner: std.atomic.Value(usize) = .init(NO_WINNER);
     var gen: std.atomic.Value(u32) = .init(0);
     var pending: std.atomic.Value(usize) = .init(NO_WINNER);

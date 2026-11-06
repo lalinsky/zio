@@ -76,6 +76,9 @@ All notable changes to this project will be documented in this file.
 - With the epoll and kqueue backends, a timeout or cancel of one of several tasks receiving
   or accepting on the same socket could crash or hang the program (#880).
 
+- Waking a task that waited on a mutex, channel, timeout or I/O could touch the task after
+  it had already finished and been freed, when the wake raced a cancellation or timeout.
+
 - Under sustained load, tasks that overflowed an executor's run queue could wait until the
   load dropped, stalling some connections for seconds.
 

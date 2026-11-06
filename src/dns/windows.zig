@@ -63,6 +63,7 @@ pub fn lookup(
         .waiter = .init(),
         .err = 0,
     };
+    defer ctx.waiter.deinit();
     var cancel_handle: windows.HANDLE = undefined;
 
     const rc = windows.GetAddrInfoExW(
