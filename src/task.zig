@@ -272,6 +272,8 @@ pub const AnyTask = struct {
     pub const WakeKind = enum {
         /// A plain wake. The caller must own a reference to the task.
         none,
+        /// The first queuing of a new task, by the code spawning it.
+        start,
         /// The wake-up of the task's ordinary wait.
         done,
         /// The wake-up of the task's mutex lock wait.
@@ -284,7 +286,7 @@ pub const AnyTask = struct {
         pub fn apply(comptime kind: WakeKind, state: State) State {
             var new = state;
             switch (kind) {
-                .none => {},
+                .none, .start => {},
                 .done => new.done = !new.done,
                 .lock => new.lock = !new.lock,
                 .timer => new.timer = !new.timer,
@@ -876,7 +878,7 @@ pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
         return error.RuntimeShutdown;
     }
 
-    Executor.scheduleTask(task, .none);
+    Executor.scheduleTask(task, .start);
 
     if (runtime.getCurrentExecutorOrNull()) |current_executor| {
         if (current_executor.runtime == rt) {
@@ -1207,4 +1209,28 @@ test "TaskLocal: unbound key reads back null" {
     var h = try rt.spawn(S.run, .{});
     defer h.cancel();
     try h.join();
+}
+
+test "registerTask: a cancel before the task is queued leaves the queuing to the spawner" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const S = struct {
+        fn start(_: *const anyopaque, _: *anyopaque) void {}
+    };
+
+    // What `spawnTask` does up to queuing the task: create it and take the
+    // reference the handle below owns.
+    const task = try AnyTask.create(try getPlacementExecutor(rt, .auto), 0, .@"1", &.{}, .@"1", .{ .regular = &S.start });
+    task.awaitable.ref_count.incr();
+    var handle: runtime.JoinHandle(void) = .{ .awaitable = &task.awaitable, .result = undefined };
+
+    // A cancel landing here, as a concurrent `Group.cancel` can, must not
+    // queue the task: it could then run, finish and be freed while the
+    // spawner still has to queue it.
+    task.cancel();
+    try std.testing.expectEqual(.new, task.state.load(.acquire).tag);
+
+    try registerTask(rt, task);
+    handle.join();
 }

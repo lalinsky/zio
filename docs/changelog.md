@@ -84,6 +84,9 @@ All notable changes to this project will be documented in this file.
 
 - Each thread-pool worker that retired after its idle timeout leaked its thread stack (#879).
 
+- Spawning a task into a group while another executor canceled the group could touch the
+  task after it had finished and been freed (#904).
+
 - A `select` could hang, and leave a registration behind on its source, when an event fired
   and was reset while the select was re-checking its futures.
 
