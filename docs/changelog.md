@@ -79,6 +79,9 @@ All notable changes to this project will be documented in this file.
 
 - Each thread-pool worker that retired after its idle timeout leaked its thread stack (#879).
 
+- A `select` could hang, and leave a registration behind on its source, when an event fired
+  and was reset while the select was re-checking its futures.
+
 - The io_uring backend ignored every send flag except `no_signal`, so a flag such as `oob`
   or `eor` had no effect.
 

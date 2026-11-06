@@ -321,6 +321,10 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     // is left to its own source in the settle loop below, because a re-poll
     // may already have counted that signal via .requeued.
     var promoted = false;
+    // Arms a re-poll found popped (.requeued). The popped registration's
+    // signal may still be on its way, and it can win the select itself; then
+    // the claim and the counted signal are the same one.
+    var requeued: [field_names.len]bool = @splat(false);
     var decided = false;
 
     // Registration sweep. On a first call .requeued means .queued and
@@ -355,6 +359,7 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
             reg: *const [field_names.len]bool,
             prior: *u32,
             selfc: *bool,
+            requeued_arms: *[field_names.len]bool,
         ) bool {
             inline for (field_names, field_types, 0..) |name, FieldType, i| {
                 if (reg[i]) {
@@ -373,7 +378,10 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
                             return true;
                         },
                         .queued => {},
-                        .requeued => prior.* += 1,
+                        .requeued => {
+                            prior.* += 1;
+                            requeued_arms[i] = true;
+                        },
                         .decided => return true,
                     }
                 }
@@ -403,7 +411,7 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
                 // that skipped us may be parked by now; re-poll before we
                 // park, or both sides sleep through a valid pairing.
                 gen_seen = g;
-                if (Poll.repoll(&futures, &waiters, &contexts, &registered, &prior_signals, &self_claimed)) break :park;
+                if (Poll.repoll(&futures, &waiters, &contexts, &registered, &prior_signals, &self_claimed, &requeued)) break :park;
                 continue :park;
             }
             waiter.wait(consumed_wakes + 1, .allow_cancel) catch {
@@ -420,7 +428,7 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
             // A signal landed without a claim: the claimer saw our commit
             // fence. The readiness it reported is standing; re-poll finds it.
             consumed_wakes += 1;
-            if (Poll.repoll(&futures, &waiters, &contexts, &registered, &prior_signals, &self_claimed)) break :park;
+            if (Poll.repoll(&futures, &waiters, &contexts, &registered, &prior_signals, &self_claimed, &requeued)) break :park;
         }
     }
 
@@ -434,7 +442,14 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     // re-poll may have already re-registered the arm and counted that signal
     // as .requeued, in which case asyncCancelWait removes the new
     // registration and reports nothing owed.
-    const settled = if (promoted) NO_WINNER else hint;
+    //
+    // So does an external winner on an arm a re-poll found popped: the claim
+    // came either from the popped registration's late signal, already
+    // counted, while the new registration is still queued (asyncCancelWait
+    // removes it and reports nothing owed), or from the new registration,
+    // whose signal asyncCancelWait then reports as owed.
+    const requeued_winner = hint != NO_WINNER and !self_claimed and !promoted and requeued[hint];
+    const settled = if (promoted or requeued_winner) NO_WINNER else hint;
     var expected: u32 = prior_signals;
     inline for (field_names, field_types, 0..) |name, FieldType, i| {
         if (registered[i] and i != settled) {
@@ -446,8 +461,8 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
         }
     }
     // An external winner's claim carries one signal; a self-claimed win sends
-    // none, and a promoted one was just accounted for above.
-    if (hint != NO_WINNER and !self_claimed and !promoted) expected += 1;
+    // none, and a promoted or requeued one was just accounted for above.
+    if (hint != NO_WINNER and !self_claimed and !promoted and !requeued_winner) expected += 1;
     waiter.wait(expected, .no_cancel);
 
     const winner_index = winner.load(.acquire);
@@ -1241,4 +1256,103 @@ test "waitUntilComplete: re-arms the caller's cancellation in JoinHandle.cancel"
     handle.requestCancel();
     ctx.go.set();
     try handle.join();
+}
+/// A source popped the first registration of arm `late` and is about to
+/// signal it (its completer stalls between pop and signal); meanwhile the
+/// source's readiness lapsed, so the select's re-poll registers the arm again
+/// and gets .requeued. Then either the late signal wins the select itself, or
+/// the new registration is popped and wins and the late signal loses. Either
+/// way the select must outwait exactly the signals that exist.
+fn testRequeuedWinner(new_registration_wins: bool) !void {
+    const LateArm = struct {
+        stashed: ?*Waiter = null,
+        polls: u32 = 0,
+        new_wins: bool,
+        new_popped: bool = false,
+
+        pub const Result = void;
+
+        pub fn asyncWait(self: *@This(), waiter: *Waiter) common.AsyncWaitState {
+            self.polls += 1;
+            if (self.polls == 1) {
+                self.stashed = waiter;
+                return .queued;
+            }
+            return .requeued;
+        }
+
+        pub fn asyncCancelWait(self: *@This(), waiter: *Waiter) bool {
+            _ = waiter;
+            return !self.new_popped;
+        }
+
+        pub fn getResult(self: *@This()) void {
+            _ = self;
+        }
+
+        fn fire(self: *@This()) !void {
+            try rt_mod.sleep(.fromMilliseconds(20));
+            // Both registrations use the same waiter, so popping the new one
+            // and signaling it is the same call as the late signal.
+            if (self.new_wins) {
+                self.new_popped = true;
+                self.stashed.?.signal();
+            }
+            self.stashed.?.signal();
+        }
+    };
+
+    const FenceArm = struct {
+        late: *LateArm,
+        polls: u32 = 0,
+
+        pub const Result = void;
+
+        pub fn asyncWait(self: *@This(), waiter: *Waiter) common.AsyncWaitState {
+            self.polls += 1;
+            if (self.polls == 1) {
+                // A claim attempt on the late arm while our fence is up bumps
+                // the select's generation, which forces the re-poll.
+                if (!waiter.beginCommit()) return .decided;
+                std.debug.assert(self.late.stashed.?.tryClaim() == .busy);
+                waiter.abortCommit();
+            }
+            return .queued;
+        }
+
+        pub fn asyncCancelWait(self: *@This(), waiter: *Waiter) bool {
+            _ = self;
+            _ = waiter;
+            return true;
+        }
+
+        pub fn getResult(self: *@This()) void {
+            _ = self;
+        }
+    };
+
+    const Body = struct {
+        fn run(new_wins: bool) !void {
+            var late: LateArm = .{ .new_wins = new_wins };
+            var fence: FenceArm = .{ .late = &late };
+            var group: @import("group.zig").Group = .init;
+            defer group.cancel();
+            try group.spawn(LateArm.fire, .{&late});
+            const result = try select(.{ .late = &late, .fence = &fence });
+            try std.testing.expectEqual(std.meta.Tag(@TypeOf(result)).late, std.meta.activeTag(result));
+        }
+    };
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(1) });
+    defer runtime.deinit();
+    var handle = try runtime.spawn(Body.run, .{new_registration_wins});
+    try handle.join();
+}
+
+test "select: the late signal of a popped registration wins the select" {
+    try testRequeuedWinner(false);
+}
+
+test "select: the new registration of a popped arm wins, its late signal loses" {
+    try testRequeuedWinner(true);
 }
