@@ -196,7 +196,7 @@ pub fn JoinHandle(comptime T: type) type {
             const awaitable = self.awaitable orelse return self.result;
 
             // Wait for completion
-            _ = select.waitUntilComplete(awaitable);
+            select.waitUntilComplete(awaitable);
 
             // Get result and release awaitable
             self.finishAwaitable(awaitable);
@@ -272,7 +272,7 @@ pub fn JoinHandle(comptime T: type) type {
             awaitable.cancel();
 
             // Wait for completion
-            _ = select.waitUntilComplete(awaitable);
+            select.waitUntilComplete(awaitable);
 
             // Get result and release awaitable
             self.finishAwaitable(awaitable);
@@ -372,7 +372,7 @@ pub const CancelHandle = struct {
         if (awaitable.hasResult()) return;
         if (getCurrentTaskOrNull()) |task| std.debug.assert(&task.awaitable != awaitable);
         awaitable.cancel();
-        _ = select.waitUntilComplete(awaitable);
+        select.waitUntilComplete(awaitable);
     }
 };
 
