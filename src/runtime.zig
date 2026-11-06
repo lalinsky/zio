@@ -1367,8 +1367,22 @@ pub const Executor = struct {
                 // token-consume would not synchronize with it and the payload
                 // published before this wake could be invisible to the
                 // recheck after the reschedule.
-                .ready => desired.awaken = true,
-                .new, .waiting => {
+                .ready => {
+                    std.debug.assert(kind != .start);
+                    desired.awaken = true;
+                },
+                // Not queued yet. Only the code spawning the task queues it;
+                // until then nothing else may, or the task could run, finish
+                // and be freed while its spawner still uses it. Any other wake
+                // here is a cancel, already recorded in the task's cancel
+                // status and seen once the task runs.
+                .new => {
+                    if (kind != .start) return;
+                    desired.tag = .ready;
+                    desired.awaken = false;
+                },
+                .waiting => {
+                    std.debug.assert(kind != .start);
                     desired.tag = .ready;
                     desired.awaken = false;
                 },
