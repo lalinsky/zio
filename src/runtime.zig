@@ -1802,6 +1802,11 @@ pub const Runtime = struct {
     worker_start: WorkerStart = .wait,
     workers_stopped: usize = 0,
     teardown: bool = false,
+    /// Wakes in progress from code zio runs on threads that are not its
+    /// executors, see `Waiter.signalExternal`. Unlike wakes from the
+    /// program's own threads, the program cannot stop these before `deinit`,
+    /// so `deinit` waits for them.
+    external_wakes: std.atomic.Value(u32) = .init(0),
     /// Safe builds: wakes in progress on threads that are not executors of
     /// this runtime, see `Executor.beginForeignWakeCheck`.
     foreign_wakes: if (compat.is_safe) std.atomic.Value(u32) else void = if (compat.is_safe) .init(0) else {},
@@ -1959,6 +1964,23 @@ pub const Runtime = struct {
         self.worker_cond.broadcast();
     }
 
+    /// Count a wake from code zio runs on a thread that is not one of its
+    /// executors. Called before the wake makes its task ready, so whatever the
+    /// task does next, `deinit` included, sees the count.
+    pub fn beginExternalWake(self: *Runtime) void {
+        _ = self.external_wakes.fetchAdd(1, .monotonic);
+    }
+
+    /// End a wake counted by `beginExternalWake`, after its last touch of the
+    /// runtime.
+    pub fn endExternalWake(self: *Runtime) void {
+        _ = self.external_wakes.fetchSub(1, .release);
+    }
+
+    fn waitExternalWakes(self: *Runtime) void {
+        while (self.external_wakes.load(.acquire) != 0) os.thread.yield();
+    }
+
     /// Stop worker executors and join threads. Used by deinit() and init() error path.
     fn shutdownWorkers(self: *Runtime) void {
         // A worker whose run() fails retries until this is set.
@@ -1995,6 +2017,7 @@ pub const Runtime = struct {
             }
             // Executors are about to be torn down; a thread still inside a
             // wake would touch one after it is freed.
+            self.waitExternalWakes();
             if (compat.is_safe and self.foreign_wakes.load(.acquire) != 0) {
                 @panic("Runtime.deinit: a thread outside the runtime is still waking a task; stop such threads before deinit");
             }

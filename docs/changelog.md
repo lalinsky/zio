@@ -90,6 +90,9 @@ All notable changes to this project will be documented in this file.
 - Spawning a task into a group while another executor canceled the group could touch the
   task after it had finished and been freed (#904).
 
+- `Runtime.deinit` could free an executor while a Windows DNS lookup or console control
+  callback, or a Unix signal handler, was still waking one of its tasks (#905).
+
 - A `select` could hang, and leave a registration behind on its source, when an event fired
   and was reset while the select was re-checking its futures.
 

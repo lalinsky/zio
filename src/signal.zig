@@ -191,7 +191,7 @@ fn signalHandlerUnix(sig: posix.SIG) callconv(.c) void {
 
             // Wake all waiting tasks
             while (entry.waiters.pop()) |wait_node| {
-                Waiter.fromNode(wait_node).signal();
+                Waiter.fromNode(wait_node).signalExternal();
             }
         }
     }
@@ -214,7 +214,7 @@ fn consoleCtrlHandlerWindows(ctrl_type: w.DWORD) callconv(.winapi) w.BOOL {
 
             // Wake all waiting tasks
             while (entry.waiters.pop()) |wait_node| {
-                Waiter.fromNode(wait_node).signal();
+                Waiter.fromNode(wait_node).signalExternal();
             }
 
             found_handler = true;
