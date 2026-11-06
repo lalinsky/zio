@@ -291,6 +291,32 @@ pub const Waiter = struct {
         }
     }
 
+    /// Like `signal`, for code zio runs on a thread that is not one of its
+    /// executors: the Windows DNS completion and console control callbacks,
+    /// the Unix signal handler. Such a wake makes its task ready before it
+    /// pokes the task's executor, so the task can finish, and the program
+    /// call `Runtime.deinit`, in between; nothing the program can do stops
+    /// it first. Holding the runtime's external-wake count across the
+    /// signal makes `deinit` wait for it.
+    pub fn signalExternal(self: *Waiter) void {
+        // Read before signaling: once signaled, the waiter can return.
+        const rt = self.wakeRuntime();
+        if (rt) |r| r.beginExternalWake();
+        defer if (rt) |r| r.endExternalWake();
+        self.signal();
+    }
+
+    /// The runtime of the task a signal to this waiter wakes, or null when it
+    /// wakes a thread.
+    fn wakeRuntime(self: *const Waiter) ?*Runtime {
+        const direct: *const Waiter = switch (self.mode) {
+            .direct => self,
+            .select => |*s| s.parent,
+        };
+        const task = direct.directTask() orelse return null;
+        return task.runtime;
+    }
+
     /// The task a direct waiter parks, or null when it blocks a thread.
     pub fn directTask(self: *const Waiter) ?*AnyTask {
         return switch (self.mode.direct) {

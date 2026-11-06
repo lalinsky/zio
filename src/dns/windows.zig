@@ -25,7 +25,7 @@ const LookupContext = struct {
 fn completionCallback(dwError: u32, _: u32, lpOverlapped: ?*windows.OVERLAPPED) callconv(.winapi) void {
     const ctx: *LookupContext = @fieldParentPtr("overlapped", lpOverlapped.?);
     ctx.err = dwError;
-    ctx.waiter.signal();
+    ctx.waiter.signalExternal();
 }
 
 pub fn lookup(
