@@ -1331,42 +1331,54 @@ pub const Executor = struct {
         self.runtime.armSearcher(null);
     }
 
-    /// Schedule a task for execution.
-    /// Atomically transitions task state to .ready and schedules it for execution.
+    /// Schedule a task for execution, applying `kind` (for wait lane `lane`)
+    /// to its state word in the same CAS that makes it ready.
+    ///
+    /// After that CAS the task is touched again only when this call moved it
+    /// from `.new` or `.waiting` to `.ready`. The task is then in no run queue
+    /// and cannot run until it is queued below, so it cannot finish under us.
+    /// When the task was already `.ready` the CAS is the last touch, which is
+    /// what lets a signal be delivered without holding a reference: the
+    /// waiter may see the signal, return and finish the moment it lands.
+    ///
     /// May migrate the task to the current executor for cache locality.
-    pub fn scheduleTask(task: *AnyTask) void {
+    pub fn scheduleTask(task: *AnyTask, comptime kind: AnyTask.WakeKind, lane: u2) void {
         var old = task.state.load(.acquire);
         while (true) {
+            var desired = switch (kind) {
+                .none => old,
+                .signal => old.addSignal(lane),
+                .timer => old.flipTimer(lane),
+            };
             switch (old.tag) {
-                // Task already finished (race between completion and cancel) - nothing to do
-                .finished => return,
-                // Task is in .ready state (running or about to park).
-                // Set the awaken bit as a park token; processCleanup.park will consume it
-                // and reschedule the task instead of transitioning to .waiting.
-                // The CAS runs even when the token is already set (rewriting the
-                // same value): a coalescing waker must still join the release
-                // sequence on `state`, or the parker's token-consume would not
-                // synchronize with it and the payload published before this wake
-                // (a notify count, a result) could be invisible to the recheck
-                // after the reschedule.
-                .ready => {
-                    const desired = AnyTask.State{ .tag = .ready, .awaken = true };
-                    if (task.state.cmpxchgWeak(old, desired, .acq_rel, .acquire)) |actual| {
-                        old = actual;
-                        continue;
-                    }
-                    return; // Awaken token set; task will handle it before/during next park
+                // A plain wake racing the task's completion: nothing to do.
+                // A signal can never get here, because every wait outwaits
+                // the signals sent to it before its task can move on.
+                .finished => {
+                    std.debug.assert(kind == .none);
+                    return;
                 },
-                // Valid states to transition to .ready
-                .new, .waiting => {},
+                // Running or about to park: set the awaken bit as a park
+                // token; processCleanup.park consumes it and reschedules the
+                // task instead of transitioning to .waiting. The CAS runs even
+                // when the token is already set and nothing else changes: a
+                // coalescing waker must still join the release sequence on
+                // `state`, or the parker's token-consume would not synchronize
+                // with it and the payload published before this wake could be
+                // invisible to the recheck after the reschedule.
+                .ready => desired.awaken = true,
+                .new, .waiting => {
+                    desired.tag = .ready;
+                    desired.awaken = false;
+                },
             }
-            const desired = AnyTask.State{ .tag = .ready, .awaken = false };
             if (task.state.cmpxchgWeak(old, desired, .acq_rel, .acquire)) |actual| {
                 old = actual;
                 continue;
             }
             break;
         }
+        if (old.tag == .ready) return;
 
         const home_exec = Executor.fromCoroutine(&task.coro);
 
@@ -1427,7 +1439,8 @@ pub const Executor = struct {
                     std.debug.assert(old.tag == .ready);
                     if (old.awaken) {
                         // Pre-woken: consume the token, keep .ready, and reschedule
-                        const desired = AnyTask.State{ .tag = .ready, .awaken = false };
+                        var desired = old;
+                        desired.awaken = false;
                         if (task.state.cmpxchgWeak(old, desired, .acq_rel, .acquire)) |actual| {
                             old = actual;
                             continue;
@@ -1436,7 +1449,8 @@ pub const Executor = struct {
                         return;
                     }
                     // Normal: transition to .waiting
-                    const desired = AnyTask.State{ .tag = .waiting, .awaken = false };
+                    var desired = old;
+                    desired.tag = .waiting;
                     if (task.state.cmpxchgWeak(old, desired, .acq_rel, .acquire)) |actual| {
                         old = actual;
                         continue;
@@ -1718,6 +1732,7 @@ pub fn sleep(duration: Duration) Cancelable!void {
     // Nothing to time: don't arm a loop timer just to yield.
     if (duration.value == 0) return yield();
     var waiter: Waiter = .init();
+    defer waiter.deinit();
     // Nothing ever signals this waiter, so the timeout firing is the sleep
     // finishing.
     waiter.timedWait(1, .{ .duration = duration }, .allow_cancel) catch |err| switch (err) {

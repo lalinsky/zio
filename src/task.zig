@@ -202,6 +202,10 @@ pub const AnyTask = struct {
     /// Only ever accessed by the task itself, so it needs no synchronization.
     tls_head: ?*TaskLocalNode = null,
 
+    /// Number of direct waits this task has open, which is also the lane the
+    /// next one takes. Only ever accessed by the task itself.
+    wait_depth: u2 = 0,
+
     /// See `Options.debug_cancel`. Only accessed by the task itself.
     cancel_debug: if (zio_options.debug_cancel) CancelDebug else void = if (zio_options.debug_cancel) .{} else {},
 
@@ -224,15 +228,26 @@ pub const AnyTask = struct {
         if (zio_options.debug_cancel) self.cancel_debug.exempt -= 1;
     }
 
-    /// Task state and park token, packed into a single byte for atomic operations.
+    /// Task state, park token and wait lanes, packed into one word so that a
+    /// single CAS both delivers a signal and wakes the task.
     ///
     /// The `awaken` bit implements a NetBSD-style park token:
     /// - Set by wakers when the task is in `.ready` state (not yet parked)
     /// - Consumed by `processCleanup.park` to reschedule the task instead of
     ///   transitioning it to `.waiting` when the task was pre-woken
-    pub const State = packed struct(u8) {
+    ///
+    /// `lanes` holds one `Lane` per open direct wait of this task, indexed by
+    /// nesting depth (`wait_depth`). A signal names the lane of the wait it is
+    /// for, so a late signal for an outer wait cannot satisfy a wait nested
+    /// inside it. Because the signal and the wake are the same CAS, a signaler
+    /// touches the task after publishing only when it moved the task to
+    /// `.ready`, and then the task cannot run until that signaler queues it.
+    ///
+    /// 32 bits, not 64: riscv32 has no 64-bit CAS.
+    pub const State = packed struct(u32) {
         tag: Tag = .new,
         awaken: bool = false,
+        lanes: u24 = 0,
         _: u4 = 0,
 
         pub const Tag = enum(u3) {
@@ -241,6 +256,58 @@ pub const AnyTask = struct {
             waiting = 2,
             finished = 3,
         };
+
+        /// Maximum nesting depth of direct waits on one task. The deepest
+        /// nesting in the runtime is two: a select's settle phase, or a
+        /// channel's cancel path, taking the channel's `zio.Mutex`. The third
+        /// lane is headroom.
+        pub const lane_count = 3;
+
+        pub const Lane = packed struct(u8) {
+            /// Wrapping count of signals delivered to the wait at this depth.
+            /// The waiter widens it to 32 bits by observing it at least once
+            /// per 128 signals (see `Waiter.TaskWait`).
+            count: u7 = 0,
+            /// Flipped by the wait's timeout timer. A timed wait records the
+            /// bit when it arms the timer and treats a change as "fired", so
+            /// nothing ever has to clear it.
+            timer: bool = false,
+        };
+
+        pub fn lane(self: State, index: u2) Lane {
+            std.debug.assert(index < lane_count);
+            return @bitCast(@as(u8, @truncate(self.lanes >> (@as(u5, index) * 8))));
+        }
+
+        /// Bit offset of lane `index` in the state word as a `u32`.
+        fn laneShift(index: u2) u5 {
+            std.debug.assert(index < lane_count);
+            return @as(u5, @bitOffsetOf(State, "lanes")) + @as(u5, index) * 8;
+        }
+
+        /// One more signal on lane `index`. The count wraps within its 7 bits.
+        pub fn addSignal(self: State, index: u2) State {
+            const word: u32 = @bitCast(self);
+            const shift = laneShift(index);
+            const mask = @as(u32, 0x7f) << shift;
+            return @bitCast((word & ~mask) | ((word +% (@as(u32, 1) << shift)) & mask));
+        }
+
+        /// Flip the timer bit of lane `index`.
+        pub fn flipTimer(self: State, index: u2) State {
+            const word: u32 = @bitCast(self);
+            return @bitCast(word ^ (@as(u32, 0x80) << laneShift(index)));
+        }
+    };
+
+    /// What a wake does to the state word besides making the task ready.
+    pub const WakeKind = enum {
+        /// A plain wake. The caller must own a reference to the task.
+        none,
+        /// A signal for the direct wait at the given depth.
+        signal,
+        /// The timeout timer of the direct wait at the given depth fired.
+        timer,
     };
 
     pub inline fn fromAwaitable(awaitable: *Awaitable) *AnyTask {
@@ -314,10 +381,9 @@ pub const AnyTask = struct {
         // only costs one spurious reschedule at the next park.
         if (cancel_mode == .allow_cancel) {
             try self.checkCancel();
-            if (zio_options.debug_cancel and mode == .park and self.reportSwallowedCancel()) {
-                // Printing can suspend, and the task may have migrated.
-                executor = getCurrentExecutor();
-            }
+            // The report prints with the thread blocked, so the task stays
+            // on `executor`.
+            if (zio_options.debug_cancel and mode == .park) self.reportSwallowedCancel();
         }
 
         // Set up deferred cleanup — state transition happens after context is saved
@@ -531,21 +597,26 @@ pub const AnyTask = struct {
     /// The task is about to park on a cancelable wait. If a cancellation was
     /// delivered earlier and is neither pending again nor shielded, whoever
     /// received the error.Canceled did not propagate it and the wait can block
-    /// forever. Reports the first occurrence per task; returns whether it did.
-    fn reportSwallowedCancel(self: *AnyTask) bool {
+    /// forever. Reports the first occurrence per task.
+    fn reportSwallowedCancel(self: *AnyTask) void {
         const d = &self.cancel_debug;
-        if (d.reported or d.exempt > 0) return false;
-        const trace = d.trace orelse return false;
+        if (d.reported or d.exempt > 0) return;
+        const trace = d.trace orelse return;
         const status: CanceledStatus = @bitCast(self.canceled_status.load(.acquire));
-        if (status.pending_errors > 0 or status.shield_count > 0) return false;
+        if (status.pending_errors > 0 or status.shield_count > 0) return;
         d.reported = true;
+
+        // This runs inside a wait, possibly one nested in another; printing
+        // must block the thread rather than park the task on the stderr lock,
+        // which would open a third nested wait.
+        runtime.beginNoSuspend();
+        defer runtime.endNoSuspend();
 
         std.debug.print("zio: task {*} parks on a cancelable wait after error.Canceled was delivered and not propagated\n", .{self});
         std.debug.print("error.Canceled was delivered at:\n", .{});
         std.debug.dumpStackTrace(&trace);
         std.debug.print("the task is now parking at:\n", .{});
         std.debug.dumpCurrentStackTrace(.{ .first_address = @returnAddress() });
-        return true;
     }
 
     /// Like `cancel`, but a no-op once a user cancellation was requested, so any
@@ -575,8 +646,13 @@ pub const AnyTask = struct {
     }
 
     /// Wake this task (mark it as ready and schedule for execution).
+    ///
+    /// The caller must own a reference to the task (a `JoinHandle`, a
+    /// `CancelHandle`, group membership, or an explicit `ref_count.incr()`):
+    /// nothing else keeps the task alive across the wake. Waiters are woken
+    /// through `Waiter.signal`, which needs no reference.
     pub fn wake(self: *AnyTask) void {
-        Executor.scheduleTask(self);
+        Executor.scheduleTask(self, .none, 0);
     }
 
     /// Return the coroutine's stack to the pool and retire its TSan fiber.
@@ -812,7 +888,7 @@ pub fn registerTask(rt: *Runtime, task: *AnyTask) error{RuntimeShutdown}!void {
         return error.RuntimeShutdown;
     }
 
-    Executor.scheduleTask(task);
+    Executor.scheduleTask(task, .none, 0);
 
     if (runtime.getCurrentExecutorOrNull()) |current_executor| {
         if (current_executor.runtime == rt) {

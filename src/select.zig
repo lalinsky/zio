@@ -277,6 +277,9 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     const U = SelectResult(S);
     const field_names = compat.fieldNames(S);
     const field_types = compat.fieldTypes(S);
+    // A task wait lane counts signals in 7 bits and the select keeps at most
+    // one signal in flight per arm (see `Waiter.TaskWait`).
+    if (field_names.len > 64) @compileError("select supports at most 64 futures");
 
     // Self-wait detection: check all futures for self-wait
     const task = getCurrentTask();
@@ -298,6 +301,7 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
 
     // Parent waiter that select waiters will signal when they win
     var waiter = Waiter.init();
+    defer waiter.deinit();
 
     // Allocate WaitContext struct on stack for futures that need per-wait state
     const ContextsType = WaitContextsType(S);
@@ -390,6 +394,11 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
         var consumed_wakes: u32 = 0;
         var gen_seen: u32 = 0;
         park: while (true) {
+            // A round can re-register arms without parking (the generation
+            // re-poll below), and each re-registration may draw one more
+            // signal. Fold what has landed into the count every round, so the
+            // lane never runs more than one signal per arm ahead of it.
+            waiter.observe();
             // The sweep, or the re-poll below, may have just released the
             // fence a notification bounced off. Promote before parking.
             if (Waiter.promotePending(&winner, &pending_winner)) {
@@ -461,7 +470,7 @@ pub fn select(futures: anytype) !SelectResult(@TypeOf(futures)) {
     // the request back for the next cancelable operation. A null task
     // binding means the wait blocked the thread and consumed nothing.
     if (canceled) {
-        if (waiter.mode.direct.task) |t| t.recancel();
+        if (waiter.directTask()) |t| t.recancel();
     }
 
     // Return result from winner.
@@ -494,6 +503,7 @@ pub fn selectAwaitables(awaitables: []const *Awaitable) Cancelable!usize {
     // arms), so no notification can bounce. Present only to build the arms.
     var pending_winner: std.atomic.Value(usize) = .init(NO_WINNER);
     var waiter = Waiter.init();
+    defer waiter.deinit();
     var waiters: [max_awaitables]Waiter = undefined;
 
     for (waiters[0..awaitables.len], 0..) |*w, i| {
@@ -552,7 +562,7 @@ pub fn selectAwaitables(awaitables: []const *Awaitable) Cancelable!usize {
     // operation. A null task binding means the wait blocked the thread and
     // consumed nothing.
     if (canceled) {
-        if (waiter.mode.direct.task) |t| t.recancel();
+        if (waiter.directTask()) |t| t.recancel();
     }
     return winner_index;
 }
@@ -565,6 +575,7 @@ fn waitInternal(future: anytype, comptime flags: WaitFlags) Cancelable!WaitResul
     }
 
     var waiter = Waiter.init();
+    defer waiter.deinit();
 
     // Allocate WaitContext if needed
     const WaitCtx = FutureWaitContext(@TypeOf(future));

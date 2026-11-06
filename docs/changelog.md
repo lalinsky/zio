@@ -53,6 +53,9 @@ All notable changes to this project will be documented in this file.
 - On Windows, canceling a read or write of stdin, stdout or another synchronous pipe
   waited until it finished, such as a stdin read until the user pressed Enter.
 
+- Waking a task that waited on a mutex, channel, timeout or I/O could touch the task after
+  it had already finished and been freed, when the wake raced a cancellation or timeout.
+
 - A cancel was lost when `std.Io.Group.async` could not spawn its task and ran it on the
   caller instead.
 
