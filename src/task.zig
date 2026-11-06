@@ -314,10 +314,7 @@ pub const AnyTask = struct {
         // only costs one spurious reschedule at the next park.
         if (cancel_mode == .allow_cancel) {
             try self.checkCancel();
-            if (zio_options.debug_cancel and mode == .park and self.reportSwallowedCancel()) {
-                // Printing can suspend, and the task may have migrated.
-                executor = getCurrentExecutor();
-            }
+            if (zio_options.debug_cancel and mode == .park) self.reportSwallowedCancel();
         }
 
         // Set up deferred cleanup — state transition happens after context is saved
@@ -329,6 +326,10 @@ pub const AnyTask = struct {
         if (self == &executor.main_task) {
             // Main task enters the run loop instead of context switching
             executor.run(.until_ready) catch |err| {
+                // The main task is in the middle of a wait here, so logging
+                // must not open another one.
+                runtime.beginNoSuspend();
+                defer runtime.endNoSuspend();
                 std.log.err("Event loop error during yield: {}", .{err});
             };
         } else {
@@ -531,21 +532,25 @@ pub const AnyTask = struct {
     /// The task is about to park on a cancelable wait. If a cancellation was
     /// delivered earlier and is neither pending again nor shielded, whoever
     /// received the error.Canceled did not propagate it and the wait can block
-    /// forever. Reports the first occurrence per task; returns whether it did.
-    fn reportSwallowedCancel(self: *AnyTask) bool {
+    /// forever. Reports the first occurrence per task.
+    fn reportSwallowedCancel(self: *AnyTask) void {
         const d = &self.cancel_debug;
-        if (d.reported or d.exempt > 0) return false;
-        const trace = d.trace orelse return false;
+        if (d.reported or d.exempt > 0) return;
+        const trace = d.trace orelse return;
         const status: CanceledStatus = @bitCast(self.canceled_status.load(.acquire));
-        if (status.pending_errors > 0 or status.shield_count > 0) return false;
+        if (status.pending_errors > 0 or status.shield_count > 0) return;
         d.reported = true;
+
+        // The task is in the middle of a wait, so printing must not open
+        // another one: inside the region it blocks the thread instead.
+        runtime.beginNoSuspend();
+        defer runtime.endNoSuspend();
 
         std.debug.print("zio: task {*} parks on a cancelable wait after error.Canceled was delivered and not propagated\n", .{self});
         std.debug.print("error.Canceled was delivered at:\n", .{});
         std.debug.dumpStackTrace(&trace);
         std.debug.print("the task is now parking at:\n", .{});
         std.debug.dumpCurrentStackTrace(.{ .first_address = @returnAddress() });
-        return true;
     }
 
     /// Like `cancel`, but a no-op once a user cancellation was requested, so any
