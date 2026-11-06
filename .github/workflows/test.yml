@@ -51,10 +51,15 @@ jobs:
 
     - name: Install Wine
       if: matrix.config.wine
-      timeout-minutes: 5
+      # libwine alone is over 100 MB, and the runner's Ubuntu mirror is
+      # sometimes slow enough that it takes several minutes.
+      timeout-minutes: 15
       run: |
         sudo apt-get update -q -y
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -q -y wine64
+        # The recommends are a desktop media stack (gstreamer, codecs, VA
+        # drivers) the tests don't use. `wine` is the launcher, which wine64
+        # only recommends.
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -q -y --no-install-recommends wine wine64
 
     - name: Build and test for each backend
       shell: bash
