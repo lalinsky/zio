@@ -645,21 +645,19 @@ pub fn wait(future: anytype) Cancelable!WaitResult(FutureResult(@TypeOf(future))
     return waitInternal(future, .{ .on_cancel = .propagate });
 }
 
-/// Wait for a single future to complete, never propagating cancellation.
-/// When canceled, cancels the child task and continues waiting until it completes.
-/// This ensures the function always returns a result and never returns error.Canceled;
-/// the cancellation is re-armed instead, so the caller's next cancellation point
-/// reports it, even if the child swallowed the one forwarded to it.
-/// `future` must be a pointer to a future type.
+/// Wait for a task to complete, never propagating cancellation.
+/// When canceled, cancels the task and continues waiting until it completes,
+/// so this never returns error.Canceled; the cancellation is re-armed instead,
+/// so the caller's next cancellation point reports it, even if the task
+/// swallowed the one forwarded to it.
 /// Works from both coroutines and threads.
 ///
-/// Example:
-/// ```
-/// const value = waitUntilComplete(&future); // never returns error.Canceled
-/// // value is directly FutureResult (e.g., error{Foo}!i32)
-/// ```
-pub fn waitUntilComplete(future: anytype) FutureResult(@TypeOf(future)) {
-    const result = waitInternal(future, .{ .on_cancel = .cancel_and_continue }) catch unreachable;
+/// Only a single task is accepted: canceling it only requests the cancel and
+/// never waits, so the cancel path opens no second wait while this one is
+/// still registered. Canceling a group or a join handle waits for the tasks
+/// to finish.
+pub fn waitUntilComplete(awaitable: *Awaitable) void {
+    const result = waitInternal(awaitable, .{ .on_cancel = .cancel_and_continue }) catch unreachable;
     return result.value;
 }
 

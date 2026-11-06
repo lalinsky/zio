@@ -357,7 +357,7 @@ fn awaitOrCancel(any_future: *Io.AnyFuture, result: []u8, should_cancel: bool) v
         awaitable.cancel();
     }
 
-    _ = select.waitUntilComplete(awaitable);
+    select.waitUntilComplete(awaitable);
 
     @memcpy(result, awaitable.getResultSlice());
 
