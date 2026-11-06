@@ -1341,6 +1341,11 @@ pub const Executor = struct {
     /// which is what lets a waiter's wake-up be delivered without a
     /// reference: the waiter may see it, return and finish right away.
     ///
+    /// The main task is the exception: it is never queued, its executor runs
+    /// it as soon as it sees `.ready`, so it may already be running while the
+    /// code below wakes its executor. That is safe because the main task is
+    /// part of its executor, which outlives every waker.
+    ///
     /// May migrate the task to the current executor for cache locality.
     pub fn scheduleTask(task: *AnyTask, comptime kind: AnyTask.WakeKind) void {
         var old = task.state.load(.acquire);

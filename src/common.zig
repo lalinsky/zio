@@ -110,10 +110,16 @@ pub const ClaimResult = enum {
 /// that may start is a mutex lock wait. A wait is open from `init` until
 /// `deinit`; safe builds check the rules there.
 ///
-/// **A waiter is good for one wait.** The signal count only ever increases:
-/// `signal` adds to it and `wait` compares against it without consuming, so
-/// once a waiter has been signaled it satisfies every later `wait(1, ...)`
-/// immediately. Do not reuse one for a second, independent wait.
+/// **A waiter is good for one wait.** `wait` compares the signals received
+/// against `expected` without consuming them, so once a waiter has been
+/// signaled it satisfies every later `wait(1, ...)` immediately. Do not reuse
+/// one for a second, independent wait.
+///
+/// **An ordinary or lock waiter must be signaled exactly once.** Its signal
+/// flips a flag, so a second signal flips it back and the wait looks
+/// unsignaled. Sources guarantee this by removing the waiter from their queue
+/// before signaling it. A select parent counts its signals instead and takes
+/// any number.
 ///
 /// The one legitimate second call is the cancellation handshake, where both
 /// calls are waiting for the *same* signal:
