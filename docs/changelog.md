@@ -20,6 +20,9 @@ All notable changes to this project will be documented in this file.
 
 - `ev.ThreadPool.init` no longer takes an allocator.
 
+- In safe builds, `Runtime.deinit` panics if a thread outside the runtime is still waking
+  one of its tasks, which means that thread was not stopped before shutdown (#905).
+
 - `select` accepts at most 64 futures, checked at compile time, matching `std.Io`'s select.
 
 - Spawning and finishing a task no longer updates a counter shared by all executors,

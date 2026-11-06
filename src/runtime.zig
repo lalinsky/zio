@@ -1323,6 +1323,21 @@ pub const Executor = struct {
     /// executor, and wake that executor's loop. Goes to the home executor's
     /// overflow queue: the shared one (migration on, any executor may run it) or
     /// the home executor's own (migration off, stays home).
+    /// Safe builds: count a wake from a thread that is not an executor of the
+    /// task's runtime, so `Runtime.deinit` can report one still in progress.
+    fn beginForeignWakeCheck(task: *AnyTask) ?*Runtime {
+        const rt = task.runtime;
+        if (getCurrentExecutorOrNull()) |exec| {
+            if (exec.runtime == rt) return null;
+        }
+        _ = rt.foreign_wakes.fetchAdd(1, .monotonic);
+        return rt;
+    }
+
+    fn endForeignWakeCheck(rt: ?*Runtime) void {
+        if (rt) |r| _ = r.foreign_wakes.fetchSub(1, .release);
+    }
+
     fn scheduleTaskRemote(self: *Executor, task: *AnyTask) void {
         std.debug.assert(task != &self.main_task);
 
@@ -1348,6 +1363,9 @@ pub const Executor = struct {
     ///
     /// May migrate the task to the current executor for cache locality.
     pub fn scheduleTask(task: *AnyTask, comptime kind: AnyTask.WakeKind) void {
+        const foreign_rt = if (compat.is_safe) beginForeignWakeCheck(task) else {};
+        defer if (compat.is_safe) endForeignWakeCheck(foreign_rt);
+
         var old = task.state.load(.acquire);
         while (true) {
             var desired = kind.apply(old);
@@ -1784,6 +1802,9 @@ pub const Runtime = struct {
     worker_start: WorkerStart = .wait,
     workers_stopped: usize = 0,
     teardown: bool = false,
+    /// Safe builds: wakes in progress on threads that are not executors of
+    /// this runtime, see `Executor.beginForeignWakeCheck`.
+    foreign_wakes: if (compat.is_safe) std.atomic.Value(u32) else void = if (compat.is_safe) .init(0) else {},
     metrics_monitor: ?std.Thread = null,
     metrics_stop: std.atomic.Value(u32) = .init(0),
     own_self: bool = false,
@@ -1972,6 +1993,11 @@ pub const Runtime = struct {
             while (self.workers_stopped < running) {
                 self.worker_cond.wait(&self.worker_mutex);
             }
+            // Executors are about to be torn down; a thread still inside a
+            // wake would touch one after it is freed.
+            if (compat.is_safe and self.foreign_wakes.load(.acquire) != 0) {
+                @panic("Runtime.deinit: a thread outside the runtime is still waking a task; stop such threads before deinit");
+            }
             self.teardown = true;
             self.worker_cond.broadcast();
         }
@@ -1983,6 +2009,11 @@ pub const Runtime = struct {
         self.workers.deinit(self.allocator);
     }
 
+    /// Shut the runtime down and free it. Every task must have finished, and
+    /// every thread outside the runtime that wakes its tasks (by setting an
+    /// `Event`, sending on a channel, and so on) must have stopped doing so:
+    /// a wake still in progress can touch an executor after it is freed.
+    /// Safe builds panic when they catch either.
     pub fn deinit(self: *Runtime) void {
         const allocator = self.allocator;
 
