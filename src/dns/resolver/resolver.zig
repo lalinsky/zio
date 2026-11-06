@@ -73,13 +73,13 @@ pub const Resolver = struct {
 
     hosts: Hosts,
     hosts_path: []const u8,
-    hosts_mtime: i64,
+    hosts_mtime: i96,
     hosts_next_check: std.atomic.Value(u32),
     hosts_reloading: std.atomic.Value(bool),
 
     conf: ResolvConf,
     conf_path: []const u8,
-    conf_mtime: i64,
+    conf_mtime: i96,
     conf_next_check: std.atomic.Value(u32),
     conf_reloading: std.atomic.Value(bool),
 
@@ -554,13 +554,13 @@ pub const Resolver = struct {
 
         // Without a previous table or configuration to keep, a failed load
         // starts empty; mtime 0 makes the next check retry it.
-        var hosts_mtime: i64 = 0;
+        var hosts_mtime: i96 = 0;
         var hosts = loadHosts(self.allocator, self.hosts_path, &hosts_mtime) catch |err| switch (err) {
             error.Canceled => |e| return e,
             error.LoadFailed => Hosts{ .arena = .init(self.allocator), .by_name = .empty },
         };
         errdefer hosts.deinit();
-        var conf_mtime: i64 = 0;
+        var conf_mtime: i96 = 0;
         const conf = loadResolvConf(self.allocator, self.conf_path, &conf_mtime) catch |err| switch (err) {
             error.Canceled => |e| return e,
             error.LoadFailed => ResolvConf{ .arena = .init(self.allocator), .servers = &.{}, .search = &.{} },
@@ -595,7 +595,7 @@ pub const Resolver = struct {
         if (info.mtime == self.hosts_mtime) return;
 
         // A failed load keeps the current table and mtime, so the next check retries.
-        var new_mtime: i64 = 0;
+        var new_mtime: i96 = 0;
         const new_hosts = loadHosts(self.allocator, self.hosts_path, &new_mtime) catch |err| switch (err) {
             error.Canceled => |e| return e,
             error.LoadFailed => return,
@@ -631,7 +631,7 @@ pub const Resolver = struct {
         if (mtime == self.conf_mtime) return;
 
         // A failed load keeps the current configuration and mtime, so the next check retries.
-        var new_mtime: i64 = 0;
+        var new_mtime: i96 = 0;
         const new_conf = loadResolvConf(self.allocator, self.conf_path, &new_mtime) catch |err| switch (err) {
             error.Canceled => |e| return e,
             error.LoadFailed => return,
@@ -1010,7 +1010,7 @@ fn exchangeTcp(
 }
 
 /// Reads and parses the hosts file at `path`, setting `mtime_out` only on success.
-fn loadHosts(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i64) (Cancelable || error{LoadFailed})!Hosts {
+fn loadHosts(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i96) (Cancelable || error{LoadFailed})!Hosts {
     const file = fs.openFile(path) catch |err| switch (err) {
         error.Canceled => |e| return e,
         else => {
@@ -1019,7 +1019,7 @@ fn loadHosts(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i64) (C
         },
     };
     defer file.close();
-    var mtime: i64 = 0;
+    var mtime: i96 = 0;
     if (file.stat()) |info| {
         if (info.kind == .directory) {
             log.warn("dns: failed to read {s}: it is a directory", .{path});
@@ -1044,7 +1044,7 @@ fn loadHosts(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i64) (C
 /// Reads and parses the resolver configuration at `path`, setting `mtime_out`
 /// only on success. A file that is missing or that cannot be opened or read
 /// for good is the default configuration.
-fn loadResolvConf(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i64) (Cancelable || error{LoadFailed})!ResolvConf {
+fn loadResolvConf(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i96) (Cancelable || error{LoadFailed})!ResolvConf {
     const file = fs.openFile(path) catch |err| switch (err) {
         error.Canceled => |e| return e,
         error.FileNotFound,
@@ -1060,7 +1060,7 @@ fn loadResolvConf(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i6
         },
     };
     defer file.close();
-    var mtime: i64 = 0;
+    var mtime: i96 = 0;
     if (file.stat()) |info| {
         if (info.kind == .directory) return defaultResolvConf(allocator, path, mtime_out);
         mtime = info.mtime;
@@ -1082,7 +1082,7 @@ fn loadResolvConf(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i6
 
 /// The configuration for a file that is not there to read. The mtime is that
 /// of whatever is at `path`, so a reload waits for it to change.
-fn defaultResolvConf(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i64) (Cancelable || error{LoadFailed})!ResolvConf {
+fn defaultResolvConf(allocator: std.mem.Allocator, path: []const u8, mtime_out: *i96) (Cancelable || error{LoadFailed})!ResolvConf {
     var conf = ResolvConf.default(allocator) catch |err| {
         log.warn("dns: failed to init default ResolvConf: {}", .{err});
         return error.LoadFailed;

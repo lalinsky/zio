@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Reading the metadata of a file with a timestamp after 2262 or before 1677 panicked (#383 follow-up found while working on it).
 - Fixed a crash when `std.Io.swapCancelProtection` unblocked cancellation that was not blocked.
 
 ## [0.20.1] - 2026-11-12
