@@ -1453,9 +1453,8 @@ pub const Stream = struct {
             // Lend both the writer's and the reader's buffers to the fallback
             // loop; both are free here (any buffered bytes were flushed above).
             // The ev layer decides how to use them (double-buffer / split /
-            // serial). If neither is usable, defer to std's read/drain fallback.
+            // serial).
             const bufs: [2][]u8 = .{ io_w.buffer, file_reader.interface.buffer };
-            if (bufs[0].len == 0 and bufs[1].len == 0) return error.Unimplemented;
 
             // Stream the file body directly from the current read position.
             const want = @backingInt(limit);
@@ -1477,6 +1476,8 @@ pub const Stream = struct {
                     w.err = error.Canceled;
                     return error.WriteFailed;
                 },
+                // Defer to std's read/drain fallback.
+                error.Unimplemented => return error.Unimplemented,
                 // Errors unique to the file-read side; surface as ReadFailed.
                 error.InputOutput, error.IsDir, error.NotOpenForReading, error.Unseekable => return error.ReadFailed,
                 // Remaining errors are all part of the send-side set.
