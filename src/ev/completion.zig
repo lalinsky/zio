@@ -974,8 +974,9 @@ pub const NetSend = struct {
 /// the socket, repeat until EOF or `remaining` is exhausted. Socket short-writes
 /// drain the remaining buffer before the next read.
 ///
-/// A cancel that lands after some bytes were sent finishes the op with that
-/// count instead of `error.Canceled`, since those bytes can't be taken back.
+/// An error or cancel that ends the op after some bytes were sent finishes it
+/// with that count instead, since those bytes can't be taken back; a caller
+/// that tries again from there gets the error, with nothing sent.
 pub const NetSendFile = struct {
     c: Completion,
     result_private_do_not_touch: usize = undefined,
@@ -990,9 +991,10 @@ pub const NetSendFile = struct {
     remaining: usize,
     /// Up to two scratch buffers borrowed from the caller for the generic
     /// fallback loop. If both are non-empty the loop double-buffers (read into
-    /// one while sending the other); if only `bufs[0]` is non-empty it runs a
-    /// serial read-then-send loop. The two buffers may differ in size (e.g. the
-    /// writer's buffer and the reader's buffer). Unused by native backends.
+    /// one while sending the other); if only one is non-empty it runs a serial
+    /// read-then-send loop. The two buffers may differ in size (e.g. the
+    /// writer's buffer and the reader's buffer). Unused by native backends, so
+    /// both can be empty.
     bufs: [2][]u8,
 
     internal: BackendOpData(.net_send_file, "NetSendFileData") = .{},
@@ -1031,12 +1033,16 @@ pub const NetSendFile = struct {
         send_iov: [1]os.iovec_const = undefined,
     };
 
-    pub const Error = (net.SendError || fs.FileReadError) || Cancelable;
+    pub const Error = (net.SendError || fs.FileReadError) || Cancelable || error{
+        /// The backend cannot send the file with the buffers given, which
+        /// depends on the backend; both empty is enough on some. Nothing was
+        /// sent, and the caller can copy the file itself.
+        Unimplemented,
+    };
 
     /// `bufs` are borrowed for the generic fallback loop and must outlive the
     /// operation. Provide two non-empty buffers for double-buffering, or one
-    /// (with `bufs[1]` empty) for a serial loop. `bufs[0]` must be non-empty.
-    /// Native backends ignore `bufs`.
+    /// for a serial loop. Native backends ignore `bufs`, so both can be empty.
     pub fn init(handle: Backend.NetHandle, file: fs.fd_t, offset: u64, limit: usize, bufs: [2][]u8) NetSendFile {
         return .{
             .c = .init(.net_send_file),

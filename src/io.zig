@@ -2928,15 +2928,12 @@ fn netWriteFileImpl(
     }
 
     // The reader's buffer is empty here, so the fallback loop can borrow it.
-    const buffer = file_reader.interface.buffer;
-    if (ev.Backend.capability(.net_send_file) != .yes and buffer.len == 0) return error.Unimplemented;
-
     var op = ev.NetSendFile.init(
         stdIoHandleToZio(handle),
         file_reader.file.handle,
         file_reader.pos,
         @backingInt(limit),
-        .{ buffer, &.{} },
+        .{ file_reader.interface.buffer, &.{} },
     );
     try waitForIo(&op.c);
     const n = op.getResult() catch |err| switch (err) {
@@ -2955,6 +2952,8 @@ fn netWriteFileImpl(
             }
             return error.Unimplemented;
         },
+        // std reads the file into the writer's buffer instead.
+        error.Unimplemented => return error.Unimplemented,
         error.InputOutput, error.IsDir, error.NotOpenForReading => |e| {
             file_reader.err = e;
             return error.ReadFailed;
@@ -3766,6 +3765,33 @@ test "io: net TCP sendFileAll sends buffered header and file range" {
             defer std.testing.allocator.free(received);
             try std.testing.expectEqualStrings("HDR", received[0..3]);
             try std.testing.expectEqualSlices(u8, data[100..30_100], received[3..]);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{ rt.io(), tmp.dir });
+    try handle.join();
+}
+
+test "io: net TCP sendFileAll sends a file through an unbuffered reader" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const Worker = struct {
+        fn run(io: Io, dir: Io.Dir) !void {
+            var data: [40_000]u8 = undefined;
+            for (&data, 0..) |*b, i| b.* = @intCast(i % 251);
+            const file = try dir.createFile(io, "sendfile", .{ .read = true });
+            defer file.close(io);
+            try file.writePositionalAll(io, &data, 0);
+            var file_reader = file.reader(io, &.{});
+
+            const received = try testSendFileOverTcp(io, "HDR", &file_reader, .unlimited);
+            defer std.testing.allocator.free(received);
+            try std.testing.expectEqualStrings("HDR", received[0..3]);
+            try std.testing.expectEqualSlices(u8, &data, received[3..]);
         }
     };
 

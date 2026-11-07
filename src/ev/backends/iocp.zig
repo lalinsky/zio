@@ -2087,8 +2087,8 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
 
             if (result == windows.FALSE) {
                 const err = net.errnoToSendError(windows.WSAGetLastError());
-                // A cancel only wins when nothing was sent (see NetSendFile).
-                if (err == error.Canceled and data.internal.total > 0) {
+                // An error only wins when nothing was sent (see NetSendFile).
+                if (data.internal.total > 0) {
                     c.setResult(.net_send_file, data.internal.total);
                 } else {
                     c.setError(err);
@@ -2116,7 +2116,11 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                         state.markCompletedFromBackend(c);
                     }
                 } else |err| {
-                    c.setError(err);
+                    if (data.internal.total > 0) {
+                        c.setResult(.net_send_file, data.internal.total);
+                    } else {
+                        c.setError(err);
+                    }
                     state.markCompletedFromBackend(c);
                 }
             }

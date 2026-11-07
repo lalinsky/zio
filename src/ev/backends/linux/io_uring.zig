@@ -1272,7 +1272,11 @@ fn netSendFileAdvance(self: *Self, state: *LoopState, c: *Completion, res: i32) 
                 // Cannot happen (the pipe holds in_pipe > 0 bytes); bail out
                 // rather than re-splice forever.
                 self.netSendFileCleanup(c);
-                c.setError(error.Unexpected);
+                if (data.internal.sent > 0) {
+                    c.setResult(.net_send_file, data.internal.sent);
+                } else {
+                    c.setError(error.Unexpected);
+                }
                 state.markCompletedFromBackend(c);
                 return;
             }
@@ -1935,9 +1939,9 @@ noinline fn storeResultSlow(self: *Self, c: *Completion, res: i32) void {
             // netSendFileAdvance.
             const data = c.cast(NetSendFile);
             self.netSendFileCleanup(c);
-            const errno: linux.E = if (res < 0) @fromBackingInt(@intCast(-res)) else .SUCCESS;
-            // A cancel only wins when nothing was sent (see NetSendFile).
-            if (res < 0 and !(errno == .CANCELED and data.internal.sent > 0)) {
+            // An error only wins when nothing was sent (see NetSendFile).
+            if (res < 0 and data.internal.sent == 0) {
+                const errno: linux.E = @fromBackingInt(@intCast(-res));
                 c.setError(switch (data.internal.stage) {
                     .to_pipe => fs.errnoToFileReadError(errno),
                     .to_socket => net.errnoToSendError(errno),

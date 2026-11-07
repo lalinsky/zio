@@ -1326,6 +1326,10 @@ pub const Loop = struct {
     // from the same start, so buffers are sent in the order they were read.
 
     fn netSendFileStart(self: *Loop, op: *NetSendFile) void {
+        if (op.bufs[0].len == 0 and op.bufs[1].len == 0) {
+            op.c.setError(error.Unimplemented);
+            return self.state.markCompleted(&op.c);
+        }
         op.fallback = .{};
         op.fallback.read_remaining = op.remaining;
         // Lay out the working buffers from the (up to two) caller buffers. When
@@ -1446,9 +1450,9 @@ pub const Loop = struct {
     }
 
     fn netSendFileFinish(self: *Loop, op: *NetSendFile, err: ?anyerror) void {
-        // A cancel only wins when nothing was sent (see NetSendFile).
+        // An error only wins when nothing was sent (see NetSendFile).
         if (err) |e| {
-            if (e != error.Canceled or op.fallback.total == 0) {
+            if (op.fallback.total == 0) {
                 op.c.setError(e);
                 return self.state.markCompleted(&op.c);
             }
