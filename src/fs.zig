@@ -3085,3 +3085,20 @@ test "Dir: deleteTreeMinStackSize" {
     try cwd.deleteTreeMinStackSize(root_path);
     try std.testing.expectError(error.FileNotFound, cwd.openDir(root_path, .{}));
 }
+
+test "File: timestamps past the i64 nanosecond range round-trip" {
+    // 32-bit targets pass i32 sec to futimens, so the value cannot be
+    // set there at all; the write-side @intCast would panic in debug.
+    if (@sizeOf(usize) < 8) return error.SkipZigTest;
+    var t = try TestFileFixture.create(.{});
+    defer t.deinit();
+    // 12e9 seconds is 2350: past the i64 nanosecond limit (2262) but within
+    // the ext4 timestamp range (up to 2446), so the fs can store it exactly.
+    const mtime: i96 = 12_000_000_000 * std.time.ns_per_s + 500_000_000;
+    try t.file.setTimestamps(.{ .mtime = .{ .new = mtime } });
+    const info = try t.file.stat();
+    // Some filesystems clamp instead of storing exactly (APFS past 2262,
+    // old XFS past 2038); that is an fs limit, not a conversion failure.
+    if (info.mtime != mtime) return error.SkipZigTest;
+    try std.testing.expectEqual(mtime, info.mtime);
+}

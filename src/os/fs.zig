@@ -95,11 +95,11 @@ pub const FileStatInfo = struct {
     /// expose this (e.g. Windows).
     block_size: u32,
     /// Access time in nanoseconds since Unix epoch
-    atime: i64,
+    atime: i96,
     /// Modification time in nanoseconds since Unix epoch
-    mtime: i64,
+    mtime: i96,
     /// Change time (POSIX) / Creation time (Windows) in nanoseconds since Unix epoch
-    ctime: i64,
+    ctime: i96,
 };
 
 pub const FileOpenMode = enum {
@@ -2495,8 +2495,8 @@ fn statToFileStat(stat_buf: posix.system.Stat) FileStatInfo {
     };
 }
 
-fn timespecToNanos(ts: posix.system.timespec) i64 {
-    return @as(i64, ts.sec) * std.time.ns_per_s + ts.nsec;
+fn timespecToNanos(ts: posix.system.timespec) i96 {
+    return @as(i96, ts.sec) * std.time.ns_per_s + ts.nsec;
 }
 
 fn statxToFileStat(statx_buf: std.os.linux.Statx) FileStatInfo {
@@ -2525,8 +2525,8 @@ fn statxToFileStat(statx_buf: std.os.linux.Statx) FileStatInfo {
     };
 }
 
-fn statxTimeToNanos(ts: std.os.linux.statx_timestamp) i64 {
-    return @as(i64, ts.sec) * std.time.ns_per_s + ts.nsec;
+fn statxTimeToNanos(ts: std.os.linux.statx_timestamp) i96 {
+    return @as(i96, ts.sec) * std.time.ns_per_s + ts.nsec;
 }
 
 pub fn errnoToFileStatError(errno: posix.system.E) FileStatError {
@@ -3735,4 +3735,24 @@ fn ioctlWindows(handle: fd_t, code: std.os.windows.CTL_CODE, in: []const u8, out
         io_status.Information = 0;
     }
     return io_status;
+}
+
+test "timespecToNanos converts exactly outside the i64 nanosecond range" {
+    // windows.zig has no timespec; the conversion is POSIX-only.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    // 32-bit targets store .sec as i32, so the large value cannot
+    // even be built there; the i96 path is covered by statx below.
+    if (@sizeOf(usize) < 8) return error.SkipZigTest;
+    const ts: posix.system.timespec = .{ .sec = 16_000_000_000, .nsec = 500_000_000 };
+    try std.testing.expectEqual(@as(i96, 16_000_000_000 * std.time.ns_per_s + 500_000_000), timespecToNanos(ts));
+}
+
+test "statxTimeToNanos converts exactly outside the i64 nanosecond range" {
+    // statx timestamps use i64 sec on every target, including 32-bit,
+    // so this test keeps the large-value conversion covered there.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var ts: std.os.linux.statx_timestamp = std.mem.zeroes(std.os.linux.statx_timestamp);
+    ts.sec = 16_000_000_000;
+    ts.nsec = 500_000_000;
+    try std.testing.expectEqual(@as(i96, 16_000_000_000 * std.time.ns_per_s + 500_000_000), statxTimeToNanos(ts));
 }
