@@ -3740,6 +3740,19 @@ fn ioctlWindows(handle: fd_t, code: std.os.windows.CTL_CODE, in: []const u8, out
 test "timespecToNanos converts exactly outside the i64 nanosecond range" {
     // windows.zig has no timespec; the conversion is POSIX-only.
     if (builtin.os.tag == .windows) return error.SkipZigTest;
+    // 32-bit targets store .sec as i32, so the large value cannot
+    // even be built there; the i96 path is covered by statx below.
+    if (@sizeOf(usize) < 8) return error.SkipZigTest;
     const ts: posix.system.timespec = .{ .sec = 16_000_000_000, .nsec = 500_000_000 };
     try std.testing.expectEqual(@as(i96, 16_000_000_000 * std.time.ns_per_s + 500_000_000), timespecToNanos(ts));
+}
+
+test "statxTimeToNanos converts exactly outside the i64 nanosecond range" {
+    // statx timestamps use i64 sec on every target, including 32-bit,
+    // so this test keeps the large-value conversion covered there.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var ts: std.os.linux.statx_timestamp = std.mem.zeroes(std.os.linux.statx_timestamp);
+    ts.sec = 16_000_000_000;
+    ts.nsec = 500_000_000;
+    try std.testing.expectEqual(@as(i96, 16_000_000_000 * std.time.ns_per_s + 500_000_000), statxTimeToNanos(ts));
 }
