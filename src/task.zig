@@ -655,7 +655,7 @@ pub const AnyTask = struct {
     /// `allocation_len` marking the resources as already released.
     pub fn releaseCoro(self: *AnyTask, rt: *Runtime) void {
         if (self.coro.context.stack_info.allocation_len == 0) return;
-        rt.stack_pool.release(self.coro.context.stack_info);
+        rt.releaseStack(self.coro.context.stack_info);
         self.coro.context.stack_info.allocation_len = 0;
         self.coro.deinit();
     }
@@ -728,7 +728,7 @@ pub const AnyTask = struct {
 
         // Acquire stack from pool and initialize context. Nothing below can
         // fail, so the acquired stack needs no errdefer release here.
-        self.coro.context.stack_info = try executor.runtime.stack_pool.acquire();
+        self.coro.context.stack_info = try executor.runtime.acquireStack();
 
         // Copy context data into the allocation
         const context_dest = self.closure.getContextSlice(AnyTask, self);

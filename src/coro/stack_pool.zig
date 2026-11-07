@@ -85,6 +85,27 @@ pub const Config = struct {
     /// available and `slab_slots` is nonzero; otherwise by individually
     /// mapped stacks (Windows, 32-bit, OpenBSD, or slabs disabled).
     prewarm: usize = 0,
+
+    /// Number of stacks each executor keeps in a private cache in front of
+    /// the pool (see StackCache), so that spawning and finishing tasks on one
+    /// thread stays off the pool's lock. Stacks move between a cache and the
+    /// pool in batches of half this capacity: an acquire on an empty cache
+    /// takes up to that many already-free stacks under one lock hold, and a
+    /// release onto a full cache hands that many back under one lock hold.
+    /// After either exchange the cache is half full, so a steady spawn/finish
+    /// rhythm on one executor never locks, and a flow that spawns on one
+    /// executor and finishes on others pays one lock per batch. Stacks are
+    /// never carved for a cache, only ones that were already free go there.
+    /// This also bounds the stacks idling in any one cache; they return to
+    /// the pool, where the shrink pass can see them, each time the
+    /// executor's shrink timer fires and when the executor shuts down.
+    /// Cached stacks are counted as checked out but not as demand, so the
+    /// shrink pass sizes the pool by live coroutines, not by the caches.
+    /// Filling the caches is a one-time cost: in a flow where one executor
+    /// spawns and the others finish, each finisher parks up to a cache's
+    /// worth of stacks before handing any back, so the spawner carves that
+    /// many extra slots once. 0 disables the caches.
+    local_cache: usize = 16,
 };
 
 pub const StackPool = struct {
@@ -167,30 +188,29 @@ pub const StackPool = struct {
     /// Acquires a stack from the pool, or allocates a new one if the pool is empty.
     /// All stacks from this pool have the configured maximum_size and committed_size.
     pub fn acquire(self: *StackPool) error{OutOfMemory}!StackInfo {
-        // Try to get from pool under lock
+        return self.acquireExtra(null, 0);
+    }
+
+    /// Acquire a stack for the caller and, under the same lock hold, move up
+    /// to `extra` more already-free stacks into `cache`. Only the caller's
+    /// own stack is ever carved or mapped; the cache gets what was free.
+    fn acquireExtra(self: *StackPool, cache: ?*StackCache, extra: usize) error{OutOfMemory}!StackInfo {
         {
             self.mutex.lock();
             defer self.mutex.unlock();
 
-            if (slab_supported) {
-                // Released slab slots first: still committed, still
-                // cache-warm, zero syscalls. The partial list's head has one
-                // by definition.
-                if (self.partial) |s| {
-                    const node = s.free.?;
-                    s.free = node.next;
-                    if (s.free == null) self.unlinkPartial(s);
-                    s.in_use += 1;
-                    self.noteAcquireLocked();
-                    return node.stack_info;
-                }
-            }
-
-            if (self.head) |node| {
-                const stack_info = node.stack_info;
-                self.removeNode(node);
+            if (self.popFreeLocked()) |first| {
                 self.noteAcquireLocked();
-                return stack_info;
+                if (cache) |c| {
+                    var n: usize = 0;
+                    while (n < extra) : (n += 1) {
+                        const info = self.popFreeLocked() orelse break;
+                        // Checked out, but idle: not part of the demand peak.
+                        self.in_use += 1;
+                        c.push(info);
+                    }
+                }
+                return first;
             }
 
             if (slab_supported and self.config.slab_slots > 0) {
@@ -216,9 +236,44 @@ pub const StackPool = struct {
         return stack_info;
     }
 
+    /// Pop a free stack, or null when none is free (this never carves):
+    /// a released slab slot first, since it is still committed and still
+    /// cache-warm (the partial list's head has one by definition), then an
+    /// individually mapped stack. The caller accounts the pool-wide
+    /// acquire. Must run under mutex.
+    fn popFreeLocked(self: *StackPool) ?StackInfo {
+        if (slab_supported) {
+            if (self.partial) |s| {
+                const node = s.free.?;
+                s.free = node.next;
+                if (s.free == null) self.unlinkPartial(s);
+                s.in_use += 1;
+                return node.stack_info;
+            }
+        }
+
+        if (self.head) |node| {
+            const stack_info = node.stack_info;
+            self.removeNode(node);
+            return stack_info;
+        }
+
+        return null;
+    }
+
     fn noteAcquireLocked(self: *StackPool) void {
         self.in_use += 1;
         self.epoch_peak = @max(self.epoch_peak, self.in_use);
+    }
+
+    /// Address of the FreeNode that a free list keeps at the base of this
+    /// stack (aligned backward), or null when the committed region is too
+    /// small to hold one. Slab slots always commit at least a page, so only
+    /// an individually mapped stack can be too small, and such a stack can
+    /// neither be pooled nor cached.
+    fn freeNodeAddr(stack_info: StackInfo) ?usize {
+        const addr = std.mem.alignBackward(usize, stack_info.base - @sizeOf(FreeNode), @alignOf(FreeNode));
+        return if (addr < stack_info.limit) null else addr;
     }
 
     /// Releases a stack back to the pool. Never makes a syscall: slab slots
@@ -226,8 +281,27 @@ pub const StackPool = struct {
     /// onto the pool's list. Returning memory to the OS happens only in the
     /// periodic shrink pass.
     pub fn release(self: *StackPool, stack_info: StackInfo) void {
-        // The FreeNode is stored at the base of the stack (aligned backward)
-        const node_addr = std.mem.alignBackward(usize, stack_info.base - @sizeOf(FreeNode), @alignOf(FreeNode));
+        if (freeNodeAddr(stack_info) == null) {
+            // Stack is too small to hold the FreeNode, free it instead of pooling
+            std.debug.assert(!slab_supported or stack.stackReadOwnerTag(stack_info) == 0);
+            self.mutex.lock();
+            self.in_use -= 1;
+            self.mutex.unlock();
+            stack.stackFree(stack_info);
+            return;
+        }
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.releaseLocked(stack_info);
+    }
+
+    /// Push a stack onto its free list: its slab's for a slab slot, the
+    /// pool's for an individually mapped stack. The caller has checked that
+    /// the FreeNode fits. Must run under mutex.
+    fn releaseLocked(self: *StackPool, stack_info: StackInfo) void {
+        const node: *FreeNode = @ptrFromInt(freeNodeAddr(stack_info).?);
+        self.in_use -= 1;
 
         if (slab_supported) {
             // The owner tag at the top of the stack names the slab this slot
@@ -239,13 +313,9 @@ pub const StackPool = struct {
                 // Stack overflow into the tag word is impossible (it sits
                 // above base), but cheap paranoia in safe builds: the slab
                 // must contain this slot.
-                self.mutex.lock();
                 if (compat.is_debug) {
                     std.debug.assert(self.slabOfLocked(stack_info.allocation_ptr) == slab);
                 }
-                // Slab slots always commit at least one page, so the node fits.
-                std.debug.assert(node_addr >= stack_info.limit);
-                const node: *FreeNode = @ptrFromInt(node_addr);
                 node.* = .{
                     .prev = null,
                     .next = slab.free,
@@ -254,31 +324,32 @@ pub const StackPool = struct {
                 if (slab.free == null) self.linkPartial(slab);
                 slab.free = node;
                 slab.in_use -= 1;
-                self.in_use -= 1;
-                self.mutex.unlock();
                 return;
             }
         }
 
-        self.mutex.lock();
-        self.in_use -= 1;
-
-        // Verify the FreeNode fits within the committed region (between limit and base)
-        if (node_addr < stack_info.limit) {
-            // Stack is too small to hold the FreeNode, free it instead of pooling
-            self.mutex.unlock();
-            stack.stackFree(stack_info);
-            return;
-        }
-
-        const node: *FreeNode = @ptrFromInt(node_addr);
         node.* = .{
             .prev = null,
             .next = null,
             .stack_info = stack_info,
         };
         self.addNode(node);
-        self.mutex.unlock();
+    }
+
+    /// Hand every stack in `cache` beyond its `keep` most recently released
+    /// ones back to the pool, under one lock hold.
+    pub fn releaseBatch(self: *StackPool, cache: *StackCache, keep: usize) void {
+        var cur: ?*FreeNode = cache.detachBeyond(keep) orelse return;
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        while (cur) |node| {
+            // releaseLocked rewrites the node in place, so read it out first.
+            const next = node.next;
+            const stack_info = node.stack_info;
+            self.releaseLocked(stack_info);
+            cur = next;
+        }
     }
 
     /// Periodic shrink pass: rate-limited to `shrink_interval` internally,
@@ -519,6 +590,140 @@ pub const StackPool = struct {
         self.pool_size += 1;
     }
 };
+
+/// A private cache of free stacks in front of a StackPool, owned by one
+/// thread (an executor) and used without a lock. The stacks are threaded
+/// through the same FreeNode the pool uses, most recently released first,
+/// so the cache has no storage of its own. Config.local_cache sets the
+/// capacity and describes the exchange policy with the pool.
+pub const StackCache = struct {
+    head: ?*FreeNode = null,
+    count: usize = 0,
+
+    /// Pop a cached stack, refilling from the pool (half the capacity under
+    /// one lock hold) when the cache is empty.
+    pub fn acquire(self: *StackCache, pool: *StackPool) error{OutOfMemory}!StackInfo {
+        if (self.head) |node| {
+            self.head = node.next;
+            self.count -= 1;
+            return node.stack_info;
+        }
+        return pool.acquireExtra(self, pool.config.local_cache / 2);
+    }
+
+    /// Push a stack, handing the older half back to the pool (under one
+    /// lock hold) once the cache is over capacity.
+    pub fn release(self: *StackCache, pool: *StackPool, stack_info: StackInfo) void {
+        const capacity = pool.config.local_cache;
+        // A stack too small for a FreeNode cannot be cached (the pool frees it).
+        if (capacity == 0 or StackPool.freeNodeAddr(stack_info) == null) {
+            return pool.release(stack_info);
+        }
+        self.push(stack_info);
+        if (self.count > capacity) pool.releaseBatch(self, capacity / 2);
+    }
+
+    /// Return every cached stack to the pool.
+    pub fn flush(self: *StackCache, pool: *StackPool) void {
+        pool.releaseBatch(self, 0);
+    }
+
+    fn push(self: *StackCache, stack_info: StackInfo) void {
+        const node: *FreeNode = @ptrFromInt(StackPool.freeNodeAddr(stack_info).?);
+        node.* = .{
+            .prev = null,
+            .next = self.head,
+            .stack_info = stack_info,
+        };
+        self.head = node;
+        self.count += 1;
+    }
+
+    /// Cut the list after its first `keep` nodes and return the rest, or
+    /// null when there is nothing beyond them.
+    fn detachBeyond(self: *StackCache, keep: usize) ?*FreeNode {
+        if (self.count <= keep) return null;
+        if (keep == 0) {
+            const tail = self.head;
+            self.head = null;
+            self.count = 0;
+            return tail;
+        }
+        var last = self.head.?;
+        var i: usize = 1;
+        while (i < keep) : (i += 1) last = last.next.?;
+        const tail = last.next;
+        last.next = null;
+        self.count = keep;
+        return tail;
+    }
+};
+
+test "StackCache: exchanges with the pool in half-capacity batches" {
+    var pool = StackPool.init(.{
+        .maximum_size = 256 * 1024,
+        .committed_size = 16 * 1024,
+        .local_cache = 4,
+    });
+    defer pool.deinit();
+    var cache: StackCache = .{};
+
+    // Nothing is free yet, so every acquire carves for the caller alone and
+    // the cache stays empty.
+    var infos: [5]StackInfo = undefined;
+    for (&infos) |*info| info.* = try cache.acquire(&pool);
+    try std.testing.expectEqual(0, cache.count);
+    try std.testing.expectEqual(5, pool.in_use);
+
+    // Releases stay local until the cache is over capacity; the fifth hands
+    // the older half (three stacks) back, keeping two.
+    for (infos[0..4]) |info| cache.release(&pool, info);
+    try std.testing.expectEqual(4, cache.count);
+    try std.testing.expectEqual(5, pool.in_use);
+    cache.release(&pool, infos[4]);
+    try std.testing.expectEqual(2, cache.count);
+    try std.testing.expectEqual(2, pool.in_use);
+
+    // The two kept are the most recently released, popped newest first.
+    try std.testing.expectEqual(infos[4].base, (try cache.acquire(&pool)).base);
+    try std.testing.expectEqual(infos[3].base, (try cache.acquire(&pool)).base);
+    try std.testing.expectEqual(0, cache.count);
+
+    // An empty cache refills from the pool's free stacks: one for the caller
+    // plus half the capacity cached, under one lock hold.
+    _ = try cache.acquire(&pool);
+    try std.testing.expectEqual(2, cache.count);
+    try std.testing.expectEqual(5, pool.in_use);
+
+    // Flushing returns everything cached; the three stacks still held by
+    // this test remain in use.
+    cache.flush(&pool);
+    try std.testing.expectEqual(0, cache.count);
+    try std.testing.expectEqual(3, pool.in_use);
+    for (infos[2..5]) |info| pool.release(info);
+    try std.testing.expectEqual(0, pool.in_use);
+}
+
+test "StackCache: a zero capacity routes everything to the pool" {
+    var pool = StackPool.init(.{
+        .maximum_size = 256 * 1024,
+        .committed_size = 16 * 1024,
+        .local_cache = 0,
+    });
+    defer pool.deinit();
+    var cache: StackCache = .{};
+
+    const a = try cache.acquire(&pool);
+    const b = try cache.acquire(&pool);
+    try std.testing.expectEqual(2, pool.in_use);
+    cache.release(&pool, a);
+    cache.release(&pool, b);
+    try std.testing.expectEqual(0, cache.count);
+    try std.testing.expectEqual(0, pool.in_use);
+    try std.testing.expectEqual(b.base, (try cache.acquire(&pool)).base);
+    try std.testing.expectEqual(0, cache.count);
+    pool.release(b);
+}
 
 test "StackPool basic acquire and release" {
     var pool = StackPool.init(.{
