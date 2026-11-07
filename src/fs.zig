@@ -2004,7 +2004,10 @@ test "File: direct I/O descriptor flags" {
                 .direct = direct,
                 .resolve_beneath = resolve_beneath,
             }) catch |err| switch (err) {
-                error.Unexpected => return error.SkipZigTest,
+                // openat2 is missing under qemu-user and on old kernels.
+                error.Unsupported => if (resolve_beneath) continue else return err,
+                // Some filesystems (tmpfs, overlayfs, ...) reject O_DIRECT with EINVAL.
+                error.Unexpected => if (direct) continue else return err,
                 else => return err,
             };
             defer created.close();
