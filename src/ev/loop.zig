@@ -1450,9 +1450,9 @@ pub const Loop = struct {
     }
 
     fn netSendFileFinish(self: *Loop, op: *NetSendFile, err: ?anyerror) void {
-        // A cancel only wins when nothing was sent (see NetSendFile).
+        // An error only wins when nothing was sent (see NetSendFile).
         if (err) |e| {
-            if (e != error.Canceled or op.fallback.total == 0) {
+            if (op.fallback.total == 0) {
                 op.c.setError(e);
                 return self.state.markCompleted(&op.c);
             }

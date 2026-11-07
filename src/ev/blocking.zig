@@ -170,6 +170,12 @@ fn handleBlockingGroup(c: *Completion, allocator: std.mem.Allocator) void {
     c.setResult(.group, {});
 }
 
+/// Ends the op with `err`, or with the bytes sent so far if there were any
+/// (see NetSendFile).
+fn finishNetSendFile(c: *Completion, total: usize, err: NetSendFile.Error) void {
+    if (total > 0) c.setResult(.net_send_file, total) else c.setError(err);
+}
+
 /// Synchronous file-to-socket transfer for the no-runtime path. Drives the same
 /// FileRead/NetSend child ops as the event-loop fallback, but executes each one
 /// inline via `executeBlocking`. Uses a local buffer so it is independent of the
@@ -188,7 +194,7 @@ fn handleNetSendFile(c: *Completion, allocator: std.mem.Allocator) void {
 
         var rd = FileRead.init(op.file, ReadBuf.fromSlice(buf[0..want], &read_iov), op.offset);
         executeBlocking(&rd.c, allocator);
-        const n = rd.getResult() catch |err| return c.setError(err);
+        const n = rd.getResult() catch |err| return finishNetSendFile(c, total, err);
         if (n == 0) break; // EOF
         op.offset += n;
 
@@ -196,7 +202,7 @@ fn handleNetSendFile(c: *Completion, allocator: std.mem.Allocator) void {
         while (off < n) {
             var sd = NetSend.init(op.handle, WriteBuf.fromSlice(buf[off..n], &send_iov), .{});
             executeBlocking(&sd.c, allocator);
-            const m = sd.getResult() catch |err| return c.setError(err);
+            const m = sd.getResult() catch |err| return finishNetSendFile(c, total, err);
             off += m;
             total += m;
             op.remaining -= m;

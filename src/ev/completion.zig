@@ -974,8 +974,9 @@ pub const NetSend = struct {
 /// the socket, repeat until EOF or `remaining` is exhausted. Socket short-writes
 /// drain the remaining buffer before the next read.
 ///
-/// A cancel that lands after some bytes were sent finishes the op with that
-/// count instead of `error.Canceled`, since those bytes can't be taken back.
+/// An error or cancel that ends the op after some bytes were sent finishes it
+/// with that count instead, since those bytes can't be taken back; a caller
+/// that tries again from there gets the error, with nothing sent.
 pub const NetSendFile = struct {
     c: Completion,
     result_private_do_not_touch: usize = undefined,
