@@ -720,9 +720,13 @@ test "StackCache: a zero capacity routes everything to the pool" {
     cache.release(&pool, b);
     try std.testing.expectEqual(0, cache.count);
     try std.testing.expectEqual(0, pool.in_use);
-    try std.testing.expectEqual(b.base, (try cache.acquire(&pool)).base);
+    // The pool hands one of the two back (slab free lists are LIFO, the
+    // list of individually mapped stacks is FIFO) without caching anything.
+    const c = try cache.acquire(&pool);
+    try std.testing.expect(c.base == a.base or c.base == b.base);
+    try std.testing.expectEqual(1, pool.in_use);
     try std.testing.expectEqual(0, cache.count);
-    pool.release(b);
+    pool.release(c);
 }
 
 test "StackPool basic acquire and release" {
