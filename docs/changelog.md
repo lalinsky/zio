@@ -28,6 +28,10 @@ All notable changes to this project will be documented in this file.
 - Spawning and finishing a task no longer updates a counter shared by all executors,
   which slowed down spawn-heavy programs on many cores.
 
+- Each executor now keeps a small cache of free coroutine stacks and exchanges them with
+  the shared pool in batches, so spawn-heavy programs on many cores spend less time on
+  the pool's lock.
+
 - The blocking thread pool now starts a new thread whenever no idle one can take a job,
   up to a default `max_threads` of 512 (was twice the CPU count). The `scale_threshold`
   option is removed.
