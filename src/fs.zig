@@ -1990,6 +1990,44 @@ test "File: streaming changes caller-owned descriptor flags only for epoll" {
     try std.testing.expectEqual(readiness_backend, flags_after & nonblocking != 0);
 }
 
+test "File: direct I/O descriptor flags" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var t = try TestDirFixture.init();
+    defer t.deinit();
+
+    const direct_mask: c_int = @bitCast(os.posix.system.O{ .DIRECT = true });
+    for ([_]bool{ false, true }) |resolve_beneath| {
+        for ([_]bool{ false, true }) |direct| {
+            const created = t.dir.createFile("direct.bin", .{
+                .read = true,
+                .direct = direct,
+                .resolve_beneath = resolve_beneath,
+            }) catch |err| switch (err) {
+                // openat2 is missing under qemu-user and on old kernels.
+                error.Unsupported => if (resolve_beneath) continue else return err,
+                // Some filesystems (tmpfs, overlayfs, ...) reject O_DIRECT with EINVAL.
+                error.Unexpected => if (direct) continue else return err,
+                else => return err,
+            };
+            defer created.close();
+            const opened = try t.dir.openFile("direct.bin", .{
+                .direct = direct,
+                .resolve_beneath = resolve_beneath,
+            });
+            defer opened.close();
+
+            // A successful aligned round-trip also works with buffered I/O.
+            // Inspect the descriptors to prove the requested mode was applied.
+            for ([_]File{ created, opened }) |file| {
+                const flags = os.posix.system.fcntl(file.fd, os.posix.system.F.GETFL, @as(c_int, 0));
+                try std.testing.expectEqual(.SUCCESS, os.posix.errno(flags));
+                try std.testing.expectEqual(direct, flags & direct_mask != 0);
+            }
+        }
+    }
+}
+
 test "File: direct I/O round-trip" {
     // Direct I/O requires the buffer, offset, and length to be aligned to the
     // device's logical block size (O_DIRECT on Linux/BSD, FILE_FLAG_NO_BUFFERING
