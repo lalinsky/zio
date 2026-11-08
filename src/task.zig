@@ -674,6 +674,7 @@ pub const AnyTask = struct {
         var executor = getCurrentExecutor();
         executor.current_task = self;
         executor.processCleanup();
+        executor.bump("tasks_started", 1);
 
         // Run the task's function
         self.closure.call(AnyTask, self);

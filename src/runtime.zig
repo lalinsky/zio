@@ -478,46 +478,146 @@ pub fn getPlacementExecutor(rt: *Runtime, placement: Placement) PlacementError!*
 pub const metrics_enabled = zio_options.scheduler_metrics;
 
 /// Counts of scheduler events, kept per executor (plain increments on the
-/// owning thread) and summed by `Runtime.schedulerMetrics`. With
-/// `metrics_enabled` false the per-executor storage is zero-bit and the
-/// summed snapshot is all zeros.
+/// owning thread, published periodically, see `ExecutorStats`) and summed by
+/// `Runtime.schedulerMetrics`. The counters are `usize` so they can be
+/// published and read atomically on every target; they wrap on overflow
+/// (after 2^32 events on 32-bit targets), and the difference of two
+/// snapshots taken with `sub` stays correct across a wrap. With
+/// `metrics_enabled` false nothing is stored and every snapshot is zeros.
 pub const SchedulerMetrics = struct {
     /// Idle probes: a non-blocking poll of the loop before an indefinite park.
     /// Named for the capped park the probe replaced.
-    parks_doze: u64 = 0,
+    parks_doze: usize = 0,
     /// Indefinite parks.
-    parks_full: u64 = 0,
+    parks_full: usize = 0,
     /// Park exits where a pusher had claimed this executor's idle bit.
-    park_elections: u64 = 0,
+    park_elections: usize = 0,
     /// stealWork scans that ran / that took work.
-    steal_attempts: u64 = 0,
-    steal_hits: u64 = 0,
+    steal_attempts: usize = 0,
+    steal_hits: usize = 0,
     /// Steals satisfied by the hinted victim on the first probe.
-    steal_hint_hits: u64 = 0,
+    steal_hint_hits: usize = 0,
     /// Indefinite parks capped at baton_tick because this executor held the
     /// rescue baton / tasks taken from an executor stuck in one task.
-    baton_parks: u64 = 0,
-    rescues: u64 = 0,
+    baton_parks: usize = 0,
+    rescues: usize = 0,
     /// Dispatched-queue drains that woke at least one task / tasks woken.
-    drain_batches: u64 = 0,
-    drain_woken: u64 = 0,
+    drain_batches: usize = 0,
+    drain_woken: usize = 0,
     /// Sleepers woken by batched wake decisions.
-    batch_wake_claims: u64 = 0,
+    batch_wake_claims: usize = 0,
+    /// Tasks that started running / finished on this executor. A task can
+    /// start on one executor and finish on another, so only the sums over
+    /// all executors are meaningful together (see `RuntimeStats.tasks`).
+    tasks_started: usize = 0,
+    tasks_finished: usize = 0,
+
     pub fn add(self: *SchedulerMetrics, other: SchedulerMetrics) void {
         inline for (compat.fieldNames(SchedulerMetrics)) |name| {
-            @field(self, name) += @field(other, name);
+            @field(self, name) +%= @field(other, name);
         }
     }
 
     pub fn sub(self: *SchedulerMetrics, other: SchedulerMetrics) void {
         inline for (compat.fieldNames(SchedulerMetrics)) |name| {
-            @field(self, name) -= @field(other, name);
+            @field(self, name) -%= @field(other, name);
         }
     }
 };
 
+/// What an executor last published about itself. Executors publish at most
+/// every `publish_interval` while running, right before parking, and when
+/// the main executor hands control back to the main thread, so an idle
+/// executor's numbers are current and a running one's are slightly behind.
+pub const ExecutorStats = struct {
+    metrics: SchedulerMetrics = .{},
+    /// Tasks queued in this executor's run ring. Tasks in the shared
+    /// overflow queue are counted in `RuntimeStats.ready`; with `.pinned`
+    /// scheduling, wakes sent from other threads that have not reached the
+    /// ring yet are not counted anywhere.
+    ready: usize = 0,
+    /// Free coroutine stacks in this executor's private cache.
+    stacks_cached: usize = 0,
+    /// The executor is parked, or (the main executor) the main thread is
+    /// outside the runtime: nothing here changes until it runs again.
+    idle: bool = true,
+    /// Running, but has not published for longer than `stall_threshold`:
+    /// most likely stuck in a task that does not yield.
+    stalled: bool = false,
+    /// Time since the executor last published.
+    age: Duration = .zero,
+};
+
+/// Point-in-time view of the whole runtime, from `Runtime.stats`. Built from
+/// what each executor last published plus a few shared values read directly,
+/// so the fields are not one consistent moment.
+pub const RuntimeStats = struct {
+    /// Sum of all executors' counters.
+    metrics: SchedulerMetrics = .{},
+    executors: usize = 0,
+    executors_idle: usize = 0,
+    executors_stalled: usize = 0,
+    /// Tasks that have started running and not finished yet. Spawned tasks
+    /// that have not started are only in `ready`.
+    tasks: usize = 0,
+    /// Tasks queued to run: every executor's ring plus the shared overflow
+    /// queue (see `ExecutorStats.ready` for what is left out).
+    ready: usize = 0,
+    /// Free coroutine stacks in the executors' private caches.
+    stacks_cached: usize = 0,
+    /// Blocking thread pool: worker threads alive, how many of them are
+    /// waiting for work, and jobs queued for them.
+    blocking_threads: usize = 0,
+    blocking_idle: usize = 0,
+    blocking_queued: usize = 0,
+};
+
+/// How often a busy executor publishes its stats.
+pub const publish_interval: Duration = .fromMilliseconds(1);
+
+/// How long a running executor may go without publishing before its stats
+/// report it as stalled.
+pub const stall_threshold: Duration = .fromMilliseconds(50);
+
+/// An executor's published stats as stored: every field is written and read
+/// with relaxed atomics, the owner being the only writer.
+const PublishedStats = struct {
+    metrics: SchedulerMetrics = .{},
+    ready: usize = 0,
+    stacks_cached: usize = 0,
+    idle: bool = true,
+    /// Milliseconds since `Runtime.stats_epoch`, wrapping.
+    at_ms: usize = 0,
+};
+
+fn storeRelaxed(comptime T: type, dst: *T, src: T) void {
+    inline for (compat.fieldNames(T)) |name| {
+        const F = @TypeOf(@field(src, name));
+        if (@typeInfo(F) == .@"struct") {
+            storeRelaxed(F, &@field(dst, name), @field(src, name));
+        } else {
+            @atomicStore(F, &@field(dst, name), @field(src, name), .monotonic);
+        }
+    }
+}
+
+fn loadRelaxed(comptime T: type, src: *const T) T {
+    var out: T = .{};
+    inline for (compat.fieldNames(T)) |name| {
+        const F = @TypeOf(@field(out, name));
+        if (@typeInfo(F) == .@"struct") {
+            @field(out, name) = loadRelaxed(F, &@field(src, name));
+        } else {
+            @field(out, name) = @atomicLoad(F, &@field(src, name), .monotonic);
+        }
+    }
+    return out;
+}
+
 const MetricsStorage = if (metrics_enabled) SchedulerMetrics else void;
 const metrics_storage_init: MetricsStorage = if (metrics_enabled) .{} else {};
+const PublishedStorage = if (metrics_enabled) PublishedStats else void;
+const published_storage_init: PublishedStorage = if (metrics_enabled) .{} else {};
 
 // Executor - per-thread execution unit for running coroutines
 pub const Executor = struct {
@@ -594,6 +694,10 @@ pub const Executor = struct {
 
     // Scheduler event counters; written only by this executor's thread.
     metrics: MetricsStorage = metrics_storage_init,
+    // What this executor last published (see ExecutorStats), and when, in
+    // milliseconds since Runtime.stats_epoch.
+    published: PublishedStorage = published_storage_init,
+    published_ms: usize = 0,
 
     // True while drainDispatched signals a batch of task wakes:
     // scheduleTaskLocal skips the per-push announce, the drain announces
@@ -782,8 +886,34 @@ pub const Executor = struct {
 
     pub const YieldCancelMode = enum { allow_cancel, no_cancel };
 
-    inline fn bump(self: *Executor, comptime field: []const u8, n: u64) void {
-        if (comptime metrics_enabled) @field(self.metrics, field) += n;
+    pub inline fn bump(self: *Executor, comptime field: []const u8, n: usize) void {
+        if (comptime metrics_enabled) @field(self.metrics, field) +%= n;
+    }
+
+    fn msSinceEpoch(self: *const Executor, at: Timestamp) usize {
+        const ns = at.toNanoseconds() -| self.runtime.stats_epoch.toNanoseconds();
+        return @truncate(ns / std.time.ns_per_ms);
+    }
+
+    /// Publish this executor's stats for other threads (see ExecutorStats).
+    fn publishStats(self: *Executor, idle: bool) void {
+        if (comptime !metrics_enabled) return;
+        self.published_ms = self.msSinceEpoch(self.loop.now());
+        storeRelaxed(PublishedStats, &self.published, .{
+            .metrics = self.metrics,
+            .ready = self.run_queue.len(),
+            .stacks_cached = self.stack_cache.count,
+            .idle = idle,
+            .at_ms = self.published_ms,
+        });
+    }
+
+    /// Publish if the last publish is older than publish_interval.
+    inline fn maybePublishStats(self: *Executor, at: Timestamp) void {
+        if (comptime !metrics_enabled) return;
+        if (self.msSinceEpoch(at) -% self.published_ms >= publish_interval.toMilliseconds()) {
+            self.publishStats(false);
+        }
     }
 
     /// Aim to poll I/O roughly this often while running tasks back-to-back.
@@ -868,6 +998,10 @@ pub const Executor = struct {
         // no-suspend region.
         self.current_task = null;
         defer self.current_task = &self.main_task;
+        // Idle outside the run loop: nothing here changes until it is
+        // entered again.
+        self.publishStats(false);
+        defer self.publishStats(true);
         defer self.spawn_streak = 0;
 
         // Process deferred cleanup (e.g. main task's park/reschedule)
@@ -937,6 +1071,7 @@ pub const Executor = struct {
             self.tick_task_count = 0;
             self.tick_expired = false;
             self.tick_checkpoint_countdown = checkpoint_interval;
+            self.maybePublishStats(tick_now);
             if (need_fresh_drain) {
                 need_fresh_drain = false;
                 continue;
@@ -963,7 +1098,9 @@ pub const Executor = struct {
     fn parkAndSearch(self: *Executor, check_ready: bool) !void {
         if (!migrates) {
             self.bump("parks_full", 1);
+            self.publishStats(true);
             try self.loop.poll(.max);
+            self.publishStats(false);
             self.drainDispatched();
             return;
         }
@@ -1027,7 +1164,10 @@ pub const Executor = struct {
         if (!found_work) found_work = self.rescueStuck();
         const wait: Duration = if (found_work) .zero else if (self.holdBaton()) baton_tick else .max;
         if (wait.value == baton_tick.value) self.bump("baton_parks", 1);
+        const sleeps = wait.value != 0;
+        if (sleeps) self.publishStats(true);
         try self.loop.poll(wait);
+        if (sleeps) self.publishStats(false);
         // Drain before withdrawing the bit, so the post-park work checks
         // below see the woken batch.
         self.drainDispatched();
@@ -1504,6 +1644,7 @@ pub const Executor = struct {
             },
             .finish => |task| {
                 self.pending_cleanup = .none;
+                self.bump("tasks_finished", 1);
                 task.state.store(.{ .tag = .finished }, .release);
                 task.releaseCoro(self.runtime);
                 finishTask(&task.awaitable);
@@ -1823,6 +1964,8 @@ pub const Runtime = struct {
     foreign_wakes: if (compat.is_safe) std.atomic.Value(u32) else void = if (compat.is_safe) .init(0) else {},
     metrics_monitor: ?std.Thread = null,
     metrics_stop: std.atomic.Value(u32) = .init(0),
+    /// Reference point for the executors' publish times.
+    stats_epoch: Timestamp = .zero,
     own_self: bool = false,
 
     resolver: ?dns.Resolver = null,
@@ -1872,6 +2015,7 @@ pub const Runtime = struct {
             .stack_pool = .init(options.stack_pool),
             .task_pool = .init(allocator),
             .resolver = if (options.dns.custom_resolver) dns.Resolver.init(allocator) else null,
+            .stats_epoch = Timestamp.now(.monotonic),
         };
         errdefer if (self.resolver) |*r| r.deinit();
 
@@ -1944,11 +2088,18 @@ pub const Runtime = struct {
         var last: SchedulerMetrics = .{};
         while (self.metrics_stop.load(.acquire) == 0) {
             os.Futex.timedWait(&self.metrics_stop, 0, interval) catch {
-                const total = self.schedulerMetrics();
-                var delta = total;
+                const st = self.stats();
+                var delta = st.metrics;
                 delta.sub(last);
-                last = total;
-                log.info("scheduler: parks probe={d} full={d} baton={d} elections={d} steals={d}/{d} hint_hits={d} rescues={d} drains={d} woken={d} batch_claims={d}", .{
+                last = st.metrics;
+                log.info("scheduler: tasks={d} ready={d} executors idle={d} stalled={d} blocking threads={d} idle={d} queued={d} | parks probe={d} full={d} baton={d} elections={d} steals={d}/{d} hint_hits={d} rescues={d} drains={d} woken={d} batch_claims={d} started={d} finished={d}", .{
+                    st.tasks,
+                    st.ready,
+                    st.executors_idle,
+                    st.executors_stalled,
+                    st.blocking_threads,
+                    st.blocking_idle,
+                    st.blocking_queued,
                     delta.parks_doze,
                     delta.parks_full,
                     delta.baton_parks,
@@ -1960,6 +2111,8 @@ pub const Runtime = struct {
                     delta.drain_batches,
                     delta.drain_woken,
                     delta.batch_wake_claims,
+                    delta.tasks_started,
+                    delta.tasks_finished,
                 });
             };
         }
@@ -2247,18 +2400,78 @@ pub const Runtime = struct {
         }
     }
 
-    /// Sum of all executors' scheduler event counters. The counters are
-    /// written without atomics by their owning threads, so this is an
-    /// approximate snapshot while executors are running; it is exact once
-    /// they are quiesced. All zeros when `metrics_enabled` is false.
+    /// Sum of all executors' scheduler event counters, as last published
+    /// (see `ExecutorStats`). All zeros when `metrics_enabled` is false.
     pub fn schedulerMetrics(self: *Runtime) SchedulerMetrics {
         var total: SchedulerMetrics = .{};
         if (comptime metrics_enabled) {
             for (self.executors.items) |executor| {
-                total.add(executor.metrics);
+                total.add(loadRelaxed(SchedulerMetrics, &executor.published.metrics));
             }
         }
         return total;
+    }
+
+    /// What executor `id` last published, or null if there is no such
+    /// executor. All zeros when `metrics_enabled` is false.
+    pub fn executorStats(self: *Runtime, id: usize) ?ExecutorStats {
+        if (id >= self.executors.items.len) return null;
+        if (comptime !metrics_enabled) return .{};
+        return self.readExecutorStats(self.executors.items[id], self.nowMs());
+    }
+
+    /// Runtime-wide counters and gauges. All zeros when `metrics_enabled`
+    /// is false.
+    pub fn stats(self: *Runtime) RuntimeStats {
+        var out: RuntimeStats = .{};
+        if (comptime !metrics_enabled) return out;
+        const now_ms = self.nowMs();
+        for (self.executors.items) |executor| {
+            const e = self.readExecutorStats(executor, now_ms);
+            out.metrics.add(e.metrics);
+            out.executors += 1;
+            if (e.idle) out.executors_idle += 1;
+            if (e.stalled) out.executors_stalled += 1;
+            out.ready += e.ready;
+            out.stacks_cached += e.stacks_cached;
+        }
+        // Summed over executors only: a task that started on one executor
+        // can finish on another, and the publishes are not simultaneous, so
+        // finished can briefly run ahead of started.
+        const started = out.metrics.tasks_started;
+        const finished = out.metrics.tasks_finished;
+        out.tasks = if (started -% finished <= std.math.maxInt(usize) / 2) started -% finished else 0;
+        if (migrates) out.ready += self.stealing.global_overflow.len();
+
+        const pool = &self.thread_pool;
+        out.blocking_threads = pool.running_threads.load(.monotonic);
+        out.blocking_idle = pool.idle_threads.load(.monotonic);
+        pool.queue_mutex.lock();
+        out.blocking_queued = pool.queue_size;
+        pool.queue_mutex.unlock();
+        return out;
+    }
+
+    fn nowMs(self: *Runtime) usize {
+        const ns = Timestamp.now(.monotonic).toNanoseconds() -| self.stats_epoch.toNanoseconds();
+        return @truncate(ns / std.time.ns_per_ms);
+    }
+
+    fn readExecutorStats(_: *Runtime, executor: *Executor, now_ms: usize) ExecutorStats {
+        const p = loadRelaxed(PublishedStats, &executor.published);
+        // The publish time comes from the executor's cached loop clock, which
+        // can trail this reading but not lead it by much; clamp a lead to 0.
+        const diff = now_ms -% p.at_ms;
+        const age_ms: usize = if (diff <= std.math.maxInt(usize) / 2) diff else 0;
+        const age: Duration = .fromMilliseconds(age_ms);
+        return .{
+            .metrics = p.metrics,
+            .ready = p.ready,
+            .stacks_cached = p.stacks_cached,
+            .idle = p.idle,
+            .stalled = !p.idle and age.value > stall_threshold.value,
+            .age = age,
+        };
     }
 
     /// Whether other executors can steal from this runtime's queues. The
@@ -2334,7 +2547,7 @@ pub const Runtime = struct {
     /// A claimed searcher's park exit may release a token it never took;
     /// that lets one extra election through, it never loses a wake.
     /// Returns the number of sleepers actually woken.
-    fn batchWakeSleepers(self: *Runtime, ready: usize, hint: ExecutorId) u64 {
+    fn batchWakeSleepers(self: *Runtime, ready: usize, hint: ExecutorId) usize {
         if (!migrates) return 0;
 
         if (!self.stealingActive() or ready < 2) return 0;
@@ -2343,7 +2556,7 @@ pub const Runtime = struct {
         var wakes: usize = 0;
         var covered: usize = 2; // wakes = ceil(log2(ready))
         while (covered < ready) : (covered *= 2) wakes += 1;
-        var woken: u64 = 0;
+        var woken: usize = 0;
         while (wakes > 0) : (wakes -= 1) {
             if (!self.claimAndWake(hint, hint)) break;
             woken += 1;
@@ -2450,6 +2663,69 @@ test "Runtime: scheduler metrics count parks and drained wakes" {
     try std.testing.expect(m.drain_woken >= 1);
     try std.testing.expect(m.drain_batches >= 1);
     try std.testing.expect(m.parks_doze + m.parks_full >= 1);
+}
+
+test "Runtime: stats count live tasks and report a stalled executor" {
+    if (!metrics_enabled or builtin.single_threaded) return error.SkipZigTest;
+
+    const runtime = try Runtime.init(std.testing.allocator, .{
+        .executors = .exact(2),
+    });
+    defer runtime.deinit();
+
+    const Event = @import("sync/Event.zig");
+    const Waiters = struct {
+        fn wait(event: *Event) !void {
+            try event.wait();
+        }
+    };
+    var event: Event = .init;
+    var group: Group = .init;
+    defer group.cancel();
+    for (0..3) |_| try group.spawn(Waiters.wait, .{&event});
+
+    // The waiters' executors publish their start before they park.
+    var tries: usize = 0;
+    while (runtime.stats().tasks < 3) : (tries += 1) {
+        try std.testing.expect(tries < 1000);
+        try runtime.sleep(.fromMilliseconds(1));
+    }
+    event.set();
+    try group.wait();
+    tries = 0;
+    while (runtime.stats().tasks != 0) : (tries += 1) {
+        try std.testing.expect(tries < 1000);
+        try runtime.sleep(.fromMilliseconds(1));
+    }
+
+    // A task that never yields stops its executor from publishing while it
+    // is not idle. Watched from a plain thread, since the task may be
+    // occupying the main executor.
+    const Stall = struct {
+        seen: std.atomic.Value(bool) = .init(false),
+        fn spin(self: *@This()) void {
+            const deadline = Timestamp.now(.monotonic).addDuration(.fromSeconds(2));
+            while (!self.seen.load(.acquire) and Timestamp.now(.monotonic).value < deadline.value) {
+                std.atomic.spinLoopHint();
+            }
+        }
+        fn watch(self: *@This(), rt: *Runtime) void {
+            const deadline = Timestamp.now(.monotonic).addDuration(.fromSeconds(2));
+            while (Timestamp.now(.monotonic).value < deadline.value) {
+                if (rt.stats().executors_stalled > 0) {
+                    self.seen.store(true, .release);
+                    return;
+                }
+                std.Thread.yield() catch {};
+            }
+        }
+    };
+    var stall: Stall = .{};
+    const watcher = try std.Thread.spawn(.{}, Stall.watch, .{ &stall, runtime });
+    var spinner = try runtime.spawn(Stall.spin, .{&stall});
+    spinner.join();
+    watcher.join();
+    try std.testing.expect(stall.seen.load(.acquire));
 }
 
 test "Runtime: metrics monitor thread starts and stops" {
