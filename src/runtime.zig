@@ -539,7 +539,8 @@ pub const ExecutorStats = struct {
     /// Free coroutine stacks in this executor's private cache.
     stacks_cached: usize = 0,
     /// The executor is parked, or (the main executor) the main thread is
-    /// outside the runtime: nothing here changes until it runs again.
+    /// outside the runtime. The counters do not change until it runs again;
+    /// `ready` can, when the main thread spawns tasks outside the runtime.
     idle: bool = true,
     /// Running, but has not published for longer than `stall_threshold`:
     /// most likely stuck in a task that does not yield.
@@ -697,7 +698,7 @@ pub const Executor = struct {
     // What this executor last published (see ExecutorStats), and when, in
     // milliseconds since Runtime.stats_epoch.
     published: PublishedStorage = published_storage_init,
-    published_ms: usize = 0,
+    published_ms: if (metrics_enabled) usize else void = if (metrics_enabled) 0 else {},
 
     // True while drainDispatched signals a batch of task wakes:
     // scheduleTaskLocal skips the per-push announce, the drain announces
@@ -896,9 +897,9 @@ pub const Executor = struct {
     }
 
     /// Publish this executor's stats for other threads (see ExecutorStats).
-    fn publishStats(self: *Executor, idle: bool) void {
+    fn publishStats(self: *Executor, idle: bool, at: Timestamp) void {
         if (comptime !metrics_enabled) return;
-        self.published_ms = self.msSinceEpoch(self.loop.now());
+        self.published_ms = self.msSinceEpoch(at);
         storeRelaxed(PublishedStats, &self.published, .{
             .metrics = self.metrics,
             .ready = self.run_queue.len(),
@@ -912,7 +913,7 @@ pub const Executor = struct {
     inline fn maybePublishStats(self: *Executor, at: Timestamp) void {
         if (comptime !metrics_enabled) return;
         if (self.msSinceEpoch(at) -% self.published_ms >= publish_interval.toMilliseconds()) {
-            self.publishStats(false);
+            self.publishStats(false, at);
         }
     }
 
@@ -1000,8 +1001,7 @@ pub const Executor = struct {
         defer self.current_task = &self.main_task;
         // Idle outside the run loop: nothing here changes until it is
         // entered again.
-        self.publishStats(false);
-        defer self.publishStats(true);
+        defer self.publishStats(true, self.loop.now());
         defer self.spawn_streak = 0;
 
         // Process deferred cleanup (e.g. main task's park/reschedule)
@@ -1016,6 +1016,9 @@ pub const Executor = struct {
         // Start the batch window here: time spent in the main task between
         // run() calls must not count toward the per-quantum estimate.
         self.tick_started_at = Timestamp.now(.monotonic);
+        // Not the loop clock: it is stale when the main thread was busy
+        // outside the runtime, which would read as a stall.
+        self.publishStats(false, self.tick_started_at);
 
         while (true) {
             // Process ready coroutines
@@ -1098,9 +1101,9 @@ pub const Executor = struct {
     fn parkAndSearch(self: *Executor, check_ready: bool) !void {
         if (!migrates) {
             self.bump("parks_full", 1);
-            self.publishStats(true);
+            self.publishStats(true, self.loop.now());
             try self.loop.poll(.max);
-            self.publishStats(false);
+            self.publishStats(false, self.loop.now());
             self.drainDispatched();
             return;
         }
@@ -1165,9 +1168,9 @@ pub const Executor = struct {
         const wait: Duration = if (found_work) .zero else if (self.holdBaton()) baton_tick else .max;
         if (wait.value == baton_tick.value) self.bump("baton_parks", 1);
         const sleeps = wait.value != 0;
-        if (sleeps) self.publishStats(true);
+        if (sleeps) self.publishStats(true, self.loop.now());
         try self.loop.poll(wait);
-        if (sleeps) self.publishStats(false);
+        if (sleeps) self.publishStats(false, self.loop.now());
         // Drain before withdrawing the bit, so the post-park work checks
         // below see the woken batch.
         self.drainDispatched();
@@ -2413,7 +2416,7 @@ pub const Runtime = struct {
     }
 
     /// What executor `id` last published, or null if there is no such
-    /// executor. All zeros when `metrics_enabled` is false.
+    /// executor. Default values when `metrics_enabled` is false.
     pub fn executorStats(self: *Runtime, id: usize) ?ExecutorStats {
         if (id >= self.executors.items.len) return null;
         if (comptime !metrics_enabled) return .{};
