@@ -256,36 +256,50 @@ test "clearTimer racing a firing timer (cross-thread)" {
     // there corrupted the heap, double-decremented active, and cleared the
     // result markCompleted asserts on.
     // The loop is initialized and driven entirely on the runner thread (an
-    // io_uring SINGLE_ISSUER ring must be entered by its creating thread);
-    // this thread only uses the thread-safe setTimer/clearTimer/wake APIs,
-    // exactly like a migrated task's timedWaitClock does.
-    var loop: Loop = undefined;
-    var ready = std.atomic.Value(bool).init(false);
-    var stop = std.atomic.Value(bool).init(false);
-    var wake_done = std.atomic.Value(bool).init(false);
-    const runner = try std.Thread.spawn(.{}, struct {
-        fn run(l: *Loop, r: *std.atomic.Value(bool), s: *std.atomic.Value(bool), w: *std.atomic.Value(bool)) void {
+    // io_uring SINGLE_ISSUER ring must be entered by its creating thread),
+    // which also arms each timer, since setTimer refreshes the owner-only
+    // cached `now`. This thread only clears and wakes, exactly like a
+    // migrated task's timedWaitClock does.
+    const Shared = struct {
+        loop: Loop = undefined,
+        ready: std.atomic.Value(bool) = .init(false),
+        stop: std.atomic.Value(bool) = .init(false),
+        wake_done: std.atomic.Value(bool) = .init(false),
+        /// Timer for the runner to arm with a delay of `arm_ns`; reset to
+        /// null once it is armed.
+        to_arm: std.atomic.Value(?*Timer) = .init(null),
+        arm_ns: u64 = 0,
+
+        fn run(sh: *@This()) void {
+            const l = &sh.loop;
             l.init(.{}) catch @panic("loop init failed");
             defer {
                 // Deinit belongs to this thread, but must not race the main
-                // thread's final wake(): a stale wake from the last clearTimer
+                // thread's final wake(): a stale wake from the last arming
                 // can pop poll(.max) before that wake() is issued.
-                while (!w.load(.acquire)) std.Thread.yield() catch {};
+                while (!sh.wake_done.load(.acquire)) std.Thread.yield() catch {};
                 l.deinit();
             }
-            r.store(true, .release);
-            while (!s.load(.acquire)) {
+            sh.ready.store(true, .release);
+            while (!sh.stop.load(.acquire)) {
+                if (sh.to_arm.load(.acquire)) |t| {
+                    l.setTimer(t, .{ .duration = .fromNanoseconds(sh.arm_ns) });
+                    sh.to_arm.store(null, .release);
+                }
                 l.poll(.max) catch return;
             }
         }
-    }.run, .{ &loop, &ready, &stop, &wake_done });
+    };
+    var shared: Shared = .{};
+    const runner = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     defer runner.join();
     defer {
-        stop.store(true, .release);
-        loop.wake();
-        wake_done.store(true, .release);
+        shared.stop.store(true, .release);
+        shared.loop.wake();
+        shared.wake_done.store(true, .release);
     }
-    while (!ready.load(.acquire)) std.Thread.yield() catch {};
+    while (!shared.ready.load(.acquire)) std.Thread.yield() catch {};
+    const loop = &shared.loop;
 
     const callback = struct {
         fn cb(_: *Loop, c: *@import("../completion.zig").Completion) void {
@@ -304,7 +318,10 @@ test "clearTimer racing a firing timer (cross-thread)" {
         // Arm with a tiny, varying delay so the clear below lands at different
         // points relative to the fire: before it, after it, and inside the
         // limbo window.
-        loop.setTimer(&timer, .{ .duration = .fromNanoseconds((i % 64) * 1000) });
+        shared.arm_ns = (i % 64) * 1000;
+        shared.to_arm.store(&timer, .release);
+        loop.wake();
+        while (shared.to_arm.load(.acquire) != null) std.Thread.yield() catch {};
         if (i % 2 == 0) std.Thread.yield() catch {};
 
         // A clear that won hands the timer back and rules out the callback.

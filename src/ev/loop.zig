@@ -270,9 +270,9 @@ pub const LoopState = struct {
     //   - On timer fire: cancel linked operation (same thread, direct)
     // The cross-thread cancel mechanism remains for general cancellation (task migration,
     // external cancellation), but timeouts become zero-overhead pointer unlinking.
-    /// Protects all timer heaps and the cached `now` values. A single lock is
-    /// enough: it's local to the loop and effectively uncontended, only ever
-    /// held for O(log n) heap ops with callbacks run outside it.
+    /// Protects all timer heaps. A single lock is enough: it's local to the
+    /// loop and effectively uncontended, only ever held for O(log n) heap ops
+    /// with callbacks run outside it.
     timer_mutex: os.Mutex = .init(),
 
     async_handles: Queue(Completion) = .{},
