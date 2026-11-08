@@ -240,6 +240,26 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
                 @cmpxchgStrong(u32, &self.head, expected, new, .acq_rel, .acquire) == null;
         }
 
+        // --- slot accessors ----------------------------------------------------
+        // A thief copies slots of the victim's ring before its head CAS decides
+        // whether the copy counts (`steal`), and the victim's owner may at that
+        // moment store into a slot that the thief's stale snapshot still
+        // covers: it can reach slot `h + i` again only after `head` has moved
+        // past `h`, so the thief's CAS then fails and the copy is discarded
+        // (Go's runqgrab makes the same argument). The value read is never
+        // used, but two plain accesses would still be a data race, which TSan
+        // reports (#911). Monotonic is enough: a slot is published by the
+        // release store of `tail` and claimed by the acq_rel CAS of `head`, not
+        // by the slot access itself, and it compiles to a plain move on x86-64
+        // and arm64. A non-stealable ring has one thread and stays plain.
+
+        inline fn loadSlot(self: *const Self, i: u32) *T {
+            return if (stealable) @atomicLoad(*T, &self.buffer[i & mask], .monotonic) else self.buffer[i & mask];
+        }
+        inline fn storeSlot(self: *Self, i: u32, node: *T) void {
+            if (stealable) @atomicStore(*T, &self.buffer[i & mask], node, .monotonic) else self.buffer[i & mask] = node;
+        }
+
         pub fn init(overflow: *GlobalOverflowQueue(T)) Self {
             if (!stealable) @compileError("init() wires a shared overflow queue; a non-stealable queue owns its own");
             return .{ .overflow = overflow };
@@ -256,7 +276,7 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
                 const h = self.loadHead(); // synchronize with consumers
                 const t = self.ownTail(); // owner is the sole producer
                 if (t -% h < capacity) {
-                    self.buffer[t & mask] = node;
+                    self.storeSlot(t, node);
                     self.storeTail(t +% 1); // publish the slot
                     return t == h;
                 }
@@ -273,7 +293,7 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
             const n = (t -% h) / 2; // == capacity/2 when the ring is full
             var batch: [capacity / 2 + 1]*T = undefined;
             var i: u32 = 0;
-            while (i < n) : (i += 1) batch[i] = self.buffer[(h +% i) & mask];
+            while (i < n) : (i += 1) batch[i] = self.loadSlot(h +% i);
             // Claim the grabbed half; a stealer may have raced the head.
             if (!self.casHead(h, h +% n, false)) return false;
             batch[n] = node;
@@ -287,7 +307,7 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
                 const h = self.loadHead();
                 const t = self.ownTail();
                 if (h == t) return null; // empty
-                const node = self.buffer[h & mask];
+                const node = self.loadSlot(h);
                 if (self.casHead(h, h +% 1, true)) return node;
                 // A stealer took slot h; retry with the new head.
             }
@@ -303,7 +323,7 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
                 const h = self.loadHead();
                 const t = self.ownTail();
                 if (h == t) return null; // empty
-                const node = self.buffer[h & mask];
+                const node = self.loadSlot(h);
                 if (!runnable(context, node)) return null; // head not runnable; leave it
                 if (self.casHead(h, h +% 1, true)) return node;
                 // A stealer took slot h; retry and re-check the new head.
@@ -334,7 +354,7 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
                 if (take > dst_space) take = dst_space; // clamp to the thief's room
                 var i: u32 = 0;
                 while (i < take) : (i += 1) {
-                    self.buffer[(dst_tail +% i) & mask] = victim.buffer[(h +% i) & mask];
+                    self.storeSlot(dst_tail +% i, victim.loadSlot(h +% i));
                 }
                 // Commit the claim by advancing the victim's head.
                 if (victim.casHead(h, h +% take, false)) break take;
@@ -343,7 +363,7 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
 
             // Hand back the last stolen task; publish the rest into the thief's ring.
             const rest = stolen - 1;
-            const task = self.buffer[(dst_tail +% rest) & mask];
+            const task = self.loadSlot(dst_tail +% rest);
             if (rest > 0) self.storeTail(dst_tail +% rest);
             return task;
         }
@@ -363,7 +383,17 @@ pub fn LocalRunQueue(comptime T: type, comptime stealable: bool) type {
             const want = @min(contiguous, @min(space, @min(max, max_batch)));
             if (want == 0) return 0;
 
-            const got = self.overflow.popBatch(self.buffer[start .. start + want], lock_mode);
+            if (!stealable) {
+                const got = self.overflow.popBatch(self.buffer[start .. start + want], lock_mode);
+                if (got > 0) self.storeTail(t +% @as(u32, @intCast(got)));
+                return got;
+            }
+            // Stealable: stage the batch, then store each slot atomically
+            // (see the slot accessors); popBatch's plain stores into the ring
+            // itself would race a thief's stale copy.
+            var staged: [max_batch]*T = undefined;
+            const got = self.overflow.popBatch(staged[0..want], lock_mode);
+            for (staged[0..got], 0..) |node, k| self.storeSlot(t +% @as(u32, @intCast(k)), node);
             if (got > 0) self.storeTail(t +% @as(u32, @intCast(got)));
             return got;
         }
