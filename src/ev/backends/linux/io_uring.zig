@@ -1982,8 +1982,8 @@ fn statxToFileStat(statx: linux.Statx) fs.FileStatInfo {
     };
 }
 
-fn statxTimeToNanos(ts: linux.statx_timestamp) i64 {
-    return @as(i64, ts.sec) * std.time.ns_per_s + ts.nsec;
+fn statxTimeToNanos(ts: linux.statx_timestamp) i96 {
+    return @as(i96, ts.sec) * std.time.ns_per_s + ts.nsec;
 }
 
 fn storeRecvMmsgResult(c: *Completion, res: i32, _: u32) void {
