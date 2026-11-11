@@ -6,6 +6,8 @@
 /.zig-cache
 /zig-out
 /test-file
+/test-allow-directory
+/test-allow-directory.fifo
 /zio_test_*
 
 # Benchmark build artifacts

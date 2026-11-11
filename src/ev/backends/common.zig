@@ -49,6 +49,7 @@ const DeviceIoControl = @import("../completion.zig").DeviceIoControl;
 const ProcessWait = @import("../completion.zig").ProcessWait;
 const net = @import("../../os/net.zig");
 const fs = @import("../../os/fs.zig");
+const unexpectedError = @import("../../os/base.zig").unexpectedError;
 
 fn delegated(work: *Work) *DelegatedWork {
     return @fieldParentPtr("work", work);
@@ -150,9 +151,33 @@ pub fn resolveStreamingSupport(data: anytype) bool {
 pub fn handleFileOpen(c: *Completion, allocator: std.mem.Allocator) void {
     const data = c.cast(FileOpen);
     if (fs.openat(allocator, data.dir, data.path, data.flags)) |fd| {
-        c.setResult(.file_open, .{ .fd = fd, .streaming_route = if (probePollable(fd)) .pollable else .thread_pool });
+        if (rejectDirectoryIfForbidden(fd, data.flags)) |_| {
+            c.setResult(.file_open, .{ .fd = fd, .streaming_route = if (probePollable(fd)) .pollable else .thread_pool });
+        } else |err| {
+            c.setError(err);
+        }
     } else |err| {
         c.setError(err);
+    }
+}
+
+/// When the open requested allow_directory = false, a directory must not
+/// survive the open. POSIX has no open flag to refuse a directory (the
+/// opposite of O_DIRECTORY), so the only portable way is to check the opened
+/// fd and close it again. Runs on the same pool worker as the open itself.
+fn rejectDirectoryIfForbidden(fd: fs.fd_t, flags: fs.FileOpenFlags) fs.FileOpenError!void {
+    if (flags.allow_directory) return;
+    const info = fs.fstat(fd) catch |err| {
+        fs.close(fd) catch {};
+        return switch (err) {
+            // Cannot happen for a freshly opened fd; report it as a bug.
+            error.InvalidFileDescriptor => unexpectedError(err),
+            else => |e| e,
+        };
+    };
+    if (info.kind == .directory) {
+        fs.close(fd) catch {};
+        return error.IsDir;
     }
 }
 
