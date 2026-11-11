@@ -5073,6 +5073,8 @@ test "io: dir realPath and realPathFile" {
 }
 
 test "io: file realPath" {
+    // F_KINFO returns an empty path when the name is not in the namecache.
+    if (builtin.os.tag == .freebsd) return error.SkipZigTest;
     var t = try TestDirFixture.init();
     defer t.deinit();
     const io = t.rt.io();
