@@ -2,10 +2,145 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.20.0] - 2026-11-11
+
+### Breaking
 
 - Zig 0.17 is now required. For Zig 0.16, use the v0.19.x releases or the `zig-0.16`
   branch.
+
+- `ev.ThreadPool.init` no longer takes an allocator, and its `scale_threshold` option
+  is removed. The default `max_threads` is now 512 instead of twice the CPU count:
+  workers can stay blocked on I/O indefinitely, so CPU count does not reflect the
+  capacity needed to keep unrelated operations moving. The limit remains configurable.
+
+- `File.pollable`, `ev.FileOpenResult.pollable`, and the streaming operations' `pollable`
+  fields are replaced by `streaming_route`, distinguishing event-loop file I/O from
+  pollable handles and blocking thread-pool I/O.
+
+- `zio.select` now enforces a compile-time limit of 64 futures.
+
+### Added
+
+- Added `JoinHandle.requestCancel` and `CancelHandle` for requesting cancellation without
+  waiting. A `CancelHandle` can cancel a task from another task or thread without owning
+  its result; release it with `deinit` before shutting down the runtime.
+
+- Added the `debug_cancel` option to report tasks that swallow `error.Canceled` and then
+  block again, with stack traces showing where cancellation was delivered and where the
+  task is waiting.
+
+- Added `local_address` to `IpAddress.ConnectOptions`, including hostname connections,
+  to select the source IP address and optionally the source port.
+
+- Added `Dir.sync` to make directory entry changes durable on POSIX, and `File.syncRange`
+  to start writeback of a file range on Linux ahead of a final `sync`.
+
+- Added `CompletionQueue.submitAndWait` to run one event loop operation with cancellation
+  and timeout support without creating a queue.
+
+- Implemented file-to-socket transfers through `std.Io`'s `sendFile`, using native
+  transfers where supported (including unbuffered readers) and buffered copying otherwise.
+
+- Wine is now a supported platform, tested in CI alongside native Windows.
+
+### Changed
+
+- Accepted TCP sockets now inherit `TCP_NODELAY` from the listener instead of setting
+  it on each connection. Zio's `listen` enables it automatically; callers supplying
+  their own listener must set it themselves (#870).
+
+- Reduced task scheduling and coroutine stack allocation overhead in spawn-heavy programs,
+  especially with many executors. Stack caching is configurable through
+  `RuntimeOptions.stack_pool.local_cache`.
+
+- Accept loops drain waiting connections with fewer scheduler round trips, including an
+  io_uring optimization on Linux 6.10 and later.
+
+- `std.Io` datagram sends now use `sendmmsg` batches on Linux, FreeBSD and NetBSD.
+  The new `ev.NetSendMmsg` operation exposes batched sends to event loop users.
+
+- Repeatedly updating an `AutoCancel` deadline now avoids unnecessary timer removal and
+  reinsertion. Event loop users can also extend an armed timer with `Timer.extend`.
+
+- `Duration.parse` now accepts `0`, a leading `+`, fractions such as `.5s` and `1.s`,
+  and the microsecond units `µs` and `μs`.
+
+- Unexpected OS errors now log their error code in release builds too.
+
+### Fixed
+
+- Fixed `blockInPlace` panicking or returning an uninitialized result when called by
+  a task with pending cancellation, also affecting hostname lookup and random data.
+
+- Fixed a data race in the work-stealing run queue reported by ThreadSanitizer (#911).
+
+- File path resolution on macOS and the BSDs now honors cancellation.
+
+- Fixed FreeBSD batched datagram sends and receives reporting incorrect counts on
+  big-endian systems (#845).
+
+- Socket sends denied with `EPERM` now report `error.AccessDenied`, and `std.Io` Unix
+  socket connections with no listener report `error.ConnectionRefused`.
+
+- Fixed cancellation being lost when joining or canceling a child task that swallowed
+  its cancellation, or when `std.Io.Group.async` ran a task inline after failing to spawn it
+  ([upstream issue](https://codeberg.org/ziglang/zig/issues/37192)).
+
+- An `AutoCancel` or `withTimeout` deadline that passes after the guarded operation
+  finishes no longer cancels the task's next operation.
+
+- File transfers now report partial progress when an error or cancellation interrupts
+  the transfer, keeping the reader position consistent with the bytes sent. `std.Io`
+  batches also return completed results when cancellation races completion. Pending
+  cancellation is preserved for the next cancellation point (#885, #886).
+
+- `std.Io` `sendManyTimeout` now preserves the count of messages already sent on timeout
+  or cancellation and uses one deadline for the whole send.
+
+- Fixed crashes and hangs when socket cancellation races completion on epoll or kqueue,
+  and when a mutex, channel, timer or I/O wake races a task finishing (#880).
+
+- Fixed a `select` hang when an event fires and is reset while its futures are being
+  re-checked.
+
+- Without work stealing, a task spawning on a busy executor yielded after every spawn,
+  so an accept loop could leave new connections waiting for seconds (#873).
+
+- Fixed tasks waiting for seconds under sustained load after overflowing an executor's
+  run queue, including long delays with pinned scheduling.
+
+- The blocking thread pool now adds workers when queued jobs cannot be served by idle
+  workers, so a blocked stdin read no longer stalls stdout or stderr writes. Retired
+  workers no longer leak their thread stacks, and cancellation no longer targets a
+  worker that has already exited (#839, #879).
+
+- On Windows, canceling synchronous pipe and standard-handle reads or writes now
+  interrupts the blocked I/O. Streaming reads, writes and seeks on files opened with
+  IOCP now work (#738).
+
+- Fixed io_uring accepting blocking sockets that leaked into child processes, ignoring
+  send flags other than `no_signal`, and ignoring the `direct` file open/create option.
+
+- On Windows, connecting an explicitly bound socket now works, and ICMP errors from an
+  earlier UDP send no longer fail an unrelated receive.
+
+- Fixed task lifetime races when spawning into a group, including while it is being
+  canceled, and runtime teardown racing Windows DNS or console callbacks or Unix signal
+  delivery. Safe builds also detect external threads still waking tasks during teardown
+  (#904, #905).
+
+- Fixed logging from thread-pool workers potentially deadlocking against a task holding
+  stderr.
+
+- `File.sync` on macOS now flushes the drive's write cache with `F_FULLFSYNC`, falling
+  back to `fsync` on filesystems that do not support it.
+
+- IP parsing now accepts IPv4-embedded IPv6 addresses and rejects malformed addresses,
+  loose port syntax and IPv4 octets with leading zeros. The built-in DNS resolver also
+  correctly handles `/etc/hosts` comments beginning inside a field.
+
+## [0.19.1] - 2026-10-06
 
 ### Changed
 
@@ -15,106 +150,10 @@ All notable changes to this project will be documented in this file.
   waits up to 40ms for the peer's delayed ACK. `Socket.setNoDelay(false)` turns it back
   on, and the new `Socket.getNoDelay` reports the setting.
 
-- `Socket.sendMany` now sends datagrams in batches with `sendmmsg` on Linux, FreeBSD
-  and NetBSD, instead of one `sendmsg` and event loop round trip per datagram.
-
-- `ev.ThreadPool.init` no longer takes an allocator.
-
-- In safe builds, `Runtime.deinit` panics if a thread outside the runtime is still waking
-  one of its tasks, which means that thread was not stopped before shutdown (#905).
-
-- `select` accepts at most 64 futures, checked at compile time, matching `std.Io`'s select.
-
-- Spawning and finishing a task no longer updates a counter shared by all executors,
-  which slowed down spawn-heavy programs on many cores.
-
-- Each executor now keeps a small cache of free coroutine stacks and exchanges them with
-  the shared pool in batches, so spawn-heavy programs on many cores spend less time on
-  the pool's lock.
-
-- The blocking thread pool now starts a new thread whenever no idle one can take a job,
-  up to a default `max_threads` of 512 (was twice the CPU count). The `scale_threshold`
-  option is removed.
-
-### Added
-
-- Added `local_address` to `IpAddress.ConnectOptions`, to connect from a specific local
-  address.
-
-- Added `Dir.sync`, to make files created, renamed or deleted in a directory durable.
-
-- Wine is now a supported platform, tested in CI alongside native Windows.
-
-- Added `CompletionQueue.submitAndWait`, to run a single event loop operation from a task
-  without setting up a queue.
-
-- Added `File.syncRange`, a wrapper for Linux's `sync_file_range`, to start writeback of
-  a byte range ahead of a `sync`.
-
 ### Fixed
-
-- `std.Io` `sendManyTimeout` lost the count of messages already sent when it timed out or
-  was canceled, and restarted the timeout for each message.
-
-- An `AutoCancel` or `withTimeout` deadline that passed just after the operation finished
-  no longer fails the task's next operation with `error.Canceled`.
-
-- On Windows, canceling a read or write of stdin, stdout or another synchronous pipe
-  waited until it finished, such as a stdin read until the user pressed Enter.
-
-- A cancel was lost when `std.Io.Group.async` could not spawn its task and ran it on the
-  caller instead.
-
-- A canceled `sendFile` reported `error.Canceled` even when part of the file had already
-  been sent, so the caller lost track of how much went out (#885).
-
-- Canceling a blocking call on a thread-pool worker could interrupt a worker thread that had
-  already exited.
-
-- `std.Io` `Batch.awaitConcurrent` returned `error.Canceled` even when some operations had
-  already completed, so a caller using `try` dropped their results (#886).
-
-- On Windows, a streaming read or write of a file opened with the IOCP backend, as
-  `Dir.writeFile` and `File.readStreaming` do, failed with `error.Unexpected` (#738).
-
-- Sockets accepted with the io_uring backend were blocking and leaked into child processes,
-  and on Windows a socket bound before `connect` failed to connect.
-
-- With the epoll and kqueue backends, a timeout or cancel of one of several tasks receiving
-  or accepting on the same socket could crash or hang the program (#880).
-
-- Waking a task that waited on a mutex, channel, timeout or I/O could touch the task after
-  it had already finished and been freed, when the wake raced a cancellation or timeout.
-
-- Under sustained load, tasks that overflowed an executor's run queue could wait until the
-  load dropped, stalling some connections for seconds.
-
-- Each thread-pool worker that retired after its idle timeout leaked its thread stack (#879).
-
-- Spawning a task into a group while another executor canceled the group could touch the
-  task after it had finished and been freed (#904).
-
-- `Runtime.deinit` could free an executor while a Windows DNS lookup or console control
-  callback, or a Unix signal handler, was still waking one of its tasks (#905).
-
-- A `select` could hang, and leave a registration behind on its source, when an event fired
-  and was reset while the select was re-checking its futures.
-
-- The io_uring backend ignored every send flag except `no_signal`, so a flag such as `oob`
-  or `eor` had no effect.
-
-- With pinned scheduling, tasks that overflowed a busy executor's run queue were taken back
-  one per poll, so with many busy connections some waited hundreds of milliseconds.
-
-- `File.sync` on macOS now uses `F_FULLFSYNC`, so synced data is flushed out of the
-  drive's write cache too, as on other systems. It falls back to `fsync` on filesystems
-  that don't support it.
 
 - Fixed a panic in `Runtime.init` with more than one executor when logging through
   `zio.debug_io` (#804).
-
-- On Windows, writes to stdout or stderr could wait until a pending stdin read finished,
-  because the thread pool queued them behind it (#839).
 
 ## [0.19.0] - 2026-10-05
 
