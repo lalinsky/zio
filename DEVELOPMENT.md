@@ -41,4 +41,10 @@ Release process:
 4. Commit files with message "Release vX.Y.Z"
 5. Tag the commit with vX.Y.Z
 6. Push commit and tags: `git push && git push --tags`
-7. Create GitHub release: `gh release create vX.Y.Z --title "vX.Y.Z" --notes "<changelog content>"`
+7. Create GitHub release with the changelog section as notes. GitHub renders the changelog's
+   wrapped list items badly, so join each item onto a single line:
+   ```bash
+   awk '/^## \[X.Y.Z\]/{f=1;next} /^## \[/{f=0} f' docs/changelog.md \
+     | awk '/^  +[^ ]/ && buf!="" {sub(/^ +/,""); buf=buf" "$0; next} {if(s)print buf; buf=$0; s=1} END{if(s)print buf}' \
+     | gh release create vX.Y.Z --title "vX.Y.Z" --notes-file -
+   ```
