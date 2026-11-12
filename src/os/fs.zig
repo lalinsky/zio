@@ -11,6 +11,64 @@ const syscall_cancel = @import("syscall_cancel.zig");
 // Cached probe result: once we see ENOSYS from openat2, skip future attempts.
 var openat2_nosys: std.atomic.Value(bool) = .init(false);
 
+/// A null-terminated copy of a path, for the POSIX syscalls.
+///
+/// Paths are almost always short, so they are copied into an inline buffer,
+/// and only longer ones go to the C heap. The copy never uses the program's
+/// allocator: std.debug opens files through `debug_io` while holding its
+/// debug-info lock, and an allocator that captures stack traces
+/// (SafeAllocator) would wait on that same lock.
+///
+/// The slice `init` returns can point into the struct itself, so it must stay
+/// in place until `deinit`.
+pub const PathZ = struct {
+    inline_buf: [inline_len]u8 = undefined,
+    heap: ?[:0]u8 = null,
+
+    pub const inline_len = 256;
+
+    pub fn init(self: *PathZ, path: []const u8) error{SystemResources}![:0]const u8 {
+        if (path.len < inline_len) {
+            self.heap = null;
+            @memcpy(self.inline_buf[0..path.len], path);
+            self.inline_buf[path.len] = 0;
+            return self.inline_buf[0..path.len :0];
+        }
+        const copy = std.heap.c_allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
+        self.heap = copy;
+        return copy;
+    }
+
+    pub fn deinit(self: *PathZ) void {
+        if (self.heap) |copy| std.heap.c_allocator.free(copy);
+        self.heap = null;
+    }
+};
+
+test "PathZ: short paths stay inline, long ones go to the heap" {
+    var short: PathZ = undefined;
+    const short_z = try short.init("dir/file.txt");
+    defer short.deinit();
+    try std.testing.expectEqualStrings("dir/file.txt", short_z);
+    try std.testing.expectEqual(0, short_z.ptr[short_z.len]);
+    try std.testing.expect(short.heap == null);
+
+    const longest: [PathZ.inline_len - 1]u8 = @splat('a');
+    var at_limit: PathZ = undefined;
+    const at_limit_z = try at_limit.init(&longest);
+    defer at_limit.deinit();
+    try std.testing.expectEqualStrings(&longest, at_limit_z);
+    try std.testing.expect(at_limit.heap == null);
+
+    const too_long: [PathZ.inline_len]u8 = @splat('a');
+    var long: PathZ = undefined;
+    const long_z = try long.init(&too_long);
+    defer long.deinit();
+    try std.testing.expectEqualStrings(&too_long, long_z);
+    try std.testing.expectEqual(0, long_z.ptr[long_z.len]);
+    try std.testing.expect(long.heap != null);
+}
+
 pub const fd_t = switch (builtin.os.tag) {
     .windows => w.HANDLE,
     else => posix.system.fd_t,
@@ -677,14 +735,15 @@ pub const FileSetTimestampsError = error{
 };
 
 /// Open an existing file using openat() syscall
-pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: FileOpenFlags) FileOpenError!fd_t {
+pub fn openat(dir: fd_t, path: []const u8, flags: FileOpenFlags) FileOpenError!fd_t {
     if (builtin.os.tag == .windows) {
         if (flags.resolve_beneath) {
             if (options.resolve_beneath_mode == .strict) return error.Unsupported;
             std.log.warn("resolve_beneath is not supported on Windows, path escapes will not be detected", .{});
         }
-        const path_w = try w.pathToWide(allocator, dir, path);
-        defer allocator.free(path_w);
+        var path_w_buf: w.PathW = undefined;
+        const path_w = try path_w_buf.init(dir, path);
+        defer path_w_buf.deinit();
 
         const access_mask: w.DWORD = switch (flags.mode) {
             .read_only => w.GENERIC_READ,
@@ -752,8 +811,9 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
         }
     }
 
-    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
-    defer allocator.free(path_z);
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     // Cancelable region covering both the openat2 (resolve_beneath) path and the
     // plain openat loop below: on a thread-pool worker bound to a cancellation
@@ -830,14 +890,15 @@ pub fn openat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: 
 }
 
 /// Open a directory using openat() syscall
-pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: DirOpenFlags) DirOpenError!fd_t {
+pub fn dirOpen(dir: fd_t, path: []const u8, flags: DirOpenFlags) DirOpenError!fd_t {
     if (builtin.os.tag == .windows) {
         if (flags.resolve_beneath) {
             if (options.resolve_beneath_mode == .strict) return error.Unsupported;
             std.log.warn("resolve_beneath is not supported on Windows, path escapes will not be detected", .{});
         }
-        const path_w = try w.pathToWide(allocator, dir, path);
-        defer allocator.free(path_w);
+        var path_w_buf: w.PathW = undefined;
+        const path_w = try path_w_buf.init(dir, path);
+        defer path_w_buf.deinit();
 
         const access_mask: w.DWORD = w.GENERIC_READ;
 
@@ -889,8 +950,9 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
         open_flags.PATH = true;
     }
 
-    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
-    defer allocator.free(path_z);
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     // Cancelable region covering both the openat2 (resolve_beneath) path and the
     // plain openat loop below (see the note in `openat`).
@@ -954,14 +1016,15 @@ pub fn dirOpen(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
 pub const FileCreateError = FileOpenError;
 
 /// Create a file using openat() syscall
-pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: FileCreateFlags) FileCreateError!fd_t {
+pub fn createat(dir: fd_t, path: []const u8, flags: FileCreateFlags) FileCreateError!fd_t {
     if (builtin.os.tag == .windows) {
         if (flags.resolve_beneath) {
             if (options.resolve_beneath_mode == .strict) return error.Unsupported;
             std.log.warn("resolve_beneath is not supported on Windows, path escapes will not be detected", .{});
         }
-        const path_w = try w.pathToWide(allocator, dir, path);
-        defer allocator.free(path_w);
+        var path_w_buf: w.PathW = undefined;
+        const path_w = try path_w_buf.init(dir, path);
+        defer path_w_buf.deinit();
 
         const access_mask: w.DWORD = if (flags.read)
             w.GENERIC_READ | w.GENERIC_WRITE
@@ -1025,8 +1088,9 @@ pub fn createat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags
         }
     }
 
-    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
-    defer allocator.free(path_z);
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     // Cancelable region covering both the openat2 (resolve_beneath) path and the
     // plain openat loop below (see the note in `openat`).
@@ -1610,12 +1674,14 @@ fn seekPosix(fd: fd_t, offset: i64, whence: u32) FileSeekError!void {
 }
 
 /// Rename a file using renameat() syscall
-pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) DirRenameError!void {
+pub fn renameat(old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) DirRenameError!void {
     if (builtin.os.tag == .windows) {
-        const old_path_w = try w.pathToWide(allocator, old_dir, old_path);
-        defer allocator.free(old_path_w);
-        const new_path_w = try w.pathToWide(allocator, new_dir, new_path);
-        defer allocator.free(new_path_w);
+        var old_path_w_buf: w.PathW = undefined;
+        const old_path_w = try old_path_w_buf.init(old_dir, old_path);
+        defer old_path_w_buf.deinit();
+        var new_path_w_buf: w.PathW = undefined;
+        const new_path_w = try new_path_w_buf.init(new_dir, new_path);
+        defer new_path_w_buf.deinit();
 
         const success = w.MoveFileExW(
             old_path_w.ptr,
@@ -1641,10 +1707,12 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
         return;
     }
 
-    const old_path_z = allocator.dupeSentinel(u8, old_path, 0) catch return error.SystemResources;
-    defer allocator.free(old_path_z);
-    const new_path_z = allocator.dupeSentinel(u8, new_path, 0) catch return error.SystemResources;
-    defer allocator.free(new_path_z);
+    var old_path_buf: PathZ = undefined;
+    const old_path_z = try old_path_buf.init(old_path);
+    defer old_path_buf.deinit();
+    var new_path_buf: PathZ = undefined;
+    const new_path_z = try new_path_buf.init(new_path);
+    defer new_path_buf.deinit();
 
     const sc = try syscall_cancel.Syscall.begin();
     defer sc.finish();
@@ -1665,12 +1733,14 @@ pub fn renameat(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u
 /// On Linux, uses renameat2() with RENAME_NOREPLACE.
 /// On other POSIX systems, falls back to hardlink + delete.
 /// On Windows, uses MoveFileExW without MOVEFILE_REPLACE_EXISTING.
-pub fn renameatPreserve(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) DirRenamePreserveError!void {
+pub fn renameatPreserve(old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) DirRenamePreserveError!void {
     if (builtin.os.tag == .windows) {
-        const old_path_w = try w.pathToWide(allocator, old_dir, old_path);
-        defer allocator.free(old_path_w);
-        const new_path_w = try w.pathToWide(allocator, new_dir, new_path);
-        defer allocator.free(new_path_w);
+        var old_path_w_buf: w.PathW = undefined;
+        const old_path_w = try old_path_w_buf.init(old_dir, old_path);
+        defer old_path_w_buf.deinit();
+        var new_path_w_buf: w.PathW = undefined;
+        const new_path_w = try new_path_w_buf.init(new_dir, new_path);
+        defer new_path_w_buf.deinit();
 
         const success = w.MoveFileExW(
             old_path_w.ptr,
@@ -1696,10 +1766,12 @@ pub fn renameatPreserve(allocator: std.mem.Allocator, old_dir: fd_t, old_path: [
         return;
     }
 
-    const old_path_z = allocator.dupeSentinel(u8, old_path, 0) catch return error.SystemResources;
-    defer allocator.free(old_path_z);
-    const new_path_z = allocator.dupeSentinel(u8, new_path, 0) catch return error.SystemResources;
-    defer allocator.free(new_path_z);
+    var old_path_buf: PathZ = undefined;
+    const old_path_z = try old_path_buf.init(old_path);
+    defer old_path_buf.deinit();
+    var new_path_buf: PathZ = undefined;
+    const new_path_z = try new_path_buf.init(new_path);
+    defer new_path_buf.deinit();
 
     if (builtin.os.tag == .linux) {
         while (true) {
@@ -1734,7 +1806,7 @@ pub fn renameatPreserve(allocator: std.mem.Allocator, old_dir: fd_t, old_path: [
     }
 
     // Atomic no-replace rename unavailable on this platform/filesystem.
-    return renameatPreserveFallback(allocator, old_dir, old_path, new_dir, new_path);
+    return renameatPreserveFallback(old_dir, old_path, new_dir, new_path);
 }
 
 /// No-replace rename via hardlink + delete for filesystems that reject the
@@ -1743,9 +1815,9 @@ pub fn renameatPreserve(allocator: std.mem.Allocator, old_dir: fd_t, old_path: [
 /// Regular files only (a directory source fails the hardlink with EPERM).
 /// All-or-nothing: if the source cannot be deleted after linking, the link is
 /// removed again and the error is returned.
-fn renameatPreserveFallback(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) DirRenamePreserveError!void {
-    try dirHardLink(allocator, old_dir, old_path, new_dir, new_path, .{});
-    dirDeleteFile(allocator, old_dir, old_path) catch |err| switch (err) {
+fn renameatPreserveFallback(old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) DirRenamePreserveError!void {
+    try dirHardLink(old_dir, old_path, new_dir, new_path, .{});
+    dirDeleteFile(old_dir, old_path) catch |err| switch (err) {
         // The source vanished after the link was made, so the rename is
         // complete; rolling back would delete the only name left for the data.
         error.FileNotFound => {},
@@ -1753,8 +1825,8 @@ fn renameatPreserveFallback(allocator: std.mem.Allocator, old_dir: fd_t, old_pat
             // Only undo the link while the source is verifiably still in
             // place; if we can't confirm that, the new link may be the only
             // name left for the data, so keep it.
-            if (dirAccess(allocator, old_dir, old_path, .{ .follow_symlinks = false })) |_| {
-                dirDeleteFile(allocator, new_dir, new_path) catch {};
+            if (dirAccess(old_dir, old_path, .{ .follow_symlinks = false })) |_| {
+                dirDeleteFile(new_dir, new_path) catch {};
             } else |_| {}
             return err;
         },
@@ -1765,26 +1837,25 @@ test renameatPreserveFallback {
     // The fallback is unreachable on Windows (renameatPreserve uses MoveFileExW).
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
-    const allocator = std.testing.allocator;
     const at_cwd = posix.AT.FDCWD;
     const src = "zio_rnpf_src.tmp";
     const dst = "zio_rnpf_dst.tmp";
 
-    dirDeleteFile(allocator, at_cwd, src) catch {};
-    dirDeleteFile(allocator, at_cwd, dst) catch {};
-    defer dirDeleteFile(allocator, at_cwd, src) catch {};
-    defer dirDeleteFile(allocator, at_cwd, dst) catch {};
+    dirDeleteFile(at_cwd, src) catch {};
+    dirDeleteFile(at_cwd, dst) catch {};
+    defer dirDeleteFile(at_cwd, src) catch {};
+    defer dirDeleteFile(at_cwd, dst) catch {};
 
     // Free destination: source moves onto it.
-    try close(try createat(allocator, at_cwd, src, .{}));
-    try renameatPreserveFallback(allocator, at_cwd, src, at_cwd, dst);
-    try std.testing.expectError(error.FileNotFound, dirAccess(allocator, at_cwd, src, .{}));
-    try dirAccess(allocator, at_cwd, dst, .{});
+    try close(try createat(at_cwd, src, .{}));
+    try renameatPreserveFallback(at_cwd, src, at_cwd, dst);
+    try std.testing.expectError(error.FileNotFound, dirAccess(at_cwd, src, .{}));
+    try dirAccess(at_cwd, dst, .{});
 
     // Occupied destination: fails and leaves the source in place.
-    try close(try createat(allocator, at_cwd, src, .{}));
-    try std.testing.expectError(error.PathAlreadyExists, renameatPreserveFallback(allocator, at_cwd, src, at_cwd, dst));
-    try dirAccess(allocator, at_cwd, src, .{});
+    try close(try createat(at_cwd, src, .{}));
+    try std.testing.expectError(error.PathAlreadyExists, renameatPreserveFallback(at_cwd, src, at_cwd, dst));
+    try dirAccess(at_cwd, src, .{});
 }
 
 test "renameatPreserveFallback: rollback when source cannot be deleted" {
@@ -1792,31 +1863,30 @@ test "renameatPreserveFallback: rollback when source cannot be deleted" {
     // Root bypasses the directory permission check the test relies on.
     if (posix.system.geteuid() == 0) return error.SkipZigTest;
 
-    const allocator = std.testing.allocator;
     const at_cwd = posix.AT.FDCWD;
     const src_dir_path = "zio_rnpf_rollback_dir.tmp";
     const src = "src";
     const dst = "zio_rnpf_rollback_dst.tmp";
 
-    dirDeleteFile(allocator, at_cwd, dst) catch {};
-    defer dirDeleteFile(allocator, at_cwd, dst) catch {};
+    dirDeleteFile(at_cwd, dst) catch {};
+    defer dirDeleteFile(at_cwd, dst) catch {};
 
-    try mkdirat(allocator, at_cwd, src_dir_path, 0o755);
+    try mkdirat(at_cwd, src_dir_path, 0o755);
     defer {
-        dirSetFilePermissions(allocator, at_cwd, src_dir_path, 0o755, .{}) catch {};
-        dirDeleteFile(allocator, at_cwd, src_dir_path ++ "/" ++ src) catch {};
-        dirDeleteDir(allocator, at_cwd, src_dir_path) catch {};
+        dirSetFilePermissions(at_cwd, src_dir_path, 0o755, .{}) catch {};
+        dirDeleteFile(at_cwd, src_dir_path ++ "/" ++ src) catch {};
+        dirDeleteDir(at_cwd, src_dir_path) catch {};
     }
 
-    const src_dir = try dirOpen(allocator, at_cwd, src_dir_path, .{});
+    const src_dir = try dirOpen(at_cwd, src_dir_path, .{});
     defer posix.close(src_dir);
 
-    try close(try createat(allocator, src_dir, src, .{}));
+    try close(try createat(src_dir, src, .{}));
 
     // Make the source directory read-only so the post-link unlink fails.
-    try dirSetFilePermissions(allocator, at_cwd, src_dir_path, 0o555, .{});
+    try dirSetFilePermissions(at_cwd, src_dir_path, 0o555, .{});
 
-    if (renameatPreserveFallback(allocator, src_dir, src, at_cwd, dst)) |_| {
+    if (renameatPreserveFallback(src_dir, src, at_cwd, dst)) |_| {
         return error.TestUnexpectedResult;
     } else |err| switch (err) {
         error.AccessDenied, error.PermissionDenied => {},
@@ -1824,15 +1894,16 @@ test "renameatPreserveFallback: rollback when source cannot be deleted" {
     }
 
     // Nothing changed: source still present, destination link rolled back.
-    try dirAccess(allocator, src_dir, src, .{});
-    try std.testing.expectError(error.FileNotFound, dirAccess(allocator, at_cwd, dst, .{}));
+    try dirAccess(src_dir, src, .{});
+    try std.testing.expectError(error.FileNotFound, dirAccess(at_cwd, dst, .{}));
 }
 
 /// Delete a file using unlinkat() syscall
-pub fn dirDeleteFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) DirDeleteFileError!void {
+pub fn dirDeleteFile(dir: fd_t, path: []const u8) DirDeleteFileError!void {
     if (builtin.os.tag == .windows) {
-        const path_w = try w.pathToWide(allocator, dir, path);
-        defer allocator.free(path_w);
+        var path_w_buf: w.PathW = undefined;
+        const path_w = try path_w_buf.init(dir, path);
+        defer path_w_buf.deinit();
 
         if (w.DeleteFileW(path_w.ptr) == w.FALSE) {
             return switch (w.GetLastError()) {
@@ -1859,8 +1930,9 @@ pub fn dirDeleteFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) 
         return;
     }
 
-    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
-    defer allocator.free(path_z);
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     const sc = try syscall_cancel.Syscall.begin();
     defer sc.finish();
@@ -1901,10 +1973,11 @@ pub fn dirDeleteFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) 
 }
 
 /// Delete a directory using unlinkat() syscall with AT_REMOVEDIR
-pub fn dirDeleteDir(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) DirDeleteDirError!void {
+pub fn dirDeleteDir(dir: fd_t, path: []const u8) DirDeleteDirError!void {
     if (builtin.os.tag == .windows) {
-        const path_w = try w.pathToWide(allocator, dir, path);
-        defer allocator.free(path_w);
+        var path_w_buf: w.PathW = undefined;
+        const path_w = try path_w_buf.init(dir, path);
+        defer path_w_buf.deinit();
 
         if (w.RemoveDirectoryW(path_w.ptr) == w.FALSE) {
             return switch (w.GetLastError()) {
@@ -1920,8 +1993,9 @@ pub fn dirDeleteDir(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) D
         return;
     }
 
-    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
-    defer allocator.free(path_z);
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     const sc = try syscall_cancel.Syscall.begin();
     defer sc.finish();
@@ -1939,10 +2013,11 @@ pub fn dirDeleteDir(allocator: std.mem.Allocator, dir: fd_t, path: []const u8) D
 }
 
 /// Create a directory using mkdirat() syscall
-pub fn mkdirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, mode: mode_t) DirCreateDirError!void {
+pub fn mkdirat(dir: fd_t, path: []const u8, mode: mode_t) DirCreateDirError!void {
     if (builtin.os.tag == .windows) {
-        const path_w = try w.pathToWide(allocator, dir, path);
-        defer allocator.free(path_w);
+        var path_w_buf: w.PathW = undefined;
+        const path_w = try path_w_buf.init(dir, path);
+        defer path_w_buf.deinit();
 
         if (w.CreateDirectoryW(path_w.ptr, null) == w.FALSE) {
             return switch (w.GetLastError()) {
@@ -1959,8 +2034,9 @@ pub fn mkdirat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, mode: 
         return;
     }
 
-    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
-    defer allocator.free(path_z);
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     const sc = try syscall_cancel.Syscall.begin();
     defer sc.finish();
@@ -2398,10 +2474,11 @@ pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
 }
 
 /// Get file metadata by path relative to directory
-pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: FileStatFlags) FileStatError!FileStatInfo {
+pub fn fstatat(dir: fd_t, path: []const u8, flags: FileStatFlags) FileStatError!FileStatInfo {
     if (builtin.os.tag == .windows) {
-        const path_w = try w.pathToWide(allocator, dir, path);
-        defer allocator.free(path_w);
+        var path_w_buf: w.PathW = undefined;
+        const path_w = try path_w_buf.init(dir, path);
+        defer path_w_buf.deinit();
 
         var create_flags: u32 = w.FILE_FLAG_BACKUP_SEMANTICS; // Required to open directories
         if (!flags.follow_symlinks) create_flags |= w.FILE_FLAG_OPEN_REPARSE_POINT;
@@ -2431,8 +2508,9 @@ pub fn fstatat(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags:
         return fstat(handle);
     }
 
-    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
-    defer allocator.free(path_z);
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     const at_flags: u32 = if (flags.follow_symlinks) 0 else posix.AT.SYMLINK_NOFOLLOW;
 
@@ -2781,12 +2859,13 @@ pub const PathSetFlags = struct {
 };
 
 /// Set permissions of a file relative to a directory (fchmodat)
-pub fn dirSetFilePermissions(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, mode: mode_t, flags: PathSetFlags) FileSetPermissionsError!void {
+pub fn dirSetFilePermissions(dir: fd_t, path: []const u8, mode: mode_t, flags: PathSetFlags) FileSetPermissionsError!void {
     // Windows doesn't have POSIX-style permissions
     if (builtin.os.tag == .windows) return;
 
-    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.Unexpected;
-    defer allocator.free(path_z);
+    var path_buf: PathZ = undefined;
+    const path_z = path_buf.init(path) catch return error.Unexpected;
+    defer path_buf.deinit();
 
     // Note: AT_SYMLINK_NOFOLLOW for fchmodat requires Linux 6.6+ (fchmodat2)
     const at_flags: u32 = if (flags.follow_symlinks) 0 else posix.AT.SYMLINK_NOFOLLOW;
@@ -2807,12 +2886,13 @@ pub fn dirSetFilePermissions(allocator: std.mem.Allocator, dir: fd_t, path: []co
 }
 
 /// Set owner of a file relative to a directory (fchownat)
-pub fn dirSetFileOwner(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, uid: ?uid_t, gid: ?gid_t, flags: PathSetFlags) FileSetOwnerError!void {
+pub fn dirSetFileOwner(dir: fd_t, path: []const u8, uid: ?uid_t, gid: ?gid_t, flags: PathSetFlags) FileSetOwnerError!void {
     // Windows doesn't have POSIX-style ownership
     if (builtin.os.tag == .windows) return;
 
-    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.Unexpected;
-    defer allocator.free(path_z);
+    var path_buf: PathZ = undefined;
+    const path_z = path_buf.init(path) catch return error.Unexpected;
+    defer path_buf.deinit();
 
     // -1 means "don't change"
     const uid_arg: uid_t = uid orelse @bitCast(@as(i32, -1));
@@ -2836,15 +2916,16 @@ pub fn dirSetFileOwner(allocator: std.mem.Allocator, dir: fd_t, path: []const u8
 }
 
 /// Set timestamps of a file relative to a directory (utimensat)
-pub fn dirSetFileTimestamps(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, timestamps: FileTimestamps, flags: PathSetFlags) FileSetTimestampsError!void {
+pub fn dirSetFileTimestamps(dir: fd_t, path: []const u8, timestamps: FileTimestamps, flags: PathSetFlags) FileSetTimestampsError!void {
     if (builtin.os.tag == .windows) {
         // On Windows, we need to open the file first, set timestamps, then close
         // For now, return success (no-op like other Windows permission functions)
         return;
     }
 
-    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.Unexpected;
-    defer allocator.free(path_z);
+    var path_buf: PathZ = undefined;
+    const path_z = path_buf.init(path) catch return error.Unexpected;
+    defer path_buf.deinit();
 
     const times: [2]posix.system.timespec = .{
         setTimestampToTimespec(timestamps.atime),
@@ -2889,7 +2970,7 @@ pub const SymLinkFlags = struct {
 };
 
 /// Create a symbolic link using symlinkat() syscall
-pub fn dirSymLink(allocator: std.mem.Allocator, dir: fd_t, target: []const u8, link_path: []const u8, flags: SymLinkFlags) SymLinkError!void {
+pub fn dirSymLink(dir: fd_t, target: []const u8, link_path: []const u8, flags: SymLinkFlags) SymLinkError!void {
     _ = flags;
 
     if (builtin.os.tag == .windows) {
@@ -2897,11 +2978,13 @@ pub fn dirSymLink(allocator: std.mem.Allocator, dir: fd_t, target: []const u8, l
         return error.Unexpected;
     }
 
-    const target_z = allocator.dupeSentinel(u8, target, 0) catch return error.SystemResources;
-    defer allocator.free(target_z);
+    var target_buf: PathZ = undefined;
+    const target_z = try target_buf.init(target);
+    defer target_buf.deinit();
 
-    const link_path_z = allocator.dupeSentinel(u8, link_path, 0) catch return error.SystemResources;
-    defer allocator.free(link_path_z);
+    var link_path_buf: PathZ = undefined;
+    const link_path_z = try link_path_buf.init(link_path);
+    defer link_path_buf.deinit();
 
     const sc = try syscall_cancel.Syscall.begin();
     defer sc.finish();
@@ -2951,9 +3034,13 @@ pub const ReadLinkError = error{
 };
 
 /// Read a symbolic link using readlinkat() syscall
-pub fn dirReadLink(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, buffer: []u8) ReadLinkError!usize {
-    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
-    defer allocator.free(path_z);
+pub fn dirReadLink(dir: fd_t, path: []const u8, buffer: []u8) ReadLinkError!usize {
+    // TODO: Implement Windows readlink, see dirReadLinkZ.
+    if (builtin.os.tag == .windows) return error.Unexpected;
+
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     return dirReadLinkZ(dir, path_z, buffer);
 }
@@ -3017,17 +3104,19 @@ pub const HardLinkFlags = struct {
 };
 
 /// Create a hard link using linkat() syscall
-pub fn dirHardLink(allocator: std.mem.Allocator, old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8, flags: HardLinkFlags) HardLinkError!void {
+pub fn dirHardLink(old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8, flags: HardLinkFlags) HardLinkError!void {
     if (builtin.os.tag == .windows) {
         // TODO: Implement Windows hardlink via CreateHardLinkW
         return error.Unexpected;
     }
 
-    const old_path_z = allocator.dupeSentinel(u8, old_path, 0) catch return error.SystemResources;
-    defer allocator.free(old_path_z);
+    var old_path_buf: PathZ = undefined;
+    const old_path_z = try old_path_buf.init(old_path);
+    defer old_path_buf.deinit();
 
-    const new_path_z = allocator.dupeSentinel(u8, new_path, 0) catch return error.SystemResources;
-    defer allocator.free(new_path_z);
+    var new_path_buf: PathZ = undefined;
+    const new_path_z = try new_path_buf.init(new_path);
+    defer new_path_buf.deinit();
 
     const at_flags: u32 = if (flags.follow_symlinks) posix.AT.SYMLINK_FOLLOW else 0;
 
@@ -3071,13 +3160,14 @@ pub const FileHardLinkError = HardLinkError || error{
 };
 
 /// Create a hard link from an open file descriptor using linkat() with AT_EMPTY_PATH
-pub fn fileHardLink(allocator: std.mem.Allocator, fd: fd_t, new_dir: fd_t, new_path: []const u8, flags: HardLinkFlags) FileHardLinkError!void {
+pub fn fileHardLink(fd: fd_t, new_dir: fd_t, new_path: []const u8, flags: HardLinkFlags) FileHardLinkError!void {
     if (builtin.os.tag == .windows) {
         return error.OperationUnsupported;
     }
 
-    const new_path_z = allocator.dupeSentinel(u8, new_path, 0) catch return error.SystemResources;
-    defer allocator.free(new_path_z);
+    var new_path_buf: PathZ = undefined;
+    const new_path_z = try new_path_buf.init(new_path);
+    defer new_path_buf.deinit();
 
     const at_flags: u32 = if (flags.follow_symlinks) posix.AT.SYMLINK_FOLLOW else 0;
 
@@ -3107,11 +3197,11 @@ pub fn fileHardLink(allocator: std.mem.Allocator, fd: fd_t, new_dir: fd_t, new_p
         }
     } else {
         // macOS/BSD: get real path from fd, then use dirHardLink
+        // The last byte is kept free for the terminator.
         var path_buf: [posix.PATH_MAX]u8 = undefined;
-        const len = dirRealPath(fd, &path_buf) catch return error.OperationUnsupported;
-
-        const old_path_z = allocator.dupeSentinel(u8, path_buf[0..len], 0) catch return error.SystemResources;
-        defer allocator.free(old_path_z);
+        const len = dirRealPath(fd, path_buf[0 .. path_buf.len - 1]) catch return error.OperationUnsupported;
+        path_buf[len] = 0;
+        const old_path_z = path_buf[0..len :0];
 
         while (true) {
             const rc = posix.linkat(posix.AT.FDCWD, old_path_z.ptr, new_dir, new_path_z.ptr, at_flags);
@@ -3148,13 +3238,14 @@ pub const AccessFlags = struct {
 };
 
 /// Check file accessibility using faccessat() syscall
-pub fn dirAccess(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: AccessFlags) DirAccessError!void {
+pub fn dirAccess(dir: fd_t, path: []const u8, flags: AccessFlags) DirAccessError!void {
     if (builtin.os.tag == .windows) {
-        return dirAccessWindows(allocator, dir, path, flags);
+        return dirAccessWindows(dir, path, flags);
     }
 
-    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
-    defer allocator.free(path_z);
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     var mode: u32 = posix.system.F_OK;
     if (flags.read) mode |= posix.system.R_OK;
@@ -3196,15 +3287,16 @@ pub fn errnoToDirAccessError(errno: posix.system.E) DirAccessError {
     };
 }
 
-fn dirAccessWindows(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, flags: AccessFlags) DirAccessError!void {
+fn dirAccessWindows(dir: fd_t, path: []const u8, flags: AccessFlags) DirAccessError!void {
     _ = flags; // Windows access check doesn't distinguish read/write/execute
 
     // Handle "." and ".." specially
     if (path.len == 1 and path[0] == '.') return;
     if (path.len == 2 and path[0] == '.' and path[1] == '.') return;
 
-    const path_w = try w.pathToWide(allocator, dir, path);
-    defer allocator.free(path_w);
+    var path_w_buf: w.PathW = undefined;
+    const path_w = try path_w_buf.init(dir, path);
+    defer path_w_buf.deinit();
 
     if (w.GetFileAttributesW(path_w) != w.INVALID_FILE_ATTRIBUTES) {
         return;
@@ -3420,13 +3512,14 @@ pub fn dirRealPath(fd: fd_t, buffer: []u8) DirRealPathError!usize {
 }
 
 /// Get the real path of a file relative to a directory
-pub fn dirRealPathFile(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, buffer: []u8) DirRealPathFileError!usize {
+pub fn dirRealPathFile(dir: fd_t, path: []const u8, buffer: []u8) DirRealPathFileError!usize {
     if (builtin.os.tag == .windows) {
-        return dirRealPathFileWindows(allocator, dir, path, buffer);
+        return dirRealPathFileWindows(dir, path, buffer);
     }
 
-    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
-    defer allocator.free(path_z);
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     return dirRealPathFileZ(dir, path_z, buffer);
 }
@@ -3586,9 +3679,10 @@ fn dirRealPathWindows(handle: fd_t, buffer: []u8) DirRealPathError!usize {
     return std.unicode.wtf16LeToWtf8(buffer, wide_slice[skip..]);
 }
 
-fn dirRealPathFileWindows(allocator: std.mem.Allocator, dir: fd_t, path: []const u8, buffer: []u8) DirRealPathFileError!usize {
-    const path_w = try w.pathToWide(allocator, dir, path);
-    defer allocator.free(path_w);
+fn dirRealPathFileWindows(dir: fd_t, path: []const u8, buffer: []u8) DirRealPathFileError!usize {
+    var path_w_buf: w.PathW = undefined;
+    const path_w = try path_w_buf.init(dir, path);
+    defer path_w_buf.deinit();
 
     const handle = w.CreateFileW(
         path_w.ptr,

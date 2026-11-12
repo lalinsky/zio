@@ -33,11 +33,9 @@ test "Blocking sockets: basic smoke test" {
     // Server thread: open, bind, listen, accept, recv, close
     const server_thread = try std.Thread.spawn(.{}, struct {
         fn serverFn(s: *SharedState) void {
-            const alloc = std.testing.allocator;
-
             // Open server socket
             var open = ev.NetOpen.init(.ipv4, .stream, .ip, .{ .nonblocking = false });
-            blocking.executeBlocking(&open.c, alloc);
+            blocking.executeBlocking(&open.c);
             const server_sock = open.c.getResult(.net_open) catch |err| {
                 s.server_err = err;
                 s.server_ready.set();
@@ -45,13 +43,13 @@ test "Blocking sockets: basic smoke test" {
             };
             defer {
                 var close = ev.NetClose.init(server_sock);
-                blocking.executeBlocking(&close.c, alloc);
+                blocking.executeBlocking(&close.c);
                 _ = close.c.getResult(.net_close) catch {};
             }
 
             // Bind
             var bind = ev.NetBind.init(server_sock, @ptrCast(&s.server_addr), &s.server_addr_len);
-            blocking.executeBlocking(&bind.c, alloc);
+            blocking.executeBlocking(&bind.c);
             bind.c.getResult(.net_bind) catch |err| {
                 s.server_err = err;
                 s.server_ready.set();
@@ -60,7 +58,7 @@ test "Blocking sockets: basic smoke test" {
 
             // Listen
             var listen = ev.NetListen.init(server_sock, 1);
-            blocking.executeBlocking(&listen.c, alloc);
+            blocking.executeBlocking(&listen.c);
             listen.c.getResult(.net_listen) catch |err| {
                 s.server_err = err;
                 s.server_ready.set();
@@ -72,14 +70,14 @@ test "Blocking sockets: basic smoke test" {
 
             // Accept
             var accept = ev.NetAccept.init(server_sock, null, null);
-            blocking.executeBlocking(&accept.c, alloc);
+            blocking.executeBlocking(&accept.c);
             const client_sock = accept.getResult() catch |err| {
                 s.server_err = err;
                 return;
             };
             defer {
                 var close = ev.NetClose.init(client_sock);
-                blocking.executeBlocking(&close.c, alloc);
+                blocking.executeBlocking(&close.c);
                 _ = close.c.getResult(.net_close) catch {};
             }
 
@@ -87,7 +85,7 @@ test "Blocking sockets: basic smoke test" {
             var recv_buf: [128]u8 = undefined;
             var recv_iov: [1]os.iovec = undefined;
             var recv = ev.NetRecv.init(client_sock, .fromSlice(&recv_buf, &recv_iov), .{});
-            blocking.executeBlocking(&recv.c, alloc);
+            blocking.executeBlocking(&recv.c);
             const bytes_received = recv.getResult() catch |err| {
                 s.server_err = err;
                 return;
@@ -104,8 +102,6 @@ test "Blocking sockets: basic smoke test" {
     // Client thread: wait for server, then open, connect, send, close
     const client_thread = try std.Thread.spawn(.{}, struct {
         fn clientFn(s: *SharedState) void {
-            const alloc = std.testing.allocator;
-
             // Wait for server to be ready
             s.server_ready.wait();
 
@@ -114,20 +110,20 @@ test "Blocking sockets: basic smoke test" {
 
             // Open client socket
             var open = ev.NetOpen.init(.ipv4, .stream, .ip, .{ .nonblocking = false });
-            blocking.executeBlocking(&open.c, alloc);
+            blocking.executeBlocking(&open.c);
             const client_sock = open.c.getResult(.net_open) catch |err| {
                 s.client_err = err;
                 return;
             };
             defer {
                 var close = ev.NetClose.init(client_sock);
-                blocking.executeBlocking(&close.c, alloc);
+                blocking.executeBlocking(&close.c);
                 _ = close.c.getResult(.net_close) catch {};
             }
 
             // Connect
             var connect = ev.NetConnect.init(client_sock, @ptrCast(&s.server_addr), s.server_addr_len);
-            blocking.executeBlocking(&connect.c, alloc);
+            blocking.executeBlocking(&connect.c);
             connect.getResult() catch |err| {
                 s.client_err = err;
                 return;
@@ -137,7 +133,7 @@ test "Blocking sockets: basic smoke test" {
             const message = "Hello, blocking sockets!";
             var send_iov: [1]os.iovec_const = undefined;
             var send = ev.NetSend.init(client_sock, .fromSlice(message, &send_iov), .{});
-            blocking.executeBlocking(&send.c, alloc);
+            blocking.executeBlocking(&send.c);
             const bytes_sent = send.getResult() catch |err| {
                 s.client_err = err;
                 return;
@@ -167,8 +163,6 @@ test "Blocking sockets: recv on a nonblocking socket waits for data" {
     // executeBlocking.
     net.ensureWSAInitialized();
 
-    const alloc = std.testing.allocator;
-
     // Listener, blocking mode, on an ephemeral loopback port.
     var addr = net.sockaddr.in{
         .family = net.AF.INET,
@@ -179,43 +173,43 @@ test "Blocking sockets: recv on a nonblocking socket waits for data" {
     var addr_len: net.socklen_t = @sizeOf(net.sockaddr.in);
 
     var open = ev.NetOpen.init(.ipv4, .stream, .ip, .{ .nonblocking = false });
-    blocking.executeBlocking(&open.c, alloc);
+    blocking.executeBlocking(&open.c);
     const listener = try open.c.getResult(.net_open);
     defer {
         var close = ev.NetClose.init(listener);
-        blocking.executeBlocking(&close.c, alloc);
+        blocking.executeBlocking(&close.c);
         _ = close.c.getResult(.net_close) catch {};
     }
 
     var bind = ev.NetBind.init(listener, @ptrCast(&addr), &addr_len);
-    blocking.executeBlocking(&bind.c, alloc);
+    blocking.executeBlocking(&bind.c);
     try bind.c.getResult(.net_bind);
 
     var listen = ev.NetListen.init(listener, 1);
-    blocking.executeBlocking(&listen.c, alloc);
+    blocking.executeBlocking(&listen.c);
     try listen.c.getResult(.net_listen);
 
     // Client connects; loopback connect completes without an accept.
     var copen = ev.NetOpen.init(.ipv4, .stream, .ip, .{ .nonblocking = false });
-    blocking.executeBlocking(&copen.c, alloc);
+    blocking.executeBlocking(&copen.c);
     const client = try copen.c.getResult(.net_open);
     defer {
         var close = ev.NetClose.init(client);
-        blocking.executeBlocking(&close.c, alloc);
+        blocking.executeBlocking(&close.c);
         _ = close.c.getResult(.net_close) catch {};
     }
 
     var connect = ev.NetConnect.init(client, @ptrCast(&addr), addr_len);
-    blocking.executeBlocking(&connect.c, alloc);
+    blocking.executeBlocking(&connect.c);
     try connect.getResult();
 
     // Accept with the default flags: the accepted socket is nonblocking.
     var accept = ev.NetAccept.init(listener, null, null);
-    blocking.executeBlocking(&accept.c, alloc);
+    blocking.executeBlocking(&accept.c);
     const accepted = try accept.getResult();
     defer {
         var close = ev.NetClose.init(accepted);
-        blocking.executeBlocking(&close.c, alloc);
+        blocking.executeBlocking(&close.c);
         _ = close.c.getResult(.net_close) catch {};
     }
 
@@ -225,7 +219,7 @@ test "Blocking sockets: recv on a nonblocking socket waits for data" {
             os.time.sleep(.fromMilliseconds(50));
             var iov: [1]os.iovec_const = undefined;
             var send = ev.NetSend.init(sock, .fromSlice("late data", &iov), .{});
-            blocking.executeBlocking(&send.c, std.testing.allocator);
+            blocking.executeBlocking(&send.c);
             _ = send.getResult() catch {};
         }
     }.sendLate, .{client});
@@ -234,7 +228,7 @@ test "Blocking sockets: recv on a nonblocking socket waits for data" {
     var buf: [32]u8 = undefined;
     var iov: [1]os.iovec = undefined;
     var recv = ev.NetRecv.init(accepted, .fromSlice(&buf, &iov), .{});
-    blocking.executeBlocking(&recv.c, alloc);
+    blocking.executeBlocking(&recv.c);
     const n = try recv.getResult();
     try std.testing.expectEqualStrings("late data", buf[0..n]);
 }
@@ -242,8 +236,6 @@ test "Blocking sockets: recv on a nonblocking socket waits for data" {
 test "Blocking sockets: dontwait recvmsg reports an empty queue as WouldBlock" {
     // Normally done by Loop.init; this test bypasses the loop.
     net.ensureWSAInitialized();
-
-    const alloc = std.testing.allocator;
 
     var addr = net.sockaddr.in{
         .family = net.AF.INET,
@@ -255,36 +247,36 @@ test "Blocking sockets: dontwait recvmsg reports an empty queue as WouldBlock" {
 
     // Blocking mode on purpose: the flag alone must keep recvmsg from waiting.
     var open = ev.NetOpen.init(.ipv4, .dgram, .ip, .{ .nonblocking = false });
-    blocking.executeBlocking(&open.c, alloc);
+    blocking.executeBlocking(&open.c);
     const sock = try open.c.getResult(.net_open);
     defer {
         var close = ev.NetClose.init(sock);
-        blocking.executeBlocking(&close.c, alloc);
+        blocking.executeBlocking(&close.c);
     }
 
     var bind = ev.NetBind.init(sock, @ptrCast(&addr), &addr_len);
-    blocking.executeBlocking(&bind.c, alloc);
+    blocking.executeBlocking(&bind.c);
     try bind.c.getResult(.net_bind);
 
     var buf: [32]u8 = undefined;
     var iov: [1]os.iovec = undefined;
     var recv = ev.NetRecvMsg.init(sock, .fromSlice(&buf, &iov), .{ .dontwait = true }, null, null, null);
-    blocking.executeBlocking(&recv.c, alloc);
+    blocking.executeBlocking(&recv.c);
     try std.testing.expectError(error.WouldBlock, recv.c.getResult(.net_recvmsg));
 
     var send_iov: [1]os.iovec_const = undefined;
     var send = ev.NetSendTo.init(sock, .fromSlice("ping", &send_iov), .{}, @ptrCast(&addr), addr_len);
-    blocking.executeBlocking(&send.c, alloc);
+    blocking.executeBlocking(&send.c);
     try std.testing.expectEqual(4, try send.c.getResult(.net_sendto));
 
     // Loopback delivery is asynchronous on the BSDs; wait for readability
     // before asking for the datagram without waiting.
     var readable = ev.NetPoll.init(sock, .recv);
-    blocking.executeBlocking(&readable.c, alloc);
+    blocking.executeBlocking(&readable.c);
     try readable.c.getResult(.net_poll);
 
     var recv2 = ev.NetRecvMsg.init(sock, .fromSlice(&buf, &iov), .{ .dontwait = true }, null, null, null);
-    blocking.executeBlocking(&recv2.c, alloc);
+    blocking.executeBlocking(&recv2.c);
     const result = try recv2.c.getResult(.net_recvmsg);
     try std.testing.expectEqualStrings("ping", buf[0..result.len]);
 }

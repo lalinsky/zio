@@ -784,8 +784,7 @@ fn waitForIoImpl(c: *ev.Completion, comptime cancel_check: CancelCheck, comptime
 
     // Blocking path: Execute synchronously without event loop
     const task = waiter.directTask() orelse {
-        // TODO: Don't use std.heap.c_allocator - it should be passed as a parameter
-        ev.executeBlocking(c, std.heap.c_allocator);
+        ev.executeBlocking(c);
         return;
     };
 
@@ -862,8 +861,7 @@ pub fn waitForIoUncancelable(c: *ev.Completion) void {
 
     // Blocking path: Execute synchronously without event loop
     const task = waiter.directTask() orelse {
-        // TODO: Don't use std.heap.c_allocator - it should be passed as a parameter
-        ev.executeBlocking(c, std.heap.c_allocator);
+        ev.executeBlocking(c);
         return;
     };
 

@@ -147,9 +147,9 @@ pub fn resolveStreamingSupport(data: anytype) bool {
     return route != .thread_pool;
 }
 
-pub fn handleFileOpen(c: *Completion, allocator: std.mem.Allocator) void {
+pub fn handleFileOpen(c: *Completion) void {
     const data = c.cast(FileOpen);
-    if (fs.openat(allocator, data.dir, data.path, data.flags)) |fd| {
+    if (fs.openat(data.dir, data.path, data.flags)) |fd| {
         c.setResult(.file_open, .{ .fd = fd, .streaming_route = if (probePollable(fd)) .pollable else .thread_pool });
     } else |err| {
         c.setError(err);
@@ -157,9 +157,9 @@ pub fn handleFileOpen(c: *Completion, allocator: std.mem.Allocator) void {
 }
 
 /// Helper to handle file create operation
-pub fn handleFileCreate(c: *Completion, allocator: std.mem.Allocator) void {
+pub fn handleFileCreate(c: *Completion) void {
     const data = c.cast(FileCreate);
-    if (fs.createat(allocator, data.dir, data.path, data.flags)) |fd| {
+    if (fs.createat(data.dir, data.path, data.flags)) |fd| {
         c.setResult(.file_create, .{ .fd = fd, .streaming_route = if (probePollable(fd)) .pollable else .thread_pool });
     } else |err| {
         c.setError(err);
@@ -339,7 +339,7 @@ pub fn fileOpenWork(work: *Work) void {
         file_open.flags.nonblocking = true;
     }
 
-    handleFileOpen(&file_open.c, linked_work.allocator);
+    handleFileOpen(&file_open.c);
 
     // If the operation failed, exit early
     if (file_open.c.err != null) return;
@@ -365,7 +365,7 @@ pub fn fileCreateWork(work: *Work) void {
         file_create.flags.nonblocking = true;
     }
 
-    handleFileCreate(&file_create.c, linked_work.allocator);
+    handleFileCreate(&file_create.c);
 
     // If the operation failed, exit early
     if (file_create.c.err != null) return;
@@ -480,9 +480,9 @@ pub fn dirSetOwnerWork(work: *Work) void {
 }
 
 /// Helper to handle dir set file permissions operation
-pub fn handleDirSetFilePermissions(c: *Completion, allocator: std.mem.Allocator) void {
+pub fn handleDirSetFilePermissions(c: *Completion) void {
     const data = c.cast(DirSetFilePermissions);
-    if (fs.dirSetFilePermissions(allocator, data.dir, data.path, data.mode, data.flags)) |_| {
+    if (fs.dirSetFilePermissions(data.dir, data.path, data.mode, data.flags)) |_| {
         c.setResult(.dir_set_file_permissions, {});
     } else |err| {
         c.setError(err);
@@ -491,15 +491,14 @@ pub fn handleDirSetFilePermissions(c: *Completion, allocator: std.mem.Allocator)
 
 /// Work function for DirSetFilePermissions
 pub fn dirSetFilePermissionsWork(work: *Work) void {
-    const linked_work = delegated(work);
     const data = opFromWork(work, DirSetFilePermissions);
-    handleDirSetFilePermissions(&data.c, linked_work.allocator);
+    handleDirSetFilePermissions(&data.c);
 }
 
 /// Helper to handle dir set file owner operation
-pub fn handleDirSetFileOwner(c: *Completion, allocator: std.mem.Allocator) void {
+pub fn handleDirSetFileOwner(c: *Completion) void {
     const data = c.cast(DirSetFileOwner);
-    if (fs.dirSetFileOwner(allocator, data.dir, data.path, data.uid, data.gid, data.flags)) |_| {
+    if (fs.dirSetFileOwner(data.dir, data.path, data.uid, data.gid, data.flags)) |_| {
         c.setResult(.dir_set_file_owner, {});
     } else |err| {
         c.setError(err);
@@ -508,15 +507,14 @@ pub fn handleDirSetFileOwner(c: *Completion, allocator: std.mem.Allocator) void 
 
 /// Work function for DirSetFileOwner
 pub fn dirSetFileOwnerWork(work: *Work) void {
-    const linked_work = delegated(work);
     const data = opFromWork(work, DirSetFileOwner);
-    handleDirSetFileOwner(&data.c, linked_work.allocator);
+    handleDirSetFileOwner(&data.c);
 }
 
 /// Helper to handle dir set file timestamps operation
-pub fn handleDirSetFileTimestamps(c: *Completion, allocator: std.mem.Allocator) void {
+pub fn handleDirSetFileTimestamps(c: *Completion) void {
     const data = c.cast(DirSetFileTimestamps);
-    if (fs.dirSetFileTimestamps(allocator, data.dir, data.path, data.timestamps, data.flags)) |_| {
+    if (fs.dirSetFileTimestamps(data.dir, data.path, data.timestamps, data.flags)) |_| {
         c.setResult(.dir_set_file_timestamps, {});
     } else |err| {
         c.setError(err);
@@ -525,15 +523,14 @@ pub fn handleDirSetFileTimestamps(c: *Completion, allocator: std.mem.Allocator) 
 
 /// Work function for DirSetFileTimestamps
 pub fn dirSetFileTimestampsWork(work: *Work) void {
-    const linked_work = delegated(work);
     const data = opFromWork(work, DirSetFileTimestamps);
-    handleDirSetFileTimestamps(&data.c, linked_work.allocator);
+    handleDirSetFileTimestamps(&data.c);
 }
 
 /// Helper to handle dir sym link operation
-pub fn handleDirSymLink(c: *Completion, allocator: std.mem.Allocator) void {
+pub fn handleDirSymLink(c: *Completion) void {
     const data = c.cast(DirSymLink);
-    if (fs.dirSymLink(allocator, data.dir, data.target, data.link_path, data.flags)) |_| {
+    if (fs.dirSymLink(data.dir, data.target, data.link_path, data.flags)) |_| {
         c.setResult(.dir_sym_link, {});
     } else |err| {
         c.setError(err);
@@ -542,15 +539,14 @@ pub fn handleDirSymLink(c: *Completion, allocator: std.mem.Allocator) void {
 
 /// Work function for DirSymLink
 pub fn dirSymLinkWork(work: *Work) void {
-    const linked_work = delegated(work);
     const data = opFromWork(work, DirSymLink);
-    handleDirSymLink(&data.c, linked_work.allocator);
+    handleDirSymLink(&data.c);
 }
 
 /// Helper to handle dir read link operation
-pub fn handleDirReadLink(c: *Completion, allocator: std.mem.Allocator) void {
+pub fn handleDirReadLink(c: *Completion) void {
     const data = c.cast(DirReadLink);
-    if (fs.dirReadLink(allocator, data.dir, data.path, data.buffer)) |len| {
+    if (fs.dirReadLink(data.dir, data.path, data.buffer)) |len| {
         c.setResult(.dir_read_link, len);
     } else |err| {
         c.setError(err);
@@ -559,15 +555,14 @@ pub fn handleDirReadLink(c: *Completion, allocator: std.mem.Allocator) void {
 
 /// Work function for DirReadLink
 pub fn dirReadLinkWork(work: *Work) void {
-    const linked_work = delegated(work);
     const data = opFromWork(work, DirReadLink);
-    handleDirReadLink(&data.c, linked_work.allocator);
+    handleDirReadLink(&data.c);
 }
 
 /// Helper to handle dir hard link operation
-pub fn handleDirHardLink(c: *Completion, allocator: std.mem.Allocator) void {
+pub fn handleDirHardLink(c: *Completion) void {
     const data = c.cast(DirHardLink);
-    if (fs.dirHardLink(allocator, data.old_dir, data.old_path, data.new_dir, data.new_path, data.flags)) |_| {
+    if (fs.dirHardLink(data.old_dir, data.old_path, data.new_dir, data.new_path, data.flags)) |_| {
         c.setResult(.dir_hard_link, {});
     } else |err| {
         c.setError(err);
@@ -576,15 +571,14 @@ pub fn handleDirHardLink(c: *Completion, allocator: std.mem.Allocator) void {
 
 /// Work function for DirHardLink
 pub fn dirHardLinkWork(work: *Work) void {
-    const linked_work = delegated(work);
     const data = opFromWork(work, DirHardLink);
-    handleDirHardLink(&data.c, linked_work.allocator);
+    handleDirHardLink(&data.c);
 }
 
 /// Helper to handle dir access operation
-pub fn handleDirAccess(c: *Completion, allocator: std.mem.Allocator) void {
+pub fn handleDirAccess(c: *Completion) void {
     const data = c.cast(DirAccess);
-    if (fs.dirAccess(allocator, data.dir, data.path, data.flags)) |_| {
+    if (fs.dirAccess(data.dir, data.path, data.flags)) |_| {
         c.setResult(.dir_access, {});
     } else |err| {
         c.setError(err);
@@ -593,9 +587,8 @@ pub fn handleDirAccess(c: *Completion, allocator: std.mem.Allocator) void {
 
 /// Work function for DirAccess
 pub fn dirAccessWork(work: *Work) void {
-    const linked_work = delegated(work);
     const data = opFromWork(work, DirAccess);
-    handleDirAccess(&data.c, linked_work.allocator);
+    handleDirAccess(&data.c);
 }
 
 /// Helper to handle dir read operation
@@ -632,9 +625,9 @@ pub fn dirRealPathWork(work: *Work) void {
 }
 
 /// Helper to handle dir real path file operation
-pub fn handleDirRealPathFile(c: *Completion, allocator: std.mem.Allocator) void {
+pub fn handleDirRealPathFile(c: *Completion) void {
     const data = c.cast(DirRealPathFile);
-    if (fs.dirRealPathFile(allocator, data.dir, data.path, data.buffer)) |len| {
+    if (fs.dirRealPathFile(data.dir, data.path, data.buffer)) |len| {
         c.setResult(.dir_real_path_file, len);
     } else |err| {
         c.setError(err);
@@ -643,9 +636,8 @@ pub fn handleDirRealPathFile(c: *Completion, allocator: std.mem.Allocator) void 
 
 /// Work function for DirRealPathFile
 pub fn dirRealPathFileWork(work: *Work) void {
-    const linked_work = delegated(work);
     const data = opFromWork(work, DirRealPathFile);
-    handleDirRealPathFile(&data.c, linked_work.allocator);
+    handleDirRealPathFile(&data.c);
 }
 
 /// Helper to handle file real path operation
@@ -665,9 +657,9 @@ pub fn fileRealPathWork(work: *Work) void {
 }
 
 /// Helper to handle file hard link operation
-pub fn handleFileHardLink(c: *Completion, allocator: std.mem.Allocator) void {
+pub fn handleFileHardLink(c: *Completion) void {
     const data = c.cast(FileHardLink);
-    if (fs.fileHardLink(allocator, data.fd, data.new_dir, data.new_path, data.flags)) |_| {
+    if (fs.fileHardLink(data.fd, data.new_dir, data.new_path, data.flags)) |_| {
         c.setResult(.file_hard_link, {});
     } else |err| {
         c.setError(err);
@@ -676,15 +668,14 @@ pub fn handleFileHardLink(c: *Completion, allocator: std.mem.Allocator) void {
 
 /// Work function for FileHardLink
 pub fn fileHardLinkWork(work: *Work) void {
-    const linked_work = delegated(work);
     const data = opFromWork(work, FileHardLink);
-    handleFileHardLink(&data.c, linked_work.allocator);
+    handleFileHardLink(&data.c);
 }
 
 /// Helper to handle dir create dir operation
-pub fn handleDirCreateDir(c: *Completion, allocator: std.mem.Allocator) void {
+pub fn handleDirCreateDir(c: *Completion) void {
     const data = c.cast(DirCreateDir);
-    if (fs.mkdirat(allocator, data.dir, data.path, data.mode)) |_| {
+    if (fs.mkdirat(data.dir, data.path, data.mode)) |_| {
         c.setResult(.dir_create_dir, {});
     } else |err| {
         c.setError(err);
@@ -692,9 +683,9 @@ pub fn handleDirCreateDir(c: *Completion, allocator: std.mem.Allocator) void {
 }
 
 /// Helper to handle dir rename operation
-pub fn handleDirRename(c: *Completion, allocator: std.mem.Allocator) void {
+pub fn handleDirRename(c: *Completion) void {
     const data = c.cast(DirRename);
-    if (fs.renameat(allocator, data.old_dir, data.old_path, data.new_dir, data.new_path)) |_| {
+    if (fs.renameat(data.old_dir, data.old_path, data.new_dir, data.new_path)) |_| {
         c.setResult(.dir_rename, {});
     } else |err| {
         c.setError(err);
@@ -702,9 +693,9 @@ pub fn handleDirRename(c: *Completion, allocator: std.mem.Allocator) void {
 }
 
 /// Helper to handle dir rename preserve operation
-pub fn handleDirRenamePreserve(c: *Completion, allocator: std.mem.Allocator) void {
+pub fn handleDirRenamePreserve(c: *Completion) void {
     const data = c.cast(DirRenamePreserve);
-    if (fs.renameatPreserve(allocator, data.old_dir, data.old_path, data.new_dir, data.new_path)) |_| {
+    if (fs.renameatPreserve(data.old_dir, data.old_path, data.new_dir, data.new_path)) |_| {
         c.setResult(.dir_rename_preserve, {});
     } else |err| {
         c.setError(err);
@@ -712,9 +703,9 @@ pub fn handleDirRenamePreserve(c: *Completion, allocator: std.mem.Allocator) voi
 }
 
 /// Helper to handle dir delete file operation
-pub fn handleDirDeleteFile(c: *Completion, allocator: std.mem.Allocator) void {
+pub fn handleDirDeleteFile(c: *Completion) void {
     const data = c.cast(DirDeleteFile);
-    if (fs.dirDeleteFile(allocator, data.dir, data.path)) |_| {
+    if (fs.dirDeleteFile(data.dir, data.path)) |_| {
         c.setResult(.dir_delete_file, {});
     } else |err| {
         c.setError(err);
@@ -722,9 +713,9 @@ pub fn handleDirDeleteFile(c: *Completion, allocator: std.mem.Allocator) void {
 }
 
 /// Helper to handle dir delete dir operation
-pub fn handleDirDeleteDir(c: *Completion, allocator: std.mem.Allocator) void {
+pub fn handleDirDeleteDir(c: *Completion) void {
     const data = c.cast(DirDeleteDir);
-    if (fs.dirDeleteDir(allocator, data.dir, data.path)) |_| {
+    if (fs.dirDeleteDir(data.dir, data.path)) |_| {
         c.setResult(.dir_delete_dir, {});
     } else |err| {
         c.setError(err);
@@ -733,37 +724,32 @@ pub fn handleDirDeleteDir(c: *Completion, allocator: std.mem.Allocator) void {
 
 /// Work function for DirCreateDir - performs blocking mkdirat() syscall
 pub fn dirCreateDirWork(work: *Work) void {
-    const linked_work = delegated(work);
     const dir_create_dir = opFromWork(work, DirCreateDir);
-    handleDirCreateDir(&dir_create_dir.c, linked_work.allocator);
+    handleDirCreateDir(&dir_create_dir.c);
 }
 
 /// Work function for DirRename - performs blocking renameat() syscall
 pub fn dirRenameWork(work: *Work) void {
-    const linked_work = delegated(work);
     const dir_rename = opFromWork(work, DirRename);
-    handleDirRename(&dir_rename.c, linked_work.allocator);
+    handleDirRename(&dir_rename.c);
 }
 
 /// Work function for DirRenamePreserve - performs blocking renameat2() syscall with NOREPLACE
 pub fn dirRenamePreserveWork(work: *Work) void {
-    const linked_work = delegated(work);
     const dir_rename_preserve = opFromWork(work, DirRenamePreserve);
-    handleDirRenamePreserve(&dir_rename_preserve.c, linked_work.allocator);
+    handleDirRenamePreserve(&dir_rename_preserve.c);
 }
 
 /// Work function for DirDeleteFile - performs blocking unlinkat() syscall
 pub fn dirDeleteFileWork(work: *Work) void {
-    const linked_work = delegated(work);
     const dir_delete_file = opFromWork(work, DirDeleteFile);
-    handleDirDeleteFile(&dir_delete_file.c, linked_work.allocator);
+    handleDirDeleteFile(&dir_delete_file.c);
 }
 
 /// Work function for DirDeleteDir - performs blocking unlinkat() syscall with AT_REMOVEDIR
 pub fn dirDeleteDirWork(work: *Work) void {
-    const linked_work = delegated(work);
     const dir_delete_dir = opFromWork(work, DirDeleteDir);
-    handleDirDeleteDir(&dir_delete_dir.c, linked_work.allocator);
+    handleDirDeleteDir(&dir_delete_dir.c);
 }
 
 /// Helper to handle file size operation
@@ -785,10 +771,10 @@ pub fn fileSizeWork(work: *Work) void {
 /// Helper to handle file stat operation
 /// If path is null, stats the file descriptor directly (fstat).
 /// If path is provided, stats the file at path relative to handle (fstatat).
-pub fn handleFileStat(c: *Completion, allocator: std.mem.Allocator) void {
+pub fn handleFileStat(c: *Completion) void {
     const data = c.cast(FileStat);
     const result = if (data.path) |path|
-        fs.fstatat(allocator, data.handle, path, data.flags)
+        fs.fstatat(data.handle, path, data.flags)
     else
         fs.fstat(data.handle);
 
@@ -801,15 +787,14 @@ pub fn handleFileStat(c: *Completion, allocator: std.mem.Allocator) void {
 
 /// Work function for FileStat - performs blocking fstat()/fstatat() syscall
 pub fn fileStatWork(work: *Work) void {
-    const linked_work = delegated(work);
     const file_stat = opFromWork(work, FileStat);
-    handleFileStat(&file_stat.c, linked_work.allocator);
+    handleFileStat(&file_stat.c);
 }
 
 /// Helper to handle directory open operation
-pub fn handleDirOpen(c: *Completion, allocator: std.mem.Allocator) void {
+pub fn handleDirOpen(c: *Completion) void {
     const data = c.cast(DirOpen);
-    if (fs.dirOpen(allocator, data.dir, data.path, data.flags)) |fd| {
+    if (fs.dirOpen(data.dir, data.path, data.flags)) |fd| {
         c.setResult(.dir_open, fd);
     } else |err| {
         c.setError(err);
@@ -818,9 +803,8 @@ pub fn handleDirOpen(c: *Completion, allocator: std.mem.Allocator) void {
 
 /// Work function for DirOpen - performs blocking openat() syscall
 pub fn dirOpenWork(work: *Work) void {
-    const linked_work = delegated(work);
     const dir_open = opFromWork(work, DirOpen);
-    handleDirOpen(&dir_open.c, linked_work.allocator);
+    handleDirOpen(&dir_open.c);
 }
 
 /// Helper to handle directory close operation

@@ -45,14 +45,14 @@ const time = @import("../time.zig");
 ///
 /// Supports file, pipe, and socket operations (read/write use poll+I/O on POSIX).
 /// Timer and async/work/group operations are not supported (require event loop).
-pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
+pub fn executeBlocking(c: *Completion) void {
     // Reset the completion: no loop, fresh state
     c.setLoop(null);
     c.state.store(.{}, .monotonic);
 
     switch (c.op) {
-        .file_open => common.handleFileOpen(c, allocator),
-        .file_create => common.handleFileCreate(c, allocator),
+        .file_open => common.handleFileOpen(c),
+        .file_create => common.handleFileCreate(c),
         .file_close => common.handleFileClose(c),
         .file_read => common.handleFileRead(c),
         .file_write => common.handleFileWrite(c),
@@ -64,29 +64,29 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
         .file_set_permissions => common.handleFileSetPermissions(c),
         .file_set_owner => common.handleFileSetOwner(c),
         .file_set_timestamps => common.handleFileSetTimestamps(c),
-        .dir_create_dir => common.handleDirCreateDir(c, allocator),
-        .dir_rename => common.handleDirRename(c, allocator),
-        .dir_rename_preserve => common.handleDirRenamePreserve(c, allocator),
-        .dir_delete_file => common.handleDirDeleteFile(c, allocator),
-        .dir_delete_dir => common.handleDirDeleteDir(c, allocator),
+        .dir_create_dir => common.handleDirCreateDir(c),
+        .dir_rename => common.handleDirRename(c),
+        .dir_rename_preserve => common.handleDirRenamePreserve(c),
+        .dir_delete_file => common.handleDirDeleteFile(c),
+        .dir_delete_dir => common.handleDirDeleteDir(c),
         .file_size => common.handleFileSize(c),
-        .file_stat => common.handleFileStat(c, allocator),
-        .dir_open => common.handleDirOpen(c, allocator),
+        .file_stat => common.handleFileStat(c),
+        .dir_open => common.handleDirOpen(c),
         .dir_close => common.handleDirClose(c),
         .dir_set_permissions => common.handleDirSetPermissions(c),
         .dir_set_owner => common.handleDirSetOwner(c),
-        .dir_set_file_permissions => common.handleDirSetFilePermissions(c, allocator),
-        .dir_set_file_owner => common.handleDirSetFileOwner(c, allocator),
-        .dir_set_file_timestamps => common.handleDirSetFileTimestamps(c, allocator),
-        .dir_sym_link => common.handleDirSymLink(c, allocator),
-        .dir_read_link => common.handleDirReadLink(c, allocator),
-        .dir_hard_link => common.handleDirHardLink(c, allocator),
-        .dir_access => common.handleDirAccess(c, allocator),
+        .dir_set_file_permissions => common.handleDirSetFilePermissions(c),
+        .dir_set_file_owner => common.handleDirSetFileOwner(c),
+        .dir_set_file_timestamps => common.handleDirSetFileTimestamps(c),
+        .dir_sym_link => common.handleDirSymLink(c),
+        .dir_read_link => common.handleDirReadLink(c),
+        .dir_hard_link => common.handleDirHardLink(c),
+        .dir_access => common.handleDirAccess(c),
         .dir_real_path => common.handleDirRealPath(c),
-        .dir_real_path_file => common.handleDirRealPathFile(c, allocator),
+        .dir_real_path_file => common.handleDirRealPathFile(c),
         .dir_read => common.handleDirRead(c),
         .file_real_path => common.handleFileRealPath(c),
-        .file_hard_link => common.handleFileHardLink(c, allocator),
+        .file_hard_link => common.handleFileHardLink(c),
 
         // Pipe operations
         .pipe_create => handlePipeCreate(c),
@@ -110,7 +110,7 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
         .net_connect => handleNetConnect(c),
         .net_accept => handleNetAccept(c),
         .net_poll => handleNetPoll(c),
-        .net_send_file => handleNetSendFile(c, allocator),
+        .net_send_file => handleNetSendFile(c),
 
         // Timer operation
         .timer => handleTimer(c),
@@ -125,7 +125,7 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
         .device_io_control => handleDeviceIoControl(c),
 
         // A gather group of individually-supported ops can be run sequentially.
-        .group => handleBlockingGroup(c, allocator),
+        .group => handleBlockingGroup(c),
 
         // Async operations require the event loop
         .async => @panic("Async operations not supported in blocking mode (requires event loop)"),
@@ -142,7 +142,7 @@ pub fn executeBlocking(c: *Completion, allocator: std.mem.Allocator) void {
 /// std's stack-trace symbolization opens and then closes the executable through
 /// `debug_io`. Anything else keeps the "requires event loop" panic. Children are
 /// validated before any is run so we never leave a group half-executed.
-fn handleBlockingGroup(c: *Completion, allocator: std.mem.Allocator) void {
+fn handleBlockingGroup(c: *Completion) void {
     const group: *Group = @alignCast(@fieldParentPtr("c", c));
 
     // Race groups (used for timeouts) genuinely need the loop to arbitrate.
@@ -164,7 +164,7 @@ fn handleBlockingGroup(c: *Completion, allocator: std.mem.Allocator) void {
     node = group.head;
     while (node) |n| : (node = n.next) {
         const child: *Completion = @alignCast(@fieldParentPtr("group", n));
-        executeBlocking(child, allocator);
+        executeBlocking(child);
     }
 
     c.setResult(.group, {});
@@ -181,7 +181,7 @@ fn finishNetSendFile(c: *Completion, total: usize, err: NetSendFile.Error) void 
 /// inline via `executeBlocking`. Uses a local buffer so it is independent of the
 /// backend's `net_send_file` capability (the loop is unavailable here, so we
 /// can never use a native splice path anyway).
-fn handleNetSendFile(c: *Completion, allocator: std.mem.Allocator) void {
+fn handleNetSendFile(c: *Completion) void {
     const op = c.cast(NetSendFile);
     var buf: [16 * 1024]u8 = undefined;
     var read_iov: [1]os.iovec = undefined;
@@ -193,7 +193,7 @@ fn handleNetSendFile(c: *Completion, allocator: std.mem.Allocator) void {
         if (want == 0) break;
 
         var rd = FileRead.init(op.file, ReadBuf.fromSlice(buf[0..want], &read_iov), op.offset);
-        executeBlocking(&rd.c, allocator);
+        executeBlocking(&rd.c);
         const n = rd.getResult() catch |err| return finishNetSendFile(c, total, err);
         if (n == 0) break; // EOF
         op.offset += n;
@@ -201,7 +201,7 @@ fn handleNetSendFile(c: *Completion, allocator: std.mem.Allocator) void {
         var off: usize = 0;
         while (off < n) {
             var sd = NetSend.init(op.handle, WriteBuf.fromSlice(buf[off..n], &send_iov), .{});
-            executeBlocking(&sd.c, allocator);
+            executeBlocking(&sd.c);
             const m = sd.getResult() catch |err| return finishNetSendFile(c, total, err);
             off += m;
             total += m;

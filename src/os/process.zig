@@ -47,15 +47,15 @@ pub const SetCurrentDirError = error{
 /// Write the path of the current working directory into `buffer`, returning its
 /// length. On Windows the result is WTF-8; elsewhere it is whatever bytes the
 /// system stores, with no particular encoding.
-pub fn getCurrentPath(allocator: std.mem.Allocator, buffer: []u8) CurrentPathError!usize {
+pub fn getCurrentPath(buffer: []u8) CurrentPathError!usize {
     if (builtin.os.tag == .windows) {
         // Asking for a zero-length buffer returns the size that would be
         // needed, counting the terminating null.
         const needed = w.GetCurrentDirectoryW(0, null);
         if (needed == 0) return unexpectedError(w.GetLastError());
 
-        const wide = allocator.alloc(w.WCHAR, needed) catch return error.SystemResources;
-        defer allocator.free(wide);
+        const wide = w.heap_allocator.alloc(w.WCHAR, needed) catch return error.SystemResources;
+        defer w.heap_allocator.free(wide);
 
         // The second call reports the length without the terminating null, so
         // it is one short of `needed` unless the directory changed underneath.
@@ -107,10 +107,11 @@ pub fn errnoToCurrentPathError(errno: posix.system.E) CurrentPathError {
 }
 
 /// Change the working directory to `path`.
-pub fn setCurrentPath(allocator: std.mem.Allocator, path: []const u8) SetCurrentPathError!void {
+pub fn setCurrentPath(path: []const u8) SetCurrentPathError!void {
     if (builtin.os.tag == .windows) {
-        const path_w = try w.pathToWide(allocator, w.FDCWD, path);
-        defer allocator.free(path_w);
+        var path_w_buf: w.PathW = undefined;
+        const path_w = try path_w_buf.init(w.FDCWD, path);
+        defer path_w_buf.deinit();
 
         if (w.SetCurrentDirectoryW(path_w.ptr) == w.FALSE) {
             return win32ErrorToSetCurrentPathError(w.GetLastError());
@@ -118,8 +119,9 @@ pub fn setCurrentPath(allocator: std.mem.Allocator, path: []const u8) SetCurrent
         return;
     }
 
-    const path_z = allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
-    defer allocator.free(path_z);
+    var path_buf: fs.PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     const sc = try syscall_cancel.Syscall.begin();
     defer sc.finish();
@@ -163,7 +165,7 @@ fn win32ErrorToSetCurrentPathError(err: w.Win32Error) SetCurrentPathError {
 }
 
 /// Change the working directory to an already open directory.
-pub fn setCurrentDir(allocator: std.mem.Allocator, fd: fs.fd_t) SetCurrentDirError!void {
+pub fn setCurrentDir(fd: fs.fd_t) SetCurrentDirError!void {
     // The cwd sentinel is not a descriptor fchdir can take, and asking for the
     // directory we are already in is a no-op anyway.
     if (fd == fs.cwd()) return;
@@ -172,8 +174,8 @@ pub fn setCurrentDir(allocator: std.mem.Allocator, fd: fs.fd_t) SetCurrentDirErr
         // Windows has no fchdir: the directory has to be named, and the only
         // name we have for an open handle is the one we can query back out of
         // it.
-        const path_buf = allocator.alloc(u8, std.os.windows.PATH_MAX_WIDE) catch return error.SystemResources;
-        defer allocator.free(path_buf);
+        const path_buf = w.heap_allocator.alloc(u8, std.os.windows.PATH_MAX_WIDE) catch return error.SystemResources;
+        defer w.heap_allocator.free(path_buf);
 
         const len = fs.dirRealPath(fd, path_buf) catch |err| switch (err) {
             error.AccessDenied, error.PermissionDenied => return error.AccessDenied,
@@ -186,7 +188,7 @@ pub fn setCurrentDir(allocator: std.mem.Allocator, fd: fs.fd_t) SetCurrentDirErr
             error.Unexpected => return error.Unexpected,
         };
 
-        return setCurrentPath(allocator, path_buf[0..len]) catch |err| switch (err) {
+        return setCurrentPath(path_buf[0..len]) catch |err| switch (err) {
             error.AccessDenied => error.AccessDenied,
             error.NotDir => error.NotDir,
             error.InputOutput => error.InputOutput,
