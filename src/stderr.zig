@@ -637,7 +637,7 @@ test "stderr lock: the terminal mode is detected when not given" {
     defer rt.deinit();
     const io = rt.io();
 
-    const tty_handle = os_fs.openat(std.testing.allocator, os_fs.cwd(), "/dev/ptmx", .{ .mode = .read_write }) catch
+    const tty_handle = os_fs.openat(os_fs.cwd(), "/dev/ptmx", .{ .mode = .read_write }) catch
         return error.SkipZigTest;
     const tty_file: Io.File = .{ .handle = tty_handle, .flags = .{ .nonblocking = false } };
     defer tty_file.close(io);

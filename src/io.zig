@@ -1952,8 +1952,8 @@ fn unlockStderrImpl(_: ?*anyopaque) void {
     stderr.unlock();
 }
 
-fn processCurrentPathImpl(userdata: ?*anyopaque, buffer: []u8) std.process.CurrentPathError!usize {
-    return os_process.getCurrentPath(scratchAllocator(userdata), buffer) catch |err| switch (err) {
+fn processCurrentPathImpl(_: ?*anyopaque, buffer: []u8) std.process.CurrentPathError!usize {
+    return os_process.getCurrentPath(buffer) catch |err| switch (err) {
         error.NameTooLong => error.NameTooLong,
         error.CurrentDirUnlinked => error.CurrentDirUnlinked,
         error.Canceled => error.Canceled,
@@ -1965,8 +1965,8 @@ fn processCurrentPathImpl(userdata: ?*anyopaque, buffer: []u8) std.process.Curre
     };
 }
 
-fn processSetCurrentDirImpl(userdata: ?*anyopaque, dir: Io.Dir) std.process.SetCurrentDirError!void {
-    return os_process.setCurrentDir(scratchAllocator(userdata), stdIoHandleToZio(dir.handle)) catch |err| switch (err) {
+fn processSetCurrentDirImpl(_: ?*anyopaque, dir: Io.Dir) std.process.SetCurrentDirError!void {
+    return os_process.setCurrentDir(stdIoHandleToZio(dir.handle)) catch |err| switch (err) {
         error.AccessDenied => error.AccessDenied,
         error.NotDir => error.NotDir,
         error.InputOutput => error.FileSystem,
@@ -1977,8 +1977,8 @@ fn processSetCurrentDirImpl(userdata: ?*anyopaque, dir: Io.Dir) std.process.SetC
     };
 }
 
-fn processSetCurrentPathImpl(userdata: ?*anyopaque, path: []const u8) std.process.SetCurrentPathError!void {
-    return os_process.setCurrentPath(scratchAllocator(userdata), path) catch |err| switch (err) {
+fn processSetCurrentPathImpl(_: ?*anyopaque, path: []const u8) std.process.SetCurrentPathError!void {
+    return os_process.setCurrentPath(path) catch |err| switch (err) {
         error.AccessDenied => error.AccessDenied,
         error.SymLinkLoop => error.SymLinkLoop,
         error.NameTooLong => error.NameTooLong,
@@ -3374,7 +3374,7 @@ test "io: file isTty is true for a terminal" {
     defer rt.deinit();
     const io = rt.io();
 
-    const tty_handle = os_fs.openat(std.testing.allocator, os_fs.cwd(), "/dev/ptmx", .{ .mode = .read_write }) catch
+    const tty_handle = os_fs.openat(os_fs.cwd(), "/dev/ptmx", .{ .mode = .read_write }) catch
         return error.SkipZigTest;
     var tty_file: Io.File = .{ .handle = tty_handle, .flags = .{ .nonblocking = false } };
     defer tty_file.close(io);

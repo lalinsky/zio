@@ -1405,7 +1405,6 @@ pub const FileOpenResult = struct {
 /// layout knowledge.
 pub const DelegatedWork = struct {
     work: Work = undefined,
-    allocator: std.mem.Allocator = undefined,
     linked_context: Loop.LinkedWorkContext = undefined,
     /// Bound by the worker (`enter`/`exit`) around the syscall; signaled on
     /// cancel. See `os.syscall_cancel`. The cancel-resend linkage now lives on

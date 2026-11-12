@@ -1295,7 +1295,6 @@ pub const Loop = struct {
                 };
 
                 const op_data = completion.cast(op.toType());
-                op_data.linked_work.allocator = self.allocator;
                 op_data.linked_work.linked_context = .{
                     .loop = self,
                     .linked = completion,

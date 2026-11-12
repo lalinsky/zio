@@ -379,7 +379,7 @@ test "isPollable: a terminal is pollable" {
     // A pty is a terminal we can open without one being attached to the test
     // process. Systems without the multiplexer at this path skip.
     const fs = @import("fs.zig");
-    const fd = fs.openat(std.testing.allocator, fs.cwd(), "/dev/ptmx", .{ .mode = .read_write }) catch
+    const fd = fs.openat(fs.cwd(), "/dev/ptmx", .{ .mode = .read_write }) catch
         return error.SkipZigTest;
     defer close(fd);
 

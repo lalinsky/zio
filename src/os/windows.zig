@@ -1265,10 +1265,12 @@ pub const PathToWideError = error{
 /// Converts a (dir_handle, UTF-8 path) pair to an absolute null-terminated wide string.
 /// If dir is FDCWD, the path is converted directly (kernel32 APIs resolve against CWD).
 /// Otherwise, resolves the path relative to the directory handle.
-/// Caller must free the returned slice with the same allocator.
-pub fn pathToWide(allocator: std.mem.Allocator, dir: HANDLE, path: []const u8) PathToWideError![:0]WCHAR {
+/// The result is allocated from `heap_allocator`; the caller frees it there.
+pub fn pathToWide(dir: HANDLE, path: []const u8) PathToWideError![:0]WCHAR {
+    const allocator = heap_allocator;
+
     // Convert path to wide first - we need this in all cases
-    const path_wide = try utf8ToWide(allocator, path);
+    const path_wide = try utf8ToWide(path);
 
     // If CWD or path is absolute, just return the converted path
     if (dir == FDCWD or PathIsRelativeW(path_wide) == FALSE) {
@@ -1392,8 +1394,10 @@ fn rootLength(path: []const WCHAR) ?usize {
 }
 
 /// Converts UTF-8 string to null-terminated wide string.
-/// Caller must free the returned slice with the same allocator.
-fn utf8ToWide(allocator: std.mem.Allocator, utf8: []const u8) PathToWideError![:0]WCHAR {
+/// The result is allocated from `heap_allocator`; the caller frees it there.
+fn utf8ToWide(utf8: []const u8) PathToWideError![:0]WCHAR {
+    const allocator = heap_allocator;
+
     if (utf8.len == 0) {
         return allocator.allocSentinel(WCHAR, 0, 0) catch return error.SystemResources;
     }
@@ -1438,6 +1442,44 @@ fn utf8ToWide(allocator: std.mem.Allocator, utf8: []const u8) PathToWideError![:
     }
 
     return wide;
+}
+
+extern "kernel32" fn GetProcessHeap() callconv(.winapi) ?HANDLE;
+extern "kernel32" fn HeapAlloc(hHeap: HANDLE, dwFlags: DWORD, dwBytes: SIZE_T) callconv(.winapi) ?LPVOID;
+extern "kernel32" fn HeapFree(hHeap: HANDLE, dwFlags: DWORD, lpMem: LPVOID) callconv(.winapi) BOOL;
+
+/// The process heap, for the temporary buffers the `os` layer needs on
+/// Windows (wide paths can reach 64 KiB, too much for a coroutine stack).
+///
+/// It never goes through the program's allocator: these buffers are taken
+/// while std.debug holds its debug-info lock and opens files through
+/// `debug_io`, and an allocator that captures stack traces (SafeAllocator)
+/// would wait on that same lock.
+///
+/// Alignment is limited to what HeapAlloc guarantees (8 bytes on 32-bit, 16
+/// on 64-bit), which covers the byte and WCHAR buffers it is used for.
+pub const heap_allocator: std.mem.Allocator = .{ .ptr = undefined, .vtable = &heap_vtable };
+
+const heap_vtable: std.mem.Allocator.VTable = .{
+    .alloc = heapAlloc,
+    .resize = std.mem.Allocator.noResize,
+    .remap = std.mem.Allocator.noRemap,
+    .free = heapFree,
+};
+
+/// HeapAlloc returns MEMORY_ALLOCATION_ALIGNMENT-aligned blocks: 16 bytes on
+/// 64-bit Windows, 8 on 32-bit.
+const heap_alignment: std.mem.Alignment = .fromByteUnits(2 * @sizeOf(usize));
+
+fn heapAlloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
+    std.debug.assert(alignment.order(heap_alignment) != .gt);
+    const heap = GetProcessHeap() orelse return null;
+    return @ptrCast(HeapAlloc(heap, 0, len) orelse return null);
+}
+
+fn heapFree(_: *anyopaque, memory: []u8, _: std.mem.Alignment, _: usize) void {
+    const heap = GetProcessHeap() orelse unreachable;
+    _ = HeapFree(heap, 0, memory.ptr);
 }
 
 pub const GetRandomError = @import("base.zig").GetRandomError;
@@ -1522,8 +1564,8 @@ test "windows: pathToWide joins onto a drive-root handle without doubling the se
 
     // A root handle is the one directory GetFinalPathNameByHandleW canonicalizes
     // with a trailing separator ("\\?\C:\").
-    const joined = try pathToWide(std.testing.allocator, root, "Windows");
-    defer std.testing.allocator.free(joined);
+    const joined = try pathToWide(root, "Windows");
+    defer heap_allocator.free(joined);
 
     var utf8_buf: [512]u8 = undefined;
     const utf8 = utf8_buf[0..try std.unicode.utf16LeToUtf8(&utf8_buf, joined)];

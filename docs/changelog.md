@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed a deadlock when printing a stack trace through `debug_io` while the runtime
+  uses an allocator that captures stack traces, such as `std.heap.SafeAllocator`.
+
 ## [0.20.0] - 2026-11-11
 
 ### Breaking
