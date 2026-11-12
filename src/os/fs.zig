@@ -11,30 +11,62 @@ const syscall_cancel = @import("syscall_cancel.zig");
 // Cached probe result: once we see ENOSYS from openat2, skip future attempts.
 var openat2_nosys: std.atomic.Value(bool) = .init(false);
 
-/// Stack storage for a null-terminated copy of a path, for the POSIX syscalls.
-pub const PathBuffer = [posix.PATH_MAX]u8;
+/// A null-terminated copy of a path, for the POSIX syscalls.
+///
+/// Paths are almost always short, so they are copied into an inline buffer,
+/// and only longer ones go to the C heap. The copy never uses the program's
+/// allocator: std.debug opens files through `debug_io` while holding its
+/// debug-info lock, and an allocator that captures stack traces
+/// (SafeAllocator) would wait on that same lock.
+///
+/// The slice `init` returns can point into the struct itself, so it must stay
+/// in place until `deinit`.
+pub const PathZ = struct {
+    inline_buf: [inline_len]u8 = undefined,
+    heap: ?[:0]u8 = null,
 
-/// Copy `path` into `buf` with the null terminator the syscalls need.
-/// PATH_MAX counts the terminator, so a path that leaves no room for it is
-/// longer than the system accepts anyway.
-pub fn toPathZ(buf: *PathBuffer, path: []const u8) error{NameTooLong}![:0]const u8 {
-    if (path.len >= buf.len) return error.NameTooLong;
-    @memcpy(buf[0..path.len], path);
-    buf[path.len] = 0;
-    return buf[0..path.len :0];
-}
+    pub const inline_len = 256;
 
-test "toPathZ: rejects a path with no room for the terminator" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    pub fn init(self: *PathZ, path: []const u8) error{SystemResources}![:0]const u8 {
+        if (path.len < inline_len) {
+            self.heap = null;
+            @memcpy(self.inline_buf[0..path.len], path);
+            self.inline_buf[path.len] = 0;
+            return self.inline_buf[0..path.len :0];
+        }
+        const copy = std.heap.c_allocator.dupeSentinel(u8, path, 0) catch return error.SystemResources;
+        self.heap = copy;
+        return copy;
+    }
 
-    var buf: PathBuffer = undefined;
-    const longest: [posix.PATH_MAX - 1]u8 = @splat('a');
-    const path_z = try toPathZ(&buf, &longest);
-    try std.testing.expectEqual(longest.len, path_z.len);
-    try std.testing.expectEqual(0, path_z.ptr[path_z.len]);
+    pub fn deinit(self: *PathZ) void {
+        if (self.heap) |copy| std.heap.c_allocator.free(copy);
+        self.heap = null;
+    }
+};
 
-    const too_long: [posix.PATH_MAX]u8 = @splat('a');
-    try std.testing.expectError(error.NameTooLong, toPathZ(&buf, &too_long));
+test "PathZ: short paths stay inline, long ones go to the heap" {
+    var short: PathZ = undefined;
+    const short_z = try short.init("dir/file.txt");
+    defer short.deinit();
+    try std.testing.expectEqualStrings("dir/file.txt", short_z);
+    try std.testing.expectEqual(0, short_z.ptr[short_z.len]);
+    try std.testing.expect(short.heap == null);
+
+    const longest: [PathZ.inline_len - 1]u8 = @splat('a');
+    var at_limit: PathZ = undefined;
+    const at_limit_z = try at_limit.init(&longest);
+    defer at_limit.deinit();
+    try std.testing.expectEqualStrings(&longest, at_limit_z);
+    try std.testing.expect(at_limit.heap == null);
+
+    const too_long: [PathZ.inline_len]u8 = @splat('a');
+    var long: PathZ = undefined;
+    const long_z = try long.init(&too_long);
+    defer long.deinit();
+    try std.testing.expectEqualStrings(&too_long, long_z);
+    try std.testing.expectEqual(0, long_z.ptr[long_z.len]);
+    try std.testing.expect(long.heap != null);
 }
 
 pub const fd_t = switch (builtin.os.tag) {
@@ -709,8 +741,9 @@ pub fn openat(dir: fd_t, path: []const u8, flags: FileOpenFlags) FileOpenError!f
             if (options.resolve_beneath_mode == .strict) return error.Unsupported;
             std.log.warn("resolve_beneath is not supported on Windows, path escapes will not be detected", .{});
         }
-        const path_w = try w.pathToWide(dir, path);
-        defer w.heap_allocator.free(path_w);
+        var path_w_buf: w.PathW = undefined;
+        const path_w = try path_w_buf.init(dir, path);
+        defer path_w_buf.deinit();
 
         const access_mask: w.DWORD = switch (flags.mode) {
             .read_only => w.GENERIC_READ,
@@ -778,8 +811,9 @@ pub fn openat(dir: fd_t, path: []const u8, flags: FileOpenFlags) FileOpenError!f
         }
     }
 
-    var path_buf: PathBuffer = undefined;
-    const path_z = try toPathZ(&path_buf, path);
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     // Cancelable region covering both the openat2 (resolve_beneath) path and the
     // plain openat loop below: on a thread-pool worker bound to a cancellation
@@ -862,8 +896,9 @@ pub fn dirOpen(dir: fd_t, path: []const u8, flags: DirOpenFlags) DirOpenError!fd
             if (options.resolve_beneath_mode == .strict) return error.Unsupported;
             std.log.warn("resolve_beneath is not supported on Windows, path escapes will not be detected", .{});
         }
-        const path_w = try w.pathToWide(dir, path);
-        defer w.heap_allocator.free(path_w);
+        var path_w_buf: w.PathW = undefined;
+        const path_w = try path_w_buf.init(dir, path);
+        defer path_w_buf.deinit();
 
         const access_mask: w.DWORD = w.GENERIC_READ;
 
@@ -915,8 +950,9 @@ pub fn dirOpen(dir: fd_t, path: []const u8, flags: DirOpenFlags) DirOpenError!fd
         open_flags.PATH = true;
     }
 
-    var path_buf: PathBuffer = undefined;
-    const path_z = try toPathZ(&path_buf, path);
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     // Cancelable region covering both the openat2 (resolve_beneath) path and the
     // plain openat loop below (see the note in `openat`).
@@ -986,8 +1022,9 @@ pub fn createat(dir: fd_t, path: []const u8, flags: FileCreateFlags) FileCreateE
             if (options.resolve_beneath_mode == .strict) return error.Unsupported;
             std.log.warn("resolve_beneath is not supported on Windows, path escapes will not be detected", .{});
         }
-        const path_w = try w.pathToWide(dir, path);
-        defer w.heap_allocator.free(path_w);
+        var path_w_buf: w.PathW = undefined;
+        const path_w = try path_w_buf.init(dir, path);
+        defer path_w_buf.deinit();
 
         const access_mask: w.DWORD = if (flags.read)
             w.GENERIC_READ | w.GENERIC_WRITE
@@ -1051,8 +1088,9 @@ pub fn createat(dir: fd_t, path: []const u8, flags: FileCreateFlags) FileCreateE
         }
     }
 
-    var path_buf: PathBuffer = undefined;
-    const path_z = try toPathZ(&path_buf, path);
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     // Cancelable region covering both the openat2 (resolve_beneath) path and the
     // plain openat loop below (see the note in `openat`).
@@ -1638,10 +1676,12 @@ fn seekPosix(fd: fd_t, offset: i64, whence: u32) FileSeekError!void {
 /// Rename a file using renameat() syscall
 pub fn renameat(old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) DirRenameError!void {
     if (builtin.os.tag == .windows) {
-        const old_path_w = try w.pathToWide(old_dir, old_path);
-        defer w.heap_allocator.free(old_path_w);
-        const new_path_w = try w.pathToWide(new_dir, new_path);
-        defer w.heap_allocator.free(new_path_w);
+        var old_path_w_buf: w.PathW = undefined;
+        const old_path_w = try old_path_w_buf.init(old_dir, old_path);
+        defer old_path_w_buf.deinit();
+        var new_path_w_buf: w.PathW = undefined;
+        const new_path_w = try new_path_w_buf.init(new_dir, new_path);
+        defer new_path_w_buf.deinit();
 
         const success = w.MoveFileExW(
             old_path_w.ptr,
@@ -1667,10 +1707,12 @@ pub fn renameat(old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []
         return;
     }
 
-    var old_path_buf: PathBuffer = undefined;
-    const old_path_z = try toPathZ(&old_path_buf, old_path);
-    var new_path_buf: PathBuffer = undefined;
-    const new_path_z = try toPathZ(&new_path_buf, new_path);
+    var old_path_buf: PathZ = undefined;
+    const old_path_z = try old_path_buf.init(old_path);
+    defer old_path_buf.deinit();
+    var new_path_buf: PathZ = undefined;
+    const new_path_z = try new_path_buf.init(new_path);
+    defer new_path_buf.deinit();
 
     const sc = try syscall_cancel.Syscall.begin();
     defer sc.finish();
@@ -1693,10 +1735,12 @@ pub fn renameat(old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []
 /// On Windows, uses MoveFileExW without MOVEFILE_REPLACE_EXISTING.
 pub fn renameatPreserve(old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path: []const u8) DirRenamePreserveError!void {
     if (builtin.os.tag == .windows) {
-        const old_path_w = try w.pathToWide(old_dir, old_path);
-        defer w.heap_allocator.free(old_path_w);
-        const new_path_w = try w.pathToWide(new_dir, new_path);
-        defer w.heap_allocator.free(new_path_w);
+        var old_path_w_buf: w.PathW = undefined;
+        const old_path_w = try old_path_w_buf.init(old_dir, old_path);
+        defer old_path_w_buf.deinit();
+        var new_path_w_buf: w.PathW = undefined;
+        const new_path_w = try new_path_w_buf.init(new_dir, new_path);
+        defer new_path_w_buf.deinit();
 
         const success = w.MoveFileExW(
             old_path_w.ptr,
@@ -1722,10 +1766,12 @@ pub fn renameatPreserve(old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_
         return;
     }
 
-    var old_path_buf: PathBuffer = undefined;
-    const old_path_z = try toPathZ(&old_path_buf, old_path);
-    var new_path_buf: PathBuffer = undefined;
-    const new_path_z = try toPathZ(&new_path_buf, new_path);
+    var old_path_buf: PathZ = undefined;
+    const old_path_z = try old_path_buf.init(old_path);
+    defer old_path_buf.deinit();
+    var new_path_buf: PathZ = undefined;
+    const new_path_z = try new_path_buf.init(new_path);
+    defer new_path_buf.deinit();
 
     if (builtin.os.tag == .linux) {
         while (true) {
@@ -1855,8 +1901,9 @@ test "renameatPreserveFallback: rollback when source cannot be deleted" {
 /// Delete a file using unlinkat() syscall
 pub fn dirDeleteFile(dir: fd_t, path: []const u8) DirDeleteFileError!void {
     if (builtin.os.tag == .windows) {
-        const path_w = try w.pathToWide(dir, path);
-        defer w.heap_allocator.free(path_w);
+        var path_w_buf: w.PathW = undefined;
+        const path_w = try path_w_buf.init(dir, path);
+        defer path_w_buf.deinit();
 
         if (w.DeleteFileW(path_w.ptr) == w.FALSE) {
             return switch (w.GetLastError()) {
@@ -1883,8 +1930,9 @@ pub fn dirDeleteFile(dir: fd_t, path: []const u8) DirDeleteFileError!void {
         return;
     }
 
-    var path_buf: PathBuffer = undefined;
-    const path_z = try toPathZ(&path_buf, path);
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     const sc = try syscall_cancel.Syscall.begin();
     defer sc.finish();
@@ -1927,8 +1975,9 @@ pub fn dirDeleteFile(dir: fd_t, path: []const u8) DirDeleteFileError!void {
 /// Delete a directory using unlinkat() syscall with AT_REMOVEDIR
 pub fn dirDeleteDir(dir: fd_t, path: []const u8) DirDeleteDirError!void {
     if (builtin.os.tag == .windows) {
-        const path_w = try w.pathToWide(dir, path);
-        defer w.heap_allocator.free(path_w);
+        var path_w_buf: w.PathW = undefined;
+        const path_w = try path_w_buf.init(dir, path);
+        defer path_w_buf.deinit();
 
         if (w.RemoveDirectoryW(path_w.ptr) == w.FALSE) {
             return switch (w.GetLastError()) {
@@ -1944,8 +1993,9 @@ pub fn dirDeleteDir(dir: fd_t, path: []const u8) DirDeleteDirError!void {
         return;
     }
 
-    var path_buf: PathBuffer = undefined;
-    const path_z = try toPathZ(&path_buf, path);
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     const sc = try syscall_cancel.Syscall.begin();
     defer sc.finish();
@@ -1965,8 +2015,9 @@ pub fn dirDeleteDir(dir: fd_t, path: []const u8) DirDeleteDirError!void {
 /// Create a directory using mkdirat() syscall
 pub fn mkdirat(dir: fd_t, path: []const u8, mode: mode_t) DirCreateDirError!void {
     if (builtin.os.tag == .windows) {
-        const path_w = try w.pathToWide(dir, path);
-        defer w.heap_allocator.free(path_w);
+        var path_w_buf: w.PathW = undefined;
+        const path_w = try path_w_buf.init(dir, path);
+        defer path_w_buf.deinit();
 
         if (w.CreateDirectoryW(path_w.ptr, null) == w.FALSE) {
             return switch (w.GetLastError()) {
@@ -1983,8 +2034,9 @@ pub fn mkdirat(dir: fd_t, path: []const u8, mode: mode_t) DirCreateDirError!void
         return;
     }
 
-    var path_buf: PathBuffer = undefined;
-    const path_z = try toPathZ(&path_buf, path);
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     const sc = try syscall_cancel.Syscall.begin();
     defer sc.finish();
@@ -2424,8 +2476,9 @@ pub fn fstat(fd: fd_t) FileStatError!FileStatInfo {
 /// Get file metadata by path relative to directory
 pub fn fstatat(dir: fd_t, path: []const u8, flags: FileStatFlags) FileStatError!FileStatInfo {
     if (builtin.os.tag == .windows) {
-        const path_w = try w.pathToWide(dir, path);
-        defer w.heap_allocator.free(path_w);
+        var path_w_buf: w.PathW = undefined;
+        const path_w = try path_w_buf.init(dir, path);
+        defer path_w_buf.deinit();
 
         var create_flags: u32 = w.FILE_FLAG_BACKUP_SEMANTICS; // Required to open directories
         if (!flags.follow_symlinks) create_flags |= w.FILE_FLAG_OPEN_REPARSE_POINT;
@@ -2455,8 +2508,9 @@ pub fn fstatat(dir: fd_t, path: []const u8, flags: FileStatFlags) FileStatError!
         return fstat(handle);
     }
 
-    var path_buf: PathBuffer = undefined;
-    const path_z = try toPathZ(&path_buf, path);
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     const at_flags: u32 = if (flags.follow_symlinks) 0 else posix.AT.SYMLINK_NOFOLLOW;
 
@@ -2809,8 +2863,9 @@ pub fn dirSetFilePermissions(dir: fd_t, path: []const u8, mode: mode_t, flags: P
     // Windows doesn't have POSIX-style permissions
     if (builtin.os.tag == .windows) return;
 
-    var path_buf: PathBuffer = undefined;
-    const path_z = toPathZ(&path_buf, path) catch return error.Unexpected;
+    var path_buf: PathZ = undefined;
+    const path_z = path_buf.init(path) catch return error.Unexpected;
+    defer path_buf.deinit();
 
     // Note: AT_SYMLINK_NOFOLLOW for fchmodat requires Linux 6.6+ (fchmodat2)
     const at_flags: u32 = if (flags.follow_symlinks) 0 else posix.AT.SYMLINK_NOFOLLOW;
@@ -2835,8 +2890,9 @@ pub fn dirSetFileOwner(dir: fd_t, path: []const u8, uid: ?uid_t, gid: ?gid_t, fl
     // Windows doesn't have POSIX-style ownership
     if (builtin.os.tag == .windows) return;
 
-    var path_buf: PathBuffer = undefined;
-    const path_z = toPathZ(&path_buf, path) catch return error.Unexpected;
+    var path_buf: PathZ = undefined;
+    const path_z = path_buf.init(path) catch return error.Unexpected;
+    defer path_buf.deinit();
 
     // -1 means "don't change"
     const uid_arg: uid_t = uid orelse @bitCast(@as(i32, -1));
@@ -2867,8 +2923,9 @@ pub fn dirSetFileTimestamps(dir: fd_t, path: []const u8, timestamps: FileTimesta
         return;
     }
 
-    var path_buf: PathBuffer = undefined;
-    const path_z = toPathZ(&path_buf, path) catch return error.Unexpected;
+    var path_buf: PathZ = undefined;
+    const path_z = path_buf.init(path) catch return error.Unexpected;
+    defer path_buf.deinit();
 
     const times: [2]posix.system.timespec = .{
         setTimestampToTimespec(timestamps.atime),
@@ -2921,11 +2978,13 @@ pub fn dirSymLink(dir: fd_t, target: []const u8, link_path: []const u8, flags: S
         return error.Unexpected;
     }
 
-    var target_buf: PathBuffer = undefined;
-    const target_z = try toPathZ(&target_buf, target);
+    var target_buf: PathZ = undefined;
+    const target_z = try target_buf.init(target);
+    defer target_buf.deinit();
 
-    var link_path_buf: PathBuffer = undefined;
-    const link_path_z = try toPathZ(&link_path_buf, link_path);
+    var link_path_buf: PathZ = undefined;
+    const link_path_z = try link_path_buf.init(link_path);
+    defer link_path_buf.deinit();
 
     const sc = try syscall_cancel.Syscall.begin();
     defer sc.finish();
@@ -2979,8 +3038,9 @@ pub fn dirReadLink(dir: fd_t, path: []const u8, buffer: []u8) ReadLinkError!usiz
     // TODO: Implement Windows readlink, see dirReadLinkZ.
     if (builtin.os.tag == .windows) return error.Unexpected;
 
-    var path_buf: PathBuffer = undefined;
-    const path_z = try toPathZ(&path_buf, path);
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     return dirReadLinkZ(dir, path_z, buffer);
 }
@@ -3050,11 +3110,13 @@ pub fn dirHardLink(old_dir: fd_t, old_path: []const u8, new_dir: fd_t, new_path:
         return error.Unexpected;
     }
 
-    var old_path_buf: PathBuffer = undefined;
-    const old_path_z = try toPathZ(&old_path_buf, old_path);
+    var old_path_buf: PathZ = undefined;
+    const old_path_z = try old_path_buf.init(old_path);
+    defer old_path_buf.deinit();
 
-    var new_path_buf: PathBuffer = undefined;
-    const new_path_z = try toPathZ(&new_path_buf, new_path);
+    var new_path_buf: PathZ = undefined;
+    const new_path_z = try new_path_buf.init(new_path);
+    defer new_path_buf.deinit();
 
     const at_flags: u32 = if (flags.follow_symlinks) posix.AT.SYMLINK_FOLLOW else 0;
 
@@ -3103,8 +3165,9 @@ pub fn fileHardLink(fd: fd_t, new_dir: fd_t, new_path: []const u8, flags: HardLi
         return error.OperationUnsupported;
     }
 
-    var new_path_buf: PathBuffer = undefined;
-    const new_path_z = try toPathZ(&new_path_buf, new_path);
+    var new_path_buf: PathZ = undefined;
+    const new_path_z = try new_path_buf.init(new_path);
+    defer new_path_buf.deinit();
 
     const at_flags: u32 = if (flags.follow_symlinks) posix.AT.SYMLINK_FOLLOW else 0;
 
@@ -3135,7 +3198,7 @@ pub fn fileHardLink(fd: fd_t, new_dir: fd_t, new_path: []const u8, flags: HardLi
     } else {
         // macOS/BSD: get real path from fd, then use dirHardLink
         // The last byte is kept free for the terminator.
-        var path_buf: PathBuffer = undefined;
+        var path_buf: [posix.PATH_MAX]u8 = undefined;
         const len = dirRealPath(fd, path_buf[0 .. path_buf.len - 1]) catch return error.OperationUnsupported;
         path_buf[len] = 0;
         const old_path_z = path_buf[0..len :0];
@@ -3180,8 +3243,9 @@ pub fn dirAccess(dir: fd_t, path: []const u8, flags: AccessFlags) DirAccessError
         return dirAccessWindows(dir, path, flags);
     }
 
-    var path_buf: PathBuffer = undefined;
-    const path_z = try toPathZ(&path_buf, path);
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     var mode: u32 = posix.system.F_OK;
     if (flags.read) mode |= posix.system.R_OK;
@@ -3230,8 +3294,9 @@ fn dirAccessWindows(dir: fd_t, path: []const u8, flags: AccessFlags) DirAccessEr
     if (path.len == 1 and path[0] == '.') return;
     if (path.len == 2 and path[0] == '.' and path[1] == '.') return;
 
-    const path_w = try w.pathToWide(dir, path);
-    defer w.heap_allocator.free(path_w);
+    var path_w_buf: w.PathW = undefined;
+    const path_w = try path_w_buf.init(dir, path);
+    defer path_w_buf.deinit();
 
     if (w.GetFileAttributesW(path_w) != w.INVALID_FILE_ATTRIBUTES) {
         return;
@@ -3452,8 +3517,9 @@ pub fn dirRealPathFile(dir: fd_t, path: []const u8, buffer: []u8) DirRealPathFil
         return dirRealPathFileWindows(dir, path, buffer);
     }
 
-    var path_buf: PathBuffer = undefined;
-    const path_z = try toPathZ(&path_buf, path);
+    var path_buf: PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     return dirRealPathFileZ(dir, path_z, buffer);
 }
@@ -3614,8 +3680,9 @@ fn dirRealPathWindows(handle: fd_t, buffer: []u8) DirRealPathError!usize {
 }
 
 fn dirRealPathFileWindows(dir: fd_t, path: []const u8, buffer: []u8) DirRealPathFileError!usize {
-    const path_w = try w.pathToWide(dir, path);
-    defer w.heap_allocator.free(path_w);
+    var path_w_buf: w.PathW = undefined;
+    const path_w = try path_w_buf.init(dir, path);
+    defer path_w_buf.deinit();
 
     const handle = w.CreateFileW(
         path_w.ptr,

@@ -109,8 +109,9 @@ pub fn errnoToCurrentPathError(errno: posix.system.E) CurrentPathError {
 /// Change the working directory to `path`.
 pub fn setCurrentPath(path: []const u8) SetCurrentPathError!void {
     if (builtin.os.tag == .windows) {
-        const path_w = try w.pathToWide(w.FDCWD, path);
-        defer w.heap_allocator.free(path_w);
+        var path_w_buf: w.PathW = undefined;
+        const path_w = try path_w_buf.init(w.FDCWD, path);
+        defer path_w_buf.deinit();
 
         if (w.SetCurrentDirectoryW(path_w.ptr) == w.FALSE) {
             return win32ErrorToSetCurrentPathError(w.GetLastError());
@@ -118,8 +119,9 @@ pub fn setCurrentPath(path: []const u8) SetCurrentPathError!void {
         return;
     }
 
-    var path_buf: fs.PathBuffer = undefined;
-    const path_z = try fs.toPathZ(&path_buf, path);
+    var path_buf: fs.PathZ = undefined;
+    const path_z = try path_buf.init(path);
+    defer path_buf.deinit();
 
     const sc = try syscall_cancel.Syscall.begin();
     defer sc.finish();

@@ -1262,79 +1262,143 @@ pub const PathToWideError = error{
     Unexpected,
 };
 
-/// Converts a (dir_handle, UTF-8 path) pair to an absolute null-terminated wide string.
-/// If dir is FDCWD, the path is converted directly (kernel32 APIs resolve against CWD).
-/// Otherwise, resolves the path relative to the directory handle.
-/// The result is allocated from `heap_allocator`; the caller frees it there.
-pub fn pathToWide(dir: HANDLE, path: []const u8) PathToWideError![:0]WCHAR {
-    const allocator = heap_allocator;
+/// A path converted for the wide-character APIs.
+///
+/// Paths are almost always short, so they are converted into an inline buffer,
+/// and only longer ones go to `heap_allocator`, never the program's allocator
+/// (see `heap_allocator`).
+///
+/// The slice `init` returns can point into the struct itself, so it must stay
+/// in place until `deinit`.
+pub const PathW = struct {
+    inline_buf: [inline_len]WCHAR = undefined,
+    heap: ?[:0]WCHAR = null,
 
-    // Convert path to wide first - we need this in all cases
-    const path_wide = try utf8ToWide(path);
+    pub const inline_len = 256;
 
-    // If CWD or path is absolute, just return the converted path
-    if (dir == FDCWD or PathIsRelativeW(path_wide) == FALSE) {
-        return path_wide;
-    }
-    defer allocator.free(path_wide);
+    /// Converts a (dir_handle, UTF-8 path) pair to a null-terminated wide string.
+    /// If dir is FDCWD or the path is absolute, the path is converted directly
+    /// (kernel32 APIs resolve against CWD). Otherwise, it is resolved against
+    /// the directory handle's absolute path.
+    pub fn init(self: *PathW, dir: HANDLE, path: []const u8) PathToWideError![:0]const WCHAR {
+        const path_wide = try self.fromUtf8(path);
+        if (dir == FDCWD or PathIsRelativeW(path_wide) == FALSE) {
+            return path_wide;
+        }
 
-    // Non-CWD with relative path: get directory path, then join
-
-    // Get the directory's absolute path
-    // Start with a reasonable buffer, grow if needed
-    var dir_buf: [512]WCHAR = undefined;
-    var dir_path: []const WCHAR = undefined;
-    var heap_dir_buf: ?[]WCHAR = null;
-    defer if (heap_dir_buf) |buf| allocator.free(buf);
-
-    var result = GetFinalPathNameByHandleW(dir, &dir_buf, dir_buf.len, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-    if (result == 0) {
-        return switch (GetLastError()) {
-            .NOT_ENOUGH_MEMORY => error.SystemResources,
-            else => error.Unexpected,
+        // The join is written into this struct, so the relative part moves out
+        // of the way first.
+        var rel: PathW = undefined;
+        const rel_wide = rel.storage(path_wide.len) catch |err| {
+            self.deinit();
+            return err;
         };
-    } else if (result > dir_buf.len) {
-        // Buffer too small, allocate on heap
-        heap_dir_buf = allocator.alloc(WCHAR, result) catch return error.SystemResources;
-        result = GetFinalPathNameByHandleW(dir, heap_dir_buf.?.ptr, @intCast(heap_dir_buf.?.len), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+        defer rel.deinit();
+        @memcpy(rel_wide, path_wide);
+        self.deinit();
+
+        return self.joinOnto(dir, rel_wide);
+    }
+
+    pub fn deinit(self: *PathW) void {
+        if (self.heap) |buf| heap_allocator.free(buf);
+        self.heap = null;
+    }
+
+    /// Room for `len` code units plus the terminator: inline when it fits,
+    /// otherwise from the heap.
+    fn storage(self: *PathW, len: usize) PathToWideError![:0]WCHAR {
+        if (len < inline_len) {
+            self.heap = null;
+            self.inline_buf[len] = 0;
+            return self.inline_buf[0..len :0];
+        }
+        const buf = heap_allocator.allocSentinel(WCHAR, len, 0) catch return error.SystemResources;
+        self.heap = buf;
+        return buf;
+    }
+
+    /// Converts UTF-8 into this struct, turning forward slashes into backslashes.
+    fn fromUtf8(self: *PathW, utf8: []const u8) PathToWideError![:0]WCHAR {
+        if (utf8.len == 0) return self.storage(0);
+
+        // Get required buffer size
+        const len = MultiByteToWideChar(CP_UTF8, 0, utf8.ptr, @intCast(utf8.len), null, 0);
+        if (len <= 0) {
+            return switch (GetLastError()) {
+                .INSUFFICIENT_BUFFER => error.NameTooLong,
+                else => error.Unexpected,
+            };
+        }
+
+        const wide = try self.storage(@intCast(len));
+        const result = MultiByteToWideChar(CP_UTF8, 0, utf8.ptr, @intCast(utf8.len), wide.ptr, len);
+        if (result <= 0) {
+            self.deinit();
+            return switch (GetLastError()) {
+                .INSUFFICIENT_BUFFER => error.NameTooLong,
+                else => error.Unexpected,
+            };
+        }
+
+        for (wide) |*c| {
+            if (c.* == '/') c.* = '\\';
+        }
+        return wide;
+    }
+
+    /// Writes `rel` resolved against `dir`'s absolute path into this struct.
+    fn joinOnto(self: *PathW, dir: HANDLE, rel: []const WCHAR) PathToWideError![:0]const WCHAR {
+        // Get the directory's absolute path
+        // Start with a reasonable buffer, grow if needed
+        var dir_buf: [512]WCHAR = undefined;
+        var dir_path: []const WCHAR = undefined;
+        var heap_dir_buf: ?[]WCHAR = null;
+        defer if (heap_dir_buf) |buf| heap_allocator.free(buf);
+
+        var result = GetFinalPathNameByHandleW(dir, &dir_buf, dir_buf.len, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
         if (result == 0) {
             return switch (GetLastError()) {
                 .NOT_ENOUGH_MEMORY => error.SystemResources,
                 else => error.Unexpected,
             };
-        } else if (result > heap_dir_buf.?.len) {
-            return error.Unexpected; // Buffer size changed between calls
+        } else if (result > dir_buf.len) {
+            // Buffer too small, allocate on heap
+            heap_dir_buf = heap_allocator.alloc(WCHAR, result) catch return error.SystemResources;
+            result = GetFinalPathNameByHandleW(dir, heap_dir_buf.?.ptr, @intCast(heap_dir_buf.?.len), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+            if (result == 0) {
+                return switch (GetLastError()) {
+                    .NOT_ENOUGH_MEMORY => error.SystemResources,
+                    else => error.Unexpected,
+                };
+            } else if (result > heap_dir_buf.?.len) {
+                return error.Unexpected; // Buffer size changed between calls
+            }
+            dir_path = heap_dir_buf.?[0..result];
+        } else {
+            dir_path = dir_buf[0..result];
         }
-        dir_path = heap_dir_buf.?[0..result];
-    } else {
-        dir_path = dir_buf[0..result];
+
+        // A handle on a drive or share root canonicalizes with a trailing separator
+        // ("\\?\C:\"), unlike every other directory. Drop it so the join adds exactly
+        // one separator; joinRelative puts it back if the path resolves to the root.
+        if (dir_path.len > 0 and dir_path[dir_path.len - 1] == '\\') {
+            dir_path = dir_path[0 .. dir_path.len - 1];
+        }
+
+        // dir_path comes from GetFinalPathNameByHandleW with FILE_NAME_NORMALIZED, so
+        // it carries the \\?\ prefix. That prefix tells Win32 to pass the path to the
+        // object manager verbatim, where "." and ".." are ordinary (and rejected) name
+        // components and repeated separators are empty ones, so the join resolves them.
+        //
+        // Each component costs its own length plus one separator, and only the ones
+        // the join eliminates make the result shorter, so this is an upper bound.
+        const buf = try self.storage(dir_path.len + 1 + rel.len);
+        const joined_len = joinRelative(dir_path, rel, buf);
+        buf.ptr[joined_len] = 0;
+        return buf[0..joined_len :0];
     }
-
-    // A handle on a drive or share root canonicalizes with a trailing separator
-    // ("\\?\C:\"), unlike every other directory. Drop it so the join adds exactly
-    // one separator; joinRelative puts it back if the path resolves to the root.
-    if (dir_path.len > 0 and dir_path[dir_path.len - 1] == '\\') {
-        dir_path = dir_path[0 .. dir_path.len - 1];
-    }
-
-    // dir_path comes from GetFinalPathNameByHandleW with FILE_NAME_NORMALIZED, so
-    // it carries the \\?\ prefix. That prefix tells Win32 to pass the path to the
-    // object manager verbatim, where "." and ".." are ordinary (and rejected) name
-    // components and repeated separators are empty ones, so the join resolves them.
-    //
-    // Each component costs its own length plus one separator, and only the ones
-    // the join eliminates make the result shorter, so this bound is exact for a
-    // path that needs no resolution -- the common case, which then avoids a copy.
-    const max_len = dir_path.len + 1 + path_wide.len;
-    const buf = allocator.allocSentinel(WCHAR, max_len, 0) catch return error.SystemResources;
-    const joined_len = joinRelative(dir_path, path_wide, buf);
-    if (joined_len == max_len) return buf;
-
-    defer allocator.free(buf);
-    const joined = allocator.allocSentinel(WCHAR, joined_len, 0) catch return error.SystemResources;
-    @memcpy(joined, buf[0..joined_len]);
-    return joined;
-}
+};
 
 /// Writes the relative `rel` appended to the normalized absolute `base` into
 /// `out`, resolving ".", ".." and empty components the way the kernel would for a
@@ -1391,57 +1455,6 @@ fn rootLength(path: []const WCHAR) ?usize {
 
     if (path.len < dos_prefix.len + 2 or path[dos_prefix.len + 1] != ':') return null;
     return dos_prefix.len + 2;
-}
-
-/// Converts UTF-8 string to null-terminated wide string.
-/// The result is allocated from `heap_allocator`; the caller frees it there.
-fn utf8ToWide(utf8: []const u8) PathToWideError![:0]WCHAR {
-    const allocator = heap_allocator;
-
-    if (utf8.len == 0) {
-        return allocator.allocSentinel(WCHAR, 0, 0) catch return error.SystemResources;
-    }
-
-    // Get required buffer size
-    const len = MultiByteToWideChar(
-        CP_UTF8,
-        0,
-        utf8.ptr,
-        @intCast(utf8.len),
-        null,
-        0,
-    );
-    if (len <= 0) {
-        return switch (GetLastError()) {
-            .INSUFFICIENT_BUFFER => error.NameTooLong,
-            else => error.Unexpected,
-        };
-    }
-
-    // Allocate and convert
-    const wide = allocator.allocSentinel(WCHAR, @intCast(len), 0) catch return error.SystemResources;
-    const result = MultiByteToWideChar(
-        CP_UTF8,
-        0,
-        utf8.ptr,
-        @intCast(utf8.len),
-        wide.ptr,
-        len,
-    );
-    if (result <= 0) {
-        allocator.free(wide);
-        return switch (GetLastError()) {
-            .INSUFFICIENT_BUFFER => error.NameTooLong,
-            else => error.Unexpected,
-        };
-    }
-
-    // Normalize forward slashes to backslashes.
-    for (wide) |*c| {
-        if (c.* == '/') c.* = '\\';
-    }
-
-    return wide;
 }
 
 extern "kernel32" fn GetProcessHeap() callconv(.winapi) ?HANDLE;
@@ -1538,7 +1551,7 @@ test "windows: joinRelative resolves dotdot without escaping the root" {
 }
 
 test "windows: joinRelative keeps the separator on a path that resolves to the root" {
-    // A drive-root handle canonicalizes to "\\?\C:\"; pathToWide trims the
+    // A drive-root handle canonicalizes to "\\?\C:\"; PathW trims the
     // trailing separator, and joining must not leave "\\?\C:", which names the
     // volume rather than its root directory.
     try testJoinRelative("\\\\?\\C:", "data", "\\\\?\\C:\\data");
@@ -1549,7 +1562,7 @@ test "windows: joinRelative keeps the separator on a path that resolves to the r
     try testJoinRelative("\\\\?\\UNC\\server\\share\\dir", "..", "\\\\?\\UNC\\server\\share\\");
 }
 
-test "windows: pathToWide joins onto a drive-root handle without doubling the separator" {
+test "windows: PathW joins onto a drive-root handle without doubling the separator" {
     const root = CreateFileW(
         std.unicode.utf8ToUtf16LeStringLiteral("C:\\"),
         0,
@@ -1564,12 +1577,53 @@ test "windows: pathToWide joins onto a drive-root handle without doubling the se
 
     // A root handle is the one directory GetFinalPathNameByHandleW canonicalizes
     // with a trailing separator ("\\?\C:\").
-    const joined = try pathToWide(root, "Windows");
-    defer heap_allocator.free(joined);
+    var joined_buf: PathW = undefined;
+    const joined = try joined_buf.init(root, "Windows");
+    defer joined_buf.deinit();
 
     var utf8_buf: [512]u8 = undefined;
     const utf8 = utf8_buf[0..try std.unicode.utf16LeToUtf8(&utf8_buf, joined)];
     try std.testing.expectEqualStrings("\\\\?\\C:\\Windows", utf8);
+}
+
+test "windows: PathW keeps short paths inline and moves long ones to the heap" {
+    var short_buf: PathW = undefined;
+    const short = try short_buf.init(FDCWD, "dir/file.txt");
+    defer short_buf.deinit();
+    try std.testing.expect(short_buf.heap == null);
+    try std.testing.expectEqualSlices(WCHAR, std.unicode.utf8ToUtf16LeStringLiteral("dir\\file.txt"), short);
+
+    const name: [PathW.inline_len]u8 = @splat('a');
+    var long_buf: PathW = undefined;
+    const long = try long_buf.init(FDCWD, &name);
+    defer long_buf.deinit();
+    try std.testing.expect(long_buf.heap != null);
+    try std.testing.expectEqual(name.len, long.len);
+    try std.testing.expectEqual(0, long.ptr[long.len]);
+
+    // A short relative path joined onto a directory can outgrow the inline
+    // buffer.
+    const root = CreateFileW(
+        std.unicode.utf8ToUtf16LeStringLiteral("C:\\"),
+        0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        null,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        null,
+    );
+    if (root == INVALID_HANDLE_VALUE) return error.SkipZigTest;
+    defer _ = CloseHandle(root);
+
+    const rel = name[0 .. PathW.inline_len - 4];
+    var joined_buf: PathW = undefined;
+    const joined = try joined_buf.init(root, rel);
+    defer joined_buf.deinit();
+    try std.testing.expect(joined_buf.heap != null);
+    const prefix = std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\C:\\");
+    try std.testing.expectEqualSlices(WCHAR, prefix, joined[0..prefix.len]);
+    try std.testing.expectEqual(prefix.len + rel.len, joined.len);
+    try std.testing.expectEqual(0, joined.ptr[joined.len]);
 }
 
 test "windows: rootLength" {
