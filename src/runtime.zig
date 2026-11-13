@@ -989,7 +989,7 @@ pub const Executor = struct {
         }
         self.bump("parks_full", 1);
         try self.park(check_ready);
-        return self.run_queue.isEmpty() or (!check_ready or self.main_task.state.load(.acquire).tag != .ready);
+        return self.run_queue.isEmpty() and (!check_ready or self.main_task.state.load(.acquire).tag != .ready);
     }
 
     /// Leaving the idle path with work in hand, from the probe or a full
