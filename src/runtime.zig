@@ -883,9 +883,9 @@ pub const Executor = struct {
         // run() calls must not count toward the per-quantum estimate.
         self.tick_started_at = Timestamp.now(.monotonic);
 
-        // Tracks whether executor needs to leave idle state when work is enqueued.
-        // Starts as false because if there is local work it will wake up another executor
-        // to pass the baton, even though current one never held it in the first place.
+        // The last park came back with nothing runnable, so the executor is
+        // still idle. Whichever pass first finds work, or returns to the main
+        // task, needs to call leaveIdle.
         var still_idle: bool = false;
 
         while (true) {
