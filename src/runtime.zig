@@ -883,6 +883,11 @@ pub const Executor = struct {
         // run() calls must not count toward the per-quantum estimate.
         self.tick_started_at = Timestamp.now(.monotonic);
 
+        // Tracks whether executor needs to leave idle state when work is enqueued.
+        // Starts as false because if there is local work it will wake up another executor
+        // to pass the baton, even though current one never held it in the first place.
+        var still_idle: bool = false;
+
         while (true) {
             // Process ready coroutines
             while (self.getNextTask()) |next_task| {
@@ -910,10 +915,15 @@ pub const Executor = struct {
             // Polling with tasks still queued means this pass fell behind.
             if (migrates) self.updateBacklog(!self.run_queue.isEmpty());
             if (has_work) {
+                if (still_idle) {
+                    self.leaveIdle();
+                    still_idle = false;
+                }
                 try self.loop.poll(.zero);
                 self.drainDispatched();
             } else {
-                try self.parkAndSearch(check_ready);
+                still_idle = try self.parkAndSearch(check_ready);
+                if (!still_idle) self.leaveIdle();
             }
 
             // Retune the tick budget from this batch. Skipped when we may have
@@ -944,6 +954,7 @@ pub const Executor = struct {
 
             // Check again after I/O
             if (check_ready and self.main_task.state.load(.acquire).tag == .ready) {
+                if (still_idle) self.leaveIdle();
                 return;
             }
         }
@@ -960,12 +971,12 @@ pub const Executor = struct {
     /// executor park indefinitely, with stealing folded into the pre-park
     /// check, which is also what makes the park's wake protocol sound (see
     /// park).
-    fn parkAndSearch(self: *Executor, check_ready: bool) !void {
+    fn parkAndSearch(self: *Executor, check_ready: bool) !bool {
         if (!migrates) {
             self.bump("parks_full", 1);
             try self.loop.poll(.max);
             self.drainDispatched();
-            return;
+            return false;
         }
 
         // With nobody to steal from (or to), the probe would only delay the
@@ -974,13 +985,11 @@ pub const Executor = struct {
             self.bump("parks_doze", 1);
             try self.loop.poll(.zero);
             self.drainDispatched();
-            if (self.checkLocalWork(check_ready)) return self.leaveIdle();
+            if (self.checkLocalWork(check_ready)) return false;
         }
         self.bump("parks_full", 1);
         try self.park(check_ready);
-        if (!self.run_queue.isEmpty() or (check_ready and self.main_task.state.load(.acquire).tag == .ready)) {
-            self.leaveIdle();
-        }
+        return self.run_queue.isEmpty() or (!check_ready or self.main_task.state.load(.acquire).tag != .ready);
     }
 
     /// Leaving the idle path with work in hand, from the probe or a full
