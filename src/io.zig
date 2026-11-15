@@ -448,16 +448,8 @@ fn recancelImpl(_: ?*anyopaque) void {
 }
 
 fn swapCancelProtectionImpl(_: ?*anyopaque, new: Io.CancelProtection) Io.CancelProtection {
-    switch (new) {
-        .blocked => {
-            beginShield();
-            return .unblocked;
-        },
-        .unblocked => {
-            endShield();
-            return .blocked;
-        },
-    }
+    const task = runtime_mod.getCurrentTaskOrNull() orelse return .unblocked;
+    return task.swapCancelProtection(new);
 }
 
 fn checkCancelImpl(_: ?*anyopaque) Io.Cancelable!void {
@@ -3518,6 +3510,36 @@ test "io: sleep is cancelable" {
             try io.sleep(.fromMilliseconds(10), .awake);
             future.cancel(io);
             try std.testing.expectError(error.Canceled, observed);
+        }
+    };
+
+    var handle = try rt.spawn(Worker.run, .{rt.io()});
+    try handle.join();
+}
+
+test "io: swapCancelProtection swaps the mode and composes with shields" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const Worker = struct {
+        fn run(io: Io) !void {
+            // Unblocking while not blocked is a no-op.
+            try std.testing.expectEqual(.unblocked, io.swapCancelProtection(.unblocked));
+
+            // Nested blocking reports the real previous mode.
+            try std.testing.expectEqual(.unblocked, io.swapCancelProtection(.blocked));
+            try std.testing.expectEqual(.blocked, io.swapCancelProtection(.blocked));
+
+            _ = getCurrentTask().setCanceled(.user);
+            try io.checkCancel();
+
+            // A counted shield still holds while the mode is unblocked.
+            beginShield();
+            try std.testing.expectEqual(.blocked, io.swapCancelProtection(.unblocked));
+            try io.checkCancel();
+            endShield();
+
+            try std.testing.expectError(error.Canceled, io.checkCancel());
         }
     };
 

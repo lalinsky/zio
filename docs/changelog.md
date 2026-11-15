@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed a crash when `std.Io.swapCancelProtection` unblocked cancellation that was not blocked.
+
 ## [0.20.1] - 2026-11-12
 
 ### Fixed
