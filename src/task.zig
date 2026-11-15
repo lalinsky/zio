@@ -145,7 +145,7 @@ pub const Closure = struct {
 // Byte 0: user_canceled flag + delivered counter
 // Byte 1: auto_canceled counter
 // Byte 2: pending_errors counter
-// Byte 3: shield_count counter
+// Byte 3: shield (nesting count + std.Io cancel protection flag)
 pub const CanceledStatus = packed struct(u32) {
     user_canceled: bool = false,
     /// Net count of error.Canceled delivered to the task, wrapping: `checkCancel`
@@ -157,7 +157,22 @@ pub const CanceledStatus = packed struct(u32) {
     delivered: u7 = 0,
     auto_canceled: u8 = 0,
     pending_errors: u8 = 0,
-    shield_count: u8 = 0,
+    shield: Shield = .{},
+
+    /// Cancellation points report nothing while any shield is active, whether
+    /// it is a counted `beginShield` or the `std.Io` cancel protection flag.
+    /// Both live in one byte, so a single compare covers them.
+    pub const Shield = packed struct(u8) {
+        /// Nesting depth of `beginShield`/`endShield`.
+        count: u7 = 0,
+        /// `std.Io.CancelProtection`, which is a mode and not a count:
+        /// `swapCancelProtection` sets it and returns the previous mode.
+        protected: bool = false,
+
+        pub fn active(self: Shield) bool {
+            return @as(u8, @bitCast(self)) != 0;
+        }
+    };
 };
 
 // Kind of cancellation
@@ -191,7 +206,7 @@ pub const AnyTask = struct {
     coro: Coroutine,
     state: std.atomic.Value(State),
 
-    // Cancellation status - tracks user cancel, timeout, pending errors, and shield count
+    // Cancellation status - tracks user cancel, timeout, pending errors, shield count, and std.Io cancel protection
     canceled_status: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     // Closure for the task
@@ -414,7 +429,7 @@ pub const AnyTask = struct {
         var current = self.canceled_status.load(.acquire);
         while (true) {
             var status: CanceledStatus = @bitCast(current);
-            status.shield_count += 1;
+            status.shield.count += 1;
             const new: u32 = @bitCast(status);
             if (self.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
                 current = prev;
@@ -429,14 +444,33 @@ pub const AnyTask = struct {
         var current = self.canceled_status.load(.acquire);
         while (true) {
             var status: CanceledStatus = @bitCast(current);
-            std.debug.assert(status.shield_count > 0);
-            status.shield_count -= 1;
+            std.debug.assert(status.shield.count > 0);
+            status.shield.count -= 1;
             const new: u32 = @bitCast(status);
             if (self.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
                 current = prev;
                 continue;
             }
             break;
+        }
+    }
+
+    /// Set the `std.Io` cancel protection mode and return the previous one.
+    /// The mode is independent of `beginShield` nesting: unblocking it does
+    /// not lift a counted shield.
+    pub fn swapCancelProtection(self: *AnyTask, new_mode: std.Io.CancelProtection) std.Io.CancelProtection {
+        var current = self.canceled_status.load(.acquire);
+        while (true) {
+            var status: CanceledStatus = @bitCast(current);
+            const old_mode: std.Io.CancelProtection = if (status.shield.protected) .blocked else .unblocked;
+            if (old_mode == new_mode) return old_mode;
+            status.shield.protected = new_mode == .blocked;
+            const new: u32 = @bitCast(status);
+            if (self.canceled_status.cmpxchgWeak(current, new, .acq_rel, .acquire)) |prev| {
+                current = prev;
+                continue;
+            }
+            return old_mode;
         }
     }
 
@@ -567,7 +601,7 @@ pub const AnyTask = struct {
             var status: CanceledStatus = @bitCast(current);
 
             // If shielded, nothing to consume
-            if (status.shield_count > 0) return;
+            if (status.shield.active()) return;
 
             // If no pending errors, nothing to consume
             if (status.pending_errors == 0) return;
@@ -598,7 +632,7 @@ pub const AnyTask = struct {
         if (d.reported or d.exempt > 0) return;
         const trace = d.trace orelse return;
         const status: CanceledStatus = @bitCast(self.canceled_status.load(.acquire));
-        if (status.pending_errors > 0 or status.shield_count > 0) return;
+        if (status.pending_errors > 0 or status.shield.active()) return;
         d.reported = true;
 
         // The task is in the middle of a wait, so printing must not open
