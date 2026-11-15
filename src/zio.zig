@@ -17,6 +17,7 @@ pub const JoinHandle = runtime.JoinHandle;
 pub const CancelHandle = runtime.CancelHandle;
 pub const Placement = runtime.Placement;
 pub const ExecutorId = runtime.ExecutorId;
+pub const max_executors = runtime.Executor.max_executors;
 
 // Standalone task functions
 pub const spawn = runtime.spawn;
