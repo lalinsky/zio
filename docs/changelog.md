@@ -4,8 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking
+
+- File and directory timestamp error sets (FileSetTimestampsError, and the SetTimestampsError of
+  File and Dir) gained a TimestampOutOfRange member. Setting a timestamp the platform API cannot
+  represent now returns this error instead of panicking on the conversion.
+
 ### Fixed
 
+- Reading the metadata of a file with a timestamp after 2262 or before 1677 panicked (#383 follow-up found while working on it).
+
+- Setting a file timestamp that the target platform cannot represent no longer panics. On 32-bit
+  Linux, writing back a statx timestamp whose seconds fall outside the i32 range of timespec.sec
+  (before 1901 or after 2038) now returns error.TimestampOutOfRange, and on Windows timestamps
+  outside the FILETIME range (before 1601 or after year 30827) do the same. The std.Io adapters
+  surface these cases as error.Unexpected, matching the existing set of std.Io errors.
 - Fixed a crash when `std.Io.swapCancelProtection` unblocked cancellation that was not blocked.
 
 ## [0.20.1] - 2026-11-12

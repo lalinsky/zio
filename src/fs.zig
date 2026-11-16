@@ -3123,3 +3123,82 @@ test "Dir: deleteTreeMinStackSize" {
     try cwd.deleteTreeMinStackSize(root_path);
     try std.testing.expectError(error.FileNotFound, cwd.openDir(root_path, .{}));
 }
+
+/// Probe whether the platform and filesystem expose mtime == mtime through
+/// stat, using raw OS calls on the same handle - not zio's conversion
+/// helpers, so a zio conversion bug cannot influence the verdict.
+/// Returns false (the caller skips) when the value cannot be represented or
+/// the probe fails for environment reasons (read-only mount, EPERM, ...).
+/// All comparisons use i128 arithmetic computed here, never zio's converters.
+fn probeMtimeExactSupport(handle: os.fs.fd_t, mtime: i96) bool {
+    const sec: i128 = @divFloor(mtime, std.time.ns_per_s);
+    const nsec: i128 = @mod(mtime, std.time.ns_per_s);
+    switch (builtin.os.tag) {
+        .linux => {
+            var times: [2]std.os.linux.timespec = .{
+                std.os.linux.UTIME.OMIT,
+                .{ .sec = @intCast(sec), .nsec = @intCast(nsec) },
+            };
+            if (std.os.linux.futimens(handle, &times) != 0) return false;
+            var stx: std.os.linux.Statx = std.mem.zeroes(std.os.linux.Statx);
+            const rc = std.os.linux.statx(handle, "", std.os.linux.AT.EMPTY_PATH, std.os.linux.STATX{ .MTIME = true }, &stx);
+            if (std.os.linux.errno(rc) != .SUCCESS) return false;
+            const readback: i128 = @as(i128, stx.mtime.sec) * std.time.ns_per_s + stx.mtime.nsec;
+            return readback == mtime;
+        },
+        else => {
+            var times: [2]std.c.timespec = .{
+                std.c.UTIME.OMIT,
+                .{ .sec = @intCast(sec), .nsec = @intCast(nsec) },
+            };
+            if (std.c.futimens(handle, &times) != 0) return false;
+            var st: std.c.Stat = undefined;
+            if (std.c.fstat(handle, &st) != 0) return false;
+            const rb_ts = st.mtime();
+            const readback: i128 = @as(i128, rb_ts.sec) * std.time.ns_per_s + rb_ts.nsec;
+            return readback == mtime;
+        },
+    }
+}
+
+test "File: timestamps past the i64 nanosecond range round-trip" {
+    const mtime: i96 = 12_000_000_000 * std.time.ns_per_s + 500_000_000;
+    var t = try TestFileFixture.create(.{});
+    defer t.deinit();
+
+    if (builtin.os.tag == .windows) {
+        // FILETIME spans 1601..30827, so year 2350 is representable. Probe
+        // the same handle with raw kernel32 calls (ticks computed here, not
+        // via zio's nanosToFileTime), then hard-assert the zio result.
+        const ticks: u64 = @intCast(@divFloor(mtime, 100) + 116444736000000000);
+        const set_ft: os.windows.FILETIME = .{ .dwLowDateTime = @truncate(ticks), .dwHighDateTime = @truncate(ticks >> 32) };
+        if (os.windows.SetFileTime(t.file.fd, null, null, &set_ft) == os.windows.FALSE) return error.SkipZigTest;
+        var got_ft: os.windows.FILETIME = undefined;
+        if (os.windows.GetFileTime(t.file.fd, null, null, &got_ft) == os.windows.FALSE) return error.SkipZigTest;
+        const got_ticks: u64 = (@as(u64, got_ft.dwHighDateTime) << 32) | got_ft.dwLowDateTime;
+        if (got_ticks != ticks) return error.SkipZigTest;
+        try t.file.setTimestamps(.{ .mtime = .{ .new = mtime } });
+        const info = try t.file.stat();
+        try std.testing.expectEqual(mtime, info.mtime);
+        return;
+    }
+
+    // 32-bit POSIX cannot build the timespec (sec is i32): zio must report
+    // the platform limit instead of panicking on the write-side conversion.
+    // The arithmetic conversion itself is covered by os/fs.zig unit tests.
+    if (@sizeOf(usize) < 8) {
+        try std.testing.expectError(error.TimestampOutOfRange, t.file.setTimestamps(.{ .mtime = .{ .new = mtime } }));
+        return;
+    }
+
+    // Skip only when an independent check establishes that the platform +
+    // filesystem cannot represent the value through stat (APFS clamps past
+    // its i64 ns limit in 2262, old XFS past 2038 without bigtime). When the
+    // probe succeeds, the zio result is hard-asserted: a conversion bug now
+    // fails the test instead of being swallowed by a skip.
+    if (!probeMtimeExactSupport(t.file.fd, mtime)) return error.SkipZigTest;
+
+    try t.file.setTimestamps(.{ .mtime = .{ .new = mtime } });
+    const info = try t.file.stat();
+    try std.testing.expectEqual(mtime, info.mtime);
+}

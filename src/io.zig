@@ -1612,7 +1612,12 @@ fn dirSetTimestampsImpl(_: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, optio
         .mtime = resolveSetTimestamp(options.modify_timestamp),
     }, .{ .follow_symlinks = options.follow_symlinks });
     try waitForIo(&op.c);
-    try op.getResult();
+    op.getResult() catch |err| return switch (err) {
+        // std.Io.Dir.SetTimestampsError has no member for unrepresentable
+        // timestamps; surface it as Unexpected, like error.Unsupported.
+        error.TimestampOutOfRange => error.Unexpected,
+        else => |e| return e,
+    };
 }
 
 fn dirHardLinkImpl(_: ?*anyopaque, old_dir: Io.Dir, old_sub_path: []const u8, new_dir: Io.Dir, new_sub_path: []const u8, options: Io.Dir.HardLinkOptions) Io.Dir.HardLinkError!void {
@@ -1821,7 +1826,12 @@ fn fileSetTimestampsImpl(_: ?*anyopaque, file: Io.File, options: Io.File.SetTime
         .mtime = resolveSetTimestamp(options.modify_timestamp),
     });
     try waitForIo(&op.c);
-    try op.getResult();
+    op.getResult() catch |err| return switch (err) {
+        // std.Io.File.SetTimestampsError has no member for unrepresentable
+        // timestamps; surface it as Unexpected, like error.Unsupported.
+        error.TimestampOutOfRange => error.Unexpected,
+        else => |e| return e,
+    };
 }
 
 fn fileLockImpl(_: ?*anyopaque, file: Io.File, lock: Io.File.Lock) Io.File.LockError!void {
