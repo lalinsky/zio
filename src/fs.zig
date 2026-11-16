@@ -3142,7 +3142,7 @@ fn probeMtimeExactSupport(handle: os.fs.fd_t, mtime: i96) bool {
             if (std.os.linux.futimens(handle, &times) != 0) return false;
             var stx: std.os.linux.Statx = std.mem.zeroes(std.os.linux.Statx);
             const rc = std.os.linux.statx(handle, "", std.os.linux.AT.EMPTY_PATH, std.os.linux.STATX{ .MTIME = true }, &stx);
-            if (std.os.linux.E.init(rc) != .SUCCESS) return false;
+            if (std.os.linux.errno(rc) != .SUCCESS) return false;
             const readback: i128 = @as(i128, stx.mtime.sec) * std.time.ns_per_s + stx.mtime.nsec;
             return readback == mtime;
         },
@@ -3171,10 +3171,10 @@ test "File: timestamps past the i64 nanosecond range round-trip" {
         // the same handle with raw kernel32 calls (ticks computed here, not
         // via zio's nanosToFileTime), then hard-assert the zio result.
         const ticks: u64 = @intCast(@divFloor(mtime, 100) + 116444736000000000);
-        const set_ft: std.os.windows.FILETIME = .{ .dwLowDateTime = @truncate(ticks), .dwHighDateTime = @truncate(ticks >> 32) };
-        if (std.os.windows.SetFileTime(t.file.fd, null, null, &set_ft) == 0) return error.SkipZigTest;
-        var got_ft: std.os.windows.FILETIME = undefined;
-        if (std.os.windows.GetFileTime(t.file.fd, null, null, &got_ft) == 0) return error.SkipZigTest;
+        const set_ft: os.windows.FILETIME = .{ .dwLowDateTime = @truncate(ticks), .dwHighDateTime = @truncate(ticks >> 32) };
+        if (os.windows.SetFileTime(t.file.fd, null, null, &set_ft) == os.windows.FALSE) return error.SkipZigTest;
+        var got_ft: os.windows.FILETIME = undefined;
+        if (os.windows.GetFileTime(t.file.fd, null, null, &got_ft) == os.windows.FALSE) return error.SkipZigTest;
         const got_ticks: u64 = (@as(u64, got_ft.dwHighDateTime) << 32) | got_ft.dwLowDateTime;
         if (got_ticks != ticks) return error.SkipZigTest;
         try t.file.setTimestamps(.{ .mtime = .{ .new = mtime } });

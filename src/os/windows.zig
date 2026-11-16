@@ -261,6 +261,12 @@ pub extern "kernel32" fn SetFileTime(
     lpLastAccessTime: ?*const FILETIME,
     lpLastWriteTime: ?*const FILETIME,
 ) callconv(.winapi) BOOL;
+pub extern "kernel32" fn GetFileTime(
+    hFile: HANDLE,
+    lpCreationTime: ?*const FILETIME,
+    lpLastAccessTime: ?*const FILETIME,
+    lpLastWriteTime: ?*const FILETIME,
+) callconv(.winapi) BOOL;
 
 pub const FILE_BEGIN: DWORD = 0;
 pub const FILE_CURRENT: DWORD = 1;

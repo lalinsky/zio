@@ -2804,7 +2804,7 @@ fn setTimestampToFileTime(timestamp: SetTimestamp, now: w.FILETIME) FileSetTimes
     return switch (timestamp) {
         .unchanged => null,
         .now => now,
-        .new => |ns| w.nanosToFileTime(ns),
+        .new => |ns| w.nanosToFileTime(ns) catch |e| return e,
     };
 }
 
