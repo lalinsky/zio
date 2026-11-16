@@ -313,11 +313,15 @@ pub fn fileTimeToNanos(ft: FILETIME) i96 {
 }
 
 /// Convert nanoseconds since Unix epoch to Windows FILETIME.
-pub fn nanosToFileTime(nanos: i96) FILETIME {
-    const ticks: u64 = @intCast(@divFloor(nanos, 100) + EPOCH_DIFF);
+/// Returns error.TimestampOutOfRange for timestamps the FILETIME range
+/// cannot represent: before 1601 or after year 30827.
+pub fn nanosToFileTime(nanos: i96) error{TimestampOutOfRange}!FILETIME {
+    const ticks = @divFloor(nanos, 100) + EPOCH_DIFF;
+    if (ticks < 0 or ticks > std.math.maxInt(u64)) return error.TimestampOutOfRange;
+    const ticks_u64: u64 = @intCast(ticks);
     return .{
-        .dwLowDateTime = @truncate(ticks),
-        .dwHighDateTime = @truncate(ticks >> 32),
+        .dwLowDateTime = @truncate(ticks_u64),
+        .dwHighDateTime = @truncate(ticks_u64 >> 32),
     };
 }
 
@@ -1642,4 +1646,15 @@ test "windows: rootLength" {
     // Not a \\?\ path, and a \\?\ path with no drive or share to anchor on.
     try std.testing.expectEqual(null, rootLength(std.unicode.utf8ToUtf16LeStringLiteral("C:\\base")));
     try std.testing.expectEqual(null, rootLength(std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\Volume{0}\\base")));
+}
+
+
+test "nanosToFileTime rejects timestamps outside the FILETIME range" {
+    const testing = std.testing;
+    try testing.expectError(error.TimestampOutOfRange, nanosToFileTime(std.math.minInt(i96)));
+    try testing.expectError(error.TimestampOutOfRange, nanosToFileTime(std.math.maxInt(i96)));
+    // The Unix epoch itself converts exactly.
+    const ft = try nanosToFileTime(0);
+    const ticks: u64 = (@as(u64, ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+    try testing.expectEqual(@as(u64, EPOCH_DIFF), ticks);
 }
