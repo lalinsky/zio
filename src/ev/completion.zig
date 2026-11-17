@@ -291,6 +291,18 @@ pub const Completion = struct {
     flags: Flags = .{},
 
     userdata: ?*anyopaque = null,
+    /// Called on the loop's thread once the operation has finished. The
+    /// completion is already dead when it runs, and for a completion with
+    /// neither `rearm` nor a group or queue owner the loop does not touch it
+    /// after the callback returns. The callback may therefore free it, or
+    /// reuse its memory for the next operation, of the same or another type,
+    /// and `add` it again. With `rearm` the loop re-adds it afterwards, so it
+    /// must stay alive; with an owner, the owner is notified afterwards, so
+    /// it must stay alive until then.
+    ///
+    /// When it is null, or the loop has `do_not_call_callbacks`, a completion
+    /// without `rearm` or an owner is handed out through `Loop.nextDispatched`
+    /// instead, and the same applies to whoever takes it from there.
     callback: ?*const CallbackFn = null,
 
     /// Loop this completion was submitted to. Monotonic accesses; visibility

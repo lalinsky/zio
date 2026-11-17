@@ -31,6 +31,7 @@ test {
     _ = @import("test/timer.zig");
     _ = @import("test/wake.zig");
     _ = @import("test/cancel.zig");
+    _ = @import("test/reuse.zig");
     _ = @import("test/group.zig");
     _ = @import("test/blocking_sockets.zig");
     _ = @import("test/process_wait.zig");
