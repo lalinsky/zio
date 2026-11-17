@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `setsockopt` failing with `EINVAL`, such as `TCP_NODELAY` on an already shut down
+  connection on macOS, is no longer logged as an unexpected error.
+
 - Fixed a crash when `ev.Async.notify` raced with its loop finishing and being deinitialized.
 
 - Fixed a crash when `std.Io.swapCancelProtection` unblocked cancellation that was not blocked.
