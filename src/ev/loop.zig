@@ -591,6 +591,13 @@ pub const Loop = struct {
     pub fn deinit(self: *Loop) void {
         self.assertOwnThread();
         if (in_debug_mode) current_loop = null;
+        // Handles still armed (the loop was stopped) can be notified at any
+        // time; turn new notifiers away from the loop and wait out the ones
+        // in flight.
+        var c = self.state.async_handles.head;
+        while (c) |completion| : (c = completion.next) {
+            disarmAsync(completion.cast(Async));
+        }
         self.backend.deinit();
         _ = self.loop_group.loops.fetchSub(1, .monotonic);
     }
@@ -820,6 +827,7 @@ pub const Loop = struct {
             },
             .async => {
                 const async_handle = completion.cast(Async);
+                disarmAsync(async_handle);
                 async_handle.c.setError(error.Canceled);
                 _ = self.state.async_handles.remove(&async_handle.c);
                 self.state.markCompleted(&async_handle.c);
@@ -963,13 +971,12 @@ pub const Loop = struct {
             .async => {
                 const async = completion.cast(Async);
 
-                // Check if already notified before submission
-                if (checkAndSetAsyncResult(async)) {
-                    // Already pending - complete immediately
-                    self.state.markCompleted(&async.c);
-                } else {
-                    // Not pending - add to queue to wait for notification
+                if (armAsync(async)) {
                     self.state.async_handles.push(&async.c);
+                } else {
+                    // Notified while disarmed.
+                    async.c.setResult(.async, {});
+                    self.state.markCompleted(&async.c);
                 }
                 return;
             },
@@ -1139,19 +1146,54 @@ pub const Loop = struct {
         return .{ .next_timeout = next_timeout, .fired = fired };
     }
 
-    /// Check if an async handle is pending and set its result if so.
-    /// Returns true if the async was pending and had its result set.
-    /// Caller is responsible for managing queues and calling markCompleted.
-    fn checkAndSetAsyncResult(async_handle: *Async) bool {
-        // acq_rel: pairs with the swap in Async.notify (see the comment there).
+    /// Arm an async handle being added, or take the notification latched
+    /// while it was disarmed. Returns whether it was armed.
+    fn armAsync(async_handle: *Async) bool {
+        // An RMW: pairs with the one in Async.notify (see the comment there).
         // The release half publishes addInternal's setLoop to a notifier that
-        // misses this pending flag.
-        const was_pending = async_handle.pending.swap(0, .acq_rel);
-        if (was_pending != 0) {
-            async_handle.c.setResult(.async, {});
-            return true;
+        // finds the handle armed.
+        var old = async_handle.pending.load(.monotonic);
+        while (true) {
+            std.debug.assert(old.disarmed and !old.busy);
+            const new: Async.Pending = if (old.notified) .{ .disarmed = true } else .{ .disarmed = false };
+            old = async_handle.pending.cmpxchgWeak(old, new, .acq_rel, .monotonic) orelse return !old.notified;
         }
-        return false;
+    }
+
+    const AsyncNotification = enum { none, taken, busy };
+
+    /// Take an armed async handle's notification, disarming it, and set its
+    /// result. `.busy` means it is notified, but its notifier may still be
+    /// waking this loop, so it must not complete yet.
+    /// Caller is responsible for managing queues and calling markCompleted.
+    fn takeAsyncNotification(async_handle: *Async) AsyncNotification {
+        const w = async_handle.pending.cmpxchgStrong(
+            .{ .notified = true, .disarmed = false },
+            .{ .disarmed = true },
+            .acq_rel,
+            .monotonic,
+        ) orelse {
+            async_handle.c.setResult(.async, {});
+            return .taken;
+        };
+        std.debug.assert(!w.disarmed);
+        return if (w.notified) .busy else .none;
+    }
+
+    /// Disarm an async handle the loop is letting go of without a
+    /// notification, and wait out a notifier still touching the loop through
+    /// it; that one holds `busy` for at most one waker syscall. A latched
+    /// notification stays for the next `add`.
+    fn disarmAsync(async_handle: *Async) void {
+        _ = async_handle.pending.fetchOr(.{ .disarmed = true }, .acq_rel);
+        while (async_handle.pending.load(.acquire).busy) os.thread.yield();
+    }
+
+    /// Have the next poll run `processAsyncHandles` without blocking, for a
+    /// handle left armed because its notifier was still busy. Called on the
+    /// loop's own thread, which is not sleeping, so no backend wake is needed.
+    fn retryAsyncHandles(self: *Loop) void {
+        _ = self.state.requestWake(LoopState.wake_async);
     }
 
     /// Standard completion callback for user-submitted Work
@@ -1187,17 +1229,22 @@ pub const Loop = struct {
 
     pub fn processAsyncHandles(self: *Loop) void {
         // Check all async handles for pending notifications
+        var retry = false;
         var c = self.state.async_handles.head;
         while (c) |completion| {
             const next = completion.next;
             const async_handle = completion.cast(Async);
-            if (checkAndSetAsyncResult(async_handle)) {
-                // This handle was notified - remove from queue and complete it
-                _ = self.state.async_handles.remove(completion);
-                self.state.markCompleted(&async_handle.c);
+            switch (takeAsyncNotification(async_handle)) {
+                .none => {},
+                .taken => {
+                    _ = self.state.async_handles.remove(completion);
+                    self.state.markCompleted(&async_handle.c);
+                },
+                .busy => retry = true,
             }
             c = next;
         }
+        if (retry) self.retryAsyncHandles();
     }
 
     pub fn processCompletions(self: *Loop) void {

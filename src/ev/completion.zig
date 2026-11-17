@@ -654,30 +654,69 @@ pub const Timer = struct {
 pub const Async = struct {
     c: Completion,
     result_private_do_not_touch: void = {},
-    pending: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    pending: std.atomic.Value(Pending) = .init(.{ .disarmed = true }),
 
     pub const Error = Cancelable;
 
+    pub const Pending = packed struct(u8) {
+        /// Set by `notify`, cleared by the loop when it completes the handle.
+        /// A notification that arrives while the handle is disarmed stays
+        /// latched, and the next `add` completes the handle at once.
+        notified: bool = false,
+        /// Held by the `notify` that set `notified` on an armed handle, until
+        /// it is done touching the loop, waker syscall included. The loop does
+        /// not complete or disarm the handle while it is set: that is what
+        /// would allow its owner to stop and deinit the loop, or free the
+        /// handle. Implies `notified` and not `disarmed`.
+        busy: bool = false,
+        /// Not in a loop's async list: before the first `add`, and from when
+        /// the loop completes, cancels, or is deinitialized under the handle
+        /// until the next `add`. `notify` then only latches `notified`, and
+        /// never touches the loop.
+        disarmed: bool = true,
+        _reserved: u5 = 0,
+
+        /// `fetchAnd` mask clearing `busy`.
+        pub const clear_busy: Pending = @bitCast(~@as(u8, @bitCast(Pending{ .busy = true, .disarmed = false })));
+    };
+
+    /// Construct with this or the field defaults; zeroed memory is an armed
+    /// handle without a loop.
     pub fn init() Async {
         return .{
             .c = .init(.async),
         };
     }
 
-    /// Notify the loop to wake up and complete this async handle (thread-safe)
+    /// Notify the loop to wake up and complete this async handle. Safe to
+    /// call from any thread, and from a signal handler, at any time while the
+    /// `Async` itself is alive: concurrently with the loop completing the
+    /// handle, with it being canceled, stopped, deinitialized, or re-added.
     pub fn notify(self: *Async) void {
-        // Pairs with the `pending` swap in Loop.add: both are acq_rel RMWs on
-        // the same variable, so they order against each other. If add's swap
-        // came first, the acquire here makes its setLoop visible and we wake
-        // the loop; if ours came first, add sees `pending` set and completes
-        // the handle itself. Reading a null loop therefore proves add will
-        // handle it.
-        const was_pending = self.pending.swap(1, .acq_rel);
-        if (was_pending == 0) {
-            if (self.c.getLoop()) |loop| {
-                loop.wakeAsync();
+        // Always an RMW, even when already notified: pairs with the RMWs the
+        // loop takes the notification and arms the handle with, so either the
+        // loop sees `notified`, or this sees the handle armed and, through the
+        // acquire, the loop `add` published with `setLoop`.
+        var old = self.pending.load(.monotonic);
+        while (true) {
+            // Only the notify that moves an armed handle to notified wakes
+            // the loop and owns `busy`; any other sees `busy` as someone
+            // else's.
+            const waker = !old.notified and !old.disarmed;
+            var new = old;
+            if (!old.notified) {
+                new.notified = true;
+                new.busy = waker;
             }
+            old = self.pending.cmpxchgWeak(old, new, .acq_rel, .monotonic) orelse {
+                if (!waker) return;
+                break;
+            };
         }
+        // We moved an armed handle to notified: wake its loop.
+        self.c.getLoop().?.wakeAsync();
+        // Release: a loop that reads `busy` clear sees this notify done with it.
+        _ = self.pending.fetchAnd(Pending.clear_busy, .release);
     }
 
     pub fn getResult(self: *const Async) Error!void {

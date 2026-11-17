@@ -177,3 +177,128 @@ test "Async: notify racing the rearm re-add is never lost" {
 
     try std.testing.expect(ctx.seen.load(.acquire) >= rounds);
 }
+
+const Flag = struct {
+    fn cb(_: *Loop, c: *Completion) void {
+        const done: *bool = @ptrCast(@alignCast(c.userdata.?));
+        done.* = true;
+    }
+};
+
+const latched: Async.Pending = .{ .notified = true, .disarmed = true };
+
+test "Async: not completed while its notifier is still waking the loop" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    var done = false;
+    var handle = Async.init();
+    handle.c.callback = Flag.cb;
+    handle.c.userdata = &done;
+    loop.add(&handle.c);
+
+    // A notify stopped between its request and its waker syscall.
+    handle.pending.store(.{ .notified = true, .busy = true, .disarmed = false }, .release);
+    loop.wakeAsync();
+
+    // Completing now would let the owner deinit the loop under the notifier.
+    try loop.poll(.zero);
+    try loop.poll(.zero);
+    try std.testing.expect(!done);
+
+    // The notifier returns from its syscall.
+    _ = handle.pending.fetchAnd(Async.Pending.clear_busy, .release);
+    try loop.poll(.zero);
+    try std.testing.expect(done);
+    try std.testing.expectEqual(Async.Pending{ .disarmed = true }, handle.pending.load(.acquire));
+}
+
+test "Async: a second notify leaves the first one's busy alone" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    var done = false;
+    var handle = Async.init();
+    handle.c.callback = Flag.cb;
+    handle.c.userdata = &done;
+    loop.add(&handle.c);
+
+    // The first notify is still waking the loop.
+    const mid_wake: Async.Pending = .{ .notified = true, .busy = true, .disarmed = false };
+    handle.pending.store(mid_wake, .release);
+
+    // The second finds it notified: no wake, and `busy` is not its to clear.
+    handle.notify();
+    try std.testing.expectEqual(mid_wake, handle.pending.load(.acquire));
+    try std.testing.expectEqual(0, loop.state.wake_requested.load(.acquire));
+    loop.wakeAsync();
+    try loop.poll(.zero);
+    try std.testing.expect(!done);
+
+    _ = handle.pending.fetchAnd(Async.Pending.clear_busy, .release);
+    try loop.poll(.zero);
+    try std.testing.expect(done);
+}
+
+test "Async: a notify between completion and re-add is latched, not sent to the loop" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    var done = false;
+    var handle = Async.init();
+    handle.c.callback = Flag.cb;
+    handle.c.userdata = &done;
+    loop.add(&handle.c);
+    handle.notify();
+    try loop.poll(.zero);
+    try std.testing.expect(done);
+
+    // A wake would show up as a request bit.
+    handle.notify();
+    try std.testing.expectEqual(0, loop.state.wake_requested.load(.acquire));
+    try std.testing.expectEqual(latched, handle.pending.load(.acquire));
+
+    // The next add completes it.
+    done = false;
+    loop.add(&handle.c);
+    try loop.poll(.zero);
+    try std.testing.expect(done);
+}
+
+test "Async: a notify after cancel is latched, not sent to the loop" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    var done = false;
+    var handle = Async.init();
+    handle.c.callback = Flag.cb;
+    handle.c.userdata = &done;
+    loop.add(&handle.c);
+    loop.cancel(&handle.c);
+    try loop.poll(.zero);
+    try std.testing.expect(done);
+    try std.testing.expectError(error.Canceled, handle.getResult());
+
+    handle.notify();
+    try std.testing.expectEqual(0, loop.state.wake_requested.load(.acquire));
+    try std.testing.expectEqual(latched, handle.pending.load(.acquire));
+}
+
+test "Async: a notify after deinit of a stopped loop is latched, not sent to the loop" {
+    var loop: Loop = undefined;
+    try loop.init(.{});
+
+    var handle = Async.init();
+    loop.add(&handle.c);
+    loop.stop();
+    loop.deinit();
+
+    // The handle stayed in the dead loop's list; its loop pointer is stale.
+    handle.notify();
+    try std.testing.expectEqual(0, loop.state.wake_requested.load(.acquire));
+    try std.testing.expectEqual(latched, handle.pending.load(.acquire));
+}
