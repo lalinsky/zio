@@ -768,7 +768,13 @@ pub fn getSockError(fd: fd_t) GetSockErrorError!i32 {
     return err;
 }
 
-pub const SetsockoptError = error{ OptionNotSupported, Unexpected };
+pub const SetsockoptError = error{
+    OptionNotSupported,
+    /// EINVAL: the option, its value, or the socket's state was rejected.
+    /// For example, macOS returns it for a socket whose connection was already shut down.
+    InvalidArgument,
+    Unexpected,
+};
 
 pub fn setsockopt(fd: fd_t, level: i32, optname: u32, optval: []const u8) SetsockoptError!void {
     switch (builtin.os.tag) {
@@ -776,6 +782,7 @@ pub fn setsockopt(fd: fd_t, level: i32, optname: u32, optval: []const u8) Setsoc
             const rc = windows.setsockopt(fd, level, optname, optval.ptr, @intCast(optval.len));
             if (rc != 0) return switch (windows.WSAGetLastError()) {
                 .ENOPROTOOPT => error.OptionNotSupported,
+                .EINVAL => error.InvalidArgument,
                 else => |err| unexpectedError(err),
             };
         },
@@ -784,6 +791,7 @@ pub fn setsockopt(fd: fd_t, level: i32, optname: u32, optval: []const u8) Setsoc
             switch (posix.errno(rc)) {
                 .SUCCESS => {},
                 .NOPROTOOPT => return error.OptionNotSupported,
+                .INVAL => return error.InvalidArgument,
                 else => |err| return unexpectedError(err),
             }
         },
