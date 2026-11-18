@@ -263,9 +263,9 @@ pub extern "kernel32" fn SetFileTime(
 ) callconv(.winapi) BOOL;
 pub extern "kernel32" fn GetFileTime(
     hFile: HANDLE,
-    lpCreationTime: ?*const FILETIME,
-    lpLastAccessTime: ?*const FILETIME,
-    lpLastWriteTime: ?*const FILETIME,
+    lpCreationTime: ?*FILETIME,
+    lpLastAccessTime: ?*FILETIME,
+    lpLastWriteTime: ?*FILETIME,
 ) callconv(.winapi) BOOL;
 
 pub const FILE_BEGIN: DWORD = 0;
@@ -320,10 +320,12 @@ pub fn fileTimeToNanos(ft: FILETIME) i96 {
 
 /// Convert nanoseconds since Unix epoch to Windows FILETIME.
 /// Returns error.TimestampOutOfRange for timestamps the FILETIME range
-/// cannot represent: before 1601 or after year 30827.
+/// cannot represent: before 1601 or after year 30827. The all-ones ticks
+/// value is also rejected: SetFileTime interprets 0xFFFF...F as a control
+/// value that suppresses later timestamp updates, not as a timestamp.
 pub fn nanosToFileTime(nanos: i96) error{TimestampOutOfRange}!FILETIME {
     const ticks = @divFloor(nanos, 100) + EPOCH_DIFF;
-    if (ticks < 0 or ticks > std.math.maxInt(u64)) return error.TimestampOutOfRange;
+    if (ticks < 0 or ticks >= std.math.maxInt(u64)) return error.TimestampOutOfRange;
     const ticks_u64: u64 = @intCast(ticks);
     return .{
         .dwLowDateTime = @truncate(ticks_u64),
@@ -1654,11 +1656,15 @@ test "windows: rootLength" {
     try std.testing.expectEqual(null, rootLength(std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\Volume{0}\\base")));
 }
 
-
 test "nanosToFileTime rejects timestamps outside the FILETIME range" {
     const testing = std.testing;
     try testing.expectError(error.TimestampOutOfRange, nanosToFileTime(std.math.minInt(i96)));
     try testing.expectError(error.TimestampOutOfRange, nanosToFileTime(std.math.maxInt(i96)));
+    // The all-ones FILETIME is a control value that asks SetFileTime to
+    // suppress later timestamp updates, not a real timestamp, so it must be
+    // rejected even though it fits in u64.
+    const all_ones_nanos: i96 = (@as(i96, std.math.maxInt(u64)) - EPOCH_DIFF) * 100;
+    try testing.expectError(error.TimestampOutOfRange, nanosToFileTime(all_ones_nanos));
     // The Unix epoch itself converts exactly.
     const ft = try nanosToFileTime(0);
     const ticks: u64 = (@as(u64, ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
