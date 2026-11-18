@@ -3163,6 +3163,9 @@ fn probeMtimeExactSupport(handle: os.fs.fd_t, mtime: i96) bool {
 
 test "File: timestamps past the i64 nanosecond range round-trip" {
     const mtime: i96 = 12_000_000_000 * std.time.ns_per_s + 500_000_000;
+    // A value every supported filesystem can represent (2017), used to prove
+    // the setter actually applies .new instead of leaving the probe value.
+    const baseline: i96 = 1_500_000_000 * std.time.ns_per_s;
     var t = try TestFileFixture.create(.{});
     defer t.deinit();
 
@@ -3177,6 +3180,11 @@ test "File: timestamps past the i64 nanosecond range round-trip" {
         if (os.windows.GetFileTime(t.file.fd, null, null, &got_ft) == os.windows.FALSE) return error.SkipZigTest;
         const got_ticks: u64 = (@as(u64, got_ft.dwHighDateTime) << 32) | got_ft.dwLowDateTime;
         if (got_ticks != ticks) return error.SkipZigTest;
+        // The probe leaves the file at mtime; reset to a different baseline
+        // first so a setter that silently ignores .new cannot pass below.
+        try t.file.setTimestamps(.{ .mtime = .{ .new = baseline } });
+        const base_info = try t.file.stat();
+        try std.testing.expectEqual(baseline, base_info.mtime);
         try t.file.setTimestamps(.{ .mtime = .{ .new = mtime } });
         const info = try t.file.stat();
         try std.testing.expectEqual(mtime, info.mtime);
@@ -3197,6 +3205,12 @@ test "File: timestamps past the i64 nanosecond range round-trip" {
     // probe succeeds, the zio result is hard-asserted: a conversion bug now
     // fails the test instead of being swallowed by a skip.
     if (!probeMtimeExactSupport(t.file.fd, mtime)) return error.SkipZigTest;
+
+    // The probe leaves the file at mtime; reset to a different baseline first
+    // so a setter that silently ignores .new cannot pass the final assert.
+    try t.file.setTimestamps(.{ .mtime = .{ .new = baseline } });
+    const base_info = try t.file.stat();
+    try std.testing.expectEqual(baseline, base_info.mtime);
 
     try t.file.setTimestamps(.{ .mtime = .{ .new = mtime } });
     const info = try t.file.stat();
