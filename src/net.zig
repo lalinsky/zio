@@ -1257,7 +1257,12 @@ pub const Server = struct {
                 try timedWaitForIo(&op.c, deadline);
             }
             const handle = op.getResult() catch |err| switch (err) {
-                error.ConnectionAborted => continue,
+                error.ConnectionAborted => {
+                    // An attempt that completes inline finishes the race before
+                    // the timer gets a turn, even past the deadline.
+                    if (deadline != .none and deadline.durationFromNow().value == 0) return error.Timeout;
+                    continue;
+                },
                 else => |e| return e,
             };
             const address: Address = .fromPosix(&peer_addr.any, peer_addr_len);

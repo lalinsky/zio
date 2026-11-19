@@ -14,6 +14,8 @@ All notable changes to this project will be documented in this file.
 - Fixed accept errors that belong to a single queued connection being reported as
   unexpected or fatal, and a crash in accept on Windows.
 
+- Fixed `Server.accept` not timing out while queued connections kept failing.
+
 - Fixed a crash when `std.Io.swapCancelProtection` unblocked cancellation that was not blocked.
 
 ## [0.20.1] - 2026-11-12
