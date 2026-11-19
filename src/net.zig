@@ -1238,8 +1238,8 @@ pub const Server = struct {
     /// next connection is taken instead. The timeout covers the whole call, not
     /// each attempt, so a stream of aborted connections cannot extend it.
     ///
-    /// The descriptor limits and `SystemResources` leave the connection queued, so
-    /// a server should back off and accept again rather than exit on them.
+    /// The descriptor limits and `SystemResources` are a temporary shortage, so a
+    /// server should back off and accept again rather than exit on them.
     ///
     /// Shutting down the listener makes a pending accept fail with
     /// `SocketNotListening` on Linux only; elsewhere it keeps waiting, so cancel
