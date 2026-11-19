@@ -873,7 +873,7 @@ fn sendFlagsToMsg(flags: net.SendFlags) windows.DWORD {
     return 0;
 }
 
-fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
+fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) NetAccept.Error!void {
     // Get socket address to determine address family
     var addr_buf align(@alignOf(windows.sockaddr.in6)) = @as([128]u8, @splat(0));
     var addr_len: i32 = addr_buf.len;
@@ -882,7 +882,7 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
         @ptrCast(&addr_buf),
         &addr_len,
     ) != 0) {
-        return error.Unexpected;
+        return net.errnoToAcceptError(windows.WSAGetLastError());
     }
 
     const family: u16 = @as(*const windows.sockaddr, @ptrCast(&addr_buf)).family;
@@ -894,7 +894,20 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
     const exts = self.shared_state.exts;
 
     // Create new socket for the accepted connection (same family as listening socket)
-    const accept_socket = try net.socket(@fromBackingInt(@intCast(family)), .stream, .ip, data.flags);
+    const accept_socket = net.socket(@fromBackingInt(@intCast(family)), .stream, .ip, data.flags) catch |err| return switch (err) {
+        error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded,
+        error.SystemResources,
+        error.Canceled,
+        error.Unexpected,
+        => |e| e,
+        // The family is the listener's, so it is the listener that AcceptEx
+        // cannot serve.
+        error.AddressFamilyUnsupported,
+        error.ProtocolNotSupported,
+        => error.OperationNotSupported,
+        error.PermissionDenied => error.Unexpected,
+    };
     errdefer net.close(accept_socket);
 
     // Publish the accepted socket into the op BEFORE issuing AcceptEx (#530). The
@@ -944,7 +957,6 @@ fn submitAccept(self: *Self, state: *LoopState, data: *NetAccept) !void {
         if (err != .IO_PENDING) {
             // Real error - complete immediately with error
             net.close(accept_socket);
-            log.err("AcceptEx failed: {}", .{err});
             data.c.setError(net.errnoToAcceptError(err));
             state.markCompletedFromBackend(&data.c);
             return;
@@ -1958,10 +1970,10 @@ fn processCompletion(self: *Self, state: *LoopState, entry: *const windows.OVERL
                 );
 
                 if (setsockopt_result == windows.SOCKET_ERROR) {
-                    // setsockopt failed - close the socket and report error
-                    const err = windows.WSAGetLastError();
+                    // AcceptEx succeeded, so the listener is fine and the failure
+                    // belongs to this connection alone.
                     net.close(data.result_private_do_not_touch);
-                    c.setError(net.errnoToAcceptError(err));
+                    c.setError(error.ConnectionAborted);
                 } else {
                     // Parse the address buffer to get the peer address
                     if (data.addr) |user_addr| {

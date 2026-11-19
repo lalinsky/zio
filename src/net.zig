@@ -1233,10 +1233,17 @@ pub const Server = struct {
     /// before connections arrive.
     ///
     /// `ConnectionAborted` is not reported: it means a connection sitting in the
-    /// accept queue went away before we got to it, which says nothing about the
-    /// listener, so the next connection is taken instead. The timeout covers the
-    /// whole call, not each attempt, so a stream of aborted connections cannot
-    /// extend it.
+    /// accept queue failed before we got to it (aborted or reset by the peer, or
+    /// on Linux a network error pending on it, such as `EHOSTUNREACH`), so the
+    /// next connection is taken instead. The timeout covers the whole call, not
+    /// each attempt, so a stream of aborted connections cannot extend it.
+    ///
+    /// The descriptor limits and `SystemResources` leave the connection queued, so
+    /// a server should back off and accept again rather than exit on them.
+    ///
+    /// Shutting down the listener makes a pending accept fail with
+    /// `SocketNotListening` on Linux only; elsewhere it keeps waiting, so cancel
+    /// the task to stop it portably.
     pub fn accept(self: Server, options: AcceptOptions) !Stream {
         const deadline = options.timeout.toDeadline();
         while (true) {

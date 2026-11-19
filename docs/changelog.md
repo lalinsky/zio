@@ -11,6 +11,9 @@ All notable changes to this project will be documented in this file.
 
 - Fixed a crash when `ev.Async.notify` raced with its loop finishing and being deinitialized.
 
+- Fixed accept errors that belong to a single queued connection being reported as
+  unexpected or fatal, and a crash in accept on Windows.
+
 - Fixed a crash when `std.Io.swapCancelProtection` unblocked cancellation that was not blocked.
 
 ## [0.20.1] - 2026-11-12
