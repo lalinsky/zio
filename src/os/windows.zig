@@ -778,6 +778,9 @@ pub const WinsockError = enum(u16) {
     INVALID_HANDLE = 6,
     /// Insufficient memory available.
     NOT_ENOUGH_MEMORY = 8,
+    /// The specified network name is no longer available. The Win32 code for a
+    /// connection reset, as GetQueuedCompletionStatus reports it.
+    NETNAME_DELETED = 64,
     /// One or more parameters are invalid.
     INVALID_PARAMETER = 87,
     /// Overlapped operation aborted.
