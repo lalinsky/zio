@@ -172,15 +172,13 @@ See `examples/*.zig` for more examples.
 
 If you need an HTTP client or server, that works well with zio, have a look at [dusty](https://github.com/lalinsky/dusty).
 
-## Frequently Asked Questions
+## Ecosystem
 
-### What is the difference between this project and `std.Io.Evented`?
+Zio works with any library written on top of `std.Io`, for example:
 
-In theory, from user perspective, there is very little difference. However, `std.Io.Evented` is very far from finished. It's missing essential functionality, if it even builds.
-Zio already fully supports multiple operating systems.
-
-The architecture of these two implementations is different. In the standard library, they prefer to reimplement the `std.Io` interface for each I/O backend, while in zio, I chose a layered architecture,
-where I have a cross-platform event loop, and the fiber/coroutine runtime built on top of that. That makes it much easier to support multiple systems. Plus you can even reach into the event loop from your code, in case you need functionality not covered by the `std.Io` interface.
+- HTTP: [lalinsky/dusty](https://github.com/lalinsky/dusty)
+- TLS: [ianic/tls.zig](https://github.com/ianic/tls.zig), [lalinsky/ztls](https://github.com/lalinsky/ztls)
+- Databases: [lalinsky/pg.zig](https://github.com/lalinsky/pg.zig), [speed2exe/myzql](https://github.com/speed2exe/myzql), [lalinsky/redis.zig](https://github.com/lalinsky/redis.zig), [lalinsky/memcached.zig](https://github.com/lalinsky/memcached.zig)
 
 ## Development
 
