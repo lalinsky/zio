@@ -757,6 +757,8 @@ const FinishedEarly = enum {
     /// Go to the back of the run queue. A task that sends and then reads
     /// would otherwise read before the peer could answer, and pay for a
     /// failed attempt and a readiness registration on every exchange.
+    /// Only a delay when other tasks are queued: alone on its executor,
+    /// the task runs again at once.
     yield,
     /// Keep running until the time slice is used up.
     keep_running,
