@@ -741,8 +741,26 @@ pub fn waitOnFlagQueue(queue: *WaitQueue(WaitNode), waiter: *Waiter) AsyncWaitSt
 /// If called from a context with an async runtime, uses the event loop.
 /// If called from a context without a runtime, executes the operation synchronously.
 pub fn waitForIo(c: *ev.Completion) Cancelable!void {
-    return waitForIoImpl(c, .check_first);
+    return waitForIoImpl(c, .check_first, .yield);
 }
+
+/// Like `waitForIo`, but an operation that finishes inside `loop.add` goes
+/// on without yielding while its time slice lasts. For accept: an accept
+/// loop then takes a waiting backlog without going to the back of the run
+/// queue after every connection.
+pub fn waitForIoPreferInline(c: *ev.Completion) Cancelable!void {
+    return waitForIoImpl(c, .check_first, .keep_running);
+}
+
+/// What a task does when its operation finished before it could park.
+const FinishedEarly = enum {
+    /// Go to the back of the run queue. A task that sends and then reads
+    /// would otherwise read before the peer could answer, and pay for a
+    /// failed attempt and a readiness registration on every exchange.
+    yield,
+    /// Keep running until the time slice is used up.
+    keep_running,
+};
 
 const CancelCheck = enum {
     /// Report a pending cancellation instead of submitting the operation.
@@ -752,7 +770,7 @@ const CancelCheck = enum {
     submit_always,
 };
 
-fn waitForIoImpl(c: *ev.Completion, comptime cancel_check: CancelCheck) Cancelable!void {
+fn waitForIoImpl(c: *ev.Completion, comptime cancel_check: CancelCheck, comptime finished_early: FinishedEarly) Cancelable!void {
     var waiter = Waiter.init();
     defer waiter.deinit();
     c.userdata = &waiter;
@@ -790,8 +808,7 @@ fn waitForIoImpl(c: *ev.Completion, comptime cancel_check: CancelCheck) Cancelab
     task.getExecutor().loopAdd(c);
     // An operation that finishes inside loopAdd, or on the thread of another
     // loop that owns the socket, signals before the wait, which then returns
-    // without parking. Charge the coop budget for that case, so it still
-    // hits a yield point.
+    // without parking.
     const signaled_early = waiter.signalCount() != 0;
     waiter.wait(1, .allow_cancel) catch |err| switch (err) {
         error.Canceled => {
@@ -810,9 +827,10 @@ fn waitForIoImpl(c: *ev.Completion, comptime cancel_check: CancelCheck) Cancelab
             return;
         },
     };
-    if (signaled_early) {
-        task.getExecutor().maybeYield(.reschedule, .no_cancel);
-    }
+    if (signaled_early) switch (finished_early) {
+        .yield => task.yield(.reschedule, .no_cancel),
+        .keep_running => task.getExecutor().maybeYield(.reschedule, .no_cancel),
+    };
 }
 
 /// Runs an I/O operation to completion without allowing cancellation.
@@ -839,7 +857,8 @@ pub fn waitForIoUncancelable(c: *ev.Completion) void {
 
     // Async path: Submit to the event loop and wait for completion (no cancel)
     task.getExecutor().loopAdd(c);
-    // See waitForIo.
+    // Finished before the wait: charge the coop budget, so the task still
+    // hits a yield point.
     const signaled_early = waiter.signalCount() != 0;
     waiter.wait(1, .no_cancel);
     if (signaled_early) {
@@ -1068,7 +1087,7 @@ fn blockInPlaceImpl(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func)), rese
     // through func's return), so this is unreachable. Assert it: were it ever to
     // fire we would be returning uninitialized ctx.result, which we would much
     // rather crash on.
-    waitForIoImpl(&work.c, .submit_always) catch unreachable;
+    waitForIoImpl(&work.c, .submit_always, .yield) catch unreachable;
 
     return ctx.result;
 }

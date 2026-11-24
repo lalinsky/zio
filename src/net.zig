@@ -1252,7 +1252,7 @@ pub const Server = struct {
 
             var op = ev.NetAccept.init(self.socket.handle, &peer_addr.any, &peer_addr_len);
             if (deadline == .none) {
-                try common.waitForIo(&op.c);
+                try common.waitForIoPreferInline(&op.c);
             } else {
                 try timedWaitForIo(&op.c, deadline);
             }
