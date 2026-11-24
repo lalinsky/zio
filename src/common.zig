@@ -894,7 +894,18 @@ pub fn timedWaitForIoClock(c: *ev.Completion, timeout: Timeout, clock: Clock) (T
     group.add(c);
     group.add(&timer.c);
 
-    try waitForIo(&group.c);
+    waitForIo(&group.c) catch |err| {
+        // A canceled group reports Canceled however its children ended, so
+        // look at the operation itself. If it ran and was not the one that
+        // got canceled, its result may own resources: hand it to the caller
+        // and leave the cancellation for the next cancellation point.
+        const io_canceled = if (c.err) |io_err| io_err == error.Canceled else false;
+        if (c.has_result and !io_canceled) {
+            @import("runtime.zig").recancel();
+            return;
+        }
+        return err;
+    };
 
     // Check if the IO was cancelled by the timeout
     // (both could complete in a race, so check if I/O was actually cancelled)
@@ -941,6 +952,37 @@ test "timedWaitForIo: completes before timeout" {
     // Short timer (10ms) with long timeout (1 second)
     var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
     try timedWaitForIo(&timer.c, .{ .duration = .fromSeconds(1) });
+}
+
+test "timedWaitForIo: a result that arrives after the cancel request is returned" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const T = struct {
+        var started: std.atomic.Value(bool) = .init(false);
+
+        // Keeps running until the wait has asked for it to be canceled, then
+        // finishes normally: a running job without a cancel token cannot be
+        // interrupted, so it completes with its result.
+        fn workFn(work: *ev.Work) void {
+            started.store(true, .release);
+            while (!work.c.loadState().cancel_requested) os.thread.yield();
+        }
+
+        fn call(r: *Runtime) !void {
+            var work = ev.Work.init(workFn, null);
+            try timedWaitForIo(&work.c, .{ .duration = .fromSeconds(60) });
+            try work.getResult();
+            try std.testing.expectError(error.Canceled, r.checkCancel());
+        }
+    };
+
+    var handle = try rt.spawn(T.call, .{rt});
+    defer handle.cancel();
+
+    while (!T.started.load(.acquire)) try rt.sleep(.fromMicroseconds(100));
+    handle.cancel();
+    try handle.join();
 }
 
 test "Waiter: futex-based timed wait with timeout" {

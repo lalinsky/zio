@@ -18,6 +18,9 @@ All notable changes to this project will be documented in this file.
 
 - Fixed `Server.accept` not timing out while queued connections kept failing.
 
+- Fixed an operation with a timeout dropping its result when it completed while its task was
+  being canceled.
+
 - Fixed `Socket.receiveMsg` not returning the length of the received control data.
 
 - Fixed a `std.Io` stream read on a connection that timed out reporting `ConnectionResetByPeer`
