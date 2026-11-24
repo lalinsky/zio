@@ -347,11 +347,7 @@ pub const LoopState = struct {
         // invoked here. `completion` was just popped from `completions`, so its
         // queue link is free to reuse. Rearm/group completions fall through and
         // run inline, since their machinery must stay synchronous.
-        //
-        // A null callback opts a single completion into the same delivery:
-        // it is handed out through `nextDispatched` instead of being invoked.
-        // Task wakes travel this way (see Executor.drainDispatched).
-        if ((self.loop.do_not_call_callbacks or completion.callback == null) and !was_rearm and owner_callback == null) {
+        if (self.loop.do_not_call_callbacks and !was_rearm and owner_callback == null) {
             self.dispatched.push(completion);
             return;
         }
@@ -612,20 +608,10 @@ pub const Loop = struct {
     }
 
     /// Pop the next finished standalone completion awaiting user-callback
-    /// dispatch: every finished completion when the loop was created with
-    /// `do_not_call_callbacks`, and completions with a null callback always.
-    /// Returns null when drained; the caller invokes `completion.call(loop)`
-    /// or interprets the completion itself.
+    /// dispatch (only populated when created with `do_not_call_callbacks`).
+    /// Returns null when drained; the caller invokes `completion.call(loop)`.
     pub fn nextDispatched(self: *Loop) ?*Completion {
         return self.state.dispatched.pop();
-    }
-
-    /// Take `completion` out of the dispatched queue if it is the last one
-    /// there, as a null-callback completion that finished inside `add` is.
-    /// Returns whether it was.
-    pub fn takeLastDispatched(self: *Loop, completion: *Completion) bool {
-        if (self.state.dispatched.tail != completion) return false;
-        return self.state.dispatched.remove(completion);
     }
 
     pub fn stopped(self: *const Loop) bool {

@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Tasks woken by I/O completions are scheduled as each completion is processed again,
+  instead of as one batch per event loop poll with several idle executors woken at once.
+  The batch left a small number of busy connections on too few executors (bulk sends on
+  8 connections ran at about half the throughput on a 48-thread machine) and woke more
+  executors than needed otherwise.
+
+- In the low-level `ev` API, a completion with a null `callback` is no longer delivered
+  through `Loop.nextDispatched()`; only `do_not_call_callbacks` does that. Removed
+  `Loop.takeLastDispatched()`.
+
 ### Fixed
 
 - `setsockopt` failing with `EINVAL`, such as `TCP_NODELAY` on an already shut down
