@@ -15,6 +15,7 @@ const Duration = @import("time.zig").Duration;
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTaskOrNull = @import("runtime.zig").getCurrentTaskOrNull;
 const getWaitableTaskOrNull = @import("runtime.zig").getWaitableTaskOrNull;
+const recancel = @import("runtime.zig").recancel;
 const loopClearTimer = @import("runtime.zig").loopClearTimer;
 const AnyTask = @import("task.zig").AnyTask;
 const Executor = @import("runtime.zig").Executor;
@@ -901,7 +902,7 @@ pub fn timedWaitForIoClock(c: *ev.Completion, timeout: Timeout, clock: Clock) (T
         // and leave the cancellation for the next cancellation point.
         const io_canceled = if (c.err) |io_err| io_err == error.Canceled else false;
         if (c.has_result and !io_canceled) {
-            @import("runtime.zig").recancel();
+            recancel();
             return;
         }
         return err;
