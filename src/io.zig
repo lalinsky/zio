@@ -4000,6 +4000,9 @@ test "io: net Stream.readWithControl receives a file descriptor" {
 
 test "io: net Stream.readWithControl reports truncated control data" {
     if (!zio_net.has_unix_sockets or builtin.os.tag == .windows) return error.SkipZigTest;
+    // OpenBSD fails the whole read with EMSGSIZE when the control buffer
+    // cannot hold the passed descriptors, so there is no truncated result.
+    if (builtin.os.tag == .openbsd) return error.SkipZigTest;
 
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
