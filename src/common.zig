@@ -957,6 +957,9 @@ test "timedWaitForIo: completes before timeout" {
 }
 
 test "timedWaitForIo: a result that arrives after the cancel request is returned" {
+    // The job needs a thread pool worker to run on.
+    if (builtin.single_threaded) return error.SkipZigTest;
+
     const rt = try Runtime.init(std.testing.allocator, .{});
     defer rt.deinit();
 
