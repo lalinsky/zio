@@ -15,6 +15,7 @@ const Duration = @import("time.zig").Duration;
 const Runtime = @import("runtime.zig").Runtime;
 const getCurrentTaskOrNull = @import("runtime.zig").getCurrentTaskOrNull;
 const getWaitableTaskOrNull = @import("runtime.zig").getWaitableTaskOrNull;
+const recancel = @import("runtime.zig").recancel;
 const loopClearTimer = @import("runtime.zig").loopClearTimer;
 const AnyTask = @import("task.zig").AnyTask;
 const Executor = @import("runtime.zig").Executor;
@@ -894,7 +895,19 @@ pub fn timedWaitForIoClock(c: *ev.Completion, timeout: Timeout, clock: Clock) (T
     group.add(c);
     group.add(&timer.c);
 
-    try waitForIo(&group.c);
+    waitForIo(&group.c) catch |err| {
+        // Canceled before the group was submitted: the operation never ran.
+        if (!group.c.has_result) return err;
+        // A canceled group reports Canceled however its children ended, so
+        // look at the operation itself. If it was not the one that got
+        // canceled, its result may own resources: hand it to the caller and
+        // leave the cancellation for the next cancellation point.
+        if (c.err) |io_err| {
+            if (io_err == error.Canceled) return err;
+        }
+        recancel();
+        return;
+    };
 
     // Check if the IO was cancelled by the timeout
     // (both could complete in a race, so check if I/O was actually cancelled)
@@ -941,6 +954,66 @@ test "timedWaitForIo: completes before timeout" {
     // Short timer (10ms) with long timeout (1 second)
     var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(10) });
     try timedWaitForIo(&timer.c, .{ .duration = .fromSeconds(1) });
+}
+
+test "timedWaitForIo: a result that arrives after the cancel request is returned" {
+    // The job needs a thread pool worker to run on.
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const T = struct {
+        // Keeps running until the wait has asked for it to be canceled, then
+        // finishes normally: a running job without a cancel token cannot be
+        // interrupted, so it completes with its result.
+        fn workFn(work: *ev.Work) void {
+            const started: *std.atomic.Value(bool) = @ptrCast(@alignCast(work.userdata.?));
+            started.store(true, .release);
+            while (!work.c.loadState().cancel_requested) os.thread.yield();
+        }
+
+        fn call(r: *Runtime, started: *std.atomic.Value(bool)) !void {
+            var work = ev.Work.init(workFn, started);
+            try timedWaitForIo(&work.c, .{ .duration = .fromSeconds(60) });
+            try work.getResult();
+            try std.testing.expectError(error.Canceled, r.checkCancel());
+        }
+    };
+
+    var started: std.atomic.Value(bool) = .init(false);
+    var handle = try rt.spawn(T.call, .{ rt, &started });
+    defer handle.cancel();
+
+    while (!started.load(.acquire)) try rt.sleep(.fromMicroseconds(100));
+    handle.cancel();
+    try handle.join();
+}
+
+test "timedWaitForIo: a task canceled before the wait does not start the operation" {
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const T = struct {
+        fn call(r: *Runtime) !void {
+            r.sleep(.fromSeconds(60)) catch |err| {
+                try std.testing.expectEqual(error.Canceled, err);
+                recancel();
+                var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(1) });
+                try std.testing.expectError(error.Canceled, timedWaitForIo(&timer.c, .{ .duration = .fromSeconds(60) }));
+                try std.testing.expectEqual(false, timer.c.has_result);
+                return;
+            };
+            return error.TestUnexpectedResult;
+        }
+    };
+
+    var handle = try rt.spawn(T.call, .{rt});
+    defer handle.cancel();
+
+    try rt.sleep(.fromMilliseconds(10));
+    handle.cancel();
+    try handle.join();
 }
 
 test "Waiter: futex-based timed wait with timeout" {
