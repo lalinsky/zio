@@ -11,10 +11,17 @@ All notable changes to this project will be documented in this file.
 
 - Fixed a crash when `ev.Async.notify` raced with its loop finishing and being deinitialized.
 
+- Fixed `std.Io.net.Stream.readWithControl` and `readerWithControl` never receiving control data.
+
 - Fixed accept errors that belong to a single queued connection being reported as
   unexpected or fatal, and a crash in accept on Windows.
 
 - Fixed `Server.accept` not timing out while queued connections kept failing.
+
+- Fixed `Socket.receiveMsg` not returning the length of the received control data.
+
+- Fixed a `std.Io` stream read on a connection that timed out reporting `ConnectionResetByPeer`
+  and not `ConnectionTimedOut`.
 
 - Fixed a crash when `std.Io.swapCancelProtection` unblocked cancellation that was not blocked.
 
