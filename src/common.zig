@@ -831,7 +831,7 @@ fn waitForIoImpl(c: *ev.Completion, comptime cancel_check: CancelCheck, comptime
     };
     if (signaled_early) switch (finished_early) {
         .yield => task.yield(.reschedule, .no_cancel),
-        .keep_running => task.getExecutor().maybeYield(.reschedule, .no_cancel),
+        .keep_running => task.maybeYield(.no_cancel),
     };
 }
 
@@ -864,7 +864,7 @@ pub fn waitForIoUncancelable(c: *ev.Completion) void {
     const signaled_early = waiter.signalCount() != 0;
     waiter.wait(1, .no_cancel);
     if (signaled_early) {
-        task.getExecutor().maybeYield(.reschedule, .no_cancel);
+        task.maybeYield(.no_cancel);
     }
 }
 

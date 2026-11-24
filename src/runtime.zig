@@ -800,7 +800,7 @@ pub const Executor = struct {
     const baton_tick: Duration = .fromMilliseconds(10);
 
     /// True while the current tick may keep spending quanta without polling.
-    inline fn tickBudgetLeft(self: *const Executor) bool {
+    pub inline fn tickBudgetLeft(self: *const Executor) bool {
         return self.tick_task_count < self.tick_task_budget and !self.tick_expired;
     }
 
@@ -808,30 +808,13 @@ pub const Executor = struct {
     /// clock is read to catch budget mispredictions: if the batch has already
     /// overrun tick_target_ns, the tick is expired so every budget check fails
     /// until the next poll resets it.
-    fn spendQuantum(self: *Executor) void {
+    pub fn spendQuantum(self: *Executor) void {
         self.tick_task_count += 1;
         self.tick_checkpoint_countdown -= 1;
         if (self.tick_checkpoint_countdown == 0) {
             self.tick_checkpoint_countdown = checkpoint_interval;
             const elapsed = Timestamp.now(.monotonic).toNanoseconds() -| self.tick_started_at.toNanoseconds();
             if (elapsed >= tick_target_ns) self.tick_expired = true;
-        }
-    }
-
-    pub fn maybeYield(self: *Executor, comptime mode: AnyTask.YieldMode, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
-        // Cancellation is observed even on the fast path, so a CPU-bound loop
-        // that only calls maybeYield() reacts to cancel promptly, like yield().
-        // Must not touch task.state on the error return (see AnyTask.yield).
-        if (cancel_mode == .allow_cancel) {
-            try getCurrentTask().checkCancel();
-        }
-        // Pure time-slice check: each call spends a quantum of the tick budget,
-        // and only when the slice is used up does a real yield happen (letting
-        // other tasks run and I/O get polled). Within the slice this returns
-        // immediately without looking at the queues.
-        self.spendQuantum();
-        if (!self.tickBudgetLeft()) {
-            return getCurrentTask().yield(mode, cancel_mode);
         }
     }
 
@@ -1655,8 +1638,8 @@ pub fn yield() Cancelable!void {
 /// executor). Returns error.Canceled if the task was canceled. No-op if called
 /// from a thread without an executor.
 pub fn maybeYield() Cancelable!void {
-    const exec = getCurrentExecutorOrNull() orelse return;
-    return exec.maybeYield(.reschedule, .allow_cancel);
+    const task = getCurrentTaskOrNull() orelse return;
+    return task.maybeYield(.allow_cancel);
 }
 
 /// Spawn a task on the current runtime.

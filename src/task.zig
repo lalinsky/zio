@@ -374,6 +374,18 @@ pub const AnyTask = struct {
         return self.yieldFrom(getCurrentExecutor(), mode, cancel_mode);
     }
 
+    /// Spend a quantum of the time slice, and yield only once the slice is
+    /// used up. Within the slice this returns without looking at the queues.
+    pub fn maybeYield(self: *AnyTask, comptime cancel_mode: Executor.YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
+        // Cancellation is observed even on the fast path, so a CPU-bound loop
+        // that only calls maybeYield() reacts to cancel promptly, like yield().
+        // Must not touch `state` on the error return (see `yieldFrom`).
+        if (cancel_mode == .allow_cancel) try self.checkCancel();
+        const executor = getCurrentExecutor();
+        executor.spendQuantum();
+        if (!executor.tickBudgetLeft()) return self.yieldFrom(executor, .reschedule, .no_cancel);
+    }
+
     /// Yield using the executor already resolved by the caller. `executor` is
     /// valid only until the context switch; the resume path still reloads TLS
     /// because the task may have migrated to another executor thread.
