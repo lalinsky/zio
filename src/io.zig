@@ -525,12 +525,11 @@ fn operateInner(operation: Io.Operation, timeout: time.Timeout, clock: time.Cloc
         },
         .net_send => |*o| return .{ .net_send = try netSendOpImpl(o.socket_handle, o.messages, o.flags, timeout, clock) },
         .net_read => |*o| return .{ .net_read = result: {
-            const n = netReadOpImpl(o.socket_handle, o.data, timeout, clock) catch |err| switch (err) {
+            break :result netReadOpImpl(o.socket_handle, o.data, o.control, timeout, clock) catch |err| switch (err) {
                 error.Canceled => |e| return e,
                 error.Timeout => |e| return e,
                 else => |e| break :result e,
             };
-            break :result .{ .data_len = n };
         } },
         .net_write => |*o| return .{ .net_write = result: {
             const n = netWriteOpImpl(o.socket_handle, o.header, o.data, o.splat, timeout, clock) catch |err| switch (err) {
@@ -633,7 +632,10 @@ const BatchCompletionData = union(Io.Operation.Tag) {
         message: *Io.net.OutgoingMessage,
     },
     net_read: struct {
-        op: ev.NetRecv,
+        op: union(enum) {
+            recv: ev.NetRecv,
+            recvmsg: ev.NetRecvMsg,
+        },
         iovecs: [max_iovecs_len]os_net.iovec,
     },
     net_write: struct {
@@ -649,7 +651,9 @@ const BatchCompletionData = union(Io.Operation.Tag) {
             .device_io_control => |*d| &d.op.c,
             .net_receive => |*d| &d.op.c,
             .net_send => |*d| &d.op.c,
-            .net_read => |*d| &d.op.c,
+            .net_read => |*d| switch (d.op) {
+                inline else => |*op| &op.c,
+            },
             .net_write => |*d| &d.op.c,
         };
     }
@@ -967,12 +971,14 @@ fn initBatchOperation(data: *BatchCompletionData, operation: Io.Operation) *ev.C
         },
         .net_read => |*o| {
             data.* = .{ .net_read = .{ .op = undefined, .iovecs = undefined } };
-            data.net_read.op = ev.NetRecv.init(
-                stdIoHandleToZio(o.socket_handle),
-                ev.ReadBuf.fromSlices(o.data, &data.net_read.iovecs),
-                .{},
-            );
-            return &data.net_read.op.c;
+            const handle = stdIoHandleToZio(o.socket_handle);
+            const buf = ev.ReadBuf.fromSlices(o.data, &data.net_read.iovecs);
+            if (netReadControl(o.control)) |control| {
+                data.net_read.op = .{ .recvmsg = .init(handle, buf, .{}, null, null, control) };
+                return &data.net_read.op.recvmsg.c;
+            }
+            data.net_read.op = .{ .recv = .init(handle, buf, .{}) };
+            return &data.net_read.op.recv.c;
         },
         .net_write => |*o| {
             data.* = .{ .net_write = .{
@@ -1063,7 +1069,10 @@ fn extractBatchResult(data: *BatchCompletionData, tag: Io.Operation.Tag) Io.Oper
             break :blk .{ null, 1 };
         } },
         .net_read => .{
-            .net_read = if (data.net_read.op.getResult()) |n| .{ .data_len = n } else |err| recvErrToReadErr(err),
+            .net_read = switch (data.net_read.op) {
+                .recv => |*op| if (op.getResult()) |n| .{ .data_len = n } else |err| recvErrToReadErr(err),
+                .recvmsg => |*op| if (op.getResult()) |result| netReadResult(result) else |err| recvErrToReadErr(err),
+            },
         },
         .net_write => .{
             .net_write = data.net_write.op.getResult() catch |err| sendErrToWriteErr(err),
@@ -2612,23 +2621,45 @@ noinline fn netSendOpImpl(
 fn netReadOpImpl(
     handle: Io.net.Socket.Handle,
     data: [][]u8,
+    control: []u8,
     timeout: time.Timeout,
     clock: time.Clock,
-) (Io.Operation.NetRead.Error || Io.Cancelable || common.Timeoutable)!usize {
-    if (data.len == 0) return 0;
+) (Io.Operation.NetRead.Error || Io.Cancelable || common.Timeoutable)!Io.net.Stream.ReadResult {
+    if (data.len == 0) return .{ .data_len = 0 };
     var iovecs: [max_iovecs_len]os_net.iovec = undefined;
-    var op = ev.NetRecv.init(stdIoHandleToZio(handle), ev.ReadBuf.fromSlices(data, &iovecs), .{});
+    const buf = ev.ReadBuf.fromSlices(data, &iovecs);
+    if (netReadControl(control)) |control_buf| {
+        var op = ev.NetRecvMsg.init(stdIoHandleToZio(handle), buf, .{}, null, null, control_buf);
+        try timedWaitForIoClock(&op.c, timeout, clock);
+        return netReadResult(op.getResult() catch |err| return recvErrToReadErr(err));
+    }
+    var op = ev.NetRecv.init(stdIoHandleToZio(handle), buf, .{});
     try timedWaitForIoClock(&op.c, timeout, clock);
-    return op.getResult() catch |err| return recvErrToReadErr(err);
+    return .{ .data_len = op.getResult() catch |err| return recvErrToReadErr(err) };
+}
+
+/// The control buffer a stream read should receive ancillary data into, or
+/// null when the read carries none. Stream sockets have no control messages on
+/// Windows, so the buffer is ignored there, as in `std.Io.Threaded`.
+fn netReadControl(control: []u8) ?[]u8 {
+    if (builtin.os.tag == .windows) return null;
+    return if (control.len != 0) control else null;
+}
+
+fn netReadResult(result: os_net.RecvMsgResult) Io.net.Stream.ReadResult {
+    return .{
+        .data_len = result.len,
+        .control_len = result.controllen,
+        .control_truncated = decodeIncomingFlags(result.flags).ctrunc,
+    };
 }
 
 fn recvErrToReadErr(err: ev.NetRecv.Error) Io.Operation.NetRead.Error {
     return switch (err) {
         error.ConnectionResetByPeer, error.ConnectionAborted => error.ConnectionResetByPeer,
         // ETIMEDOUT means the connection died (retransmits exhausted), not that a
-        // read deadline elapsed; std.Io.Stream.Reader has no timed-out-connection
-        // variant, so report it as a broken connection rather than a Timeout.
-        error.ConnectionTimedOut => error.ConnectionResetByPeer,
+        // read deadline elapsed.
+        error.ConnectionTimedOut => error.ConnectionTimedOut,
         error.SocketNotConnected, error.SocketShutdown => error.SocketUnconnected,
         error.NetworkDown => error.NetworkDown,
         error.SystemResources => error.SystemResources,
@@ -3923,6 +3954,120 @@ test "io: net receive on a Unix datagram socket" {
     var buf: [16]u8 = undefined;
     const message = try socket.receive(io, &buf);
     try std.testing.expectEqualStrings("hello", message.data);
+}
+
+/// Sends one byte over a Unix stream socket with `fd` attached as an
+/// `SCM_RIGHTS` control message.
+fn testSendFd(sock: os_net.fd_t, fd: os_net.fd_t) !void {
+    const cmsghdr = std.posix.system.cmsghdr;
+    const data_offset = os_net.cmsg_data_offset;
+    var control: [std.mem.alignForward(usize, data_offset + @sizeOf(os_net.fd_t), os_net.cmsg_align)]u8 align(@alignOf(cmsghdr)) = @splat(0);
+    std.mem.bytesAsValue(cmsghdr, control[0..@sizeOf(cmsghdr)]).* = .{
+        .len = @intCast(data_offset + @sizeOf(os_net.fd_t)),
+        .level = os_net.SOL.SOCKET,
+        .type = std.posix.system.SCM.RIGHTS,
+    };
+    @memcpy(control[data_offset..][0..@sizeOf(os_net.fd_t)], std.mem.asBytes(&fd));
+    const iov = os_net.iovecConstFromSlice("x");
+    _ = try os_net.sendmsg(sock, (&iov)[0..1], .{}, null, 0, &control);
+}
+
+test "io: net Stream.readWithControl receives a file descriptor" {
+    if (!zio_net.has_unix_sockets or builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const fds = try os_net.socketpair(.unix, .stream, .ip, .{ .nonblocking = true });
+    defer for (fds) |fd| os_net.close(fd);
+    try testSendFd(fds[0], fds[0]);
+
+    const stream: Io.net.Stream = .{ .socket = .{ .handle = fds[1], .address = .{ .ip4 = .loopback(0) } } };
+    var buf: [8]u8 = undefined;
+    var data: [1][]u8 = .{&buf};
+    var control: [64]u8 align(Io.net.cmsg_align) = undefined;
+    const result = try stream.readWithControl(io, &data, &control);
+    try std.testing.expectEqual(1, result.data_len);
+    try std.testing.expectEqual(false, result.control_truncated);
+
+    var it: Io.net.cmsg.Iterator = .{ .control = control[0..result.control_len] };
+    const message = it.next().?;
+    try std.testing.expectEqual(std.posix.system.SCM.RIGHTS, message.header.type);
+    os_net.close(std.mem.bytesToValue(os_net.fd_t, message.data[0..@sizeOf(os_net.fd_t)]));
+    try std.testing.expectEqual(null, it.next());
+}
+
+test "io: net Stream.readWithControl reports truncated control data" {
+    if (!zio_net.has_unix_sockets or builtin.os.tag == .windows) return error.SkipZigTest;
+    // OpenBSD fails the whole read with EMSGSIZE when the control buffer
+    // cannot hold the passed descriptors, so there is no truncated result.
+    if (builtin.os.tag == .openbsd) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    const fds = try os_net.socketpair(.unix, .stream, .ip, .{ .nonblocking = true });
+    defer for (fds) |fd| os_net.close(fd);
+    try testSendFd(fds[0], fds[0]);
+
+    const stream: Io.net.Stream = .{ .socket = .{ .handle = fds[1], .address = .{ .ip4 = .loopback(0) } } };
+    var buf: [8]u8 = undefined;
+    var data: [1][]u8 = .{&buf};
+    var control: [1]u8 = undefined;
+    const result = try stream.readWithControl(io, &data, &control);
+    try std.testing.expectEqual(1, result.data_len);
+    try std.testing.expect(result.control_len <= control.len);
+    try std.testing.expectEqual(true, result.control_truncated);
+}
+
+test "io: batch net_read receives control data" {
+    if (!zio_net.has_unix_sockets or builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    // Two operations, so the batch submits them to the event loop.
+    var pairs: [2][2]os_net.fd_t = undefined;
+    pairs[0] = try os_net.socketpair(.unix, .stream, .ip, .{ .nonblocking = true });
+    defer for (pairs[0]) |fd| os_net.close(fd);
+    pairs[1] = try os_net.socketpair(.unix, .stream, .ip, .{ .nonblocking = true });
+    defer for (pairs[1]) |fd| os_net.close(fd);
+
+    var storage: [2]Io.Operation.Storage = undefined;
+    var batch: Io.Batch = .init(&storage);
+    defer batch.cancel(io);
+
+    var bufs: [2][8]u8 = undefined;
+    var data: [2][1][]u8 = .{ .{&bufs[0]}, .{&bufs[1]} };
+    var controls: [2][64]u8 align(Io.net.cmsg_align) = undefined;
+    for (pairs, &data, &controls) |pair, *d, *control| {
+        _ = batch.add(.{ .net_read = .{
+            .socket_handle = pair[1],
+            .data = d,
+            .control = control,
+        } });
+        try testSendFd(pair[0], pair[0]);
+    }
+
+    var received: usize = 0;
+    while (received < pairs.len) {
+        try batch.awaitConcurrent(io, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+        while (batch.next()) |completion| {
+            const result = try completion.result.net_read;
+            try std.testing.expectEqual(1, result.data_len);
+            try std.testing.expectEqual(false, result.control_truncated);
+
+            const control: []align(Io.net.cmsg_align) u8 = &controls[completion.index];
+            var it: Io.net.cmsg.Iterator = .{ .control = control[0..result.control_len] };
+            const message = it.next().?;
+            try std.testing.expectEqual(std.posix.system.SCM.RIGHTS, message.header.type);
+            os_net.close(std.mem.bytesToValue(os_net.fd_t, message.data[0..@sizeOf(os_net.fd_t)]));
+            received += 1;
+        }
+    }
 }
 
 test "io: net Unix connect to a path with no listener is refused" {

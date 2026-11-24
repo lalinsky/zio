@@ -929,6 +929,8 @@ pub const ReceiveMsgResult = struct {
     from: Address,
     len: usize,
     flags: u32,
+    /// Number of bytes of ancillary data written to the control buffer.
+    control_len: usize,
 };
 
 pub const RecvMessage = struct {
@@ -1145,7 +1147,8 @@ pub const Socket = struct {
 
     /// Receives a message with sender address and ancillary data (control messages).
     /// The control buffer receives ancillary data (e.g., credentials, file descriptors).
-    /// Returns sender address, bytes read, and message flags.
+    /// Returns sender address, bytes read, message flags, and the length of the
+    /// ancillary data written to the control buffer.
     pub fn receiveMsg(
         self: Socket,
         buf: ev.ReadBuf,
@@ -1161,6 +1164,7 @@ pub const Socket = struct {
             .from = .fromPosix(&peer_addr.any, addr_len),
             .len = os_result.len,
             .flags = os_result.flags,
+            .control_len = os_result.controllen,
         };
     }
 
@@ -3701,6 +3705,40 @@ test "Socket: receiveFromBatch keeps the first message when a later slot fails" 
     const n = try conn.socket.receiveFromBatch(&messages, .{ .duration = .fromSeconds(1) });
     try std.testing.expectEqual(1, n);
     try std.testing.expectEqualStrings("aaa", messages[0].buf[0..messages[0].len]);
+}
+
+test "Socket: receiveMsg reports the length of the control data" {
+    if (!has_unix_sockets or builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const fds = try os.net.socketpair(.unix, .dgram, .ip, .{ .nonblocking = true });
+    defer for (fds) |fd| os.net.close(fd);
+    const sender: Socket = .{ .handle = fds[0], .address = undefined };
+    const receiver: Socket = .{ .handle = fds[1], .address = undefined };
+
+    const cmsghdr = std.posix.system.cmsghdr;
+    const data_offset = os.net.cmsg_data_offset;
+    const control_len = data_offset + @sizeOf(os.net.fd_t);
+    var send_control: [std.mem.alignForward(usize, control_len, os.net.cmsg_align)]u8 align(@alignOf(cmsghdr)) = @splat(0);
+    std.mem.bytesAsValue(cmsghdr, send_control[0..@sizeOf(cmsghdr)]).* = .{
+        .len = @intCast(control_len),
+        .level = os.net.SOL.SOCKET,
+        .type = std.posix.system.SCM.RIGHTS,
+    };
+    @memcpy(send_control[data_offset..][0..@sizeOf(os.net.fd_t)], std.mem.asBytes(&fds[0]));
+    var send_iov = [_]os.iovec_const{os.net.iovecConstFromSlice("x")};
+    _ = try sender.sendMsg(.{ .iovecs = &send_iov }, null, &send_control, .none);
+
+    var buf: [8]u8 = undefined;
+    var iov: [1]os.iovec = undefined;
+    var control: [64]u8 align(@alignOf(cmsghdr)) = undefined;
+    const result = try receiver.receiveMsg(.fromSlice(&buf, &iov), &control, .none);
+    try std.testing.expectEqual(1, result.len);
+    try std.testing.expect(result.control_len >= control_len);
+    try std.testing.expect(result.control_len <= send_control.len);
+    os.net.close(std.mem.bytesToValue(os.net.fd_t, control[data_offset..][0..@sizeOf(os.net.fd_t)]));
 }
 
 test "Socket: a send flag the socket doesn't support fails" {
