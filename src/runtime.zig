@@ -2902,6 +2902,49 @@ test "runtime: maybeYield yields once the tick budget is spent" {
     try std.testing.expect(!group.hasFailed());
 }
 
+test "runtime: maybeYield reports a cancellation that arrives while it is switched out" {
+    const runtime = try Runtime.init(std.testing.allocator, .{});
+    defer runtime.deinit();
+
+    const State = struct {
+        calls: usize = 0,
+        canceled: bool = false,
+        missed: bool = false,
+    };
+
+    const loopingTask = struct {
+        fn call(state: *State) Cancelable!void {
+            while (true) {
+                try maybeYield();
+                state.calls += 1;
+                if (state.canceled) {
+                    state.missed = true;
+                    return;
+                }
+            }
+        }
+    }.call;
+
+    // Runs when the looping task has used up its slice and yields.
+    const cancelingTask = struct {
+        fn call(state: *State, target: *JoinHandle(Cancelable!void)) void {
+            state.canceled = true;
+            target.requestCancel();
+        }
+    }.call;
+
+    var state: State = .{};
+    var looping = try runtime.spawn(loopingTask, .{&state});
+    defer looping.cancel();
+    var canceling = try runtime.spawn(cancelingTask, .{ &state, &looping });
+    defer canceling.cancel();
+
+    canceling.join();
+    try std.testing.expectError(error.Canceled, looping.join());
+    try std.testing.expect(state.calls > 0);
+    try std.testing.expect(!state.missed);
+}
+
 test "runtime: sleep from main allows tasks to run" {
     const runtime = try Runtime.init(std.testing.allocator, .{});
     defer runtime.deinit();

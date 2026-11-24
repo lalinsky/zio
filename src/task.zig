@@ -383,7 +383,7 @@ pub const AnyTask = struct {
         if (cancel_mode == .allow_cancel) try self.checkCancel();
         const executor = getCurrentExecutor();
         executor.spendQuantum();
-        if (!executor.tickBudgetLeft()) return self.yieldFrom(executor, .reschedule, .no_cancel);
+        if (!executor.tickBudgetLeft()) return self.yieldFrom(executor, .reschedule, cancel_mode);
     }
 
     /// Yield using the executor already resolved by the caller. `executor` is
