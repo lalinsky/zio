@@ -1040,7 +1040,7 @@ pub const Executor = struct {
             if (batch != 0) {
                 if (self.run_queue.refill(batch, .block) > 0) {
                     _ = self.runtime.stealing.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
-                    if (!self.run_queue.overflow.isEmpty()) self.runtime.armSearcher(null);
+                    if (!self.run_queue.overflow.isEmpty()) self.runtime.armSearcher(null, self.id);
                     return;
                 }
             }
@@ -1056,7 +1056,7 @@ pub const Executor = struct {
             if (self.stealWork(.any)) return;
             // No main-ready here: only queued (stealable) work justifies
             // arming a fresh searcher.
-            if (self.checkLocalWork(false)) self.runtime.armSearcher(self.id);
+            if (self.checkLocalWork(false)) self.runtime.armSearcher(self.id, self.id);
         }
     }
 
@@ -1227,7 +1227,7 @@ pub const Executor = struct {
                 if (hint_start and i == 0) self.bump("steal_hint_hits", 1);
                 // The rest of the loaded ring is still at the victim; point
                 // the next searcher straight at it.
-                self.runtime.armSearcher(victim.id);
+                self.runtime.armSearcher(victim.id, self.id);
                 return true;
             }
         }
@@ -1280,7 +1280,7 @@ pub const Executor = struct {
         // searcher. A lone task behind a waker that never yields is taken by
         // the rescue baton holder (see holdBaton).
         const was_empty = self.run_queue.push(&task.awaitable.wait_node);
-        if (!was_empty) self.runtime.armSearcher(self.id);
+        if (!was_empty) self.runtime.armSearcher(self.id, self.id);
     }
 
     /// Schedule a task from another thread (or no executor context) onto its home
@@ -1307,7 +1307,7 @@ pub const Executor = struct {
 
         self.run_queue.overflow.push(&task.awaitable.wait_node);
         self.loop.wake();
-        self.runtime.armSearcher(null);
+        self.runtime.armSearcher(null, null);
     }
 
     /// Schedule a task for execution, recording the wake-up `kind` in its
@@ -2217,7 +2217,11 @@ pub const Runtime = struct {
         return migrates and self.executors.items.len > 1;
     }
 
-    fn armSearcher(self: *Runtime, hint: ?ExecutorId) void {
+    /// Elect one parked executor to look for work, starting at `hint`.
+    /// `caller` is the executor calling, if it is one: it may have its idle
+    /// bit set (inside its own park, where completions wake tasks and the
+    /// pre-park check steals), and must not claim and wake itself.
+    fn armSearcher(self: *Runtime, hint: ?ExecutorId, caller: ?ExecutorId) void {
         if (!migrates) return;
 
         // The two early-return loads pair with the parker: an executor sets its
@@ -2232,9 +2236,7 @@ pub const Runtime = struct {
         if (!self.stealingActive() or (self.stealing.idle_mask.load(.seq_cst) == 0) or (self.stealing.searchers.load(.seq_cst) != 0)) return;
         if (self.stealing.searchers.cmpxchgStrong(0, 1, .seq_cst, .monotonic)) |_| return;
 
-        // The hinted executor is where the work is, so never the one to wake:
-        // an executor announcing from inside its own park would claim itself.
-        if (!self.claimAndWake(hint, hint)) {
+        if (!self.claimAndWake(hint, caller)) {
             _ = self.stealing.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
         }
     }
