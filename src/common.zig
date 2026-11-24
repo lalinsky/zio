@@ -741,24 +741,8 @@ pub fn waitOnFlagQueue(queue: *WaitQueue(WaitNode), waiter: *Waiter) AsyncWaitSt
 /// If called from a context with an async runtime, uses the event loop.
 /// If called from a context without a runtime, executes the operation synchronously.
 pub fn waitForIo(c: *ev.Completion) Cancelable!void {
-    return waitForIoImpl(c, .check_first, .batched);
+    return waitForIoImpl(c, .check_first);
 }
-
-/// Like `waitForIo`, but an operation that finishes inside `loop.add` returns
-/// right away instead of parking until the executor drains finished
-/// completions. For accept: an accept loop then takes a waiting backlog
-/// without going to the back of the run queue after every connection.
-pub fn waitForIoPreferInline(c: *ev.Completion) Cancelable!void {
-    return waitForIoImpl(c, .check_first, .prefer_inline);
-}
-
-const Delivery = enum {
-    /// Through the dispatched queue, drained when the executor runs out of
-    /// ready tasks or polls.
-    batched,
-    /// Taken back at once when the operation finished inside `loop.add`.
-    prefer_inline,
-};
 
 const CancelCheck = enum {
     /// Report a pending cancellation instead of submitting the operation.
@@ -768,14 +752,11 @@ const CancelCheck = enum {
     submit_always,
 };
 
-fn waitForIoImpl(c: *ev.Completion, comptime cancel_check: CancelCheck, comptime delivery: Delivery) Cancelable!void {
+fn waitForIoImpl(c: *ev.Completion, comptime cancel_check: CancelCheck) Cancelable!void {
     var waiter = Waiter.init();
     defer waiter.deinit();
     c.userdata = &waiter;
-    // Null callback: the loop hands the finished completion out through its
-    // dispatched queue, and the executor signals the waiter when it drains
-    // the queue (see Executor.drainDispatched).
-    c.callback = null;
+    c.callback = Waiter.callback;
     c.flags = .{ .defer_callback = false }; // single-shot wait: no rearm either
 
     defer if (std.debug.runtime_safety) {
@@ -806,20 +787,11 @@ fn waitForIoImpl(c: *ev.Completion, comptime cancel_check: CancelCheck, comptime
     if (cancel_check == .check_first) try task.checkCancel();
 
     // Async path: Submit to the event loop and wait for completion
-    const executor = task.getExecutor();
-    executor.loopAdd(c);
-    if (delivery == .prefer_inline and executor.loop.takeLastDispatched(c)) {
-        // Finished inside loopAdd. There is no park to yield at, so charge
-        // the coop budget instead.
-        executor.maybeYield(.reschedule, .no_cancel);
-        return;
-    }
-    // Otherwise an op that completes inside loopAdd still goes through the
-    // dispatched queue, so the wait below parks until the executor drains it,
-    // and that park is its yield point. A completion finished on another loop's thread
-    // (one that owns the socket) can signal before the wait, which then
-    // returns without parking; charge the coop budget for that case so it
-    // still hits a yield point.
+    task.getExecutor().loopAdd(c);
+    // An operation that finishes inside loopAdd, or on the thread of another
+    // loop that owns the socket, signals before the wait, which then returns
+    // without parking. Charge the coop budget for that case, so it still
+    // hits a yield point.
     const signaled_early = waiter.signalCount() != 0;
     waiter.wait(1, .allow_cancel) catch |err| switch (err) {
         error.Canceled => {
@@ -852,7 +824,7 @@ pub fn waitForIoUncancelable(c: *ev.Completion) void {
     var waiter = Waiter.init();
     defer waiter.deinit();
     c.userdata = &waiter;
-    c.callback = null; // dispatched-queue delivery, see waitForIo
+    c.callback = Waiter.callback;
     c.flags = .{ .defer_callback = false };
 
     defer if (std.debug.runtime_safety) {
@@ -1096,7 +1068,7 @@ fn blockInPlaceImpl(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func)), rese
     // through func's return), so this is unreachable. Assert it: were it ever to
     // fire we would be returning uninitialized ctx.result, which we would much
     // rather crash on.
-    waitForIoImpl(&work.c, .submit_always, .batched) catch unreachable;
+    waitForIoImpl(&work.c, .submit_always) catch unreachable;
 
     return ctx.result;
 }

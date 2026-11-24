@@ -300,8 +300,8 @@ pub const Completion = struct {
     /// must stay alive; with an owner, the owner is notified afterwards, so
     /// it must stay alive until then.
     ///
-    /// When it is null, or the loop has `do_not_call_callbacks`, a completion
-    /// without `rearm` or an owner is handed out through `Loop.nextDispatched`
+    /// When the loop has `do_not_call_callbacks`, a completion without
+    /// `rearm` or an owner is handed out through `Loop.nextDispatched`
     /// instead, and the same applies to whoever takes it from there.
     callback: ?*const CallbackFn = null,
 
