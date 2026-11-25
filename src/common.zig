@@ -40,6 +40,11 @@ pub const Closeable = error{
     Closed,
 };
 
+/// Error set for waits that another task or thread can interrupt
+pub const Interruptible = error{
+    Interrupted,
+};
+
 /// Sentinel value indicating no winner has been selected yet in select operations
 pub const NO_WINNER = std.math.maxInt(usize);
 

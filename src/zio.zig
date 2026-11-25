@@ -49,6 +49,7 @@ const common = @import("common.zig");
 pub const Cancelable = common.Cancelable;
 pub const Timeoutable = common.Timeoutable;
 pub const Closeable = common.Closeable;
+pub const Interruptible = common.Interruptible;
 pub const blockInPlace = common.blockInPlace;
 pub const blockInPlaceReserved = common.blockInPlaceReserved;
 
