@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking
+
+- `CompletionQueue.wait`, `waitTimeout`, and its select result (`CompletionQueue.Result`)
+  can now return `error.Interrupted`, so exhaustive switches on their errors need a case
+  for it. It is returned only after `CompletionQueue.interrupt` is called.
+
+### Added
+
+- Added `CompletionQueue.interrupt`, which makes the driver's current or next wait return
+  `error.Interrupted`. It can be called from any task or thread, so another task can wake
+  the driver, for example to have it cancel one of its operations, without parking an
+  `ev.Async` in the queue. Added the `zio.Interruptible` error set.
+
 ### Changed
 
 - Tasks woken by I/O completions are scheduled as each completion is processed again,

@@ -12,9 +12,12 @@
 //!
 //! One task drives the queue: `wait`, `waitTimeout`, `next`, `cancel` and
 //! `cancelAll` belong to it, and the rule is enforced: any of them called
-//! while another task's select is parked on the queue panics. `submit` and `close` are thread-safe, so other
-//! tasks can park their own operations here for the driver to process. An
-//! operation submitted from another task must not live in that task's frame:
+//! while another task's select is parked on the queue panics. `submit`,
+//! `close` and `interrupt` are thread-safe, so other tasks can park their own
+//! operations here for the driver to process, or wake the driver with
+//! `interrupt` to have it act on state of their own (cancel an operation,
+//! stop waiting). An operation submitted from another task must not live in
+//! that task's frame:
 //! the submitter may unwind before the driver takes the completion, so such
 //! operations belong on the heap, with the driver owning their results and
 //! memory. Heap-backed operations rule out `cancelAll(.discard)` — it drops
@@ -46,6 +49,9 @@
 //!         // The queue is closed and every operation is canceled with its
 //!         // result kept; drain with `next` before freeing them.
 //!         error.Canceled => return err,
+//!         // Another task called `interrupt`: look at whatever it wants
+//!         // done, then wait again.
+//!         error.Interrupted => continue,
 //!     };
 //!     // Process completion
 //! }
@@ -71,6 +77,7 @@ const getCurrentExecutor = @import("runtime.zig").getCurrentExecutor;
 const Cancelable = common.Cancelable;
 const Timeoutable = common.Timeoutable;
 const Closeable = common.Closeable;
+const Interruptible = common.Interruptible;
 const Waiter = common.Waiter;
 const Timeout = @import("time.zig").Timeout;
 const Completion = ev.Completion;
@@ -100,6 +107,9 @@ pub const CompletionQueue = struct {
     reg: ?Registration,
     /// No new submissions. Written under `mutex`.
     closed: bool,
+    /// `interrupt` was called and no wait has reported it yet. Written under
+    /// `mutex`.
+    interrupted: bool,
 
     const GroupNode = @FieldType(Completion, "group");
     const Queue = SimpleQueue(GroupNode);
@@ -117,6 +127,7 @@ pub const CompletionQueue = struct {
             .signal = .init(0),
             .reg = null,
             .closed = false,
+            .interrupted = false,
         };
     }
 
@@ -219,29 +230,103 @@ pub const CompletionQueue = struct {
         Futex.wake(&self.signal.raw, 1);
     }
 
+    /// Make the driver's wait return `error.Interrupted`: the one in progress,
+    /// or the next one if the driver is not waiting. Thread-safe, callable
+    /// from any task or thread.
+    ///
+    /// Interrupts do not queue up: until a wait reports one, more calls do
+    /// nothing, so a caller that needs several requests handled keeps them in
+    /// a set or queue of its own rather than in a single slot. Completions
+    /// that are ready are handed out first: the interrupt is reported by the
+    /// first wait that finds none ready. The interrupt carries no data; the
+    /// driver reads whatever state the caller set up before calling this,
+    /// which the mutex taken here publishes to it.
+    ///
+    /// This is how another task gets the driver to cancel one of its
+    /// operations: it records what it wants, interrupts, and the driver calls
+    /// `cancel`. If the operation finished in the meantime, `cancel` takes it
+    /// out with its real result.
+    ///
+    /// Also works on a closed queue while operations are still in flight,
+    /// so a driver shutting down can be asked to cancel one it is waiting
+    /// for. Does nothing once the queue is drained: waits return
+    /// `error.Closed` from then on.
+    pub fn interrupt(self: *CompletionQueue) void {
+        self.mutex.lock();
+        if (self.interrupted or (self.closed and self.pending.isEmpty())) {
+            // Interrupted: the driver will see it, a wake was already sent,
+            // or a wait checks before parking. Drained: nothing to report,
+            // `error.Closed` comes first.
+            self.mutex.unlock();
+            return;
+        }
+        self.interrupted = true;
+
+        if (self.claimToRegistered()) |r| {
+            self.mutex.unlock();
+            r.waiter.signal();
+            return;
+        }
+
+        _ = self.signal.fetchAdd(1, .release);
+        self.mutex.unlock();
+        Futex.wake(&self.signal.raw, 1);
+    }
+
+    /// What a wait takes from the queue, in order of priority: a ready
+    /// completion, the drained state, an interrupt (which is consumed).
+    const Take = union(enum) {
+        completion: *Completion,
+        drained,
+        interrupted,
+        empty,
+    };
+
+    /// The caller holds the mutex.
+    fn takeLocked(self: *CompletionQueue) Take {
+        if (self.completed.pop()) |n| return .{ .completion = completionFromGroup(n) };
+        if (self.closed and self.pending.isEmpty()) return .drained;
+        if (self.interrupted) {
+            self.interrupted = false;
+            return .interrupted;
+        }
+        return .empty;
+    }
+
+    /// Whether `takeLocked` would return something. The caller holds the
+    /// mutex.
+    fn isReadyLocked(self: *CompletionQueue) bool {
+        return !self.completed.isEmpty() or (self.closed and self.pending.isEmpty()) or self.interrupted;
+    }
+
     /// Wait for the next completion. Blocks while the queue is open, even if
     /// it is momentarily empty: operations submitted later (also by other
     /// tasks) satisfy a wait already in progress. To wait only for what is
     /// already in the queue, guard with `isEmpty`:
     /// `while (!cq.isEmpty()) { const c = try cq.wait(); ... }`
     ///
-    /// Returns `error.Closed` when the queue is closed and fully drained.
+    /// Returns `error.Closed` when the queue is closed and fully drained, and
+    /// `error.Interrupted` when `interrupt` was called and no completion is
+    /// ready.
     ///
     /// On cancellation the queue is closed and every operation is canceled
     /// with its result kept: drain with `next` (nothing blocks at that point)
     /// before freeing the operations.
-    pub fn wait(self: *CompletionQueue) (Cancelable || Closeable)!*Completion {
+    pub fn wait(self: *CompletionQueue) (Cancelable || Closeable || Interruptible)!*Completion {
         while (true) {
             const seen = self.signal.load(.acquire);
 
             self.mutex.lock();
             self.checkSingleDriverLocked();
-            const node = self.completed.pop();
-            const drained = node == null and self.closed and self.pending.isEmpty();
+            const taken = self.takeLocked();
             self.mutex.unlock();
 
-            if (node) |n| return completionFromGroup(n);
-            if (drained) return error.Closed;
+            switch (taken) {
+                .completion => |c| return c,
+                .drained => return error.Closed,
+                .interrupted => return error.Interrupted,
+                .empty => {},
+            }
 
             // A bare submit does not bump `signal`: a driver parked here is
             // waiting for a completion, and the submitted operation delivers
@@ -259,8 +344,10 @@ pub const CompletionQueue = struct {
     /// the queue is open and returns `error.Timeout` if no completion is
     /// ready before the timeout expires.
     ///
-    /// Returns `error.Closed` when the queue is closed and fully drained.
-    pub fn waitTimeout(self: *CompletionQueue, timeout: Timeout) (Timeoutable || Cancelable || Closeable)!*Completion {
+    /// Returns `error.Closed` when the queue is closed and fully drained, and
+    /// `error.Interrupted` when `interrupt` was called and no completion is
+    /// ready.
+    pub fn waitTimeout(self: *CompletionQueue, timeout: Timeout) (Timeoutable || Cancelable || Closeable || Interruptible)!*Completion {
         if (timeout == .none) {
             return self.wait();
         }
@@ -270,12 +357,15 @@ pub const CompletionQueue = struct {
 
             self.mutex.lock();
             self.checkSingleDriverLocked();
-            const node = self.completed.pop();
-            const drained = node == null and self.closed and self.pending.isEmpty();
+            const taken = self.takeLocked();
             self.mutex.unlock();
 
-            if (node) |n| return completionFromGroup(n);
-            if (drained) return error.Closed;
+            switch (taken) {
+                .completion => |c| return c,
+                .drained => return error.Closed,
+                .interrupted => return error.Interrupted,
+                .empty => {},
+            }
 
             Futex.waitTimeout(&self.signal.raw, seen, timeout) catch |err| switch (err) {
                 error.Canceled => {
@@ -283,15 +373,18 @@ pub const CompletionQueue = struct {
                     return error.Canceled;
                 },
                 error.Timeout => {
-                    // A completion, or the close, can still have landed
-                    // together with the timeout; report those rather than a
-                    // timeout that did not happen.
+                    // A completion, the close, or an interrupt can still have
+                    // landed together with the timeout; report those rather
+                    // than a timeout that did not happen.
                     self.mutex.lock();
-                    const n = self.completed.pop();
-                    const drained_now = n == null and self.closed and self.pending.isEmpty();
+                    const late = self.takeLocked();
                     self.mutex.unlock();
-                    if (n) |x| return completionFromGroup(x);
-                    return if (drained_now) error.Closed else error.Timeout;
+                    return switch (late) {
+                        .completion => |c| c,
+                        .drained => error.Closed,
+                        .interrupted => error.Interrupted,
+                        .empty => error.Timeout,
+                    };
                 },
             };
         }
@@ -360,9 +453,9 @@ pub const CompletionQueue = struct {
 
     // Future protocol implementation for use with select() / wait().
     //
-    // The registered wait completes when a completion is ready to be taken or
-    // the queue is drained. The single-driver rule applies: a select over the
-    // queue is the driver's wait. Canceling the select only deregisters; it
+    // The registered wait completes when a completion is ready to be taken,
+    // the queue is drained, or it is interrupted. The single-driver rule
+    // applies: a select over the queue is the driver's wait. Canceling the select only deregisters; it
     // does not close the queue or cancel the operations in it the way a
     // canceled `wait()` does, that cleanup is the caller's to do.
     //
@@ -379,7 +472,7 @@ pub const CompletionQueue = struct {
     // wake dispatched in the publish-to-wake gap could outlive its select
     // and claim a later one with the queue empty and open).
 
-    pub const Result = Closeable!*Completion;
+    pub const Result = (Closeable || Interruptible)!*Completion;
 
     pub const WaitContext = struct {
         /// True while this context sits in the queue's `reg` slot. Mirrors
@@ -395,20 +488,38 @@ pub const CompletionQueue = struct {
         /// The winning claim found the queue drained: `getResult` reports
         /// `error.Closed`.
         drained: bool = false,
+        /// The winning claim consumed an interrupt: `getResult` reports
+        /// `error.Interrupted`.
+        interrupted: bool = false,
     };
 
-    pub fn getResult(self: *CompletionQueue, ctx: *WaitContext) Closeable!*Completion {
+    pub fn getResult(self: *CompletionQueue, ctx: *WaitContext) Result {
         _ = self;
         if (ctx.claimed) |c| {
             ctx.claimed = null;
             return c;
         }
+        if (ctx.interrupted) {
+            ctx.interrupted = false;
+            return error.Interrupted;
+        }
         // A won CQ arm always carries its deposit: the claim popped the
-        // completion, or latched the drained state, in the same critical
-        // section that decided the winner word. Reaching here with neither
-        // is a protocol violation.
+        // completion, consumed the interrupt, or latched the drained state,
+        // in the same critical section that decided the winner word. Reaching
+        // here with none of them is a protocol violation.
         std.debug.assert(ctx.drained);
         return error.Closed;
+    }
+
+    /// Move what `takeLocked` returns into a winning claim's context. The
+    /// caller holds the mutex and has seen the queue ready.
+    fn depositLocked(self: *CompletionQueue, ctx: *WaitContext) void {
+        switch (self.takeLocked()) {
+            .completion => |c| ctx.claimed = c,
+            .drained => ctx.drained = true,
+            .interrupted => ctx.interrupted = true,
+            .empty => unreachable,
+        }
     }
 
     pub fn asyncWait(self: *CompletionQueue, waiter: *Waiter, ctx: *WaitContext) common.AsyncWaitState {
@@ -418,12 +529,12 @@ pub const CompletionQueue = struct {
         // word already holds this arm and exactly one signal was sent (it
         // may still be in flight). Never taken on a first call: a fresh
         // context has no deposit, so the sweep cannot see this state.
-        if (ctx.claimed != null or ctx.drained) {
+        if (ctx.claimed != null or ctx.drained or ctx.interrupted) {
             self.mutex.unlock();
             return .ready_signaled;
         }
 
-        if (!self.completed.isEmpty() or (self.closed and self.pending.isEmpty())) {
+        if (self.isReadyLocked()) {
             // Unhook before claiming so a lost claim leaves no registration
             // behind. Under the mutex this cannot race a producer's claim.
             if (ctx.registered) {
@@ -433,11 +544,7 @@ pub const CompletionQueue = struct {
             }
             switch (waiter.tryClaim()) {
                 .won => {
-                    if (self.completed.pop()) |node| {
-                        ctx.claimed = completionFromGroup(node);
-                    } else {
-                        ctx.drained = true;
-                    }
+                    self.depositLocked(ctx);
                     self.mutex.unlock();
                     return .ready;
                 },
@@ -473,16 +580,20 @@ pub const CompletionQueue = struct {
             // Removed before any claim: no signal was or will be sent.
             return true;
         }
-        const was_claimed = ctx.claimed != null or ctx.drained;
+        const was_claimed = ctx.claimed != null or ctx.drained or ctx.interrupted;
         if (was_claimed and waiter.isDirect()) {
             // A canceled generic wait abandons its deposit: put the
-            // completion back so it stays takeable (the drained state is
-            // re-derivable). A select waiter never abandons a deposit; a
-            // deposit means the winner word holds this arm, and select
-            // delivers its winner even on the canceled path.
+            // completion or the interrupt back so it stays takeable (the
+            // drained state is re-derivable). A select waiter never abandons
+            // a deposit; a deposit means the winner word holds this arm, and
+            // select delivers its winner even on the canceled path.
             if (ctx.claimed) |c| {
                 self.completed.push(&c.group);
                 ctx.claimed = null;
+            }
+            if (ctx.interrupted) {
+                self.interrupted = true;
+                ctx.interrupted = false;
             }
         }
         self.mutex.unlock();
@@ -519,9 +630,9 @@ pub const CompletionQueue = struct {
     /// the finished `c` out of the queue first, leaving the wait below stuck
     /// forever on a node that already left; the single-driver rule is what
     /// makes that impossible. To cancel a specific operation from another
-    /// task, ask the driver instead: park an `ev.Async` doorbell in the queue
-    /// and let the driver do the cancel. The wait here cannot itself be
-    /// canceled.
+    /// task, ask the driver instead: record which one, call `interrupt`, and
+    /// let the driver do the cancel when its wait returns
+    /// `error.Interrupted`. The wait here cannot itself be canceled.
     pub fn cancel(self: *CompletionQueue, c: *Completion) void {
         self.mutex.lock();
         self.checkSingleDriverLocked();
@@ -654,8 +765,8 @@ pub const CompletionQueue = struct {
     }
 
     /// Producer side of the claim protocol: hand what the queue holds (the
-    /// head completion, or the drained state) to the parked waiter. The
-    /// caller holds the mutex and has just made the queue ready.
+    /// head completion, the drained state, or an interrupt) to the parked
+    /// waiter. The caller holds the mutex and has just made the queue ready.
     ///
     /// On `.won` the deposit lands in the waiter's context, the slot is
     /// cleared, and the returned registration owes exactly one
@@ -670,12 +781,7 @@ pub const CompletionQueue = struct {
         const r = self.reg orelse return null;
         switch (r.waiter.tryClaim()) {
             .won => {
-                if (self.completed.pop()) |node| {
-                    r.ctx.claimed = completionFromGroup(node);
-                } else {
-                    std.debug.assert(self.closed and self.pending.isEmpty());
-                    r.ctx.drained = true;
-                }
+                self.depositLocked(r.ctx);
                 r.ctx.registered = false;
                 self.reg = null;
                 return r;
@@ -1312,7 +1418,7 @@ test "CompletionQueue: canceling the waiting driver closes the queue and keeps r
     try cq.submit(&slow.c);
 
     const Driver = struct {
-        fn run(cq_: *CompletionQueue) (Cancelable || Closeable)!void {
+        fn run(cq_: *CompletionQueue) (Cancelable || Closeable || Interruptible)!void {
             _ = try cq_.wait();
         }
     };
@@ -1669,7 +1775,7 @@ test "CompletionQueue: a claim landing on a canceled select is delivered, never 
     const Driver = struct {
         const select = @import("select.zig").select;
 
-        fn run(cq_: *CompletionQueue, expected: *ev.Completion) (Cancelable || Closeable)!bool {
+        fn run(cq_: *CompletionQueue, expected: *ev.Completion) (Cancelable || Closeable || Interruptible)!bool {
             const result = try select(.{ .io = cq_ });
             const c = try result.io;
             return c == expected;
@@ -1759,5 +1865,236 @@ test "CompletionQueue: teardown drain leaves the queue memory quiescent" {
                 try std.testing.expectEqual(0xAA, b);
             }
         }
+    }
+}
+
+test "CompletionQueue: an interrupt is reported once, and interrupts do not queue up" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+
+    cq.interrupt();
+    cq.interrupt();
+    try std.testing.expectError(error.Interrupted, cq.wait());
+    try std.testing.expectError(error.Timeout, cq.waitTimeout(.fromMilliseconds(10)));
+
+    cq.interrupt();
+    try std.testing.expectError(error.Interrupted, cq.waitTimeout(.fromSeconds(5)));
+    try std.testing.expect(cq.isEmpty());
+}
+
+test "CompletionQueue: a ready completion is handed out before the interrupt" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancelAll(.discard);
+
+    var timer = ev.Timer.init(.{ .duration = .fromMilliseconds(1) });
+    try cq.submit(&timer.c);
+
+    var pause = ev.Timer.init(.{ .duration = .fromMilliseconds(50) });
+    try common.waitForIo(&pause.c);
+    try std.testing.expect(cq.hasCompleted());
+
+    cq.interrupt();
+    try std.testing.expectEqual(&timer.c, try cq.wait());
+    try std.testing.expectError(error.Interrupted, cq.wait());
+}
+
+test "CompletionQueue: an interrupt wakes a parked wait, and the driver cancels the operation" {
+    var rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancelAll(.discard);
+
+    var timer = ev.Timer.init(.{ .duration = .fromSeconds(10) });
+    try cq.submit(&timer.c);
+
+    const Interrupter = struct {
+        fn run(cq_: *CompletionQueue) !void {
+            var pause = ev.Timer.init(.{ .duration = .fromMilliseconds(20) });
+            try common.waitForIo(&pause.c);
+            cq_.interrupt();
+        }
+    };
+    var handle = try rt.spawn(Interrupter.run, .{&cq});
+    defer handle.cancel();
+
+    try std.testing.expectError(error.Interrupted, cq.wait());
+    cq.cancel(&timer.c);
+    try std.testing.expectError(error.Canceled, timer.getResult());
+    try std.testing.expect(cq.isEmpty());
+    try handle.join();
+}
+
+test "CompletionQueue: an interrupt on a closed queue is reported until it drains" {
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    // Drained: ignored.
+    var closed = CompletionQueue.init();
+    closed.close();
+    closed.interrupt();
+    try std.testing.expectError(error.Closed, closed.wait());
+
+    // Closed with an operation in flight, before or after the interrupt:
+    // reported, so the driver can cancel the operation, then the queue
+    // drains as usual.
+    for ([_]bool{ false, true }) |close_first| {
+        var cq = CompletionQueue.init();
+        var timer = ev.Timer.init(.{ .duration = .fromSeconds(10) });
+        try cq.submit(&timer.c);
+        if (close_first) cq.close();
+        cq.interrupt();
+        if (!close_first) cq.close();
+        try std.testing.expectError(error.Interrupted, cq.waitTimeout(.fromSeconds(5)));
+        cq.cancel(&timer.c);
+        try std.testing.expectError(error.Canceled, timer.getResult());
+        try std.testing.expectError(error.Closed, cq.wait());
+    }
+
+    // Made before the close of an empty queue: the drained state wins.
+    var empty = CompletionQueue.init();
+    empty.interrupt();
+    empty.close();
+    try std.testing.expectError(error.Closed, empty.wait());
+    try std.testing.expectError(error.Closed, empty.waitTimeout(.fromMilliseconds(10)));
+}
+
+test "CompletionQueue: select reports an interrupt made before it" {
+    const select = @import("select.zig").select;
+
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancelAll(.discard);
+
+    var timer = ev.Timer.init(.{ .duration = .fromSeconds(10) });
+    try cq.submit(&timer.c);
+
+    const Sleeper = struct {
+        fn run(rt_: *Runtime) !void {
+            try rt_.sleep(.fromSeconds(10));
+        }
+    };
+    var slow_task = try rt.spawn(Sleeper.run, .{rt});
+    defer slow_task.cancel();
+
+    cq.interrupt();
+    const result = try select(.{ .io = &cq, .other = &slow_task });
+    switch (result) {
+        .io => |r| try std.testing.expectError(error.Interrupted, r),
+        .other => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(cq.hasPending());
+}
+
+test "CompletionQueue: an interrupt claims a parked select" {
+    var rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancelAll(.discard);
+
+    var timer = ev.Timer.init(.{ .duration = .fromSeconds(10) });
+    try cq.submit(&timer.c);
+
+    const Driver = struct {
+        const select = @import("select.zig").select;
+
+        fn run(cq_: *CompletionQueue) !void {
+            const result = try select(.{ .io = cq_ });
+            try std.testing.expectError(error.Interrupted, result.io);
+        }
+    };
+    var handle = try rt.spawn(Driver.run, .{&cq});
+    defer handle.cancel();
+
+    // Interrupt only once the select is parked, so that the interrupt goes
+    // through the claim rather than the select's fast path.
+    while (true) {
+        cq.mutex.lock();
+        const parked = cq.reg != null;
+        cq.mutex.unlock();
+        if (parked) break;
+        try @import("runtime.zig").yield();
+    }
+    cq.interrupt();
+    try handle.join();
+    try std.testing.expect(cq.hasPending());
+}
+
+test "CompletionQueue: an interrupt stays latched when the select loses to another future" {
+    const select = @import("select.zig").select;
+    const waitFuture = @import("select.zig").wait;
+
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var cq = CompletionQueue.init();
+    defer cq.cancelAll(.discard);
+
+    var timer = ev.Timer.init(.{ .duration = .fromSeconds(10) });
+    try cq.submit(&timer.c);
+
+    const Quick = struct {
+        fn run() void {}
+    };
+    var done = try rt.spawn(Quick.run, .{});
+    done.join();
+
+    cq.interrupt();
+    const result = try select(.{ .other = &done, .io = &cq });
+    try std.testing.expect(result == .other);
+
+    const later = try waitFuture(&cq);
+    try std.testing.expectError(error.Interrupted, later.value);
+    try std.testing.expectError(error.Timeout, cq.waitTimeout(.fromMilliseconds(5)));
+}
+
+test "CompletionQueue: an interrupt racing a completion loses neither" {
+    var rt = try Runtime.init(std.testing.allocator, .{ .executors = .exact(4) });
+    defer rt.deinit();
+
+    // The keep-alive shape: the driver waits for a read, another task
+    // interrupts it to give up on the read. Whichever lands first, the
+    // operation comes out of the queue exactly once, and the interrupt is
+    // reported exactly once. The rounds vary which one wins; a cancel that
+    // loses to the operation finishing (a real result after the interrupt)
+    // is rare here and not counted on.
+    const Interrupter = struct {
+        fn run(cq_: *CompletionQueue, spins: u32) !void {
+            var spin: u32 = 0;
+            while (spin < spins) : (spin += 1) {
+                try @import("runtime.zig").yield();
+            }
+            cq_.interrupt();
+        }
+    };
+
+    var round: u32 = 0;
+    while (round < 200) : (round += 1) {
+        var cq = CompletionQueue.init();
+        var timer = ev.Timer.init(.{ .duration = .fromMicroseconds(round % 7 * 50) });
+        try cq.submit(&timer.c);
+
+        var handle = try rt.spawn(Interrupter.run, .{ &cq, round % 5 });
+
+        if (cq.wait()) |c| {
+            try std.testing.expectEqual(&timer.c, c);
+            try handle.join();
+            try std.testing.expectError(error.Interrupted, cq.waitTimeout(.fromSeconds(5)));
+        } else |err| {
+            try std.testing.expectEqual(error.Interrupted, err);
+            cq.cancel(&timer.c);
+            timer.getResult() catch |e| try std.testing.expectEqual(error.Canceled, e);
+            try handle.join();
+            try std.testing.expectError(error.Timeout, cq.waitTimeout(.fromMilliseconds(1)));
+        }
+        try std.testing.expect(cq.isEmpty());
     }
 }
