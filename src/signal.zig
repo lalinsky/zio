@@ -43,19 +43,46 @@ const Waiter = @import("common.zig").Waiter;
 
 pub const SignalKind = switch (builtin.os.tag) {
     .windows => enum(u8) {
-        interrupt = w.CTRL_C_EVENT,
-        terminate = w.CTRL_CLOSE_EVENT,
+        /// Ctrl+C was pressed, or sent with `GenerateConsoleCtrlEvent`.
+        ctrl_c = w.CTRL_C_EVENT,
+        /// Ctrl+Break was pressed, or sent with `GenerateConsoleCtrlEvent`.
+        ctrl_break = w.CTRL_BREAK_EVENT,
+        /// The console window is being closed. Windows terminates the process after a
+        /// short system timeout, so cleanup must finish quickly.
+        ctrl_close = w.CTRL_CLOSE_EVENT,
+        /// A user is logging off. Windows terminates the process after a short system
+        /// timeout. Not delivered to processes that load user32.dll or gdi32.dll.
+        ctrl_logoff = w.CTRL_LOGOFF_EVENT,
+        /// The system is shutting down. Windows terminates the process after a short
+        /// system timeout. Not delivered to processes that load user32.dll or gdi32.dll.
+        ctrl_shutdown = w.CTRL_SHUTDOWN_EVENT,
+
+        /// Alias for `ctrl_c`, matching `SIGINT` on other systems.
+        pub const interrupt: @This() = .ctrl_c;
+        /// Alias for `ctrl_close`, matching `SIGTERM` on other systems.
+        pub const terminate: @This() = .ctrl_close;
     },
     else => enum(u8) {
+        /// `SIGINT`: interrupt from the terminal, usually Ctrl+C.
         interrupt = @backingInt(posix.SIG.INT),
+        /// `SIGTERM`: polite request to terminate, the default signal sent by `kill`.
         terminate = @backingInt(posix.SIG.TERM),
+        /// `SIGHUP`: the controlling terminal was closed. Daemons often use it to reload
+        /// their configuration.
         hangup = @backingInt(posix.SIG.HUP),
+        /// `SIGALRM`: a timer set with `alarm` or `setitimer` expired.
         alarm = @backingInt(posix.SIG.ALRM),
+        /// `SIGCHLD`: a child process exited, stopped or continued.
         child = @backingInt(posix.SIG.CHLD),
+        /// `SIGPIPE`: write to a pipe or socket with no reader.
         pipe = @backingInt(posix.SIG.PIPE),
+        /// `SIGQUIT`: quit from the terminal, usually Ctrl+\.
         quit = @backingInt(posix.SIG.QUIT),
+        /// `SIGUSR1`: user-defined, no meaning to the system.
         user1 = @backingInt(posix.SIG.USR1),
+        /// `SIGUSR2`: user-defined, no meaning to the system.
         user2 = @backingInt(posix.SIG.USR2),
+        /// Any other signal number, created with `@enumFromInt`.
         _,
     },
 };
@@ -465,8 +492,11 @@ fn signalHandlerUnix(sig: posix.SIG) callconv(.c) void {
 fn consoleCtrlHandlerWindows(ctrl_type: w.DWORD) callconv(.winapi) w.BOOL {
     // Map Windows control events to SignalKind values
     const signal_value: u8 = switch (ctrl_type) {
-        w.CTRL_C_EVENT => @backingInt(SignalKind.interrupt),
-        w.CTRL_CLOSE_EVENT => @backingInt(SignalKind.terminate),
+        w.CTRL_C_EVENT => @backingInt(SignalKind.ctrl_c),
+        w.CTRL_BREAK_EVENT => @backingInt(SignalKind.ctrl_break),
+        w.CTRL_CLOSE_EVENT => @backingInt(SignalKind.ctrl_close),
+        w.CTRL_LOGOFF_EVENT => @backingInt(SignalKind.ctrl_logoff),
+        w.CTRL_SHUTDOWN_EVENT => @backingInt(SignalKind.ctrl_shutdown),
         else => return w.FALSE, // Not handled
     };
 
@@ -484,8 +514,15 @@ fn consoleCtrlHandlerWindows(ctrl_type: w.DWORD) callconv(.winapi) w.BOOL {
         }
     }
 
-    // Return TRUE if we handled it, FALSE to pass to default handler
-    return if (found_handler) w.TRUE else w.FALSE;
+    if (!found_handler) return w.FALSE; // Pass to the next handler
+
+    // For these events, Windows terminates the process as soon as the handler returns.
+    // This runs on a thread Windows creates for the event, so block it and let the woken
+    // tasks shut down; the process exits on its own or when the system timeout expires.
+    switch (ctrl_type) {
+        w.CTRL_CLOSE_EVENT, w.CTRL_LOGOFF_EVENT, w.CTRL_SHUTDOWN_EVENT => while (true) w.Sleep(w.INFINITE),
+        else => return w.TRUE,
+    }
 }
 
 /// OS signal watcher.

@@ -120,7 +120,10 @@ pub const DUPLICATE_SAME_ACCESS: DWORD = 2;
 
 // Console control events
 pub const CTRL_C_EVENT: DWORD = 0;
+pub const CTRL_BREAK_EVENT: DWORD = 1;
 pub const CTRL_CLOSE_EVENT: DWORD = 2;
+pub const CTRL_LOGOFF_EVENT: DWORD = 5;
+pub const CTRL_SHUTDOWN_EVENT: DWORD = 6;
 
 // Generic access rights
 pub const GENERIC_READ: DWORD = 0x80000000;
