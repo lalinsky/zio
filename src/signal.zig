@@ -18,8 +18,12 @@ const Waiter = @import("common.zig").Waiter;
 
 pub const SignalKind = switch (builtin.os.tag) {
     .windows => enum(u8) {
-        interrupt = w.CTRL_C_EVENT,
-        terminate = w.CTRL_CLOSE_EVENT,
+        ctrl_c_event = w.CTRL_C_EVENT,
+        ctrl_close_event = w.CTRL_CLOSE_EVENT,
+        ctrl_break_event = w.CTRL_BREAK_EVENT,
+
+        pub const interrupt: @This() = .ctrl_c_event;
+        pub const terminate: @This() = .ctrl_close_event;
     },
     else => enum(u8) {
         interrupt = @backingInt(posix.SIG.INT),
@@ -200,8 +204,9 @@ fn signalHandlerUnix(sig: posix.SIG) callconv(.c) void {
 fn consoleCtrlHandlerWindows(ctrl_type: w.DWORD) callconv(.winapi) w.BOOL {
     // Map Windows control events to SignalKind values
     const signal_value: u8 = switch (ctrl_type) {
-        w.CTRL_C_EVENT => @backingInt(SignalKind.interrupt),
-        w.CTRL_CLOSE_EVENT => @backingInt(SignalKind.terminate),
+        w.CTRL_C_EVENT => @backingInt(SignalKind.ctrl_c_event),
+        w.CTRL_BREAK_EVENT => @backingInt(SignalKind.ctrl_break_event),
+        w.CTRL_CLOSE_EVENT => @backingInt(SignalKind.ctrl_close_event),
         else => return w.FALSE, // Not handled
     };
 

@@ -12,6 +12,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- On Windows, `SignalKind` now has `ctrl_c_event`, `ctrl_break_event` and `ctrl_close_event`,
+  so Ctrl+Break can be handled, with `interrupt` and `terminate` kept as aliases.
+
 - Added `CompletionQueue.interrupt`, which makes the driver's current or next wait return
   `error.Interrupted`. It can be called from any task or thread, so another task can wake
   the driver, for example to have it cancel one of its operations, without parking an
