@@ -12,8 +12,8 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- On Windows, `SignalKind` now has `ctrl_c_event`, `ctrl_break_event` and `ctrl_close_event`,
-  so Ctrl+Break can be handled, with `interrupt` and `terminate` kept as aliases.
+- On Windows, `SignalKind` now has `ctrl_c`, `ctrl_break`, `ctrl_close`, `ctrl_logoff` and
+  `ctrl_shutdown`, with `interrupt` and `terminate` kept as aliases.
 
 - Added `CompletionQueue.interrupt`, which makes the driver's current or next wait return
   `error.Interrupted`. It can be called from any task or thread, so another task can wake
@@ -45,6 +45,9 @@ All notable changes to this project will be documented in this file.
   unexpected or fatal, and a crash in accept on Windows.
 
 - Fixed `Server.accept` not timing out while queued connections kept failing.
+
+- Fixed Windows terminating the process right after delivering a `terminate` signal, before
+  the waiting task could clean up.
 
 - Fixed an operation with a timeout dropping its result when it completed while its task was
   being canceled.
