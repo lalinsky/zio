@@ -815,7 +815,7 @@ fixes continue on the `zig-0.16` branch.
 ### Fixed
 
 - Fixed cross-thread I/O cancelation on kqueue backend.
-- Fixed internal I/O opertion accounting on the IOCP backend that could lead to integer underflow in multi-threaded mode.
+- Fixed internal I/O operation accounting on the IOCP backend that could lead to integer underflow in multi-threaded mode.
 - Fixed mapping of `ESPIPE` to `error.Unseekable` to help `std.Io.File.Reader` with mode detection.
 - Fixed macOS-specific `deleteFile` error mapping, to return `error.IsDir` when the path is a directory.
 - Fixed handling of `follow_symlinks`, `path_only`, and `allow_ctty` file open/create flags.
@@ -927,7 +927,7 @@ fixes continue on the `zig-0.16` branch.
 ### Fixed
 
 - Fixed incorrect assert that could panic on a race between task finishing naturally and being cancelled.
-- Added some extra clobbers to context switching asssembly, already implicitly covered by others, but for consistency.
+- Added some extra clobbers to context switching assembly, already implicitly covered by others, but for consistency.
 
 ## [0.8.2] - 2026-02-17
 
@@ -962,7 +962,7 @@ fixes continue on the `zig-0.16` branch.
 
 ### Changed
 
-- Improved our CI setup, run significanly more tests in multi-threaded mode to catch possible race conditions.
+- Improved our CI setup, run significantly more tests in multi-threaded mode to catch possible race conditions.
 
 ### Fixed
 
@@ -1002,7 +1002,7 @@ fixes continue on the `zig-0.16` branch.
 ### Changed
 
 - All timeout parameters now accept `Timeout` instead of `Duration` (#238, #239)
-- Increased default stack committment to 256KiB to avoid stack overflows in the default panic handler
+- Increased default stack commitment to 256KiB to avoid stack overflows in the default panic handler
 - Internal refactoring to reduce memory usage and binary size
 
 ### Fixed
@@ -1029,14 +1029,14 @@ First of all, the codebase has been relicensed under the MIT license.
 
 I replaced `libxev` with a custom I/O event loop, that has better cross-platform support,
 natively supports multiple threads each running its own event loop, supports more filesystem operations,
-consistent timer behavior across platforms, grouped operations, and more. This is avialable in `zio.ev` and
+consistent timer behavior across platforms, grouped operations, and more. This is available in `zio.ev` and
 can be also used separately from the rest of the library. This switch was motivated by with Zig 0.16 which
 removed a lot of lower-level I/O APIs, so it was hard to upgrade `libxev`, but in the end, I'm glad I did it.
 The new event loop is more feature complete, more efficient, and more flexible.
 
 The coroutine library has also been restructured, and it's now available in `zio.coro`.
 I've added support for riscv64 and loongarch64 CPUs. Stack allocation has been completel rewritten,
-it now properly allocates vitual memory from the operating system, marks guard pages and we also have
+it now properly allocates virtual memory from the operating system, marks guard pages and we also have
 signal handlers for growing the virtual memory reservation on demand. Coroutines now start with 64KiB
 of stack space, and grow dynamically as needed.
 
@@ -1050,7 +1050,7 @@ and you want to make sure it gets cancelled if it doesn't complete in a timely m
 in HTTP request handlers.
 
 Many networking APIs now have direct timeout support. Additionally, in `zio.net.Stream.Reader` and
-`zio.net.Stream.Writer`, you can call `setTimeout()` and it will make sure the underlaying 
+`zio.net.Stream.Writer`, you can call `setTimeout()` and it will make sure the underlying 
 `std.Io.Reader` or `std.Io.Writer` doesn't block for too long. This is similar to
 POSIX socket read/write timeouts, but also supports absolute deadlines.
 
