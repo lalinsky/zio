@@ -153,11 +153,11 @@ pub const FileStatInfo = struct {
     /// expose this (e.g. Windows).
     block_size: u32,
     /// Access time in nanoseconds since Unix epoch
-    atime: i64,
+    atime: i96,
     /// Modification time in nanoseconds since Unix epoch
-    mtime: i64,
+    mtime: i96,
     /// Change time (POSIX) / Creation time (Windows) in nanoseconds since Unix epoch
-    ctime: i64,
+    ctime: i96,
 };
 
 pub const FileOpenMode = enum {
@@ -732,6 +732,9 @@ pub const FileSetTimestampsError = error{
     ReadOnlyFileSystem,
     Canceled,
     Unexpected,
+    /// The requested timestamp cannot be represented by the platform's
+    /// timestamp API: timespec.sec on POSIX, FILETIME on Windows.
+    TimestampOutOfRange,
 };
 
 /// Open an existing file using openat() syscall
@@ -2573,8 +2576,8 @@ fn statToFileStat(stat_buf: posix.system.Stat) FileStatInfo {
     };
 }
 
-fn timespecToNanos(ts: posix.system.timespec) i64 {
-    return @as(i64, ts.sec) * std.time.ns_per_s + ts.nsec;
+fn timespecToNanos(ts: posix.system.timespec) i96 {
+    return @as(i96, ts.sec) * std.time.ns_per_s + ts.nsec;
 }
 
 fn statxToFileStat(statx_buf: std.os.linux.Statx) FileStatInfo {
@@ -2603,8 +2606,8 @@ fn statxToFileStat(statx_buf: std.os.linux.Statx) FileStatInfo {
     };
 }
 
-fn statxTimeToNanos(ts: std.os.linux.statx_timestamp) i64 {
-    return @as(i64, ts.sec) * std.time.ns_per_s + ts.nsec;
+fn statxTimeToNanos(ts: std.os.linux.statx_timestamp) i96 {
+    return @as(i96, ts.sec) * std.time.ns_per_s + ts.nsec;
 }
 
 pub fn errnoToFileStatError(errno: posix.system.E) FileStatError {
@@ -2780,19 +2783,28 @@ pub const FileTimestamps = struct {
     mtime: SetTimestamp = .unchanged,
 };
 
-fn setTimestampToTimespec(timestamp: SetTimestamp) posix.system.timespec {
+fn setTimestampToTimespec(timestamp: SetTimestamp) FileSetTimestampsError!posix.system.timespec {
     return switch (timestamp) {
         .unchanged => posix.system.UTIME.OMIT,
         .now => posix.system.UTIME.NOW,
-        .new => |ns| .{ .sec = @intCast(@divFloor(ns, std.time.ns_per_s)), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) },
+        .new => |ns| blk: {
+            const sec = @divFloor(ns, std.time.ns_per_s);
+            const Sec = @TypeOf(@as(posix.system.timespec, undefined).sec);
+            // statx can hand back seconds the platform's timespec cannot
+            // store (i64 sec read on a 32-bit target); narrow only after
+            // checking, so a stat result never panics on write-back.
+            if (sec > std.math.maxInt(Sec) or sec < std.math.minInt(Sec))
+                return error.TimestampOutOfRange;
+            break :blk .{ .sec = @intCast(sec), .nsec = @intCast(@mod(ns, std.time.ns_per_s)) };
+        },
     };
 }
 
-fn setTimestampToFileTime(timestamp: SetTimestamp, now: w.FILETIME) ?w.FILETIME {
+fn setTimestampToFileTime(timestamp: SetTimestamp, now: w.FILETIME) FileSetTimestampsError!?w.FILETIME {
     return switch (timestamp) {
         .unchanged => null,
         .now => now,
-        .new => |ns| w.nanosToFileTime(ns),
+        .new => |ns| w.nanosToFileTime(ns) catch |e| return e,
     };
 }
 
@@ -2804,8 +2816,8 @@ pub fn fileSetTimestamps(fd: fd_t, timestamps: FileTimestamps) FileSetTimestamps
         else
             0;
         const now: w.FILETIME = .{ .dwLowDateTime = @truncate(now_ticks), .dwHighDateTime = @truncate(now_ticks >> 32) };
-        const atime = setTimestampToFileTime(timestamps.atime, now);
-        const mtime = setTimestampToFileTime(timestamps.mtime, now);
+        const atime = try setTimestampToFileTime(timestamps.atime, now);
+        const mtime = try setTimestampToFileTime(timestamps.mtime, now);
 
         if (w.SetFileTime(
             fd,
@@ -2823,8 +2835,8 @@ pub fn fileSetTimestamps(fd: fd_t, timestamps: FileTimestamps) FileSetTimestamps
     }
 
     const times: [2]posix.system.timespec = .{
-        setTimestampToTimespec(timestamps.atime),
-        setTimestampToTimespec(timestamps.mtime),
+        try setTimestampToTimespec(timestamps.atime),
+        try setTimestampToTimespec(timestamps.mtime),
     };
 
     const sc = try syscall_cancel.Syscall.begin();
@@ -2928,8 +2940,8 @@ pub fn dirSetFileTimestamps(dir: fd_t, path: []const u8, timestamps: FileTimesta
     defer path_buf.deinit();
 
     const times: [2]posix.system.timespec = .{
-        setTimestampToTimespec(timestamps.atime),
-        setTimestampToTimespec(timestamps.mtime),
+        try setTimestampToTimespec(timestamps.atime),
+        try setTimestampToTimespec(timestamps.mtime),
     };
 
     const at_flags: u32 = if (!flags.follow_symlinks) posix.AT.SYMLINK_NOFOLLOW else 0;
@@ -3829,4 +3841,45 @@ fn ioctlWindows(handle: fd_t, code: std.os.windows.CTL_CODE, in: []const u8, out
         io_status.Information = 0;
     }
     return io_status;
+}
+
+test "timespecToNanos converts exactly outside the i64 nanosecond range" {
+    // windows.zig has no timespec; the conversion is POSIX-only.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    // Targets with a 32-bit timespec.sec (most 32-bit POSIX) cannot even
+    // build the large value; the i96 path is covered by statx below.
+    const Sec = @TypeOf(@as(posix.system.timespec, undefined).sec);
+    if (@as(i96, std.math.maxInt(Sec)) < 16_000_000_000) return error.SkipZigTest;
+    const ts: posix.system.timespec = .{ .sec = 16_000_000_000, .nsec = 500_000_000 };
+    try std.testing.expectEqual(@as(i96, 16_000_000_000 * std.time.ns_per_s + 500_000_000), timespecToNanos(ts));
+}
+
+test "statxTimeToNanos converts exactly outside the i64 nanosecond range" {
+    // statx timestamps use i64 sec on every target, including 32-bit,
+    // so this test keeps the large-value conversion covered there.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var ts: std.os.linux.statx_timestamp = std.mem.zeroes(std.os.linux.statx_timestamp);
+    ts.sec = 16_000_000_000;
+    ts.nsec = 500_000_000;
+    try std.testing.expectEqual(@as(i96, 16_000_000_000 * std.time.ns_per_s + 500_000_000), statxTimeToNanos(ts));
+}
+
+test "setTimestampToTimespec rejects seconds the platform timespec cannot store" {
+    // windows.zig has no timespec; the conversion is POSIX-only.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const Sec = @TypeOf(@as(posix.system.timespec, undefined).sec);
+    // The largest second value the platform can represent is accepted.
+    const max_ns: i96 = @as(i96, std.math.maxInt(Sec)) * std.time.ns_per_s;
+    const max_ts = try setTimestampToTimespec(.{ .new = max_ns });
+    try std.testing.expectEqual(@as(Sec, std.math.maxInt(Sec)), max_ts.sec);
+    // 12e9 seconds is year 2350: accepted exactly when the platform's
+    // sec type can hold it (x86 NetBSD has a 64-bit sec on a 32-bit target).
+    const year_2350: i96 = 12_000_000_000 * std.time.ns_per_s + 500_000_000;
+    if (@as(i96, std.math.maxInt(Sec)) >= 12_000_000_000) {
+        _ = try setTimestampToTimespec(.{ .new = year_2350 });
+    } else {
+        try std.testing.expectError(error.TimestampOutOfRange, setTimestampToTimespec(.{ .new = year_2350 }));
+    }
+    // minInt(i96) seconds is far below every platform's representable range.
+    try std.testing.expectError(error.TimestampOutOfRange, setTimestampToTimespec(.{ .new = std.math.minInt(i96) }));
 }
