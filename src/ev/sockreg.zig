@@ -1,25 +1,34 @@
 // SPDX-FileCopyrightText: 2025 Lukáš Lalinský
 // SPDX-License-Identifier: MIT
 
-//! Shared cross-loop socket registration table (single-owner model).
+//! Per-loop socket readiness registrations for the edge-triggered backends
+//! (epoll, kqueue).
 //!
-//! A socket fd is monitored in the poller (epoll/kqueue) of exactly *one* loop
-//! per direction — the loop that first parked on that `(fd, direction)`. That
-//! loop is the "owner": it gets the readiness edges and services every waiter,
-//! including completions that were submitted on other loops and handed over at
-//! submit time. This avoids registering the same fd on every loop's poller
-//! (which task migration would otherwise cause) while staying correct when a
-//! socket is driven from different loops over its life.
+//! Each loop registers a socket with its own poller, edge-triggered and
+//! persistent, the first time one of its own completions waits on it, and only
+//! ever services its own completions, on its own thread. A socket used from
+//! several loops is registered with each of them, and every readiness edge
+//! reaches every poller it is registered with.
 //!
-//! The table is backend-agnostic: it tracks ownership, a per-direction edge
-//! readiness latch, and the parked-completion queues. The actual poller syscall
-//! (epoll_ctl / kevent) is issued by the backend while holding the fd's shard
-//! lock. Read and write are tracked independently so a reader on loop A and a
-//! writer on loop B can each own their own direction of the same socket.
+//! No wakeup can be lost: a completion parks only after its own syscall (or a
+//! readiness probe) saw the socket not ready, on its loop's thread. Anything
+//! that arrives after that raises an edge in this loop's poller, which the loop
+//! cannot harvest before it returns to its poll, so not before the completion is
+//! parked. Registering a socket, or adding a direction to it, reports readiness
+//! that already exists.
 //!
-//! Entries are keyed by fd and live until the socket is closed (`removeFd`),
-//! which any loop may call: closing the fd removes it from every poller at the
-//! kernel level, so teardown only has to drop the software bookkeeping.
+//! A registration no local completion uses any more is dropped lazily. Every
+//! park sets its direction's `used` bit; an edge that finds no waiter in that
+//! direction clears the bit, and a second such edge removes the direction from
+//! the poller. A socket that stays on one loop keeps its registration, and one
+//! whose tasks moved to other loops costs this loop at most two spurious edges.
+//!
+//! The group-shared `Table` only records which loops have a socket registered,
+//! so that closing it, from any thread, can remove it from each of their pollers
+//! before the fd is gone. The fd is the only handle a registration can be
+//! removed by, and an epoll registration on a description that outlives the
+//! close (dup, fork) would otherwise keep firing for whatever reuses the fd
+//! number.
 
 const std = @import("std");
 const os = @import("../os/root.zig");
@@ -43,54 +52,64 @@ const log = @import("../common.zig").log;
 
 pub const Dir = enum(u1) { read, write };
 
-pub fn other(dir: Dir) Dir {
-    return switch (dir) {
-        .read => .write,
-        .write => .read,
-    };
+/// A set of directions, one bit per `Dir`.
+pub const Dirs = u2;
+
+pub fn dirBit(dir: Dir) Dirs {
+    return @as(Dirs, 1) << @backingInt(dir);
 }
 
-/// Per-fd registration record. `owner`/`ready`/`waiters` are split per direction
-/// but kept in one entry so a single shard lock covers the whole fd and a close
-/// drops both directions at once.
+/// Most loops one group can have with a socket registration table.
+pub const max_loops = 64;
+
+/// Width of a registration's generation, as carried in the poller's event data
+/// (epoll's u64 above the fd and the socket tag, kqueue's udata on 32-bit too).
+pub const gen_bits = 30;
+pub const Gen = @Int(.unsigned, gen_bits);
+
+/// One loop's registration of one socket.
 pub const Entry = struct {
-    /// The backend instance whose poller has this fd registered for the
-    /// direction, or null if no loop is registered for it yet.
-    read_owner: ?*anyopaque = null,
-    write_owner: ?*anyopaque = null,
-    /// Edge-triggered readiness latch: set when an edge fired but no waiter
-    /// consumed it, so a parker that raced the edge retries instead of sleeping.
-    read_ready: bool = false,
-    write_ready: bool = false,
-    /// Completions parked on this fd/direction, serviced by the owner.
-    read_waiters: Queue(Completion) = .{},
-    write_waiters: Queue(Completion) = .{},
+    /// Completions of this loop parked on the socket, per direction.
+    waiters: [2]Queue(Completion) = .{ .{}, .{} },
+    /// Directions registered with this loop's poller.
+    registered: Dirs = 0,
+    /// Directions a completion parked on since the last edge that found no
+    /// waiter in them.
+    used: Dirs = 0,
+    /// Tags this registration's events, so an event harvested before the socket
+    /// was closed and its fd number reused is not applied to the new socket.
+    gen: Gen,
+};
 
-    pub fn ownerPtr(self: *Entry, dir: Dir) *?*anyopaque {
-        return switch (dir) {
-            .read => &self.read_owner,
-            .write => &self.write_owner,
-        };
+/// One loop's registrations. Only the loop's own thread touches it, except a
+/// close, which may run on any thread; the mutex is for that.
+pub const Local = struct {
+    mutex: os.Mutex = .init(),
+    entries: std.AutoHashMapUnmanaged(u32, Entry) = .empty,
+    next_gen: Gen = 0,
+    /// Bit of this loop in the table's per-fd masks.
+    index: u6,
+    /// The poller (epoll or kqueue fd) the registrations live in.
+    poller_fd: i32,
+    table: *Table,
+
+    fn key(fd: net.fd_t) u32 {
+        return @bitCast(fd);
     }
 
-    pub fn readyPtr(self: *Entry, dir: Dir) *bool {
-        return switch (dir) {
-            .read => &self.read_ready,
-            .write => &self.write_ready,
-        };
-    }
-
-    pub fn waiters(self: *Entry, dir: Dir) *Queue(Completion) {
-        return switch (dir) {
-            .read => &self.read_waiters,
-            .write => &self.write_waiters,
-        };
-    }
-
-    /// Whether the entry has nothing left to track and can be dropped.
-    pub fn isEmpty(self: *const Entry) bool {
-        return self.read_owner == null and self.write_owner == null and
-            self.read_waiters.head == null and self.write_waiters.head == null;
+    /// Drop `fd` for a close. The table's mask bit is already gone.
+    fn purge(self: *Local, fd: net.fd_t) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const removed = self.entries.fetchRemove(key(fd)) orelse return;
+        // Closing an fd with ops still parked on it would orphan those
+        // completions (removed here without finishing) and leak their
+        // active/inflight accounting. The contract is that callers cancel or
+        // await outstanding socket ops before closing the fd; assert it so a
+        // violation surfaces in safe builds rather than silently leaking.
+        std.debug.assert(removed.value.waiters[0].head == null);
+        std.debug.assert(removed.value.waiters[1].head == null);
+        if (removed.value.registered != 0) self.table.forget_fn(self.poller_fd, fd);
     }
 };
 
@@ -98,48 +117,73 @@ const shard_count = 64; // power of two
 
 pub const Shard = struct {
     mutex: os.Mutex = .init(),
-    map: std.AutoHashMapUnmanaged(u32, Entry) = .empty,
+    /// fd -> mask of the loops (`Local.index`) that have it registered.
+    map: std.AutoHashMapUnmanaged(u32, u64) = .empty,
 };
 
-/// Sharded fd -> Entry table shared by every loop in a group. Loops acquire it
-/// on init and release it on deinit; the maps are freed when the last loop goes.
-/// A table with live loops is linked into `live_tables`, so a socket closed by a
-/// thread that runs no loop can still be purged from it (`purgeAll`).
+/// Per-group record of which loops have which sockets registered. Loops acquire
+/// it on init and release it on deinit. A table with live loops is linked into
+/// `live_tables`, so a socket closed by a thread that runs no loop can still be
+/// purged from it (`purgeAll`).
+///
+/// Lock order: a shard's mutex, then a `Local`'s. A loop never holds its own
+/// mutex while taking a shard's.
 pub const Table = struct {
     mutex: os.Mutex = .init(),
     refcount: usize = 0,
     allocator: std.mem.Allocator = undefined,
     shards: [shard_count]Shard = @splat(.{}),
+    locals: [max_loops]?*Local = @splat(null),
     /// Link in `live_tables`, guarded by `live_tables_mutex`.
     next_live: ?*Table = null,
-    /// Removes an fd from an owner's poller; the owner is the backend instance
-    /// that registered it.
-    unregister_fn: *const fn (owner: *anyopaque, fd: net.fd_t) void = undefined,
+    /// Removes an fd from a poller, for a close; set by the backend.
+    forget_fn: *const fn (poller_fd: i32, fd: net.fd_t) void = undefined,
 
-    pub fn acquire(self: *Table, allocator: std.mem.Allocator, comptime Backend: type) void {
+    /// Register a loop whose poller is `poller_fd`. `Backend.forgetSocket`
+    /// removes an fd from such a poller before it is closed.
+    pub fn acquire(self: *Table, allocator: std.mem.Allocator, comptime Backend: type, poller_fd: i32) error{ OutOfMemory, TooManyLoops }!*Local {
         live_tables_mutex.lock();
         defer live_tables_mutex.unlock();
         self.mutex.lock();
         defer self.mutex.unlock();
         if (self.refcount == 0) {
             self.allocator = allocator;
-            self.unregister_fn = struct {
-                fn unregister(owner: *anyopaque, fd: net.fd_t) void {
-                    const backend: *Backend = @ptrCast(@alignCast(owner));
-                    backend.unregisterCleanup(fd);
-                }
-            }.unregister;
+            self.forget_fn = Backend.forgetSocket;
+        }
+        const index = std.mem.indexOfScalar(?*Local, &self.locals, null) orelse return error.TooManyLoops;
+        const local = try self.allocator.create(Local);
+        local.* = .{ .index = @intCast(index), .poller_fd = poller_fd, .table = self };
+        self.locals[index] = local;
+        if (self.refcount == 0) {
             self.next_live = live_tables;
             live_tables = self;
         }
         self.refcount += 1;
+        return local;
     }
 
-    pub fn release(self: *Table) void {
+    /// Unregister a loop. Its poller is about to be closed, which drops its
+    /// registrations in the kernel; this drops them from the table.
+    pub fn release(self: *Table, local: *Local) void {
+        // Clear the loop's bits from the masks rather than walking its entries:
+        // a close on another thread may be removing entries meanwhile. Once a
+        // shard has no bit of this loop, no purge reaches `local` through it.
+        // A mask left at zero is dropped by the fd's close.
+        const bit = @as(u64, 1) << local.index;
+        for (&self.shards) |*shard| {
+            shard.mutex.lock();
+            defer shard.mutex.unlock();
+            var it = shard.map.valueIterator();
+            while (it.next()) |mask| mask.* &= ~bit;
+        }
+
         live_tables_mutex.lock();
         defer live_tables_mutex.unlock();
         self.mutex.lock();
         defer self.mutex.unlock();
+        self.locals[local.index] = null;
+        local.entries.deinit(self.allocator);
+        self.allocator.destroy(local);
         self.refcount -= 1;
         if (self.refcount == 0) {
             var link: *?*Table = &live_tables;
@@ -157,37 +201,49 @@ pub const Table = struct {
         }
     }
 
-    pub fn shardForFd(self: *Table, fd: i32) *Shard {
-        const key: u32 = @bitCast(fd);
+    fn shardFor(self: *Table, key: u32) *Shard {
         return &self.shards[key & (shard_count - 1)];
     }
 
-    /// Drop `fd`'s entry and remove it from the poller of every loop that owns
-    /// a direction of it. Must run before the fd is closed: the fd is the only
-    /// handle a poller registration can be removed by, and a registration on a
-    /// description that outlives the close (dup, fork) would otherwise keep
-    /// firing for whatever reuses the fd number.
-    fn purge(self: *Table, fd: net.fd_t) void {
-        const shard = self.shardForFd(fd);
+    /// Remove `fd` from every loop that has it registered. Must run before the
+    /// fd is closed.
+    pub fn purge(self: *Table, fd: net.fd_t) void {
+        const shard = self.shardFor(Local.key(fd));
         shard.mutex.lock();
-        const removed = shard.map.fetchRemove(@as(u32, @bitCast(fd)));
-        shard.mutex.unlock();
-        var entry = (removed orelse return).value;
-
-        // Closing an fd with ops still parked on it would orphan those
-        // completions (removed here without finishing) and leak their
-        // active/inflight accounting. The contract is that callers cancel or
-        // await outstanding socket ops before closing the fd; assert it so a
-        // violation surfaces in safe builds rather than silently leaking.
-        std.debug.assert(entry.waiters(.read).head == null);
-        std.debug.assert(entry.waiters(.write).head == null);
-
-        if (entry.read_owner) |owner| self.unregister_fn(owner, fd);
-        if (entry.write_owner) |owner| {
-            if (owner != entry.read_owner) self.unregister_fn(owner, fd);
+        defer shard.mutex.unlock();
+        const removed = shard.map.fetchRemove(Local.key(fd)) orelse return;
+        var mask = removed.value;
+        // Under the shard mutex, so a loop's `release` (which clears its bits
+        // under the same mutex first) cannot free a `Local` we reach here.
+        while (mask != 0) : (mask &= mask - 1) {
+            const index: u6 = @intCast(@ctz(mask));
+            self.locals[index].?.purge(fd);
         }
     }
+
+    fn setBit(self: *Table, fd: net.fd_t, bit: u64) bool {
+        const shard = self.shardFor(Local.key(fd));
+        shard.mutex.lock();
+        defer shard.mutex.unlock();
+        const gop = shard.map.getOrPut(self.allocator, Local.key(fd)) catch return false;
+        if (!gop.found_existing) gop.value_ptr.* = 0;
+        gop.value_ptr.* |= bit;
+        return true;
+    }
+
+    fn unsetBit(self: *Table, fd: net.fd_t, bit: u64) void {
+        const shard = self.shardFor(Local.key(fd));
+        shard.mutex.lock();
+        defer shard.mutex.unlock();
+        clearBit(shard, Local.key(fd), bit);
+    }
 };
+
+fn clearBit(shard: *Shard, key: u32, bit: u64) void {
+    const mask = shard.map.getPtr(key) orelse return;
+    mask.* &= ~bit;
+    if (mask.* == 0) _ = shard.map.remove(key);
+}
 
 var live_tables_mutex: os.Mutex = .init();
 var live_tables: ?*Table = null;
@@ -201,29 +257,24 @@ pub fn purgeAll(fd: net.fd_t) void {
     while (it) |table| : (it = table.next_live) table.purge(fd);
 }
 
-// ---- generic single-owner socket path ---------------------------------------
+// ---- generic socket path ----------------------------------------------------
 //
 // The control flow below is identical for epoll and kqueue; only the poller
-// syscalls differ. Each backend supplies four hooks and these helpers drive the
-// shared registration/parking/servicing logic:
+// syscalls differ. Each backend supplies these hooks:
 //
 //   * checkCompletion(c, event) CheckResult  - run the op's syscall (free fn)
 //   * probeEvent(fd, dir) Event              - a no-error event for the
 //                                              optimistic attempt (free fn)
-//   * self.registerSocket(fd, dir, other_owned_here) bool - arm this loop's
-//                                              poller for (fd, dir)
-//   * self.unregisterCleanup(fd) void        - drop this loop's poller entry
+//   * self.setInterest(fd, old, new, gen) bool - change the directions `fd` is
+//                                              registered for in this loop's
+//                                              poller (adding, modifying, or
+//                                              removing it)
+//   * forgetSocket(poller_fd, fd) void       - remove `fd` from a poller before
+//                                              it is closed, from any thread
+//                                              (free fn)
 //
-// `self` is the backend, `state` is its *LoopState.
-
-pub const ParkResult = enum {
-    /// Completion parked in the owner loop's waiter queue.
-    parked,
-    /// A readiness edge raced us; the caller should retry the syscall.
-    retry,
-    /// Registration/allocation failed; completion already finished with an error.
-    failed,
-};
+// `self` is the backend, with its `Local` in `self.socks`; `state` is its
+// *LoopState.
 
 pub fn isSocketOp(op: Op) bool {
     return switch (op) {
@@ -276,196 +327,179 @@ pub fn netHandle(c: *Completion) net.fd_t {
     };
 }
 
-/// Finish a completion that could not be parked. A native sendfile that already
-/// sent part of the request reports what it sent, as on cancel (see NetSendFile).
-fn failPark(state: anytype, completion: *Completion) void {
-    const SendFileData = @FieldType(NetSendFile, "internal");
-    if (comptime @hasField(SendFileData, "sent")) {
-        if (completion.op == .net_send_file) {
-            const sent = completion.cast(NetSendFile).internal.sent;
-            if (sent > 0) {
-                completion.setResult(.net_send_file, sent);
-                state.markCompletedFromBackend(completion);
-                return;
-            }
-        }
-    }
-    completion.setError(error.Unexpected);
-    state.markCompletedFromBackend(completion);
-}
-
-/// Park `completion` on the loop that owns `(fd, dir)`, registering this loop as
-/// the owner if nobody is yet. If the owner is a different loop, the completion
-/// (and its accounting) is migrated to it. Returns `.retry` if a readiness edge
-/// raced the optimistic syscall.
-pub fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion) ParkResult {
+/// Park `completion` in this loop's waiters for its socket, registering the
+/// socket (or the direction) with this loop's poller if it is not yet. If that
+/// fails, finishes the completion with an error instead.
+fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion) void {
+    const local: *Local = self.socks;
     const dir = dirForOp(completion);
-    const self_opaque: *anyopaque = @ptrCast(self);
-    const table = &self.shared.sock_table;
-    const shard = table.shardForFd(fd);
+    const bit = dirBit(dir);
 
-    shard.mutex.lock();
-    const gop = shard.map.getOrPut(table.allocator, @as(u32, @bitCast(fd))) catch {
-        shard.mutex.unlock();
-        log.err("sock registration table OOM", .{});
-        failPark(state, completion);
-        return .failed;
-    };
-    if (!gop.found_existing) gop.value_ptr.* = .{};
-    const entry = gop.value_ptr;
-    const created = !gop.found_existing;
-
-    // A readiness edge fired since our optimistic syscall: retry instead of
-    // sleeping (the data the edge announced is still in the socket buffer).
-    const ready = entry.readyPtr(dir);
-    if (ready.*) {
-        ready.* = false;
-        if (created and entry.isEmpty()) _ = shard.map.remove(@as(u32, @bitCast(fd)));
-        shard.mutex.unlock();
-        return .retry;
-    }
-
-    const owner = entry.ownerPtr(dir);
-    if (owner.* == null) {
-        const other_owned_here = entry.ownerPtr(other(dir)).* == self_opaque;
-        if (!self.registerSocket(fd, dir, other_owned_here)) {
-            if (created and entry.isEmpty()) _ = shard.map.remove(@as(u32, @bitCast(fd)));
-            shard.mutex.unlock();
-            failPark(state, completion);
-            return .failed;
-        }
-        owner.* = self_opaque;
-    }
-
-    // The completion stays owned by its submitting loop: its `loop` field, timeout
-    // timer, and cancel routing are unchanged. The owner loop only holds the
-    // poller registration and services the op in place when its edge fires,
-    // completing it cross-thread through the synchronized completion machinery.
-    // Accounting balances regardless of which loop finishes the op (the owner on
-    // a readiness edge, or the submitter on cancel/timeout): the active decrement
-    // is routed to `completion.loop` and the inflight storage is group-shared.
-    completion.prev = null;
-    completion.next = null;
-    entry.waiters(dir).push(completion);
-    shard.mutex.unlock();
-    return .parked;
-}
-
-/// Service ready waiters for one (fd, dir) on the owner loop. Runs each waiter's
-/// syscall under the shard lock (non-blocking), collects the finished ones, then
-/// completes them after unlocking (completing can resume a fiber re-entrantly).
-pub fn service(self: anytype, state: anytype, fd: net.fd_t, dir: Dir, event: anytype) void {
-    const Backend = @TypeOf(self.*);
-    const shard = self.shared.sock_table.shardForFd(fd);
-    shard.mutex.lock();
-    const entry = shard.map.getPtr(@as(u32, @bitCast(fd))) orelse {
-        shard.mutex.unlock();
+    local.mutex.lock();
+    const gop = local.entries.getOrPut(local.table.allocator, Local.key(fd)) catch {
+        local.mutex.unlock();
+        log.err("socket registration table OOM", .{});
+        completion.setError(error.Unexpected);
+        state.markCompletedFromBackend(completion);
         return;
     };
-
-    // Latch a readiness edge that no waiter consumed so a racing parker
-    // retries instead of sleeping for an edge that already passed.
-    entry.readyPtr(dir).* = entry.waiters(dir).head == null;
-
-    var to_finish: Queue(Completion) = .{};
-    var iter: ?*Completion = entry.waiters(dir).head;
-    while (iter) |c| {
-        iter = c.next;
-        // Both ways out of the queue (this loop and `detach`) unlink the op
-        // before it is marked completed, so a parked op is always running.
-        std.debug.assert(c.loadState().phase == .running);
-        switch (Backend.checkCompletion(c, event)) {
-            .completed => {
-                // `detach` relies on this: the result is set under the shard
-                // lock, in the same critical section that unlinks the op.
-                std.debug.assert(c.has_result);
-                _ = entry.waiters(dir).remove(c);
-                to_finish.push(c);
-            },
-            .requeue => {
-                std.debug.assert(!c.has_result);
-                break; // drained to EAGAIN for this direction
-            },
-        }
+    if (!gop.found_existing) {
+        gop.value_ptr.* = .{ .gen = local.next_gen };
+        local.next_gen +%= 1;
     }
-    shard.mutex.unlock();
+    const entry = gop.value_ptr;
+    const newly_registered = entry.registered == 0;
+    if (entry.registered & bit == 0) {
+        if (!self.setInterest(fd, entry.registered, entry.registered | bit, entry.gen)) {
+            if (newly_registered) _ = local.entries.remove(Local.key(fd));
+            local.mutex.unlock();
+            completion.setError(error.Unexpected);
+            state.markCompletedFromBackend(completion);
+            return;
+        }
+        entry.registered |= bit;
+    }
+    entry.used |= bit;
+    completion.prev = null;
+    completion.next = null;
+    entry.waiters[@backingInt(dir)].push(completion);
+    local.mutex.unlock();
+
+    // The table only needs the bit by the time the socket is closed, and a
+    // close cannot race an op parked on it; set it outside the loop's mutex to
+    // keep the lock order (see `Table`).
+    if (newly_registered and !local.table.setBit(fd, @as(u64, 1) << local.index)) {
+        // Without the bit a close would leave the registration behind, so undo
+        // it. Nothing else can have touched the entry: only this thread parks
+        // or services on it.
+        log.err("socket registration table OOM", .{});
+        local.mutex.lock();
+        const entry_now = local.entries.getPtr(Local.key(fd)).?;
+        const removed = entry_now.waiters[@backingInt(dir)].remove(completion);
+        std.debug.assert(removed);
+        _ = self.setInterest(fd, entry_now.registered, 0, entry_now.gen);
+        _ = local.entries.remove(Local.key(fd));
+        local.mutex.unlock();
+        completion.setError(error.Unexpected);
+        state.markCompletedFromBackend(completion);
+    }
+}
+
+/// Handle a readiness event for `fd` on this loop: service the parked
+/// completions in the `ready` directions, or count an idle edge where there are
+/// none. Runs each waiter's syscall under the loop's mutex (non-blocking),
+/// collects the finished ones, then completes them after unlocking (completing
+/// can run callbacks that submit, cancel or close re-entrantly).
+pub fn onEvent(self: anytype, state: anytype, fd: net.fd_t, gen: Gen, ready: Dirs, event: anytype) void {
+    const Backend = @TypeOf(self.*);
+    const local: *Local = self.socks;
+    var to_finish: Queue(Completion) = .{};
+    var dropped = false;
+
+    local.mutex.lock();
+    if (local.entries.getPtr(Local.key(fd))) |entry| if (entry.gen == gen) {
+        inline for (.{ Dir.read, Dir.write }) |dir| {
+            const bit = dirBit(dir);
+            if (ready & entry.registered & bit != 0) {
+                const waiters = &entry.waiters[@backingInt(dir)];
+                if (waiters.head == null) {
+                    if (entry.used & bit != 0) {
+                        entry.used &= ~bit;
+                    } else {
+                        const remaining = entry.registered & ~bit;
+                        if (!self.setInterest(fd, entry.registered, remaining, entry.gen)) {
+                            log.err("failed to drop an idle socket registration", .{});
+                        }
+                        entry.registered = remaining;
+                    }
+                } else {
+                    var iter: ?*Completion = waiters.head;
+                    while (iter) |c| {
+                        iter = c.next;
+                        // Both ways out of the queue (this loop and `detach`)
+                        // unlink the op before it is marked completed, so a
+                        // parked op is always running.
+                        std.debug.assert(c.loadState().phase == .running);
+                        switch (Backend.checkCompletion(c, event)) {
+                            .completed => {
+                                // `detach` relies on this: the result is set in
+                                // the same critical section that unlinks the op.
+                                std.debug.assert(c.has_result);
+                                _ = waiters.remove(c);
+                                to_finish.push(c);
+                            },
+                            .requeue => {
+                                std.debug.assert(!c.has_result);
+                                break; // not ready for this direction
+                            },
+                        }
+                    }
+                }
+            }
+        }
+        if (entry.registered == 0) {
+            std.debug.assert(entry.waiters[0].head == null and entry.waiters[1].head == null);
+            _ = local.entries.remove(Local.key(fd));
+            dropped = true;
+        }
+    };
+    local.mutex.unlock();
+
+    if (dropped) local.table.unsetBit(fd, @as(u64, 1) << local.index);
 
     while (to_finish.pop()) |c| {
         state.markCompletedFromBackend(c);
     }
 }
 
-/// Detach a parked socket completion from its owner's waiter queue (cancel).
+/// Detach a parked socket completion from this loop's waiters (cancel).
 ///
 /// Returns true if `target` was still parked and this call removed it, meaning
 /// the caller now owns it and must finish it. Returns false if it was already
-/// gone, i.e. `service` claimed it and is completing it with its natural result;
-/// the caller must then leave it alone.
+/// gone: `onEvent` claimed it and is completing it with its natural result, and
+/// a callback it ran is canceling it re-entrantly. The caller must then leave it
+/// alone.
 ///
-/// The shard lock makes that answer exact rather than advisory: `service` runs
-/// the syscall and sets the result while holding the same lock it removes the
-/// waiter under, so "still in the queue" and "no result set yet" are the same
-/// condition. The answer is taken from `has_result`, not from the queue: an op
-/// `service` claimed sits in its private finish list, whose links it rewrites
-/// after unlocking, and `Queue.remove` would mistake a linked op there for a
-/// member of the waiter queue. Inferring it from the `.completed` phase would
-/// race, because `service` deliberately marks the op completed only after
-/// dropping the lock (a cancel pass could otherwise dispatch, and free, an op
-/// still linked in that finish list).
+/// The answer is taken from `has_result`, not from the queue: an op `onEvent`
+/// claimed sits in its private finish list, whose links it rewrites after
+/// unlocking, and `Queue.remove` would mistake a linked op there for a member
+/// of the waiter queue.
 pub fn detach(self: anytype, target: *Completion) bool {
-    const fd = netHandle(target);
-    const dir = dirForOp(target);
-    const shard = self.shared.sock_table.shardForFd(fd);
-    shard.mutex.lock();
-    defer shard.mutex.unlock();
+    const local: *Local = self.socks;
+    local.mutex.lock();
+    defer local.mutex.unlock();
     if (target.has_result) return false;
-    // A live parked op always has an entry: detach only runs while the op is not
-    // yet completed (loop.cancel and cancelLocal both bail on the `.completed`
-    // phase), and an entry is only dropped by `unregister` on close, which
-    // cannot happen until the op completes and wakes its owner. So this branch is
-    // unreachable in practice. Return false anyway (not true): a missing entry
-    // could only mean the waiter was already removed - i.e. `service` is finishing
-    // the op - so claiming it here would double-complete an op that is already on
-    // its way out. Leaving it alone is the safe default.
-    const entry = shard.map.getPtr(@as(u32, @bitCast(fd))) orelse return false;
-    // No result means the op is still parked here: submission is synchronous on
-    // the canceling loop's thread, so there is no half-submitted state to see.
-    const removed = entry.waiters(dir).remove(target);
+    // An op without a result is parked here: it was submitted on this loop, and
+    // its entry can only go away with its last waiter, or when the fd is
+    // closed, which the caller must not do with ops still in flight.
+    const entry = local.entries.getPtr(Local.key(netHandle(target))) orelse return false;
+    const removed = entry.waiters[@backingInt(dirForOp(target))].remove(target);
     std.debug.assert(removed);
     return removed;
 }
 
-/// Tear down the shared registration for a socket fd about to be closed, on a
-/// loop of the group the socket was used in.
+/// Remove a socket that is about to be closed from every loop of this group.
 pub fn unregister(self: anytype, fd: net.fd_t) void {
-    self.shared.sock_table.purge(fd);
+    const local: *Local = self.socks;
+    local.table.purge(fd);
 }
 
 /// Generic submit for socket read/write/accept-family ops: try the syscall
 /// optimistically (reusing checkCompletion with a no-error event) and only park
-/// on WouldBlock. Draining to EAGAIN first is what makes edge-triggered safe.
+/// on WouldBlock.
 pub fn submitIo(self: anytype, state: anytype, c: *Completion) void {
     const Backend = @TypeOf(self.*);
     const fd = netHandle(c);
-    const dir = dirForOp(c);
-    var probe = Backend.probeEvent(fd, dir);
-    while (true) {
-        switch (Backend.checkCompletion(c, &probe)) {
-            .completed => {
-                // Inline finish (flags permitting) lets a bulk sender batch
-                // until WouldBlock instead of paying a poll per chunk (#525).
-                state.markCompletedFromBackend(c);
-                return;
-            },
-            .requeue => switch (park(self, state, fd, c)) {
-                .parked, .failed => return,
-                .retry => {}, // loop and retry the syscall
-            },
-        }
+    var probe = Backend.probeEvent(fd, dirForOp(c));
+    switch (Backend.checkCompletion(c, &probe)) {
+        // Inline finish (flags permitting) lets a bulk sender batch until
+        // WouldBlock instead of paying a poll per chunk (#525).
+        .completed => state.markCompletedFromBackend(c),
+        .requeue => park(self, state, fd, c),
     }
 }
 
-/// Generic connect submit: try connect() first, register on WouldBlock.
+/// Generic connect submit: try connect() first, park on WouldBlock.
 pub fn submitConnect(self: anytype, state: anytype, c: *Completion) void {
     const data = c.cast(NetConnect);
     if (net.connect(data.handle, data.addr, data.addr_len)) |_| {
@@ -480,78 +514,83 @@ pub fn submitConnect(self: anytype, state: anytype, c: *Completion) void {
             return;
         },
     }
-    switch (park(self, state, data.handle, c)) {
-        .parked, .failed => {},
-        .retry => {
-            // The socket became writable while we raced: the connect finished.
-            if (net.getSockError(data.handle)) |se| {
-                if (se == 0) c.setResult(.net_connect, {}) else c.setError(net.errnoToConnectError(@fromBackingInt(@intCast(se))));
-            } else |_| c.setError(error.Unexpected);
-            state.markCompletedFromBackend(c);
-        },
-    }
+    park(self, state, data.handle, c);
 }
 
-/// Generic net_poll submit: probe readiness with a 0-timeout poll() (it has no
-/// I/O to drain, so it cannot rely on a fresh edge for an already-ready socket),
-/// and register for an edge only when not ready.
+/// Generic net_poll submit: probe readiness with a 0-timeout poll(), since it
+/// has no syscall of its own to see whether the socket is ready, and park only
+/// when it is not.
 pub fn submitPoll(self: anytype, state: anytype, c: *Completion) void {
     const data = c.cast(NetPoll);
     const want: i16 = switch (data.event) {
         .recv => std.posix.POLL.IN,
         .send => std.posix.POLL.OUT,
     };
-    while (true) {
-        var pfd = [_]std.posix.pollfd{.{ .fd = data.handle, .events = want, .revents = 0 }};
-        const ready = std.posix.poll(&pfd, 0) catch 0;
-        if (ready > 0 and (pfd[0].revents & (want | std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
-            c.setResult(.net_poll, {});
-            state.markCompletedFromBackend(c);
-            return;
-        }
-        switch (park(self, state, data.handle, c)) {
-            .parked, .failed => return,
-            .retry => {}, // re-probe
-        }
+    var pfd = [_]std.posix.pollfd{.{ .fd = data.handle, .events = want, .revents = 0 }};
+    const ready = std.posix.poll(&pfd, 0) catch 0;
+    if (ready > 0 and (pfd[0].revents & (want | std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
+        c.setResult(.net_poll, {});
+        state.markCompletedFromBackend(c);
+        return;
     }
+    park(self, state, data.handle, c);
 }
 
-test "sockreg: cancel of an op that service already finished leaves it alone" {
-    // service finishes A, B and C in one pass and leaves D parked. While it
-    // completes A, a cancel of B (still linked in service's finish list) must
+const TestBackend = struct {
+    socks: *Local = undefined,
+    interest: Dirs = 0,
+    interest_changes: usize = 0,
+
+    const Event = struct { requeue: ?*Completion = null };
+    const CheckResult = enum { completed, requeue };
+
+    pub fn checkCompletion(c: *Completion, event: *const Event) CheckResult {
+        if (c == event.requeue) return .requeue;
+        c.setResult(.net_recv, 1);
+        return .completed;
+    }
+
+    pub fn setInterest(self: *TestBackend, _: net.fd_t, old: Dirs, new: Dirs, _: Gen) bool {
+        std.debug.assert(old == self.interest);
+        self.interest = new;
+        self.interest_changes += 1;
+        return true;
+    }
+
+    pub fn forgetSocket(_: i32, _: net.fd_t) void {}
+};
+
+const TestState = struct {
+    backend: *TestBackend,
+    cancel_target: ?*Completion = null,
+    detached: ?bool = null,
+    finished: [4]?*Completion = @splat(null),
+    finished_count: usize = 0,
+
+    pub fn markCompletedFromBackend(self: *TestState, c: *Completion) void {
+        if (self.cancel_target) |target| {
+            if (self.detached == null) self.detached = detach(self.backend, target);
+        }
+        self.finished[self.finished_count] = c;
+        self.finished_count += 1;
+    }
+};
+
+fn testMask(table: *Table, fd: net.fd_t) u64 {
+    return table.shardFor(Local.key(fd)).map.get(Local.key(fd)) orelse 0;
+}
+
+test "sockreg: cancel of an op that onEvent already finished leaves it alone" {
+    // onEvent finishes A, B and C in one pass and leaves D parked. While it
+    // completes A, a cancel of B (still linked in onEvent's finish list) must
     // report it as already claimed, and must not touch the waiter queue.
     const ReadBuf = @import("buf.zig").ReadBuf;
     const fd: net.fd_t = 42;
 
-    const Event = struct { requeue: *Completion };
-
-    const FakeBackend = struct {
-        shared: struct { sock_table: Table = .{} } = .{},
-
-        const CheckResult = enum { completed, requeue };
-
-        pub fn unregisterCleanup(_: *@This(), _: net.fd_t) void {}
-
-        pub fn checkCompletion(c: *Completion, event: *const Event) CheckResult {
-            if (c == event.requeue) return .requeue;
-            c.setResult(.net_recv, 1);
-            return .completed;
-        }
-    };
-
-    const FakeState = struct {
-        backend: *FakeBackend,
-        cancel_target: *Completion,
-        detached: ?bool = null,
-        finished: [4]?*Completion = @splat(null),
-        finished_count: usize = 0,
-
-        pub fn markCompletedFromBackend(self: *@This(), c: *Completion) void {
-            if (self.detached == null) self.detached = detach(self.backend, self.cancel_target);
-            self.finished[self.finished_count] = c;
-            self.finished_count += 1;
-        }
-    };
+    var table: Table = .{};
+    var backend: TestBackend = .{};
+    backend.socks = try table.acquire(std.testing.allocator, TestBackend, -1);
+    defer table.release(backend.socks);
 
     var buf: [1]u8 = undefined;
     var iov: [1]os.iovec = undefined;
@@ -565,22 +604,18 @@ test "sockreg: cancel of an op that service already finished leaves it alone" {
     const c = &ops[2].c;
     const d = &ops[3].c;
 
-    var backend: FakeBackend = .{};
-    backend.shared.sock_table.acquire(std.testing.allocator, FakeBackend);
-    defer backend.shared.sock_table.release();
+    var state: TestState = .{ .backend = &backend, .cancel_target = b };
+    for ([_]*Completion{ a, b, c, d }) |op| park(&backend, &state, fd, op);
+    try std.testing.expectEqual(dirBit(.read), backend.interest);
+    try std.testing.expectEqual(@as(u64, 1) << backend.socks.index, testMask(&table, fd));
 
-    const shard = backend.shared.sock_table.shardForFd(fd);
-    const gop = try shard.map.getOrPut(std.testing.allocator, @as(u32, @bitCast(fd)));
-    gop.value_ptr.* = .{};
-    for ([_]*Completion{ a, b, c, d }) |op| gop.value_ptr.waiters(.read).push(op);
-
-    var state: FakeState = .{ .backend = &backend, .cancel_target = b };
-    service(&backend, &state, fd, .read, &Event{ .requeue = d });
+    const gen = backend.socks.entries.get(Local.key(fd)).?.gen;
+    onEvent(&backend, &state, fd, gen, dirBit(.read), &TestBackend.Event{ .requeue = d });
 
     try std.testing.expectEqual(false, state.detached.?);
     try std.testing.expectEqualSlices(?*Completion, &.{ a, b, c, null }, &state.finished);
 
-    const waiters = shard.map.getPtr(@as(u32, @bitCast(fd))).?.waiters(.read);
+    const waiters = &backend.socks.entries.getPtr(Local.key(fd)).?.waiters[@backingInt(Dir.read)];
     try std.testing.expectEqual(d, waiters.head.?);
     try std.testing.expectEqual(d, waiters.tail.?);
     try std.testing.expectEqual(null, d.next);
@@ -589,4 +624,41 @@ test "sockreg: cancel of an op that service already finished leaves it alone" {
     // D is still parked, so a cancel claims it.
     try std.testing.expect(detach(&backend, d));
     try std.testing.expectEqual(null, waiters.head);
+}
+
+test "sockreg: a registration is dropped after two edges with no waiter" {
+    const ReadBuf = @import("buf.zig").ReadBuf;
+    const fd: net.fd_t = 7;
+
+    var table: Table = .{};
+    var backend: TestBackend = .{};
+    backend.socks = try table.acquire(std.testing.allocator, TestBackend, -1);
+    defer table.release(backend.socks);
+
+    var buf: [1]u8 = undefined;
+    var iov: [1]os.iovec = undefined;
+    var op: NetRecv = .init(fd, ReadBuf.fromSlice(&buf, &iov), .{});
+    _ = op.c.enterRunning();
+
+    var state: TestState = .{ .backend = &backend };
+    park(&backend, &state, fd, &op.c);
+    try std.testing.expect(detach(&backend, &op.c));
+    const gen = backend.socks.entries.get(Local.key(fd)).?.gen;
+    const event: TestBackend.Event = .{};
+
+    // An event of an older registration of the same fd number is ignored.
+    onEvent(&backend, &state, fd, gen +% 1, dirBit(.read), &event);
+    try std.testing.expectEqual(dirBit(.read), backend.socks.entries.get(Local.key(fd)).?.used);
+
+    // The first idle edge only takes away the second chance the park gave.
+    onEvent(&backend, &state, fd, gen, dirBit(.read), &event);
+    try std.testing.expectEqual(dirBit(.read), backend.interest);
+    try std.testing.expectEqual(0, backend.socks.entries.get(Local.key(fd)).?.used);
+
+    // The second one drops the registration, and the table forgets the loop.
+    onEvent(&backend, &state, fd, gen, dirBit(.read), &event);
+    try std.testing.expectEqual(0, backend.interest);
+    try std.testing.expectEqual(null, backend.socks.entries.get(Local.key(fd)));
+    try std.testing.expectEqual(0, testMask(&table, fd));
+    try std.testing.expectEqual(0, state.finished_count);
 }

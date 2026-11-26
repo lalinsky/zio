@@ -144,13 +144,10 @@ pub fn supports(_: *const Self, comptime op: Op, data: *op.toType()) bool {
 
 pub const SharedState = struct {
     /// Backend-internal inflight count: ops accepted by submit() and not yet
-    /// completed. A completion submitted on one loop may be finished by the
-    /// loop that owns the fd registration, so the count is a group-shared
-    /// atomic (either loop's decrInflight hits the same storage). Read by
-    /// hasInflight() to skip the poll syscall when nothing can arrive.
+    /// completed, as a group-shared atomic. Read by hasInflight() to skip the
+    /// poll syscall when nothing can arrive.
     inflight_io: std.atomic.Value(usize) = .init(0),
-    /// Cross-loop single-owner socket registration table, shared by every loop
-    /// in the group. See sockreg.zig.
+    /// Which loops of the group have which sockets registered. See sockreg.zig.
     sock_table: sockreg.Table = .{},
 };
 
@@ -202,15 +199,25 @@ const NOTE_TRIGGER: u32 = 0x01000000;
 
 const delete_marker: usize = std.math.maxInt(usize);
 
-// udata tag marking a kevent that belongs to the single-owner socket path, so
-// poll() routes its events to the shared registration table instead of the
-// one-shot poll_queue (pipes / streaming files share EVFILT_READ/WRITE but use
-// udata == 0).
-const sock_marker: usize = std.math.maxInt(usize) - 1;
+// udata of a socket registration: the top two bits are 0b01, telling it apart
+// from the one-shot poll_queue (pipes / streaming files share EVFILT_READ/WRITE
+// but use udata == 0) and from delete_marker, and the registration's generation
+// is in the low bits. Sockets are registered persistently and edge-triggered
+// (EV_CLEAR) with the kqueue of each loop that parks on them (see sockreg.zig).
+const sock_udata_shift = @bitSizeOf(usize) - 2;
+const sock_udata_tag: usize = 1 << sock_udata_shift;
 
-// Persistent edge-triggered (EV_CLEAR) interest for sockets: a fd/direction is
-// added to its owner loop's kqueue once and stays registered for the fd's life.
-// Edge-triggered is safe because submit() drains the socket to EAGAIN first.
+comptime {
+    std.debug.assert(sockreg.gen_bits <= sock_udata_shift);
+}
+
+fn sockUdata(gen: sockreg.Gen) usize {
+    return sock_udata_tag | gen;
+}
+
+fn udataIsSocket(udata: usize) bool {
+    return udata >> sock_udata_shift == 0b01;
+}
 
 fn filterForDir(dir: sockreg.Dir) i16 {
     return switch (dir) {
@@ -229,9 +236,9 @@ const PollEntry = struct {
 };
 
 allocator: std.mem.Allocator,
-/// Shared cross-loop socket registration table (see sockreg.zig). All loops in
-/// a group point at the same table.
 shared: *SharedState = undefined,
+/// This loop's socket registrations (see sockreg.zig).
+socks: *sockreg.Local = undefined,
 kqueue_fd: i32 = -1,
 waker_ident: usize = undefined,
 poll_queue: std.AutoHashMapUnmanaged(u64, PollEntry) = .empty,
@@ -247,8 +254,6 @@ fn makeKey(ident: usize, filter: i32) u64 {
 }
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
-    shared_state.sock_table.acquire(allocator, Self);
-    errdefer shared_state.sock_table.release();
     const kq = std.c.kqueue();
     const kqueue_fd: i32 = switch (posix.errno(kq)) {
         .SUCCESS => @intCast(kq),
@@ -280,9 +285,13 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
         else => |err| return unexpectedError(err),
     }
 
+    const socks = try shared_state.sock_table.acquire(allocator, Self, kqueue_fd);
+    errdefer shared_state.sock_table.release(socks);
+
     self.* = .{
         .allocator = allocator,
         .shared = shared_state,
+        .socks = socks,
         .kqueue_fd = kqueue_fd,
         .waker_ident = waker_ident,
         .change_buffer = change_buffer,
@@ -296,10 +305,12 @@ pub fn deinit(self: *Self) void {
     self.poll_queue.deinit(self.allocator);
     self.change_buffer.deinit(self.allocator);
     self.allocator.free(self.events);
+    // Before closing the kqueue: once released, no close on another thread can
+    // reach this loop's registrations.
+    self.shared.sock_table.release(self.socks);
     if (self.kqueue_fd != -1) {
         _ = std.c.close(self.kqueue_fd);
     }
-    self.shared.sock_table.release();
 }
 
 pub fn wake(self: *Self, state: *LoopState) void {
@@ -523,33 +534,42 @@ fn removeFromPollQueue(self: *Self, completion: *Completion) void {
     }
 }
 
-// ---- single-owner socket registration path ----------------------------------
+// ---- socket registration path ------------------------------------------------
 
-// Backend hooks for the generic single-owner socket path in sockreg.zig.
+// Backend hooks for the generic socket path in sockreg.zig.
 
-/// Arm this loop's kqueue for `(fd, dir)` with an immediate EV_ADD | EV_CLEAR.
-/// Edge-triggered and persistent: the knote stays until the fd is closed, so
-/// this runs once per fd/direction and has nothing to gain from batching.
-/// Applying it right away means no registration can outlive the fd: a buffered
-/// EV_ADD would be applied after a close that happened in between, arming a
-/// reused fd number. kqueue tracks read/write as separate filters, so
-/// `other_owned_here` is irrelevant (no combined mask like epoll). Called by
-/// sockreg.park.
-pub fn registerSocket(self: *Self, fd: NetHandle, dir: sockreg.Dir, other_owned_here: bool) bool {
-    _ = other_owned_here;
-    var changes: [1]std.c.Kevent = .{.{
-        .ident = @intCast(fd),
-        .filter = filterForDir(dir),
-        .flags = std.c.EV.ADD | std.c.EV.CLEAR,
-        .fflags = 0,
-        .data = 0,
-        .udata = sock_marker,
-    }};
+/// Change the directions `fd` is registered for in this loop's kqueue from
+/// `old` to `new`, adding an EV_CLEAR knote for each new direction and deleting
+/// the knote of each dropped one. Applied with an immediate kevent call rather
+/// than through the change buffer, so no change can be left pending past a
+/// close of the fd and then applied to whatever reuses its number. Called by
+/// sockreg.
+pub fn setInterest(self: *Self, fd: NetHandle, old: sockreg.Dirs, new: sockreg.Dirs, gen: sockreg.Gen) bool {
+    var changes: [2]std.c.Kevent = undefined;
+    var n: usize = 0;
+    for ([_]sockreg.Dir{ .read, .write }) |dir| {
+        const bit = sockreg.dirBit(dir);
+        if ((old ^ new) & bit == 0) continue;
+        changes[n] = .{
+            .ident = @intCast(fd),
+            .filter = filterForDir(dir),
+            .flags = if (new & bit != 0) std.c.EV.ADD | std.c.EV.CLEAR else std.c.EV.DELETE,
+            .fflags = 0,
+            .data = 0,
+            .udata = sockUdata(gen),
+        };
+        n += 1;
+    }
     while (true) {
-        const rc = std.c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
+        const rc = std.c.kevent(self.kqueue_fd, &changes, @intCast(n), &.{}, 0, null);
         switch (posix.errno(rc)) {
             .SUCCESS => return true,
             .INTR => continue,
+            // Deleting a knote the kernel already dropped with a closed fd.
+            .NOENT => |err| if (new & ~old == 0) return true else {
+                log.err("Failed to register socket with kqueue: {}", .{err});
+                return false;
+            },
             else => |err| {
                 log.err("Failed to register socket with kqueue: {}", .{err});
                 return false;
@@ -558,10 +578,10 @@ pub fn registerSocket(self: *Self, fd: NetHandle, dir: sockreg.Dir, other_owned_
     }
 }
 
-/// Nothing to drop: closing the fd removes its knotes from every kqueue, and
-/// registerSocket never leaves a change pending. Called by sockreg.unregister.
-pub fn unregisterCleanup(self: *Self, fd: NetHandle) void {
-    _ = self;
+/// Nothing to remove before a close: closing the fd removes its knotes from
+/// every kqueue. Called by sockreg.
+pub fn forgetSocket(poller_fd: i32, fd: NetHandle) void {
+    _ = poller_fd;
     _ = fd;
 }
 
@@ -629,8 +649,9 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
             state.markCompletedFromBackend(c);
         },
 
-        // Sockets take the single-owner, persistent edge-triggered path: try the
-        // syscall optimistically, register with the owning loop only on WouldBlock.
+        // Sockets take the persistent edge-triggered path: try the
+        // syscall optimistically, register with this loop's kqueue only on
+        // WouldBlock.
         .net_connect => sockreg.submitConnect(self, state, c),
         .net_accept,
         .net_recv,
@@ -683,9 +704,9 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
             // Cap the request to the current file size once, so the
             // continuation can treat "remaining == 0" as done and never
             // spins on a writable socket at EOF. Then drive the sendfile
-            // syscall through the generic single-owner socket path like
-            // any other write op: drain to EAGAIN, park on the owner
-            // loop, resume on the write edge (see checkCompletion).
+            // syscall through the generic socket path like any other
+            // write op: try it, park on WouldBlock, resume on the write
+            // edge (see checkCompletion).
             const data = c.cast(NetSendFile);
             const file_size = fs.fileSize(data.file) catch |err| {
                 c.setError(switch (err) {
@@ -706,16 +727,11 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
 /// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
 pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
     if (sockreg.isSocketOp(target.op)) {
-        // Sockets are parked in the shared (fd, dir) waiter queue of the loop that
-        // owns the poller registration, which need not be this one: the op stays
-        // owned by its submitting loop (see sockreg.park), so this cancel can run
-        // concurrently with the owner servicing the op on another thread. detach
-        // claims the op against that race; if it lost, the owner already produced
-        // a natural result, so leave the op alone rather than overwriting it with
-        // Canceled and completing it twice. cancel is advisory - the callback
-        // still fires exactly once, and cancelLocal's epilogue dispatches the
-        // completion once the owner marks it completed. The kqueue registration is
-        // persistent and left in place for the fd's lifetime.
+        // Sockets are parked in this loop's waiters for the fd. If detach finds
+        // the op already claimed by sockreg.onEvent (a callback it ran is
+        // canceling it), it has a natural result, so leave it alone rather than
+        // overwriting it with Canceled and completing it twice. The kqueue
+        // registration is left in place, and dropped later if it goes unused.
         if (!sockreg.detach(self, target)) return;
         // A sendfile parked partway through reports what it sent (see
         // NetSendFile).
@@ -794,12 +810,13 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
 
         if (event.udata == delete_marker) continue;
 
-        // Sockets (single-owner path): the filter tells us the direction; ERR/EOF
-        // is delivered to the waiter, which surfaces it via its syscall.
-        if (event.udata == sock_marker) {
+        // Sockets: the filter tells us the direction; ERR/EOF is delivered to
+        // the waiter, which surfaces it via its syscall.
+        if (udataIsSocket(event.udata)) {
             const sock_fd: NetHandle = @intCast(event.ident);
             const dir: sockreg.Dir = if (event.filter == std.c.EVFILT.READ) .read else .write;
-            sockreg.service(self, state, sock_fd, dir, &event);
+            const gen: sockreg.Gen = @truncate(event.udata);
+            sockreg.onEvent(self, state, sock_fd, gen, sockreg.dirBit(dir), &event);
             continue;
         }
 

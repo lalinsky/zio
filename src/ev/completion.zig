@@ -563,11 +563,11 @@ pub const Group = struct {
 
         // Race mode: first to clear the flag wins, cancels siblings.
         //
-        // This MUST run before the `remaining` decrement below. With a
-        // multi-threaded backend (IOCP, or epoll/kqueue once a socket op is
-        // serviced cross-loop) the children of a race group can complete
-        // concurrently on different loops - e.g. the I/O on the owner loop and
-        // its timeout timer on the submitting loop. Whichever thread drives
+        // This MUST run before the `remaining` decrement below. With IOCP,
+        // whose loops share one completion port, the children of a race group
+        // can complete concurrently on different loops - e.g. the I/O on
+        // whichever loop dequeued it and its timeout timer on the submitting
+        // loop. Whichever thread drives
         // `remaining` to zero completes the group and wakes its waiter, which
         // frees the stack frame the Group (and the sibling completions) live on.
         // If we decremented first, that free could happen while this thread is

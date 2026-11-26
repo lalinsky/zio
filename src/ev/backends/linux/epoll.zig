@@ -122,30 +122,30 @@ pub fn supports(_: *const Self, comptime op: Op, data: *op.toType()) bool {
 
 pub const SharedState = struct {
     /// Backend-internal inflight count: ops accepted by submit() and not yet
-    /// completed. A completion submitted on one loop may be finished by the
-    /// loop that owns the fd registration, so the count is a group-shared
-    /// atomic (either loop's decrInflight hits the same storage). Read by
-    /// hasInflight() to skip the poll syscall when nothing can arrive.
+    /// completed, as a group-shared atomic. Read by hasInflight() to skip the
+    /// poll syscall when nothing can arrive.
     inflight_io: std.atomic.Value(usize) = .init(0),
-    /// Cross-loop single-owner socket registration table, shared by every loop
-    /// in the group. See sockreg.zig.
+    /// Which loops of the group have which sockets registered. See sockreg.zig.
     sock_table: sockreg.Table = .{},
 };
 
-// Persistent edge-triggered interest used for sockets. A socket fd is added to
-// its owner loop's epoll once per direction it owns and stays registered for the
-// fd's lifetime (no per-op MOD on read/write switch, no DEL on completion).
-// Edge-triggered is safe because submit() always tries the syscall first
-// (draining to EAGAIN) before it ever waits, so no readiness edge is missed.
+// Sockets are registered persistently and edge-triggered with the poller of
+// each loop that parks on them (see sockreg.zig): no per-op MOD on read/write
+// switch, no DEL on completion.
 const epoll_et: u32 = linux.EPOLL.ET;
 
-// epoll_event.data.u64 tag bit distinguishing socket registrations (single-owner
-// path) from everything else (waker, wall timerfds, one-shot poll_queue fds).
-// fds are small non-negative i32, so bit 32 is always free to use as the tag.
+// epoll_event.data.u64 layout for socket registrations: the fd in the low 32
+// bits, a tag in bit 32 distinguishing them from everything else (waker, wall
+// timerfds, poll_queue fds), and the registration's generation above it.
 const sock_tag: u64 = 1 << 32;
+const gen_shift = 33;
 
-fn sockData(fd: NetHandle) u64 {
-    return sock_tag | @as(u64, @as(u32, @bitCast(fd)));
+fn sockData(fd: NetHandle, gen: sockreg.Gen) u64 {
+    return @as(u64, gen) << gen_shift | sock_tag | @as(u64, @as(u32, @bitCast(fd)));
+}
+
+fn sockGen(event: *const linux.epoll_event) sockreg.Gen {
+    return @truncate(event.data.u64 >> gen_shift);
 }
 
 fn fdData(fd: i32) u64 {
@@ -191,9 +191,9 @@ const log = @import("../../../common.zig").log;
 
 allocator: std.mem.Allocator,
 poll_queue: std.AutoHashMapUnmanaged(NetHandle, PollEntry) = .empty,
-/// Shared cross-loop socket registration table (see sockreg.zig). All loops in
-/// a group point at the same table.
 shared: *SharedState = undefined,
+/// This loop's socket registrations (see sockreg.zig).
+socks: *sockreg.Local = undefined,
 epoll_fd: i32 = -1,
 waker_eventfd: i32 = -1,
 /// timerfds for the boot/real wall-clock timers (index 0 = boot, 1 = real),
@@ -210,8 +210,6 @@ pending_changes: usize = 0,
 epoll_pwait2_supported: bool = true,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
-    shared_state.sock_table.acquire(allocator, Self);
-    errdefer shared_state.sock_table.release();
     const rc = std.os.linux.epoll_create1(std.os.linux.EPOLL.CLOEXEC);
     const epoll_fd: i32 = switch (posix.errno(rc)) {
         .SUCCESS => @intCast(rc),
@@ -232,9 +230,13 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
         return unexpectedError(posix.errno(ctl_rc));
     }
 
+    const socks = try shared_state.sock_table.acquire(allocator, Self, epoll_fd);
+    errdefer shared_state.sock_table.release(socks);
+
     self.* = .{
         .allocator = allocator,
         .shared = shared_state,
+        .socks = socks,
         .epoll_fd = epoll_fd,
         .waker_eventfd = waker_eventfd,
         .events = undefined,
@@ -284,10 +286,12 @@ pub fn deinit(self: *Self) void {
     closeWallTimerfd(self.epoll_fd, self.wall_timerfd[1]);
     self.poll_queue.deinit(self.allocator);
     self.allocator.free(self.events);
+    // Before closing the epoll fd: once released, no close on another thread
+    // can reach this loop's poller.
+    self.shared.sock_table.release(self.socks);
     if (self.epoll_fd != -1) {
         _ = std.os.linux.close(self.epoll_fd);
     }
-    self.shared.sock_table.release();
 }
 
 pub fn wake(self: *Self, state: *LoopState) void {
@@ -522,50 +526,53 @@ fn getHandle(completion: *Completion) NetHandle {
     };
 }
 
-// ---- single-owner socket registration path ----------------------------------
+// ---- socket registration path ------------------------------------------------
 
-// Backend hooks for the generic single-owner socket path in sockreg.zig.
+// Backend hooks for the generic socket path in sockreg.zig.
 
 const epoll_bit_in: u32 = linux.EPOLL.IN;
 const epoll_bit_out: u32 = linux.EPOLL.OUT;
 
-fn dirBit(dir: sockreg.Dir) u32 {
-    return switch (dir) {
-        .read => epoll_bit_in,
-        .write => epoll_bit_out,
-    };
-}
-
-/// Arm this loop's epoll for `(fd, dir)`, edge-triggered and persistent. If this
-/// loop already owns the other direction, the fd is already in this epoll, so MOD
-/// the combined mask; otherwise ADD. Called by sockreg.park.
-pub fn registerSocket(self: *Self, fd: NetHandle, dir: sockreg.Dir, other_owned_here: bool) bool {
-    const cur_mask: u32 = if (other_owned_here) dirBit(sockreg.other(dir)) else 0;
-    const new_mask = cur_mask | dirBit(dir) | epoll_et;
-    var event = linux.epoll_event{ .data = .{ .u64 = sockData(fd) }, .events = new_mask };
-    const ctl: u32 = if (cur_mask == 0) linux.EPOLL.CTL_ADD else linux.EPOLL.CTL_MOD;
-    switch (posix.errno(linux.epoll_ctl(self.epoll_fd, ctl, fd, &event))) {
-        .SUCCESS => return true,
-        // Stale registration survived a teardown; MOD to the desired mask.
-        .EXIST => return posix.errno(linux.epoll_ctl(self.epoll_fd, linux.EPOLL.CTL_MOD, fd, &event)) == .SUCCESS,
-        else => |err| {
-            log.err("Failed to epoll_ctl socket: {}", .{err});
-            return false;
-        },
+/// Change the directions `fd` is registered for in this loop's epoll from `old`
+/// to `new`: ADD, MOD or DEL. A stale kernel registration (the fd was closed and
+/// its number reused without passing through sockreg) or a missing one is
+/// tolerated by falling back to the other operation. Called by sockreg.
+pub fn setInterest(self: *Self, fd: NetHandle, old: sockreg.Dirs, new: sockreg.Dirs, gen: sockreg.Gen) bool {
+    if (new == 0) {
+        return switch (posix.errno(linux.epoll_ctl(self.epoll_fd, linux.EPOLL.CTL_DEL, fd, null))) {
+            .SUCCESS, .NOENT => true,
+            else => |err| blk: {
+                log.err("Failed to remove socket from epoll: {}", .{err});
+                break :blk false;
+            },
+        };
     }
+    var mask: u32 = epoll_et;
+    if (new & sockreg.dirBit(.read) != 0) mask |= epoll_bit_in;
+    if (new & sockreg.dirBit(.write) != 0) mask |= epoll_bit_out;
+    var event = linux.epoll_event{ .data = .{ .u64 = sockData(fd, gen) }, .events = mask };
+    const first: u32 = if (old == 0) linux.EPOLL.CTL_ADD else linux.EPOLL.CTL_MOD;
+    const fallback: u32 = if (old == 0) linux.EPOLL.CTL_MOD else linux.EPOLL.CTL_ADD;
+    var err = posix.errno(linux.epoll_ctl(self.epoll_fd, first, fd, &event));
+    if (err == .EXIST or err == .NOENT) err = posix.errno(linux.epoll_ctl(self.epoll_fd, fallback, fd, &event));
+    if (err != .SUCCESS) {
+        log.err("Failed to register socket with epoll: {}", .{err});
+        return false;
+    }
+    return true;
 }
 
-/// Remove `fd` from this loop's epoll. Called by sockreg before the socket is
-/// closed, for every loop that owns a direction of it, from whichever thread
-/// closes it (epoll_ctl on another thread's epoll is safe).
-pub fn unregisterCleanup(self: *Self, fd: NetHandle) void {
-    _ = linux.epoll_ctl(self.epoll_fd, linux.EPOLL.CTL_DEL, fd, null);
+/// Remove `fd` from the epoll `poller_fd` before the socket is closed. Called
+/// by sockreg from whichever thread closes it (epoll_ctl on another thread's
+/// epoll is safe).
+pub fn forgetSocket(poller_fd: i32, fd: NetHandle) void {
+    _ = linux.epoll_ctl(poller_fd, linux.EPOLL.CTL_DEL, fd, null);
 }
 
 /// A no-error event for the optimistic (pre-park) checkCompletion attempt.
 pub fn probeEvent(fd: NetHandle, dir: sockreg.Dir) linux.epoll_event {
     _ = dir;
-    return .{ .data = .{ .u64 = sockData(fd) }, .events = 0 };
+    return .{ .data = .{ .u64 = sockData(fd, 0) }, .events = 0 };
 }
 
 /// Drop one inflight op. Called via LoopState.markCompletedFromBackend from
@@ -620,8 +627,8 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
             state.markCompletedFromBackend(c);
         },
 
-        // Sockets take the single-owner, persistent edge-triggered path: try the
-        // syscall optimistically, register with the owning loop only on WouldBlock.
+        // Sockets take the persistent edge-triggered path: try the syscall
+        // optimistically, register with this loop's epoll only on WouldBlock.
         .net_connect => sockreg.submitConnect(self, state, c),
         .net_accept,
         .net_recv,
@@ -697,16 +704,11 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
 /// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
 pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
     if (sockreg.isSocketOp(target.op)) {
-        // Sockets are parked in the shared (fd, dir) waiter queue of the loop that
-        // owns the poller registration, which need not be this one: the op stays
-        // owned by its submitting loop (see sockreg.park), so this cancel can run
-        // concurrently with the owner servicing the op on another thread. detach
-        // claims the op against that race; if it lost, the owner already produced
-        // a natural result, so leave the op alone rather than overwriting it with
-        // Canceled and completing it twice. cancel is advisory - the callback
-        // still fires exactly once, and cancelLocal's epilogue dispatches the
-        // completion once the owner marks it completed. The epoll registration is
-        // persistent and left in place for the fd's lifetime.
+        // Sockets are parked in this loop's waiters for the fd. If detach finds
+        // the op already claimed by sockreg.onEvent (a callback it ran is
+        // canceling it), it has a natural result, so leave it alone rather than
+        // overwriting it with Canceled and completing it twice. The epoll
+        // registration is left in place, and dropped later if it goes unused.
         if (!sockreg.detach(self, target)) return;
     } else {
         const fd = getHandle(target);
@@ -772,16 +774,15 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
 
     var wall_fired = false;
     for (self.events[0..n]) |event| {
-        // Sockets (single-owner path): service the ready directions. ERR/HUP is
-        // delivered to both so a pending op on either side returns the error.
+        // Sockets: service the ready directions. ERR/HUP is delivered to both
+        // so a pending op on either side returns the error.
         if (eventIsSocket(&event)) {
-            const sock_fd = eventFd(&event);
             const ev = event.events;
             const err_hup = ev & (linux.EPOLL.ERR | linux.EPOLL.HUP);
-            if ((ev & linux.EPOLL.IN) != 0 or err_hup != 0)
-                sockreg.service(self, state, sock_fd, .read, &event);
-            if ((ev & linux.EPOLL.OUT) != 0 or err_hup != 0)
-                sockreg.service(self, state, sock_fd, .write, &event);
+            var ready: sockreg.Dirs = 0;
+            if ((ev & linux.EPOLL.IN) != 0 or err_hup != 0) ready |= sockreg.dirBit(.read);
+            if ((ev & linux.EPOLL.OUT) != 0 or err_hup != 0) ready |= sockreg.dirBit(.write);
+            sockreg.onEvent(self, state, eventFd(&event), sockGen(&event), ready, &event);
             continue;
         }
 
