@@ -1236,9 +1236,12 @@ pub const Server = struct {
     /// accept queue failed before we got to it (on Windows aborted or reset by
     /// the peer, on Linux a network error pending on it, such as `EHOSTUNREACH`),
     /// so the next connection is taken instead. On Linux and macOS a connection
-    /// reset by the peer while queued is accepted like any other, and the reset
-    /// shows up on its first operation. The timeout covers the whole call, not
-    /// each attempt, so a stream of aborted connections cannot extend it.
+    /// reset by the peer while queued is accepted like any other, and a later
+    /// operation on it reports the reset: on io_uring, data the peer sent
+    /// before the reset is read first and the reset follows once it has been
+    /// consumed, while readiness backends can report the reset before any data.
+    /// The timeout covers the whole call, not each attempt, so a stream of
+    /// aborted connections cannot extend it.
     ///
     /// The descriptor limits and `SystemResources` are a temporary shortage, so a
     /// server should back off and accept again rather than exit on them.

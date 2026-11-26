@@ -657,9 +657,10 @@ pub const AcceptError = error{
     /// A queued connection failed before it was accepted, where the platform
     /// reports that from accept: aborted or reset by the peer (Windows), or
     /// (Linux) a network error that was pending on it. Linux and macOS accept a
-    /// connection reset by the peer while queued, and the reset shows up on its
-    /// first operation. The queue
-    /// has moved past it, so the next accept gets another connection. FreeBSD
+    /// connection reset by the peer while queued, and a later operation on it
+    /// reports the reset; data the peer sent before the reset can be read
+    /// first, depending on the backend. The queue has moved past it, so the
+    /// next accept gets another connection. FreeBSD
     /// also reports a shutdown of the listener this way, once.
     ConnectionAborted,
     /// The per-process limit on open file descriptors has been reached.
@@ -893,8 +894,9 @@ pub fn errnoToConnectError(err: E) ConnectError {
 // POSIX systems report it from accept, and WSAECONNRESET or
 // ERROR_NETNAME_DELETED on Windows; all of them collapse into
 // ConnectionAborted. Linux and macOS do not report a reset by the peer this
-// way: they accept the connection, and the reset shows up on its first
-// operation (#937). Linux also reports network errors pending
+// way: they accept the connection, and a later operation on it reports the
+// reset, after any data the peer sent before it where the backend reads that
+// first (#937). Linux also reports network errors pending
 // on the queued connection from accept (see accept(2)), which are mapped the
 // same way, except EOPNOTSUPP, which is also what a socket type that cannot
 // accept fails with. EACCES is a security module (SELinux, AppArmor) denying
