@@ -12,6 +12,7 @@ const migrates = zio_options.scheduling.migrates();
 const ev = @import("ev/root.zig");
 const os = @import("os/root.zig");
 const cgroup = @import("cgroup.zig");
+const SignalHook = @import("signal.zig").ExecutorHook;
 
 const meta = @import("meta.zig");
 const compat = @import("compat.zig");
@@ -609,6 +610,11 @@ pub const Executor = struct {
     // When notified, it calls loop.stop() to exit the event loop.
     shutdown: ev.Async = ev.Async.init(),
 
+    // Through this the OS signal handler gets this executor to wake the tasks
+    // waiting on a `Signal` (see signal.zig). Attached for the executor's
+    // whole life.
+    signal_hook: SignalHook = .{},
+
     // Periodic timer driving the stack pool's watermark shrink pass. The
     // pool rate-limits itself, so every executor may carry this timer.
     stack_pool_shrink_timer: ev.Timer = ev.Timer.init(.{ .duration = .fromSeconds(60) }),
@@ -707,12 +713,15 @@ pub const Executor = struct {
             self.loop.add(&self.stack_pool_shrink_timer.c);
         }
 
+        self.signal_hook.attach(&self.loop);
+
         self.main_task.coro.setCurrent();
         setCurrentExecutor(self);
         self.current_task = &self.main_task;
     }
 
     pub fn deinit(self: *Executor) void {
+        self.signal_hook.detach();
         setCurrentExecutor(null);
         Coroutine.clearCurrent();
 
