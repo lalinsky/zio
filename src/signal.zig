@@ -35,7 +35,7 @@ const common = @import("common.zig");
 const Cancelable = common.Cancelable;
 const Timeoutable = common.Timeoutable;
 const Timeout = @import("time.zig").Timeout;
-const WaitQueue = @import("utils/wait_queue.zig").WaitQueue;
+const SimpleQueue = @import("utils/simple_queue.zig").SimpleQueue;
 const WaitNode = @import("utils/wait_queue.zig").WaitNode;
 const AutoCancel = @import("autocancel.zig").AutoCancel;
 const w = @import("os/windows.zig");
@@ -68,23 +68,40 @@ const MAX_HANDLERS = 32;
 const THREAD_SLOTS = 4;
 
 /// A watcher's state, in one atomic word so that the handler's delivery and
-/// the watcher's slot being reused order against each other.
-/// 32 bits, so it is a native atomic on 32-bit targets too.
+/// the watcher's slot being reused order against each other. 32 bits, so it
+/// is a native atomic on 32-bit targets too.
 const EntryState = packed struct(u32) {
     /// The signal watched, or `NO_SIGNAL` for a free slot.
     kind: u8 = NO_SIGNAL,
     /// Set with each delivery, cleared by the executor that wakes the task
     /// waiters for it.
     dirty: bool = false,
-    _reserved: u7 = 0,
+    /// Bumped with each delivery (wrapping). A waiter records it when it
+    /// registers, which tells a wake for a delivery made before the waiter
+    /// registered from one made after.
+    seq: Seq = 0,
     /// Deliveries not yet consumed by a wait (saturating).
-    count: u16 = 0,
+    count: u8 = 0,
+};
+
+const Seq = u15;
+
+/// Outcome of `HandlerEntry.registerUnlessPending`.
+const Registration = union(enum) {
+    /// A delivery is pending; nothing was registered.
+    pending,
+    /// Registered. The value is the delivery sequence number at the time.
+    registered: Seq,
 };
 
 const HandlerEntry = struct {
     state: std.atomic.Value(EntryState) = .init(.{}),
-    /// Task waiters. Never touched by the handler: executors wake them.
-    waiters: WaitQueue(WaitNode) = .empty,
+    /// Guards `waiters`. Never taken by the handler.
+    mutex: os.Mutex = .init(),
+    /// Task waiters, and thread waiters that found no free slot. Woken by
+    /// executors, never by the handler. Each node's `userdata` holds the
+    /// delivery sequence number it registered at.
+    waiters: SimpleQueue(WaitNode) = .empty,
     /// Waiters whose wake lands on a thread. The handler claims and signals
     /// them itself; see `wakesThread`.
     thread_waiters: [THREAD_SLOTS]std.atomic.Value(?*Waiter) = @splat(.init(null)),
@@ -96,14 +113,16 @@ const HandlerEntry = struct {
             if (old.kind != signum) return false;
             var new = old;
             new.count +|= 1;
+            new.seq +%= 1;
             new.dirty = true;
-            // seq_cst: pairs with a registration's recheck (see `Signal.arm`).
+            // seq_cst: pairs with a slot registration's recheck (see
+            // `registerUnlessPending`).
             old = self.state.cmpxchgWeak(old, new, .seq_cst, .monotonic) orelse return true;
         }
     }
 
     /// Consume the pending deliveries, returning how many there were.
-    fn take(self: *HandlerEntry) u16 {
+    fn take(self: *HandlerEntry) u8 {
         var old = self.state.load(.monotonic);
         while (old.count != 0) {
             var new = old;
@@ -114,17 +133,13 @@ const HandlerEntry = struct {
     }
 
     /// Return deliveries taken by `take` that could not be used.
-    fn putBack(self: *HandlerEntry, n: u16) void {
+    fn putBack(self: *HandlerEntry, n: u8) void {
         var old = self.state.load(.monotonic);
         while (true) {
             var new = old;
             new.count +|= n;
             old = self.state.cmpxchgWeak(old, new, .release, .monotonic) orelse return;
         }
-    }
-
-    fn hasPending(self: *HandlerEntry) bool {
-        return self.state.load(.seq_cst).count != 0;
     }
 
     /// Clear the dirty flag, returning whether it was set.
@@ -138,35 +153,52 @@ const HandlerEntry = struct {
         return false;
     }
 
-    /// Register `waiter` for the next delivery.
-    ///
-    /// First settles a delivery that is still marked dirty: its count may
-    /// already have been consumed through a fast path, and a dispatch that
-    /// ran after this registration would then wake the waiter for a signal
-    /// it already returned for. The waiters queued before that delivery are
-    /// woken here instead, as the dispatch would have. A delivery that lands
-    /// after this marks the entry dirty again, and the caller's recheck of
-    /// the count covers it.
-    fn register(self: *HandlerEntry, waiter: *Waiter) void {
-        if (self.takeDirty()) self.wakeQueued();
-
-        if (wakesThread(waiter)) {
-            for (&self.thread_waiters) |*slot| {
-                // seq_cst: pairs with the handler's delivery CAS; see `Signal.arm`.
-                if (slot.cmpxchgStrong(null, waiter, .seq_cst, .monotonic) == null) return;
-            }
-        }
-        self.waiters.push(&waiter.node);
+    /// Whether a waiter registered at `seq` has a reason to return: a
+    /// delivery to consume, or one made since it registered (consumed by
+    /// another waiter of the same watcher, which every waiter sees).
+    fn settle(self: *HandlerEntry, seq: Seq) bool {
+        if (self.take() > 0) return true;
+        return self.state.load(.acquire).seq != seq;
     }
 
-    /// Undo `register`. Returns false if a wake already claimed the waiter:
-    /// its signal is then on the way.
+    /// Register `waiter` for the next delivery, unless one is pending.
+    fn registerUnlessPending(self: *HandlerEntry, waiter: *Waiter) Registration {
+        if (wakesThread(waiter)) {
+            for (&self.thread_waiters) |*slot| {
+                // seq_cst, like the state load below: either that load sees
+                // a delivery, or the handler making it sees the waiter.
+                if (slot.cmpxchgStrong(null, waiter, .seq_cst, .monotonic) != null) continue;
+                const state = self.state.load(.seq_cst);
+                if (state.count == 0) return .{ .registered = state.seq };
+                if (slot.cmpxchgStrong(waiter, null, .acq_rel, .monotonic) == null) return .pending;
+                // Claimed by the handler: its signal is on the way. Report
+                // the delivery it is for as made after the registration.
+                return .{ .registered = state.seq -% 1 };
+            }
+        }
+
+        // The check and the push are one step under the mutex, and an
+        // executor waking the queue takes the mutex after seeing the
+        // delivery: either this sees it, or the wake sees the node.
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const state = self.state.load(.acquire);
+        if (state.count != 0) return .pending;
+        waiter.node.userdata = state.seq;
+        self.waiters.push(&waiter.node);
+        return .{ .registered = state.seq };
+    }
+
+    /// Undo a registration. Returns false if a wake already claimed the
+    /// waiter: its signal is then on the way.
     fn unregister(self: *HandlerEntry, waiter: *Waiter) bool {
         for (&self.thread_waiters) |*slot| {
             if (slot.load(.monotonic) == waiter) {
                 return slot.cmpxchgStrong(waiter, null, .acq_rel, .monotonic) == null;
             }
         }
+        self.mutex.lock();
+        defer self.mutex.unlock();
         return self.waiters.remove(&waiter.node);
     }
 
@@ -179,15 +211,35 @@ const HandlerEntry = struct {
         }
     }
 
-    /// Pop and signal the queued waiters. Not signal-safe.
-    fn wakeQueued(self: *HandlerEntry) void {
-        while (self.waiters.pop()) |node| Waiter.fromNode(node).signalExternal();
+    /// Wake the queued waiters that registered before the latest delivery,
+    /// or, with `all`, every queued waiter. Not signal-safe.
+    fn wakeQueued(self: *HandlerEntry, comptime which: enum { delivered, all }) void {
+        var woken: ?*WaitNode = null;
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            const seq = self.state.load(.acquire).seq;
+            var node = self.waiters.head;
+            while (node) |n| {
+                node = n.next;
+                if (which == .delivered and n.userdata == seq) continue;
+                _ = self.waiters.remove(n);
+                n.next = woken;
+                woken = n;
+            }
+        }
+        // Signal outside the lock. A removed node is the owner's to wait
+        // for: its `unregister` now fails, so it waits for this signal.
+        while (woken) |n| {
+            woken = n.next;
+            Waiter.fromNode(n).signalExternal();
+        }
     }
 
     /// Wake every waiter. Not signal-safe.
     fn wakeAll(self: *HandlerEntry) void {
         self.wakeThreadWaiters();
-        self.wakeQueued();
+        self.wakeQueued(.all);
     }
 };
 
@@ -226,7 +278,7 @@ const RegistryUnix = struct {
             if (entry.state.load(.monotonic).kind == NO_SIGNAL) break entry;
         } else return error.TooManySignalHandlers;
 
-        std.debug.assert(!entry.waiters.hasWaiters());
+        std.debug.assert(entry.waiters.isEmpty());
         entry.state.store(.{ .kind = signum }, .release);
 
         if (self.installed[signum] == 0) {
@@ -269,7 +321,7 @@ const RegistryUnix = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         for (&self.handlers) |*entry| {
-            if (entry.takeDirty()) entry.wakeQueued();
+            if (entry.takeDirty()) entry.wakeQueued(.delivered);
         }
     }
 };
@@ -300,7 +352,7 @@ const RegistryWindows = struct {
         }
         self.total_handlers += 1;
 
-        std.debug.assert(!entry.waiters.hasWaiters());
+        std.debug.assert(entry.waiters.isEmpty());
         entry.state.store(.{ .kind = signum }, .release);
         return entry;
     }
@@ -426,7 +478,8 @@ fn consoleCtrlHandlerWindows(ctrl_type: w.DWORD) callconv(.winapi) w.BOOL {
     var found_handler = false;
     for (&registry.handlers) |*entry| {
         if (entry.deliver(signal_value)) {
-            entry.wakeAll();
+            entry.wakeThreadWaiters();
+            entry.wakeQueued(.delivered);
             found_handler = true;
         }
     }
@@ -494,18 +547,21 @@ pub const Signal = struct {
     ///
     /// Returns error.Canceled if the task is cancelled while waiting (including due to timeout expiry).
     pub fn wait(self: *Signal) Cancelable!void {
-        var waiter: Waiter = .init();
-        defer waiter.deinit();
+        // A fresh waiter per attempt: one that has been signaled cannot wait
+        // again (see `Waiter`).
+        while (true) {
+            var waiter: Waiter = .init();
+            defer waiter.deinit();
 
-        if (!self.arm(&waiter)) return;
+            const seq = self.arm(&waiter) orelse return;
 
-        waiter.wait(1, .allow_cancel) catch |err| {
-            self.disarm(&waiter);
-            return err;
-        };
+            waiter.wait(1, .allow_cancel) catch |err| {
+                self.disarm(&waiter);
+                return err;
+            };
 
-        // Consume the counter
-        _ = self.entry.take();
+            if (self.entry.settle(seq)) return;
+        }
     }
 
     /// Waits for the signal to be received with a timeout.
@@ -521,45 +577,49 @@ pub const Signal = struct {
     /// Arguments:
     /// - timeout: Timeout
     pub fn waitTimeout(self: *Signal, timeout: Timeout) (Timeoutable || Cancelable)!void {
-        var waiter: Waiter = .init();
-        defer waiter.deinit();
-
-        if (!self.arm(&waiter)) return;
-
-        // Set up timeout timer
         var timer = AutoCancel.init;
         defer timer.clear();
-        timer.set(timeout);
+        var timer_set = false;
 
-        waiter.wait(1, .allow_cancel) catch |err| {
-            self.disarm(&waiter);
+        while (true) {
+            var waiter: Waiter = .init();
+            defer waiter.deinit();
 
-            // Check if this auto-cancel triggered, otherwise it was user cancellation
-            if (timer.check(err)) return error.Timeout;
-            return err;
-        };
+            const seq = self.arm(&waiter) orelse return;
 
-        // Consume the counter
-        _ = self.entry.take();
+            if (!timer_set) {
+                timer.set(timeout);
+                timer_set = true;
+            }
+
+            waiter.wait(1, .allow_cancel) catch |err| {
+                self.disarm(&waiter);
+
+                // Check if this auto-cancel triggered, otherwise it was user cancellation
+                if (timer.check(err)) return error.Timeout;
+                return err;
+            };
+
+            if (self.entry.settle(seq)) return;
+        }
     }
 
     /// Alias for `waitTimeout`. Deprecated, will be removed in a future release.
     pub const timedWait = waitTimeout;
 
-    /// Register `waiter` for the next delivery, unless one is already
-    /// pending: then consume it and return false, with nothing registered.
-    fn arm(self: *Signal, waiter: *Waiter) bool {
+    /// Register `waiter` for the next delivery, returning the delivery
+    /// sequence number it registered at, unless one is already pending: then
+    /// consume it and return null, with nothing registered.
+    ///
+    /// A wake can still come for a delivery made before the registration
+    /// (the handler wakes the thread slots, and a lost select arm wakes
+    /// everyone), so the caller checks it with `settle` and arms again.
+    fn arm(self: *Signal, waiter: *Waiter) ?Seq {
         while (true) {
-            if (self.entry.take() > 0) return false;
-            self.entry.register(waiter);
-            // A delivery that landed before the registration was visible
-            // found nobody to wake. The registration and this load are
-            // seq_cst (or ordered through the wait queue's lock, which the
-            // dispatching executor takes after seeing the delivery), so
-            // either this sees the delivery or its wake finds the waiter.
-            if (!self.entry.hasPending()) return true;
-            // Already claimed by a wake: its signal is on the way.
-            if (!self.entry.unregister(waiter)) return true;
+            switch (self.entry.registerUnlessPending(waiter)) {
+                .registered => |seq| return seq,
+                .pending => if (self.entry.take() > 0) return null,
+            }
         }
     }
 
@@ -580,28 +640,25 @@ pub const Signal = struct {
         const had_registration = !waiter.isDirect() and self.entry.unregister(waiter);
 
         while (true) {
-            const n = self.entry.take();
-            if (n > 0) {
-                switch (waiter.tryClaim()) {
-                    .won => return if (had_registration) .ready else .ready_signaled,
-                    .busy => unreachable,
-                    .lost => {
-                        // A lost arm may not consume: the count is additive, so
-                        // put it back and re-broadcast to waiters that may have
-                        // gone back to sleep while we held it.
-                        self.entry.putBack(n);
-                        self.entry.wakeAll();
-                        return .decided;
-                    },
-                }
+            switch (self.entry.registerUnlessPending(waiter)) {
+                .registered => return if (had_registration) .queued else .requeued,
+                .pending => {},
             }
-
-            self.entry.register(waiter);
-            // Same recheck as `arm`.
-            if (!self.entry.hasPending()) break;
-            if (!self.entry.unregister(waiter)) break;
+            const n = self.entry.take();
+            if (n == 0) continue;
+            switch (waiter.tryClaim()) {
+                .won => return if (had_registration) .ready else .ready_signaled,
+                .busy => unreachable,
+                .lost => {
+                    // A lost arm may not consume: the count is additive, so
+                    // put it back and re-broadcast to waiters that may have
+                    // gone back to sleep while we held it.
+                    self.entry.putBack(n);
+                    self.entry.wakeAll();
+                    return .decided;
+                },
+            }
         }
-        return if (had_registration) .queued else .requeued;
     }
 
     /// Cancels a pending wait operation by removing the waiter.
@@ -1070,4 +1127,39 @@ test "Signal: one delivery wins a select once" {
     try rt.sleep(.fromMilliseconds(100));
     second.cancel();
     try std.testing.expectError(error.Canceled, second.join());
+}
+
+test "Signal: a delivery wakes the waiters queued before it, not after" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var rt = try Runtime.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var sig = try Signal.init(.user1);
+    defer sig.deinit();
+
+    const Waiting = struct {
+        fn run(s: *Signal, woken: *std.atomic.Value(bool)) !void {
+            try s.wait();
+            woken.store(true, .release);
+        }
+    };
+
+    var before_woken: std.atomic.Value(bool) = .init(false);
+    var before = try rt.spawn(Waiting.run, .{ &sig, &before_woken });
+    defer before.cancel();
+    try rt.sleep(.fromMilliseconds(10));
+
+    // Delivered on this (the executor's) thread, and consumed right away
+    // through the fast path, before the executor wakes the queue.
+    try posix.raise(@backingInt(SignalKind.user1));
+    try sig.wait();
+
+    var after_woken: std.atomic.Value(bool) = .init(false);
+    var after = try rt.spawn(Waiting.run, .{ &sig, &after_woken });
+    defer after.cancel();
+
+    try rt.sleep(.fromMilliseconds(100));
+    try std.testing.expect(before_woken.load(.acquire));
+    try std.testing.expect(!after_woken.load(.acquire));
 }
