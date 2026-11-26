@@ -3846,9 +3846,10 @@ fn ioctlWindows(handle: fd_t, code: std.os.windows.CTL_CODE, in: []const u8, out
 test "timespecToNanos converts exactly outside the i64 nanosecond range" {
     // windows.zig has no timespec; the conversion is POSIX-only.
     if (builtin.os.tag == .windows) return error.SkipZigTest;
-    // 32-bit targets store .sec as i32, so the large value cannot
-    // even be built there; the i96 path is covered by statx below.
-    if (@sizeOf(usize) < 8) return error.SkipZigTest;
+    // Targets with a 32-bit timespec.sec (most 32-bit POSIX) cannot even
+    // build the large value; the i96 path is covered by statx below.
+    const Sec = @TypeOf(@as(posix.system.timespec, undefined).sec);
+    if (@as(i96, std.math.maxInt(Sec)) < 16_000_000_000) return error.SkipZigTest;
     const ts: posix.system.timespec = .{ .sec = 16_000_000_000, .nsec = 500_000_000 };
     try std.testing.expectEqual(@as(i96, 16_000_000_000 * std.time.ns_per_s + 500_000_000), timespecToNanos(ts));
 }
@@ -3871,9 +3872,10 @@ test "setTimestampToTimespec rejects seconds the platform timespec cannot store"
     const max_ns: i96 = @as(i96, std.math.maxInt(Sec)) * std.time.ns_per_s;
     const max_ts = try setTimestampToTimespec(.{ .new = max_ns });
     try std.testing.expectEqual(@as(Sec, std.math.maxInt(Sec)), max_ts.sec);
-    // 12e9 seconds is year 2350: fits a 64-bit sec, not a 32-bit one.
+    // 12e9 seconds is year 2350: accepted exactly when the platform's
+    // sec type can hold it (x86 NetBSD has a 64-bit sec on a 32-bit target).
     const year_2350: i96 = 12_000_000_000 * std.time.ns_per_s + 500_000_000;
-    if (@sizeOf(usize) >= 8) {
+    if (@as(i96, std.math.maxInt(Sec)) >= 12_000_000_000) {
         _ = try setTimestampToTimespec(.{ .new = year_2350 });
     } else {
         try std.testing.expectError(error.TimestampOutOfRange, setTimestampToTimespec(.{ .new = year_2350 }));

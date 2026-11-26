@@ -3191,10 +3191,11 @@ test "File: timestamps past the i64 nanosecond range round-trip" {
         return;
     }
 
-    // 32-bit POSIX cannot build the timespec (sec is i32): zio must report
-    // the platform limit instead of panicking on the write-side conversion.
-    // The arithmetic conversion itself is covered by os/fs.zig unit tests.
-    if (@sizeOf(usize) < 8) {
+    // When the platform's timespec.sec cannot hold the value (i32 on most
+    // 32-bit POSIX), zio must report the platform limit instead of panicking
+    // on the write-side conversion. Covered by os/fs.zig unit tests otherwise.
+    const Sec = @TypeOf(@as(std.posix.system.timespec, undefined).sec);
+    if (@as(i96, std.math.maxInt(Sec)) < 12_000_000_000) {
         try std.testing.expectError(error.TimestampOutOfRange, t.file.setTimestamps(.{ .mtime = .{ .new = mtime } }));
         return;
     }
