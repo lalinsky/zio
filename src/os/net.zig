@@ -650,16 +650,28 @@ pub fn connect(fd: fd_t, addr: *const sockaddr, addr_len: socklen_t) ConnectErro
     }
 }
 
+/// Errors of `accept`.
 pub const AcceptError = error{
+    /// No connection is queued and the socket is nonblocking.
     WouldBlock,
+    /// A queued connection failed before it was accepted: aborted or reset by
+    /// the peer, or (Linux) a network error that was pending on it. The queue
+    /// has moved past it, so the next accept gets another connection. FreeBSD
+    /// also reports a shutdown of the listener this way, once.
     ConnectionAborted,
+    /// The per-process limit on open file descriptors has been reached.
     ProcessFdQuotaExceeded,
+    /// The system-wide limit on open files has been reached.
     SystemFdQuotaExceeded,
+    /// Not enough memory or socket buffer space.
     SystemResources,
     FileDescriptorNotASocket,
+    /// `listen` was never called, or (Linux) the socket was shut down.
     SocketNotListening,
+    /// The socket type does not accept connections, such as a datagram socket.
     OperationNotSupported,
     ProtocolFailure,
+    /// Firewall rules or a security policy forbid the connection.
     BlockedByFirewall,
     NetworkDown,
     Canceled,
@@ -768,7 +780,13 @@ pub fn getSockError(fd: fd_t) GetSockErrorError!i32 {
     return err;
 }
 
-pub const SetsockoptError = error{ OptionNotSupported, Unexpected };
+pub const SetsockoptError = error{
+    OptionNotSupported,
+    /// EINVAL: the option, its value, or the socket's state was rejected.
+    /// For example, macOS returns it for a socket whose connection was already shut down.
+    InvalidArgument,
+    Unexpected,
+};
 
 pub fn setsockopt(fd: fd_t, level: i32, optname: u32, optval: []const u8) SetsockoptError!void {
     switch (builtin.os.tag) {
@@ -776,6 +794,7 @@ pub fn setsockopt(fd: fd_t, level: i32, optname: u32, optval: []const u8) Setsoc
             const rc = windows.setsockopt(fd, level, optname, optval.ptr, @intCast(optval.len));
             if (rc != 0) return switch (windows.WSAGetLastError()) {
                 .ENOPROTOOPT => error.OptionNotSupported,
+                .EINVAL => error.InvalidArgument,
                 else => |err| unexpectedError(err),
             };
         },
@@ -784,6 +803,7 @@ pub fn setsockopt(fd: fd_t, level: i32, optname: u32, optval: []const u8) Setsoc
             switch (posix.errno(rc)) {
                 .SUCCESS => {},
                 .NOPROTOOPT => return error.OptionNotSupported,
+                .INVAL => return error.InvalidArgument,
                 else => |err| return unexpectedError(err),
             }
         },
@@ -866,26 +886,42 @@ pub fn errnoToConnectError(err: E) ConnectError {
     }
 }
 
-// Winsock reports "the queued connection went away before we took it" as
-// ECONNRESET, POSIX as ECONNABORTED; both collapse into ConnectionAborted.
+// A queued connection that went away before we took it is ECONNABORTED on
+// POSIX, and WSAECONNRESET or ERROR_NETNAME_DELETED on Windows; all of them
+// collapse into ConnectionAborted. Linux also reports network errors pending
+// on the queued connection from accept (see accept(2)), which are mapped the
+// same way, except EOPNOTSUPP, which is also what a socket type that cannot
+// accept fails with. EACCES is a security module (SELinux, AppArmor) denying
+// the accept.
 pub fn errnoToAcceptError(err: E) AcceptError {
     switch (builtin.os.tag) {
         .windows => {
             return switch (err) {
                 .EWOULDBLOCK => error.WouldBlock,
-                .ECONNABORTED, .ECONNRESET => error.ConnectionAborted,
+                .ECONNABORTED, .ECONNRESET, .NETNAME_DELETED => error.ConnectionAborted,
                 .EMFILE => error.ProcessFdQuotaExceeded,
                 .ENOBUFS => error.SystemResources,
                 .ENOTSOCK => error.FileDescriptorNotASocket,
                 .EINVAL => error.SocketNotListening,
-                .EOPNOTSUPP => error.ProtocolFailure,
-                .EPROTONOSUPPORT => error.ProtocolFailure,
+                .EOPNOTSUPP => error.OperationNotSupported,
                 .ENETDOWN => error.NetworkDown,
                 .OPERATION_ABORTED => error.Canceled,
                 else => unexpectedError(err),
             };
         },
         else => {
+            if (builtin.os.tag == .linux) switch (err) {
+                .NETDOWN,
+                .PROTO,
+                .NETUNREACH,
+                .HOSTUNREACH,
+                .HOSTDOWN,
+                .NONET,
+                .NOPROTOOPT,
+                .TIMEDOUT,
+                => return error.ConnectionAborted,
+                else => {},
+            };
             return switch (err) {
                 .SUCCESS => unreachable,
                 .AGAIN => error.WouldBlock,
@@ -897,7 +933,7 @@ pub fn errnoToAcceptError(err: E) AcceptError {
                 .INVAL => error.SocketNotListening,
                 .OPNOTSUPP => error.OperationNotSupported,
                 .PROTO => error.ProtocolFailure,
-                .PERM => error.BlockedByFirewall,
+                .PERM, .ACCES => error.BlockedByFirewall,
                 .NETDOWN => error.NetworkDown,
                 .CANCELED => error.Canceled,
                 else => |e| unexpectedError(e),
@@ -1888,6 +1924,25 @@ pub fn interfaceIndexToName(index: u32, buffer: []u8) InterfaceIndexToNameError!
     try syscall_cancel.checkCanceled();
     if (if_indextoname(@intCast(index), buffer.ptr) == null) return error.InterfaceNotFound;
     return std.mem.sliceTo(buffer[0..IF_NAMESIZE], 0).len;
+}
+
+test "errnoToAcceptError: failures of a queued connection are ConnectionAborted" {
+    switch (builtin.os.tag) {
+        .windows => {
+            try std.testing.expectEqual(error.ConnectionAborted, errnoToAcceptError(.ECONNRESET));
+            try std.testing.expectEqual(error.ConnectionAborted, errnoToAcceptError(.NETNAME_DELETED));
+            try std.testing.expectEqual(error.OperationNotSupported, errnoToAcceptError(.EOPNOTSUPP));
+        },
+        .linux => {
+            for ([_]E{ .CONNABORTED, .NETDOWN, .PROTO, .NETUNREACH, .HOSTUNREACH, .HOSTDOWN, .NONET, .NOPROTOOPT, .TIMEDOUT }) |err| {
+                try std.testing.expectEqual(error.ConnectionAborted, errnoToAcceptError(err));
+            }
+            // Also what a socket type that cannot accept fails with, so it must
+            // not be retried.
+            try std.testing.expectEqual(error.OperationNotSupported, errnoToAcceptError(.OPNOTSUPP));
+        },
+        else => try std.testing.expectEqual(error.ConnectionAborted, errnoToAcceptError(.CONNABORTED)),
+    }
 }
 
 test "interface index/name round-trip for loopback" {

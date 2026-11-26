@@ -10,6 +10,29 @@ All notable changes to this project will be documented in this file.
   File and Dir) gained a TimestampOutOfRange member. Setting a timestamp the platform API cannot
   represent now returns this error instead of panicking on the conversion.
 
+- `CompletionQueue.wait`, `waitTimeout`, and its select result (`CompletionQueue.Result`)
+  can now return `error.Interrupted`, so exhaustive switches on their errors need a case
+  for it. It is returned only after `CompletionQueue.interrupt` is called.
+
+### Added
+
+- Added `CompletionQueue.interrupt`, which makes the driver's current or next wait return
+  `error.Interrupted`. It can be called from any task or thread, so another task can wake
+  the driver, for example to have it cancel one of its operations, without parking an
+  `ev.Async` in the queue. Added the `zio.Interruptible` error set.
+
+### Changed
+
+- Tasks woken by I/O completions are scheduled as each completion is processed again,
+  instead of as one batch per event loop poll with several idle executors woken at once.
+  The batch left a small number of busy connections on too few executors (bulk sends on
+  8 connections ran at about half the throughput on a 48-thread machine) and woke more
+  executors than needed otherwise.
+
+- In the low-level `ev` API, a completion with a null `callback` is no longer delivered
+  through `Loop.nextDispatched()`; only `do_not_call_callbacks` does that. Removed
+  `Loop.takeLastDispatched()`.
+
 ### Fixed
 
 - Reading the metadata of a file with a timestamp after 2262 or before 1677 panicked (#383 follow-up found while working on it).
@@ -19,6 +42,27 @@ All notable changes to this project will be documented in this file.
   (before 1901 or after 2038) now returns error.TimestampOutOfRange, and on Windows timestamps
   outside the FILETIME range (before 1601 or after year 30827) do the same. The std.Io adapters
   surface these cases as error.Unexpected, matching the existing set of std.Io errors.
+
+- `setsockopt` failing with `EINVAL`, such as `TCP_NODELAY` on an already shut down
+  connection on macOS, is no longer logged as an unexpected error.
+
+- Fixed a crash when `ev.Async.notify` raced with its loop finishing and being deinitialized.
+
+- Fixed `std.Io.net.Stream.readWithControl` and `readerWithControl` never receiving control data.
+
+- Fixed accept errors that belong to a single queued connection being reported as
+  unexpected or fatal, and a crash in accept on Windows.
+
+- Fixed `Server.accept` not timing out while queued connections kept failing.
+
+- Fixed an operation with a timeout dropping its result when it completed while its task was
+  being canceled.
+
+- Fixed `Socket.receiveMsg` not returning the length of the received control data.
+
+- Fixed a `std.Io` stream read on a connection that timed out reporting `ConnectionResetByPeer`
+  and not `ConnectionTimedOut`.
+
 - Fixed a crash when `std.Io.swapCancelProtection` unblocked cancellation that was not blocked.
 
 ## [0.20.1] - 2026-11-12
