@@ -51,7 +51,7 @@ pub const Context = switch (builtin.cpu.arch) {
     .arm, .thumb => extern struct {
         sp: u32,  // r13 (stack pointer)
         fp: u32,  // r11 (frame pointer, r7 in Thumb)
-        lr: u32,  // r14 (link register) only saved beause of https://github.com/llvm/llvm-project/pull/179740 (can't be worked around in zig)
+        lr: u32,  // r14 (link register) only saved because of https://github.com/llvm/llvm-project/pull/179740 (can't be worked around in zig)
         pc: u32,  // r15 (program counter)
         stack_info: StackInfo,
         tsan_fiber: tsan.Fiber = tsan.none,
