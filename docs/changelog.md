@@ -31,6 +31,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `Signal`'s handler is now async-signal-safe. It used to wake waiting tasks itself, taking
+  locks and touching the scheduler from signal context, which could hang or corrupt the
+  executor that the signal interrupted. It now only records the signal, wakes waiting
+  threads with a futex wake, and notifies the executors' loops, which wake the tasks.
+- Fixed `Signal` losing a signal that arrived just as a task started waiting, and a race
+  between initializing and deinitializing watchers that could leave the wrong OS signal
+  handler installed.
+
 - `setsockopt` failing with `EINVAL`, such as `TCP_NODELAY` on an already shut down
   connection on macOS, is no longer logged as an unexpected error.
 
