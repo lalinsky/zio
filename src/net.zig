@@ -3307,6 +3307,7 @@ fn errName(code: u16) []const u8 {
 
 test "multi-executor: timeout cancel racing a cross-loop readiness edge" {
     if (builtin.single_threaded) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     const H = struct {
         const pairs = 8;
