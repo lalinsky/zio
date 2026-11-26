@@ -327,6 +327,24 @@ pub fn netHandle(c: *Completion) net.fd_t {
     };
 }
 
+/// Finish a completion that could not be parked. A native sendfile that already
+/// sent part of the request reports what it sent, as on cancel (see NetSendFile).
+fn failPark(state: anytype, completion: *Completion) void {
+    const SendFileData = @FieldType(NetSendFile, "internal");
+    if (comptime @hasField(SendFileData, "sent")) {
+        if (completion.op == .net_send_file) {
+            const sent = completion.cast(NetSendFile).internal.sent;
+            if (sent > 0) {
+                completion.setResult(.net_send_file, sent);
+                state.markCompletedFromBackend(completion);
+                return;
+            }
+        }
+    }
+    completion.setError(error.Unexpected);
+    state.markCompletedFromBackend(completion);
+}
+
 /// Park `completion` in this loop's waiters for its socket, registering the
 /// socket (or the direction) with this loop's poller if it is not yet. If that
 /// fails, finishes the completion with an error instead.
@@ -339,8 +357,7 @@ fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion) vo
     const gop = local.entries.getOrPut(local.table.allocator, Local.key(fd)) catch {
         local.mutex.unlock();
         log.err("socket registration table OOM", .{});
-        completion.setError(error.Unexpected);
-        state.markCompletedFromBackend(completion);
+        failPark(state, completion);
         return;
     };
     if (!gop.found_existing) {
@@ -353,8 +370,7 @@ fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion) vo
         if (!self.setInterest(fd, entry.registered, entry.registered | bit, entry.gen)) {
             if (newly_registered) _ = local.entries.remove(Local.key(fd));
             local.mutex.unlock();
-            completion.setError(error.Unexpected);
-            state.markCompletedFromBackend(completion);
+            failPark(state, completion);
             return;
         }
         entry.registered |= bit;
@@ -380,8 +396,7 @@ fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion) vo
         _ = self.setInterest(fd, entry_now.registered, 0, entry_now.gen);
         _ = local.entries.remove(Local.key(fd));
         local.mutex.unlock();
-        completion.setError(error.Unexpected);
-        state.markCompletedFromBackend(completion);
+        failPark(state, completion);
     }
 }
 
