@@ -69,15 +69,16 @@ const THREAD_SLOTS = 4;
 
 /// A watcher's state, in one atomic word so that the handler's delivery and
 /// the watcher's slot being reused order against each other.
-const EntryState = packed struct(u64) {
+/// 32 bits, so it is a native atomic on 32-bit targets too.
+const EntryState = packed struct(u32) {
     /// The signal watched, or `NO_SIGNAL` for a free slot.
     kind: u8 = NO_SIGNAL,
     /// Set with each delivery, cleared by the executor that wakes the task
     /// waiters for it.
     dirty: bool = false,
-    _reserved: u23 = 0,
-    /// Deliveries not yet consumed by a wait.
-    count: u32 = 0,
+    _reserved: u7 = 0,
+    /// Deliveries not yet consumed by a wait (saturating).
+    count: u16 = 0,
 };
 
 const HandlerEntry = struct {
@@ -102,7 +103,7 @@ const HandlerEntry = struct {
     }
 
     /// Consume the pending deliveries, returning how many there were.
-    fn take(self: *HandlerEntry) u32 {
+    fn take(self: *HandlerEntry) u16 {
         var old = self.state.load(.monotonic);
         while (old.count != 0) {
             var new = old;
@@ -113,7 +114,7 @@ const HandlerEntry = struct {
     }
 
     /// Return deliveries taken by `take` that could not be used.
-    fn putBack(self: *HandlerEntry, n: u32) void {
+    fn putBack(self: *HandlerEntry, n: u16) void {
         var old = self.state.load(.monotonic);
         while (true) {
             var new = old;
@@ -946,11 +947,10 @@ test "Signal: a signal storm on an executor thread" {
         tid: linux.pid_t,
 
         fn run(self: *@This()) void {
-            // Leave the executor room to make progress between deliveries.
-            const pause: linux.timespec = .{ .sec = 0, .nsec = 5 * std.time.ns_per_us };
             while (!self.stop.load(.acquire)) {
                 _ = linux.tgkill(self.pid, self.tid, .USR1);
-                _ = linux.nanosleep(&pause, null);
+                // Leave the executor room to make progress between deliveries.
+                os.time.sleep(.fromMicroseconds(5));
             }
         }
     };
