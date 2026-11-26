@@ -24,7 +24,6 @@
 const std = @import("std");
 const os = @import("../os/root.zig");
 const net = @import("../os/net.zig");
-const Loop = @import("loop.zig").Loop;
 const Completion = @import("completion.zig").Completion;
 const Op = @import("completion.zig").Op;
 const NetConnect = @import("completion.zig").NetConnect;
@@ -55,7 +54,7 @@ pub fn other(dir: Dir) Dir {
 /// but kept in one entry so a single shard lock covers the whole fd and a close
 /// drops both directions at once.
 pub const Entry = struct {
-    /// The loop (opaque `*Loop`) whose poller has this fd registered for the
+    /// The backend instance whose poller has this fd registered for the
     /// direction, or null if no loop is registered for it yet.
     read_owner: ?*anyopaque = null,
     write_owner: ?*anyopaque = null,
@@ -104,24 +103,53 @@ pub const Shard = struct {
 
 /// Sharded fd -> Entry table shared by every loop in a group. Loops acquire it
 /// on init and release it on deinit; the maps are freed when the last loop goes.
+/// A table with live loops is linked into `live_tables`, so a socket closed by a
+/// thread that runs no loop can still be purged from it (`purgeAll`).
 pub const Table = struct {
     mutex: os.Mutex = .init(),
     refcount: usize = 0,
     allocator: std.mem.Allocator = undefined,
     shards: [shard_count]Shard = @splat(.{}),
+    /// Link in `live_tables`, guarded by `live_tables_mutex`.
+    next_live: ?*Table = null,
+    /// Removes an fd from an owner's poller; the owner is the backend instance
+    /// that registered it.
+    unregister_fn: *const fn (owner: *anyopaque, fd: net.fd_t) void = undefined,
 
-    pub fn acquire(self: *Table, allocator: std.mem.Allocator) void {
+    pub fn acquire(self: *Table, allocator: std.mem.Allocator, comptime Backend: type) void {
+        live_tables_mutex.lock();
+        defer live_tables_mutex.unlock();
         self.mutex.lock();
         defer self.mutex.unlock();
-        if (self.refcount == 0) self.allocator = allocator;
+        if (self.refcount == 0) {
+            self.allocator = allocator;
+            self.unregister_fn = struct {
+                fn unregister(owner: *anyopaque, fd: net.fd_t) void {
+                    const backend: *Backend = @ptrCast(@alignCast(owner));
+                    backend.unregisterCleanup(fd);
+                }
+            }.unregister;
+            self.next_live = live_tables;
+            live_tables = self;
+        }
         self.refcount += 1;
     }
 
     pub fn release(self: *Table) void {
+        live_tables_mutex.lock();
+        defer live_tables_mutex.unlock();
         self.mutex.lock();
         defer self.mutex.unlock();
         self.refcount -= 1;
         if (self.refcount == 0) {
+            var link: *?*Table = &live_tables;
+            while (link.*) |table| : (link = &table.next_live) {
+                if (table == self) {
+                    link.* = self.next_live;
+                    break;
+                }
+            }
+            self.next_live = null;
             for (&self.shards) |*shard| {
                 shard.map.deinit(self.allocator);
                 shard.map = .empty;
@@ -133,7 +161,45 @@ pub const Table = struct {
         const key: u32 = @bitCast(fd);
         return &self.shards[key & (shard_count - 1)];
     }
+
+    /// Drop `fd`'s entry and remove it from the poller of every loop that owns
+    /// a direction of it. Must run before the fd is closed: the fd is the only
+    /// handle a poller registration can be removed by, and a registration on a
+    /// description that outlives the close (dup, fork) would otherwise keep
+    /// firing for whatever reuses the fd number.
+    fn purge(self: *Table, fd: net.fd_t) void {
+        const shard = self.shardForFd(fd);
+        shard.mutex.lock();
+        const removed = shard.map.fetchRemove(@as(u32, @bitCast(fd)));
+        shard.mutex.unlock();
+        var entry = (removed orelse return).value;
+
+        // Closing an fd with ops still parked on it would orphan those
+        // completions (removed here without finishing) and leak their
+        // active/inflight accounting. The contract is that callers cancel or
+        // await outstanding socket ops before closing the fd; assert it so a
+        // violation surfaces in safe builds rather than silently leaking.
+        std.debug.assert(entry.waiters(.read).head == null);
+        std.debug.assert(entry.waiters(.write).head == null);
+
+        if (entry.read_owner) |owner| self.unregister_fn(owner, fd);
+        if (entry.write_owner) |owner| {
+            if (owner != entry.read_owner) self.unregister_fn(owner, fd);
+        }
+    }
 };
+
+var live_tables_mutex: os.Mutex = .init();
+var live_tables: ?*Table = null;
+
+/// Purge `fd` from every live table, for a close that does not run on a loop
+/// and so does not know which group the socket was used in.
+pub fn purgeAll(fd: net.fd_t) void {
+    live_tables_mutex.lock();
+    defer live_tables_mutex.unlock();
+    var it = live_tables;
+    while (it) |table| : (it = table.next_live) table.purge(fd);
+}
 
 // ---- generic single-owner socket path ---------------------------------------
 //
@@ -234,8 +300,7 @@ fn failPark(state: anytype, completion: *Completion) void {
 /// raced the optimistic syscall.
 pub fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion) ParkResult {
     const dir = dirForOp(completion);
-    const self_loop: *Loop = state.loop;
-    const self_opaque: *anyopaque = @ptrCast(self_loop);
+    const self_opaque: *anyopaque = @ptrCast(self);
     const table = &self.shared.sock_table;
     const shard = table.shardForFd(fd);
 
@@ -370,24 +435,10 @@ pub fn detach(self: anytype, target: *Completion) bool {
     return removed;
 }
 
-/// Tear down the shared registration for a socket fd about to be closed. Closing
-/// the fd removes it from every poller at the kernel level, so this only drops
-/// the software bookkeeping (for all loops at once) plus this loop's poller entry.
+/// Tear down the shared registration for a socket fd about to be closed, on a
+/// loop of the group the socket was used in.
 pub fn unregister(self: anytype, fd: net.fd_t) void {
-    const shard = self.shared.sock_table.shardForFd(fd);
-    shard.mutex.lock();
-    if (shard.map.getPtr(@as(u32, @bitCast(fd)))) |entry| {
-        // Closing an fd with ops still parked on it would orphan those
-        // completions (removed here without finishing) and leak their
-        // active/inflight accounting. The contract is that callers cancel or
-        // await outstanding socket ops before closing the fd; assert it so a
-        // violation surfaces in safe builds rather than silently leaking.
-        std.debug.assert(entry.waiters(.read).head == null);
-        std.debug.assert(entry.waiters(.write).head == null);
-    }
-    _ = shard.map.remove(@as(u32, @bitCast(fd)));
-    shard.mutex.unlock();
-    self.unregisterCleanup(fd);
+    self.shared.sock_table.purge(fd);
 }
 
 /// Generic submit for socket read/write/accept-family ops: try the syscall
@@ -479,6 +530,8 @@ test "sockreg: cancel of an op that service already finished leaves it alone" {
 
         const CheckResult = enum { completed, requeue };
 
+        pub fn unregisterCleanup(_: *@This(), _: net.fd_t) void {}
+
         pub fn checkCompletion(c: *Completion, event: *const Event) CheckResult {
             if (c == event.requeue) return .requeue;
             c.setResult(.net_recv, 1);
@@ -513,7 +566,7 @@ test "sockreg: cancel of an op that service already finished leaves it alone" {
     const d = &ops[3].c;
 
     var backend: FakeBackend = .{};
-    backend.shared.sock_table.acquire(std.testing.allocator);
+    backend.shared.sock_table.acquire(std.testing.allocator, FakeBackend);
     defer backend.shared.sock_table.release();
 
     const shard = backend.shared.sock_table.shardForFd(fd);

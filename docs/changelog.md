@@ -49,6 +49,10 @@ All notable changes to this project will be documented in this file.
 
 - Fixed `std.Io.net.Stream.readWithControl` and `readerWithControl` never receiving control data.
 
+- Fixed a socket closed outside the runtime, or one whose descriptor was duplicated, leaving
+  a readiness registration behind on Linux (epoll), macOS and BSD, which could hang the next
+  socket that reused its descriptor number.
+
 - Fixed accept errors that belong to a single queued connection being reported as
   unexpected or fatal, and a crash in accept on Windows.
 

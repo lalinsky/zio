@@ -210,7 +210,7 @@ pending_changes: usize = 0,
 epoll_pwait2_supported: bool = true,
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
-    shared_state.sock_table.acquire(allocator);
+    shared_state.sock_table.acquire(allocator, Self);
     errdefer shared_state.sock_table.release();
     const rc = std.os.linux.epoll_create1(std.os.linux.EPOLL.CLOEXEC);
     const epoll_fd: i32 = switch (posix.errno(rc)) {
@@ -555,8 +555,9 @@ pub fn registerSocket(self: *Self, fd: NetHandle, dir: sockreg.Dir, other_owned_
     }
 }
 
-/// Drop this loop's epoll entry for `fd` (best-effort: ENOENT if owned elsewhere;
-/// the kernel drops the rest when the fd is closed). Called by sockreg.unregister.
+/// Remove `fd` from this loop's epoll. Called by sockreg before the socket is
+/// closed, for every loop that owns a direction of it, from whichever thread
+/// closes it (epoll_ctl on another thread's epoll is safe).
 pub fn unregisterCleanup(self: *Self, fd: NetHandle) void {
     _ = linux.epoll_ctl(self.epoll_fd, linux.EPOLL.CTL_DEL, fd, null);
 }

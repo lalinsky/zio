@@ -247,7 +247,7 @@ fn makeKey(ident: usize, filter: i32) u64 {
 }
 
 pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_state: *SharedState) !void {
-    shared_state.sock_table.acquire(allocator);
+    shared_state.sock_table.acquire(allocator, Self);
     errdefer shared_state.sock_table.release();
     const kq = std.c.kqueue();
     const kqueue_fd: i32 = switch (posix.errno(kq)) {
