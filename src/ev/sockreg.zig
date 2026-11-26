@@ -210,6 +210,24 @@ pub fn netHandle(c: *Completion) net.fd_t {
     };
 }
 
+/// Finish a completion that could not be parked. A native sendfile that already
+/// sent part of the request reports what it sent, as on cancel (see NetSendFile).
+fn failPark(state: anytype, completion: *Completion) void {
+    const SendFileData = @FieldType(NetSendFile, "internal");
+    if (comptime @hasField(SendFileData, "sent")) {
+        if (completion.op == .net_send_file) {
+            const sent = completion.cast(NetSendFile).internal.sent;
+            if (sent > 0) {
+                completion.setResult(.net_send_file, sent);
+                state.markCompletedFromBackend(completion);
+                return;
+            }
+        }
+    }
+    completion.setError(error.Unexpected);
+    state.markCompletedFromBackend(completion);
+}
+
 /// Park `completion` on the loop that owns `(fd, dir)`, registering this loop as
 /// the owner if nobody is yet. If the owner is a different loop, the completion
 /// (and its accounting) is migrated to it. Returns `.retry` if a readiness edge
@@ -225,8 +243,7 @@ pub fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion
     const gop = shard.map.getOrPut(table.allocator, @as(u32, @bitCast(fd))) catch {
         shard.mutex.unlock();
         log.err("sock registration table OOM", .{});
-        completion.setError(error.Unexpected);
-        state.markCompletedFromBackend(completion);
+        failPark(state, completion);
         return .failed;
     };
     if (!gop.found_existing) gop.value_ptr.* = .{};
@@ -249,8 +266,7 @@ pub fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion
         if (!self.registerSocket(fd, dir, other_owned_here)) {
             if (created and entry.isEmpty()) _ = shard.map.remove(@as(u32, @bitCast(fd)));
             shard.mutex.unlock();
-            completion.setError(error.Unexpected);
-            state.markCompletedFromBackend(completion);
+            failPark(state, completion);
             return .failed;
         }
         owner.* = self_opaque;
