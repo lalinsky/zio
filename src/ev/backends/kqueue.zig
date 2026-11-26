@@ -527,57 +527,42 @@ fn removeFromPollQueue(self: *Self, completion: *Completion) void {
 
 // Backend hooks for the generic single-owner socket path in sockreg.zig.
 
-/// Queue an EV_ADD | EV_CLEAR for `(fd, dir)` on this loop's kqueue (applied on
-/// the next poll). Edge-triggered + persistent: the registration stays for the
-/// fd's lifetime. Returns false only on OOM growing the change buffer.
-fn ensureKevent(self: *Self, fd: NetHandle, dir: sockreg.Dir) bool {
-    const change = self.reserveChange() catch {
-        log.err("kqueue: failed to reserve change buffer slot for socket", .{});
-        return false;
-    };
-    change.* = .{
+/// Arm this loop's kqueue for `(fd, dir)` with an immediate EV_ADD | EV_CLEAR.
+/// Edge-triggered and persistent: the knote stays until the fd is closed, so
+/// this runs once per fd/direction and has nothing to gain from batching.
+/// Applying it right away means no registration can outlive the fd: a buffered
+/// EV_ADD would be applied after a close that happened in between, arming a
+/// reused fd number. kqueue tracks read/write as separate filters, so
+/// `other_owned_here` is irrelevant (no combined mask like epoll). Called by
+/// sockreg.park.
+pub fn registerSocket(self: *Self, fd: NetHandle, dir: sockreg.Dir, other_owned_here: bool) bool {
+    _ = other_owned_here;
+    var changes: [1]std.c.Kevent = .{.{
         .ident = @intCast(fd),
         .filter = filterForDir(dir),
         .flags = std.c.EV.ADD | std.c.EV.CLEAR,
         .fflags = 0,
         .data = 0,
         .udata = sock_marker,
-    };
-    return true;
-}
-
-/// Arm this loop's kqueue for `(fd, dir)`. kqueue tracks read/write as separate
-/// filters, so `other_owned_here` is irrelevant (no combined mask like epoll).
-/// Called by sockreg.park.
-pub fn registerSocket(self: *Self, fd: NetHandle, dir: sockreg.Dir, other_owned_here: bool) bool {
-    _ = other_owned_here;
-    return self.ensureKevent(fd, dir);
-}
-
-/// The kernel removes a closed fd's *already-applied* knotes automatically, but a
-/// socket EV_ADD still sitting un-flushed in change_buffer would be applied after
-/// the fd is closed — and if the fd number is reused before the next poll, it
-/// would arm the stale registration on the wrong socket on this loop. Drop any
-/// pending changes for this fd so they cannot outlive it. (We deliberately do not
-/// enqueue an EV_DELETE: a buffered delete flushes after the close and could hit a
-/// reused fd, reintroducing the same hazard.) Called by sockreg.unregister.
-pub fn unregisterCleanup(self: *Self, fd: NetHandle) void {
-    const ident: usize = @intCast(fd);
-    var i: usize = 0;
-    while (i < self.change_buffer.items.len) {
-        const ch = self.change_buffer.items[i];
-        // Match only this loop's socket registrations (tagged with sock_marker),
-        // not other changes that may share the ident — on Darwin the wall timers
-        // use idents 0/1 and the async waker is EVFILT_USER, so an ident-only
-        // match could drop a pending timer arm and wedge it.
-        if (ch.ident == ident and ch.udata == sock_marker) {
-            // orderedRemove preserves the relative order of the remaining changes,
-            // which matters for any same-(ident,filter) ADD/DELETE pairing.
-            _ = self.change_buffer.orderedRemove(i);
-        } else {
-            i += 1;
+    }};
+    while (true) {
+        const rc = std.c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return true,
+            .INTR => continue,
+            else => |err| {
+                log.err("Failed to register socket with kqueue: {}", .{err});
+                return false;
+            },
         }
     }
+}
+
+/// Nothing to drop: closing the fd removes its knotes from every kqueue, and
+/// registerSocket never leaves a change pending. Called by sockreg.unregister.
+pub fn unregisterCleanup(self: *Self, fd: NetHandle) void {
+    _ = self;
+    _ = fd;
 }
 
 /// A no-error event for the optimistic (pre-park) checkCompletion attempt.

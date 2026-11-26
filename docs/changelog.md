@@ -54,6 +54,9 @@ All notable changes to this project will be documented in this file.
 
 - Fixed `Server.accept` not timing out while queued connections kept failing.
 
+- Fixed a rare race on macOS and BSD where closing a socket could leave a stale readiness
+  registration on a new file that reused its descriptor number.
+
 - Fixed Windows terminating the process right after delivering a `terminate` signal, before
   the waiting task could clean up.
 
