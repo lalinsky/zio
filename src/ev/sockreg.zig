@@ -72,10 +72,49 @@ pub const max_loops = 64;
 pub const gen_bits = 30;
 pub const Gen = @Int(.unsigned, gen_bits);
 
+/// Completions parked on a socket in one direction, oldest first: a list
+/// doubly linked through the completions' `prev` and `next`, whose head's
+/// `prev` points to its tail. One pointer per direction keeps an `Entry` small,
+/// with pushing at the tail and removing any member still O(1).
+pub const WaitList = struct {
+    head: ?*Completion = null,
+
+    pub fn isEmpty(self: WaitList) bool {
+        return self.head == null;
+    }
+
+    pub fn push(self: *WaitList, c: *Completion) void {
+        std.debug.assert(c.next == null and c.prev == null);
+        if (self.head) |head| {
+            const tail = head.prev.?;
+            tail.next = c;
+            c.prev = tail;
+            head.prev = c;
+        } else {
+            c.prev = c;
+            self.head = c;
+        }
+    }
+
+    /// Remove `c`, which must be in this list.
+    pub fn remove(self: *WaitList, c: *Completion) void {
+        const head = self.head.?;
+        if (c == head) {
+            self.head = c.next;
+            if (c.next) |next| next.prev = c.prev;
+        } else {
+            c.prev.?.next = c.next;
+            if (c.next) |next| next.prev = c.prev else head.prev = c.prev;
+        }
+        c.prev = null;
+        c.next = null;
+    }
+};
+
 /// One loop's registration of one socket.
 pub const Entry = struct {
     /// Completions of this loop parked on the socket, per direction.
-    waiters: [2]Queue(Completion) = .{ .{}, .{} },
+    waiters: [2]WaitList = .{ .{}, .{} },
     /// Directions registered with this loop's poller.
     registered: Dirs = 0,
     /// Directions a completion parked on since the last edge that found no
@@ -113,8 +152,8 @@ pub const Local = struct {
         // active/inflight accounting. The contract is that callers cancel or
         // await outstanding socket ops before closing the fd; assert it so a
         // violation surfaces in safe builds rather than silently leaking.
-        std.debug.assert(removed.value.waiters[0].head == null);
-        std.debug.assert(removed.value.waiters[1].head == null);
+        std.debug.assert(removed.value.waiters[0].isEmpty());
+        std.debug.assert(removed.value.waiters[1].isEmpty());
         if (removed.value.registered != 0) self.table.forget_fn(self.poller_fd, fd);
     }
 };
@@ -251,7 +290,7 @@ pub const Table = struct {
             other.mutex.lock();
             defer other.mutex.unlock();
             const entry = other.entries.getPtr(Local.key(fd)) orelse continue;
-            if (entry.waiters[0].head != null or entry.waiters[1].head != null) continue;
+            if (!entry.waiters[0].isEmpty() or !entry.waiters[1].isEmpty()) continue;
             // An edge of this registration already harvested by the other loop
             // finds no entry, or one of a later registration with another
             // generation, and is ignored.
@@ -426,8 +465,7 @@ fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion) vo
         log.err("socket registration table OOM", .{});
         local.mutex.lock();
         const entry_now = local.entries.getPtr(Local.key(fd)).?;
-        const removed = entry_now.waiters[@backingInt(dir)].remove(completion);
-        std.debug.assert(removed);
+        entry_now.waiters[@backingInt(dir)].remove(completion);
         _ = self.setInterest(fd, entry_now.registered, 0, entry_now.gen);
         _ = local.entries.remove(Local.key(fd));
         local.mutex.unlock();
@@ -452,7 +490,7 @@ pub fn onEvent(self: anytype, state: anytype, fd: net.fd_t, gen: Gen, ready: Dir
             const bit = dirBit(dir);
             if (ready & entry.registered & bit != 0) {
                 const waiters = &entry.waiters[@backingInt(dir)];
-                if (waiters.head == null) {
+                if (waiters.isEmpty()) {
                     if (entry.used & bit != 0) {
                         entry.used &= ~bit;
                     } else {
@@ -475,7 +513,7 @@ pub fn onEvent(self: anytype, state: anytype, fd: net.fd_t, gen: Gen, ready: Dir
                                 // `detach` relies on this: the result is set in
                                 // the same critical section that unlinks the op.
                                 std.debug.assert(c.has_result);
-                                _ = waiters.remove(c);
+                                waiters.remove(c);
                                 to_finish.push(c);
                             },
                             .requeue => {
@@ -488,7 +526,7 @@ pub fn onEvent(self: anytype, state: anytype, fd: net.fd_t, gen: Gen, ready: Dir
             }
         }
         if (entry.registered == 0) {
-            std.debug.assert(entry.waiters[0].head == null and entry.waiters[1].head == null);
+            std.debug.assert(entry.waiters[0].isEmpty() and entry.waiters[1].isEmpty());
             _ = local.entries.remove(Local.key(fd));
             dropped = true;
         }
@@ -510,10 +548,9 @@ pub fn onEvent(self: anytype, state: anytype, fd: net.fd_t, gen: Gen, ready: Dir
 /// a callback it ran is canceling it re-entrantly. The caller must then leave it
 /// alone.
 ///
-/// The answer is taken from `has_result`, not from the queue: an op `onEvent`
+/// The answer is taken from `has_result`, not from the links: an op `onEvent`
 /// claimed sits in its private finish list, whose links it rewrites after
-/// unlocking, and `Queue.remove` would mistake a linked op there for a member
-/// of the waiter queue.
+/// unlocking, so they cannot tell whether it is still parked.
 pub fn detach(self: anytype, target: *Completion) bool {
     const local: *Local = self.socks;
     local.mutex.lock();
@@ -523,9 +560,8 @@ pub fn detach(self: anytype, target: *Completion) bool {
     // its entry can only go away with its last waiter, or when the fd is
     // closed, which the caller must not do with ops still in flight.
     const entry = local.entries.getPtr(Local.key(netHandle(target))) orelse return false;
-    const removed = entry.waiters[@backingInt(dirForOp(target))].remove(target);
-    std.debug.assert(removed);
-    return removed;
+    entry.waiters[@backingInt(dirForOp(target))].remove(target);
+    return true;
 }
 
 /// Remove a socket that is about to be closed from every loop of this group.
@@ -672,13 +708,12 @@ test "sockreg: cancel of an op that onEvent already finished leaves it alone" {
 
     const waiters = &backend.socks.entries.getPtr(Local.key(fd)).?.waiters[@backingInt(Dir.read)];
     try std.testing.expectEqual(d, waiters.head.?);
-    try std.testing.expectEqual(d, waiters.tail.?);
     try std.testing.expectEqual(null, d.next);
-    try std.testing.expectEqual(null, d.prev);
+    try std.testing.expectEqual(d, d.prev); // the head's prev is the tail
 
     // D is still parked, so a cancel claims it.
     try std.testing.expect(detach(&backend, d));
-    try std.testing.expectEqual(null, waiters.head);
+    try std.testing.expect(waiters.isEmpty());
 }
 
 test "sockreg: a registration is dropped after two edges with no waiter" {
@@ -763,4 +798,43 @@ test "sockreg: registering a socket drops other loops' idle registrations of it"
 
     try std.testing.expect(detach(&busy, &ops[1].c));
     try std.testing.expect(detach(&new, &ops[2].c));
+}
+
+test "sockreg: a wait list keeps its order through removals anywhere" {
+    var ops: [4]NetRecv = undefined;
+    var buf: [1]u8 = undefined;
+    var iov: [1]os.iovec = undefined;
+    const ReadBuf = @import("buf.zig").ReadBuf;
+    for (&ops) |*op| op.* = .init(0, ReadBuf.fromSlice(&buf, &iov), .{});
+    const a = &ops[0].c;
+    const b = &ops[1].c;
+    const c = &ops[2].c;
+    const d = &ops[3].c;
+
+    var list: WaitList = .{};
+    for ([_]*Completion{ a, b, c, d }) |op| list.push(op);
+    list.remove(b); // middle
+    list.remove(d); // tail
+    list.push(b);
+    list.remove(a); // head
+
+    var seen: [4]?*Completion = @splat(null);
+    var n: usize = 0;
+    var it = list.head;
+    while (it) |op| : (it = op.next) {
+        seen[n] = op;
+        n += 1;
+    }
+    try std.testing.expectEqualSlices(?*Completion, &.{ c, b, null, null }, &seen);
+    try std.testing.expectEqual(b, list.head.?.prev.?);
+
+    list.remove(b);
+    list.remove(c);
+    try std.testing.expect(list.isEmpty());
+    try std.testing.expectEqual(null, c.prev);
+    try std.testing.expectEqual(null, c.next);
+}
+
+test "sockreg: an entry holds one pointer per direction" {
+    try std.testing.expect(@sizeOf(Entry) <= 24);
 }
