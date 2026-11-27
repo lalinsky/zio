@@ -121,10 +121,6 @@ pub fn supports(_: *const Self, comptime op: Op, data: *op.toType()) bool {
 }
 
 pub const SharedState = struct {
-    /// Backend-internal inflight count: ops accepted by submit() and not yet
-    /// completed, as a group-shared atomic. Read by hasInflight() to skip the
-    /// poll syscall when nothing can arrive.
-    inflight_io: std.atomic.Value(usize) = .init(0),
     /// Which loops of the group have which sockets registered. See sockreg.zig.
     sock_table: sockreg.Table = .{},
 };
@@ -194,6 +190,12 @@ poll_queue: std.AutoHashMapUnmanaged(NetHandle, PollEntry) = .empty,
 shared: *SharedState = undefined,
 /// This loop's socket registrations (see sockreg.zig).
 socks: *sockreg.Local = undefined,
+/// Backend-internal inflight count: ops accepted by submit() and not yet
+/// completed. Every op is completed on the loop that accepted it (a parked
+/// socket op by its own loop's poller, a cancel routed to it), so a plain
+/// counter suffices. Read by hasInflight() to skip the poll syscall when
+/// nothing can arrive.
+inflight: usize = 0,
 epoll_fd: i32 = -1,
 waker_eventfd: i32 = -1,
 /// timerfds for the boot/real wall-clock timers (index 0 = boot, 1 = real),
@@ -581,17 +583,16 @@ pub fn probeEvent(fd: NetHandle, dir: sockreg.Dir) linux.epoll_event {
     return .{ .data = .{ .u64 = sockData(fd, 0) }, .events = 0 };
 }
 
-/// Drop one inflight op. Called via LoopState.markCompletedFromBackend from
-/// whichever loop finishes the op; the storage is group-shared, so any
-/// instance's decrement balances any instance's increment.
+/// Drop one inflight op. Called via LoopState.markCompletedFromBackend on the
+/// owner thread.
 pub fn decrInflight(self: *Self) void {
-    _ = self.shared.inflight_io.fetchSub(1, .monotonic);
+    self.inflight -= 1;
 }
 
 /// Whether poll() could produce completions. Used by the loop to skip the
 /// wait syscall in no-wait ticks when nothing can arrive.
 pub fn hasInflight(self: *const Self) bool {
-    return self.shared.inflight_io.load(.monotonic) > 0;
+    return self.inflight > 0;
 }
 
 /// Submit a completion to the backend - infallible.
@@ -602,7 +603,7 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
     // Counted for every accepted op (sync completers decrement right back via
     // markCompletedFromBackend), mirroring the decrInflight in every completion
     // path so the balance needs no per-path reasoning.
-    _ = self.shared.inflight_io.fetchAdd(1, .monotonic);
+    self.inflight += 1;
 
     switch (op) {
         .group, .timer, .async, .work => unreachable, // Managed by the loop

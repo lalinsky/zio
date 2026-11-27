@@ -620,9 +620,9 @@ pub const Loop = struct {
 
     /// Whether this loop has nothing left to do: no backend I/O in flight, no
     /// armed timer, no registered async handle, no thread-pool job outstanding,
-    /// and no finished completion waiting for its callback. On backends whose
-    /// in-flight count is shared by a loop group (epoll, kqueue, IOCP), I/O
-    /// submitted by any loop of the group keeps every loop of the group busy.
+    /// and no finished completion waiting for its callback. On IOCP, whose
+    /// in-flight count is shared by a loop group, I/O submitted by any loop of
+    /// the group keeps every loop of the group busy.
     /// Completions handed out via `nextDispatched` are already finished and do
     /// not keep the loop running.
     ///

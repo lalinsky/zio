@@ -32,6 +32,9 @@ All notable changes to this project will be documented in this file.
   it, so its I/O completes on the waiting task's executor instead of always on the executor
   that first waited on the socket.
 
+- In the low-level `ev` API, a loop sharing a group on Linux (epoll), macOS and BSD no longer
+  keeps running while only other loops of the group have I/O in flight.
+
 - In the low-level `ev` API, a completion with a null `callback` is no longer delivered
   through `Loop.nextDispatched()`; only `do_not_call_callbacks` does that. Removed
   `Loop.takeLastDispatched()`.
