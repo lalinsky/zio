@@ -59,6 +59,9 @@ All notable changes to this project will be documented in this file.
 
 - Fixed `std.Io.net.Stream.readWithControl` and `readerWithControl` never receiving control data.
 
+- Fixed reading or writing a socket through a file handle failing or hanging on Linux (epoll),
+  macOS and BSD when the same executor also did socket I/O on it.
+
 - Fixed a socket closed outside the runtime, or one whose descriptor was duplicated, leaving
   a readiness registration behind on Linux (epoll), macOS and BSD, which could hang the next
   socket that reused its descriptor number.

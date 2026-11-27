@@ -7,6 +7,7 @@ const os = @import("../../os/root.zig");
 const Loop = ev.Loop;
 const NetRecv = ev.NetRecv;
 const NetClose = ev.NetClose;
+const FileReadStreaming = ev.FileReadStreaming;
 const net = os.net;
 
 test "sockreg: a socket closed off the loop leaves no registration for its reused fd" {
@@ -124,4 +125,34 @@ test "sockreg: a socket used on another loop wakes this one while that loop is n
         return error.TestUnexpectedResult;
     }
     try std.testing.expectEqual(1, try recv.getResult());
+}
+
+test "sockreg: a socket read as a stream file after a socket receive on the same loop" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    const fds = try net.socketpair(.unix, .stream, .ip, .{ .nonblocking = true });
+    defer net.close(fds[0]);
+    defer net.close(fds[1]);
+
+    var buf: [16]u8 = undefined;
+    var iov: [1]os.iovec = undefined;
+
+    // A receive registers the socket with the loop's poller, then goes away.
+    var recv: NetRecv = .init(fds[0], .fromSlice(&buf, &iov), .{});
+    loop.add(&recv.c);
+    loop.cancel(&recv.c);
+    try loop.run();
+    try std.testing.expectError(error.Canceled, recv.getResult());
+
+    // A streaming read of the same fd waits through the same registration.
+    var read: FileReadStreaming = .init(fds[0], .fromSlice(&buf, &iov));
+    loop.add(&read.c);
+    try loop.poll(.zero);
+    _ = try net.send(fds[1], &.{net.iovecConstFromSlice("x")}, .{});
+    try loop.run();
+    try std.testing.expectEqual(1, try read.getResult());
 }

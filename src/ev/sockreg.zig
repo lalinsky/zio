@@ -1,23 +1,32 @@
 // SPDX-FileCopyrightText: 2025 Lukáš Lalinský
 // SPDX-License-Identifier: MIT
 
-//! Per-loop socket readiness registrations for the edge-triggered backends
-//! (epoll, kqueue).
+//! Per-loop readiness registrations of pollable fds (sockets, pipes, ttys,
+//! pidfds) for the edge-triggered backends (epoll, kqueue).
 //!
-//! Each loop registers a socket with its own poller, edge-triggered and
-//! persistent, the first time one of its own completions waits on it, and only
-//! ever services its own completions, on its own thread. A socket used from
-//! several loops is registered with each of them, and every readiness edge
-//! reaches every poller it is registered with.
+//! Each loop registers an fd with its own poller, edge-triggered, the first
+//! time one of its own completions waits on it, and only ever services its own
+//! completions, on its own thread. An fd used from several loops is registered
+//! with each of them, and every readiness edge reaches every poller it is
+//! registered with.
+//!
+//! A registration a socket op created is persistent: it stays while the socket
+//! is in use, so a connection doing I/O pays no poller syscall per wait. Every
+//! other registration is transient: a direction is removed as soon as no
+//! completion waits in it. A pipe is often shared with a forked child, and its
+//! close paths do not purge, so a registration left in place could outlive the
+//! fd and keep firing for whatever reuses its number. An entry keeps the mode
+//! it was created with, whatever else parks on it later.
 //!
 //! No wakeup can be lost: a completion parks only after its own syscall (or a
-//! readiness probe) saw the socket not ready, on its loop's thread. Anything
-//! that arrives after that raises an edge in this loop's poller, which the loop
-//! cannot harvest before it returns to its poll, so not before the completion is
-//! parked. Registering a socket, or adding a direction to it, reports readiness
-//! that already exists.
+//! readiness probe) saw the fd not ready, on its loop's thread, or on an fd new
+//! to the loop. Anything that arrives after that raises an edge in this loop's
+//! poller, which the loop cannot harvest before it returns to its poll, so not
+//! before the completion is parked. Registering an fd, or adding a direction to
+//! it, reports readiness that already exists.
 //!
-//! A registration no local completion uses any more is dropped in two ways.
+//! A persistent registration no local completion uses any more is dropped in
+//! two ways.
 //! When a loop registers a socket, it removes the registrations other loops
 //! hold with nothing parked on them: a task that moved to this loop took the
 //! socket's I/O along, and a registration left behind would make every edge
@@ -27,7 +36,8 @@
 //! clears the bit, and a second such edge removes the direction from the
 //! poller.
 //!
-//! The group-shared `Table` records which loops have a socket registered, so
+//! The group-shared `Table` records which loops have a socket registered
+//! persistently, so
 //! that closing it, from any thread, can remove it from each of their pollers
 //! before the fd is gone, and so that a loop registering it can find the other
 //! loops' registrations. The fd is the only handle a registration can be
@@ -52,6 +62,10 @@ const NetSendMsg = @import("completion.zig").NetSendMsg;
 const NetSendMmsg = @import("completion.zig").NetSendMmsg;
 const NetSendFile = @import("completion.zig").NetSendFile;
 const NetPoll = @import("completion.zig").NetPoll;
+const PipePoll = @import("completion.zig").PipePoll;
+const FileReadStreaming = @import("completion.zig").FileReadStreaming;
+const FileWriteStreaming = @import("completion.zig").FileWriteStreaming;
+const ProcessWait = @import("completion.zig").ProcessWait;
 const Queue = @import("queue.zig").Queue;
 const log = @import("../common.zig").log;
 
@@ -72,7 +86,7 @@ pub const max_loops = 64;
 pub const gen_bits = 30;
 pub const Gen = @Int(.unsigned, gen_bits);
 
-/// Completions parked on a socket in one direction, oldest first: a list
+/// Completions parked on an fd in one direction, oldest first: a list
 /// doubly linked through the completions' `prev` and `next`, whose head's
 /// `prev` points to its tail. One pointer per direction keeps an `Entry` small,
 /// with pushing at the tail and removing any member still O(1).
@@ -111,18 +125,21 @@ pub const WaitList = struct {
     }
 };
 
-/// One loop's registration of one socket.
+/// One loop's registration of one fd.
 pub const Entry = struct {
-    /// Completions of this loop parked on the socket, per direction.
+    /// Completions of this loop parked on the fd, per direction.
     waiters: [2]WaitList = .{ .{}, .{} },
     /// Directions registered with this loop's poller.
     registered: Dirs = 0,
     /// Directions a completion parked on since the last edge that found no
     /// waiter in them.
     used: Dirs = 0,
-    /// Tags this registration's events, so an event harvested before the socket
-    /// was closed and its fd number reused is not applied to the new socket.
+    /// Tags this registration's events, so an event harvested before the fd was
+    /// closed and its number reused is not applied to the new one.
     gen: Gen,
+    /// Remove each direction as soon as no completion waits in it; such an
+    /// entry is not recorded in the `Table`.
+    transient: bool = false,
 };
 
 /// One loop's registrations. Only the loop's own thread touches it, except a
@@ -327,7 +344,7 @@ pub fn purgeAll(fd: net.fd_t) void {
     while (it) |table| : (it = table.next_live) table.purge(fd);
 }
 
-// ---- generic socket path ----------------------------------------------------
+// ---- generic fd path --------------------------------------------------------
 //
 // The control flow below is identical for epoll and kqueue; only the poller
 // syscalls differ. Each backend supplies these hooks:
@@ -368,7 +385,17 @@ pub fn isSocketOp(op: Op) bool {
     };
 }
 
-/// Direction a socket op waits on.
+/// Whether `op` waits through this table on every backend that uses it: the
+/// socket ops, and the waits on other pollable fds. A process wait does too on
+/// Linux, where it waits on a pidfd.
+pub fn isRegisteredOp(op: Op) bool {
+    return isSocketOp(op) or switch (op) {
+        .pipe_poll, .file_read_streaming, .file_write_streaming => true,
+        else => false,
+    };
+}
+
+/// Direction an op waits on.
 pub fn dirForOp(c: *Completion) Dir {
     return switch (c.op) {
         .net_accept, .net_recv, .net_recvfrom, .net_recvmsg, .net_recvmmsg => .read,
@@ -377,12 +404,18 @@ pub fn dirForOp(c: *Completion) Dir {
             .recv => .read,
             .send => .write,
         },
+        .pipe_poll => switch (c.cast(PipePoll).event) {
+            .read => .read,
+            .write => .write,
+        },
+        .file_read_streaming, .process_wait => .read,
+        .file_write_streaming => .write,
         else => unreachable,
     };
 }
 
-/// The socket fd a net op operates on.
-pub fn netHandle(c: *Completion) net.fd_t {
+/// The fd an op waits on.
+pub fn handleOf(c: *Completion) net.fd_t {
     return switch (c.op) {
         .net_accept => c.cast(NetAccept).handle,
         .net_connect => c.cast(NetConnect).handle,
@@ -396,6 +429,14 @@ pub fn netHandle(c: *Completion) net.fd_t {
         .net_sendmmsg => c.cast(NetSendMmsg).handle,
         .net_send_file => c.cast(NetSendFile).handle,
         .net_poll => c.cast(NetPoll).handle,
+        .pipe_poll => c.cast(PipePoll).handle,
+        .file_read_streaming => c.cast(FileReadStreaming).handle,
+        .file_write_streaming => c.cast(FileWriteStreaming).handle,
+        .process_wait => {
+            const internal = &c.cast(ProcessWait).internal;
+            if (comptime @hasField(@TypeOf(internal.*), "pidfd")) return @intCast(internal.pidfd);
+            unreachable;
+        },
         else => unreachable,
     };
 }
@@ -418,8 +459,8 @@ fn failPark(state: anytype, completion: *Completion) void {
     state.markCompletedFromBackend(completion);
 }
 
-/// Park `completion` in this loop's waiters for its socket, registering the
-/// socket (or the direction) with this loop's poller if it is not yet. If that
+/// Park `completion` in this loop's waiters for its fd, registering the fd (or
+/// the direction) with this loop's poller if it is not yet. If that
 /// fails, finishes the completion with an error instead.
 fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion) void {
     const local: *Local = self.socks;
@@ -429,16 +470,17 @@ fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion) vo
     local.mutex.lock();
     const gop = local.entries.getOrPut(local.table.allocator, Local.key(fd)) catch {
         local.mutex.unlock();
-        log.err("socket registration table OOM", .{});
+        log.err("fd registration table OOM", .{});
         failPark(state, completion);
         return;
     };
     if (!gop.found_existing) {
-        gop.value_ptr.* = .{ .gen = local.next_gen };
+        gop.value_ptr.* = .{ .gen = local.next_gen, .transient = !isSocketOp(completion.op) };
         local.next_gen +%= 1;
     }
     const entry = gop.value_ptr;
     const newly_registered = entry.registered == 0;
+    const transient = entry.transient;
     if (entry.registered & bit == 0) {
         if (!self.setInterest(fd, entry.registered, entry.registered | bit, entry.gen)) {
             if (newly_registered) _ = local.entries.remove(Local.key(fd));
@@ -458,11 +500,11 @@ fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion) vo
     // close cannot race an op parked on it; set it outside the loop's mutex to
     // keep the lock order (see `Table`). Another loop's claim cannot remove
     // this entry meanwhile: the completion just parked in it keeps it.
-    if (newly_registered and !local.table.claim(fd, local.index)) {
+    if (newly_registered and !transient and !local.table.claim(fd, local.index)) {
         // Without the bit a close would leave the registration behind, so undo
         // it. Nothing else can have touched the entry: only this thread parks
         // or services on it.
-        log.err("socket registration table OOM", .{});
+        log.err("fd registration table OOM", .{});
         local.mutex.lock();
         const entry_now = local.entries.getPtr(Local.key(fd)).?;
         entry_now.waiters[@backingInt(dir)].remove(completion);
@@ -491,7 +533,9 @@ pub fn onEvent(self: anytype, state: anytype, fd: net.fd_t, gen: Gen, ready: Dir
             if (ready & entry.registered & bit != 0) {
                 const waiters = &entry.waiters[@backingInt(dir)];
                 if (waiters.isEmpty()) {
-                    if (entry.used & bit != 0) {
+                    if (entry.transient) {
+                        dropIfIdle(self, fd, entry, dir);
+                    } else if (entry.used & bit != 0) {
                         entry.used &= ~bit;
                     } else {
                         const remaining = entry.registered & ~bit;
@@ -522,13 +566,14 @@ pub fn onEvent(self: anytype, state: anytype, fd: net.fd_t, gen: Gen, ready: Dir
                             },
                         }
                     }
+                    if (entry.transient) dropIfIdle(self, fd, entry, dir);
                 }
             }
         }
         if (entry.registered == 0) {
             std.debug.assert(entry.waiters[0].isEmpty() and entry.waiters[1].isEmpty());
+            dropped = !entry.transient;
             _ = local.entries.remove(Local.key(fd));
-            dropped = true;
         }
     };
     local.mutex.unlock();
@@ -540,7 +585,20 @@ pub fn onEvent(self: anytype, state: anytype, fd: net.fd_t, gen: Gen, ready: Dir
     }
 }
 
-/// Detach a parked socket completion from this loop's waiters (cancel).
+/// Remove `dir` of a transient registration from the poller once no completion
+/// waits in it. Called with the loop's mutex held; the caller removes the entry
+/// when nothing is left registered.
+fn dropIfIdle(self: anytype, fd: net.fd_t, entry: *Entry, dir: Dir) void {
+    const bit = dirBit(dir);
+    if (!entry.waiters[@backingInt(dir)].isEmpty() or entry.registered & bit == 0) return;
+    const remaining = entry.registered & ~bit;
+    if (!self.setInterest(fd, entry.registered, remaining, entry.gen)) {
+        log.err("failed to drop an idle fd registration", .{});
+    }
+    entry.registered = remaining;
+}
+
+/// Detach a parked completion from this loop's waiters (cancel).
 ///
 /// Returns true if `target` was still parked and this call removed it, meaning
 /// the caller now owns it and must finish it. Returns false if it was already
@@ -559,23 +617,32 @@ pub fn detach(self: anytype, target: *Completion) bool {
     // An op without a result is parked here: it was submitted on this loop, and
     // its entry can only go away with its last waiter, or when the fd is
     // closed, which the caller must not do with ops still in flight.
-    const entry = local.entries.getPtr(Local.key(netHandle(target))) orelse return false;
-    entry.waiters[@backingInt(dirForOp(target))].remove(target);
+    const fd = handleOf(target);
+    const entry = local.entries.getPtr(Local.key(fd)) orelse return false;
+    const dir = dirForOp(target);
+    entry.waiters[@backingInt(dir)].remove(target);
+    if (entry.transient) {
+        dropIfIdle(self, fd, entry, dir);
+        if (entry.registered == 0) _ = local.entries.remove(Local.key(fd));
+    }
     return true;
 }
 
 /// Remove a socket that is about to be closed from every loop of this group.
+/// Only persistent registrations can outlive their waiters, so only sockets
+/// need this.
 pub fn unregister(self: anytype, fd: net.fd_t) void {
     const local: *Local = self.socks;
     local.table.purge(fd);
 }
 
-/// Generic submit for socket read/write/accept-family ops: try the syscall
-/// optimistically (reusing checkCompletion with a no-error event) and only park
-/// on WouldBlock.
+/// Generic submit for ops with a syscall of their own (socket reads, writes
+/// and accepts, streaming reads and writes of other pollable fds): try the
+/// syscall optimistically (reusing checkCompletion with a no-error event) and
+/// only park on WouldBlock.
 pub fn submitIo(self: anytype, state: anytype, c: *Completion) void {
     const Backend = @TypeOf(self.*);
-    const fd = netHandle(c);
+    const fd = handleOf(c);
     var probe = Backend.probeEvent(fd, dirForOp(c));
     switch (Backend.checkCompletion(c, &probe)) {
         // Inline finish (flags permitting) lets a bulk sender batch until
@@ -603,23 +670,33 @@ pub fn submitConnect(self: anytype, state: anytype, c: *Completion) void {
     park(self, state, data.handle, c);
 }
 
-/// Generic net_poll submit: probe readiness with a 0-timeout poll(), since it
-/// has no syscall of its own to see whether the socket is ready, and park only
-/// when it is not.
+/// Generic submit for readiness waits (net_poll, pipe_poll): probe readiness
+/// with a 0-timeout poll(), since they have no syscall of their own to see
+/// whether the fd is ready, and park only when it is not.
 pub fn submitPoll(self: anytype, state: anytype, c: *Completion) void {
-    const data = c.cast(NetPoll);
-    const want: i16 = switch (data.event) {
-        .recv => std.posix.POLL.IN,
-        .send => std.posix.POLL.OUT,
+    const fd = handleOf(c);
+    const want: i16 = switch (dirForOp(c)) {
+        .read => std.posix.POLL.IN,
+        .write => std.posix.POLL.OUT,
     };
-    var pfd = [_]std.posix.pollfd{.{ .fd = data.handle, .events = want, .revents = 0 }};
+    var pfd = [_]std.posix.pollfd{.{ .fd = fd, .events = want, .revents = 0 }};
     const ready = std.posix.poll(&pfd, 0) catch 0;
     if (ready > 0 and (pfd[0].revents & (want | std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
-        c.setResult(.net_poll, {});
+        switch (c.op) {
+            .net_poll => c.setResult(.net_poll, {}),
+            .pipe_poll => c.setResult(.pipe_poll, {}),
+            else => unreachable,
+        }
         state.markCompletedFromBackend(c);
         return;
     }
-    park(self, state, data.handle, c);
+    park(self, state, fd, c);
+}
+
+/// Park a wait on a fd that is new to this loop, such as a just-opened pidfd:
+/// registering it reports readiness that already exists, so no probe is needed.
+pub fn submitWait(self: anytype, state: anytype, fd: net.fd_t, c: *Completion) void {
+    park(self, state, fd, c);
 }
 
 const TestBackend = struct {
@@ -632,7 +709,11 @@ const TestBackend = struct {
 
     pub fn checkCompletion(c: *Completion, event: *const Event) CheckResult {
         if (c == event.requeue) return .requeue;
-        c.setResult(.net_recv, 1);
+        switch (c.op) {
+            .net_recv => c.setResult(.net_recv, 1),
+            .file_read_streaming => c.setResult(.file_read_streaming, 1),
+            else => unreachable,
+        }
         return .completed;
     }
 
@@ -837,4 +918,42 @@ test "sockreg: a wait list keeps its order through removals anywhere" {
 
 test "sockreg: an entry holds one pointer per direction" {
     try std.testing.expect(@sizeOf(Entry) <= 24);
+}
+
+test "sockreg: a transient registration is dropped with its last waiter" {
+    const ReadBuf = @import("buf.zig").ReadBuf;
+    const fd: net.fd_t = 11;
+
+    var table: Table = .{};
+    var backend: TestBackend = .{};
+    backend.socks = try table.acquire(std.testing.allocator, TestBackend, -1);
+    defer table.release(backend.socks);
+
+    var buf: [1]u8 = undefined;
+    var iov: [1]os.iovec = undefined;
+    var ops: [2]FileReadStreaming = undefined;
+    for (&ops) |*op| {
+        op.* = .init(fd, ReadBuf.fromSlice(&buf, &iov));
+        _ = op.c.enterRunning();
+    }
+
+    var state: TestState = .{ .backend = &backend };
+    park(&backend, &state, fd, &ops[0].c);
+    park(&backend, &state, fd, &ops[1].c);
+    try std.testing.expectEqual(dirBit(.read), backend.interest);
+    try std.testing.expect(backend.socks.entries.get(Local.key(fd)).?.transient);
+    // Not recorded in the table: nothing to purge on close, nothing for
+    // another loop to drop.
+    try std.testing.expectEqual(0, testMask(&table, fd));
+
+    // A cancel of one leaves the registration for the other.
+    try std.testing.expect(detach(&backend, &ops[0].c));
+    try std.testing.expectEqual(dirBit(.read), backend.interest);
+
+    // Completing the last one drops it.
+    const gen = backend.socks.entries.get(Local.key(fd)).?.gen;
+    onEvent(&backend, &state, fd, gen, dirBit(.read), &TestBackend.Event{});
+    try std.testing.expectEqual(1, state.finished_count);
+    try std.testing.expectEqual(0, backend.interest);
+    try std.testing.expectEqual(null, backend.socks.entries.get(Local.key(fd)));
 }

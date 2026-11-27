@@ -11,7 +11,6 @@ const unexpectedError = @import("../../os/base.zig").unexpectedError;
 const LoopState = @import("../loop.zig").LoopState;
 const Completion = @import("../completion.zig").Completion;
 const Queue = @import("../queue.zig").Queue;
-const NetConnect = @import("../completion.zig").NetConnect;
 const NetAccept = @import("../completion.zig").NetAccept;
 const NetRecv = @import("../completion.zig").NetRecv;
 const NetSend = @import("../completion.zig").NetSend;
@@ -22,9 +21,7 @@ const NetRecvMmsg = @import("../completion.zig").NetRecvMmsg;
 const NetSendMsg = @import("../completion.zig").NetSendMsg;
 const NetSendMmsg = @import("../completion.zig").NetSendMmsg;
 const NetSendFile = @import("../completion.zig").NetSendFile;
-const NetPoll = @import("../completion.zig").NetPoll;
 const NetClose = @import("../completion.zig").NetClose;
-const PipePoll = @import("../completion.zig").PipePoll;
 const PipeClose = @import("../completion.zig").PipeClose;
 const MachPort = @import("../completion.zig").MachPort;
 const ProcessWait = @import("../completion.zig").ProcessWait;
@@ -195,10 +192,9 @@ const NOTE_TRIGGER: u32 = 0x01000000;
 
 const delete_marker: usize = std.math.maxInt(usize);
 
-// udata of a socket registration: the top two bits are 0b01, telling it apart
-// from the one-shot poll_queue (pipes / streaming files share EVFILT_READ/WRITE
-// but use udata == 0) and from delete_marker, and the registration's generation
-// is in the low bits. Sockets are registered persistently and edge-triggered
+// udata of an fd registration: the top two bits are 0b01, telling it apart from
+// the object waits (udata == 0) and from delete_marker, and the registration's
+// generation is in the low bits. Pollable fds are registered edge-triggered
 // (EV_CLEAR) with the kqueue of each loop that parks on them (see sockreg.zig).
 const sock_udata_shift = @bitSizeOf(usize) - 2;
 const sock_udata_tag: usize = 1 << sock_udata_shift;
@@ -227,7 +223,9 @@ fn filterForDir(dir: sockreg.Dir) i16 {
 // fd-based idents on the other filters.
 const WALL_BOOT_IDENT: usize = 0;
 
-const PollEntry = struct {
+/// Completions waiting on one kernel object that is not an fd: a process
+/// (EVFILT_PROC) or a Mach port, keyed by ident and filter.
+const ObjectWait = struct {
     completions: Queue(Completion),
 };
 
@@ -243,7 +241,7 @@ socks: *sockreg.Local = undefined,
 inflight: usize = 0,
 kqueue_fd: i32 = -1,
 waker_ident: usize = undefined,
-poll_queue: std.AutoHashMapUnmanaged(u64, PollEntry) = .empty,
+object_waits: std.AutoHashMapUnmanaged(u64, ObjectWait) = .empty,
 change_buffer: std.ArrayList(std.c.Kevent) = .empty,
 events: []std.c.Kevent,
 /// Currently-armed absolute deadline (ns in the boot epoch) for the boot
@@ -300,11 +298,11 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
         .events = events,
     };
 
-    try self.poll_queue.ensureTotalCapacity(self.allocator, queue_size);
+    try self.object_waits.ensureTotalCapacity(self.allocator, queue_size);
 }
 
 pub fn deinit(self: *Self) void {
-    self.poll_queue.deinit(self.allocator);
+    self.object_waits.deinit(self.allocator);
     self.change_buffer.deinit(self.allocator);
     self.allocator.free(self.events);
     // Before closing the kqueue: once released, no close on another thread can
@@ -410,32 +408,6 @@ fn armWall(self: *Self, deadline: ?u64) bool {
 
 fn getFilter(completion: *Completion) i16 {
     return switch (completion.op) {
-        .net_connect => std.c.EVFILT.WRITE,
-        .net_accept => std.c.EVFILT.READ,
-        .net_recv => std.c.EVFILT.READ,
-        .net_send => std.c.EVFILT.WRITE,
-        .net_recvfrom => std.c.EVFILT.READ,
-        .net_sendto => std.c.EVFILT.WRITE,
-        .net_recvmsg => std.c.EVFILT.READ,
-        .net_recvmmsg => std.c.EVFILT.READ,
-        .net_sendmsg => std.c.EVFILT.WRITE,
-        .net_sendmmsg => std.c.EVFILT.WRITE,
-        .net_poll => blk: {
-            const poll_data = completion.cast(NetPoll);
-            break :blk switch (poll_data.event) {
-                .recv => std.c.EVFILT.READ,
-                .send => std.c.EVFILT.WRITE,
-            };
-        },
-        .file_read_streaming => std.c.EVFILT.READ,
-        .file_write_streaming => std.c.EVFILT.WRITE,
-        .pipe_poll => blk: {
-            const poll_data = completion.cast(PipePoll);
-            break :blk switch (poll_data.event) {
-                .read => std.c.EVFILT.READ,
-                .write => std.c.EVFILT.WRITE,
-            };
-        },
         .process_wait => std.c.EVFILT.PROC,
         .mach_port => if (builtin.os.tag.isDarwin()) std.c.EVFILT.MACHPORT else unreachable,
         else => unreachable,
@@ -444,20 +416,6 @@ fn getFilter(completion: *Completion) i16 {
 
 fn getIdent(completion: *Completion) usize {
     return switch (completion.op) {
-        .net_accept => @intCast(completion.cast(NetAccept).handle),
-        .net_connect => @intCast(completion.cast(NetConnect).handle),
-        .net_recv => @intCast(completion.cast(NetRecv).handle),
-        .net_send => @intCast(completion.cast(NetSend).handle),
-        .net_recvfrom => @intCast(completion.cast(NetRecvFrom).handle),
-        .net_sendto => @intCast(completion.cast(NetSendTo).handle),
-        .net_recvmsg => @intCast(completion.cast(NetRecvMsg).handle),
-        .net_recvmmsg => @intCast(completion.cast(NetRecvMmsg).handle),
-        .net_sendmsg => @intCast(completion.cast(NetSendMsg).handle),
-        .net_sendmmsg => @intCast(completion.cast(NetSendMmsg).handle),
-        .net_poll => @intCast(completion.cast(NetPoll).handle),
-        .pipe_poll => @intCast(completion.cast(PipePoll).handle),
-        inline .file_read_streaming, .file_write_streaming => |op| @intCast(completion.cast(op.toType()).handle),
-        .pipe_close => @intCast(completion.cast(PipeClose).handle),
         .process_wait => @intCast(completion.cast(ProcessWait).handle),
         .mach_port => completion.cast(MachPort).port,
         else => unreachable,
@@ -475,7 +433,7 @@ fn reserveChange(self: *Self) !*std.c.Kevent {
     return self.change_buffer.addOne(self.allocator);
 }
 
-fn addToPollQueue(self: *Self, state: *LoopState, completion: *Completion) void {
+fn addObjectWait(self: *Self, state: *LoopState, completion: *Completion) void {
     const ident = getIdent(completion);
     const filter = getFilter(completion);
     const key = makeKey(ident, filter);
@@ -483,8 +441,8 @@ fn addToPollQueue(self: *Self, state: *LoopState, completion: *Completion) void 
     completion.prev = null;
     completion.next = null;
 
-    const gop = self.poll_queue.getOrPut(self.allocator, key) catch {
-        log.err("Failed to add to poll queue: OutOfMemory", .{});
+    const gop = self.object_waits.getOrPut(self.allocator, key) catch {
+        log.err("Failed to add an object wait: OutOfMemory", .{});
         completion.setError(error.Unexpected);
         state.markCompletedFromBackend(completion);
         return;
@@ -493,7 +451,7 @@ fn addToPollQueue(self: *Self, state: *LoopState, completion: *Completion) void 
     if (!gop.found_existing) {
         gop.value_ptr.* = .{ .completions = .{} };
         const change = self.reserveChange() catch {
-            _ = self.poll_queue.remove(key);
+            _ = self.object_waits.remove(key);
             completion.setError(error.Unexpected);
             state.markCompletedFromBackend(completion);
             return;
@@ -511,17 +469,17 @@ fn addToPollQueue(self: *Self, state: *LoopState, completion: *Completion) void 
     gop.value_ptr.completions.push(completion);
 }
 
-fn removeFromPollQueue(self: *Self, completion: *Completion) void {
+fn removeObjectWait(self: *Self, completion: *Completion) void {
     const ident = getIdent(completion);
     const filter = getFilter(completion);
     const key = makeKey(ident, filter);
-    const entry = self.poll_queue.getPtr(key) orelse return;
+    const entry = self.object_waits.getPtr(key) orelse return;
 
     _ = entry.completions.remove(completion);
 
     if (entry.completions.head == null) {
         const change = self.reserveChange() catch {
-            _ = self.poll_queue.remove(key);
+            _ = self.object_waits.remove(key);
             return;
         };
         change.* = .{
@@ -532,7 +490,7 @@ fn removeFromPollQueue(self: *Self, completion: *Completion) void {
             .data = 0,
             .udata = delete_marker,
         };
-        _ = self.poll_queue.remove(key);
+        _ = self.object_waits.remove(key);
     }
 }
 
@@ -676,16 +634,11 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
         => sockreg.submitIo(self, state, c),
         .net_poll => sockreg.submitPoll(self, state, c),
 
-        .pipe_poll,
+        .pipe_poll => sockreg.submitPoll(self, state, c),
         // Streaming file I/O is routed here by the loop only when the fd is
-        // pollable (non-seekable); a pipe is always pollable.
-        .file_read_streaming,
-        .file_write_streaming,
-        .mach_port,
-        .process_wait,
-        => {
-            self.addToPollQueue(state, c);
-        },
+        // pollable (non-seekable): try it, park on WouldBlock.
+        .file_read_streaming, .file_write_streaming => sockreg.submitIo(self, state, c),
+        .mach_port, .process_wait => self.addObjectWait(state, c),
 
         .pipe_create => {
             const fds = fs.pipe() catch |err| {
@@ -737,12 +690,13 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
 /// Cancel a completion - infallible.
 /// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
 pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
-    if (sockreg.isSocketOp(target.op)) {
-        // Sockets are parked in this loop's waiters for the fd. If detach finds
-        // the op already claimed by sockreg.onEvent (a callback it ran is
-        // canceling it), it has a natural result, so leave it alone rather than
-        // overwriting it with Canceled and completing it twice. The kqueue
-        // registration is left in place, and dropped later if it goes unused.
+    if (sockreg.isRegisteredOp(target.op)) {
+        // Parked in this loop's waiters for the fd. If detach finds the op
+        // already claimed by sockreg.onEvent (a callback it ran is canceling
+        // it), it has a natural result, so leave it alone rather than
+        // overwriting it with Canceled and completing it twice. A socket's
+        // registration is left in place, and dropped later if it goes unused;
+        // any other is dropped with its last waiter.
         if (!sockreg.detach(self, target)) return;
         // A sendfile parked partway through reports what it sent (see
         // NetSendFile).
@@ -757,7 +711,7 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
             }
         }
     } else {
-        self.removeFromPollQueue(target);
+        self.removeObjectWait(target);
     }
 
     target.setError(error.Canceled);
@@ -821,8 +775,8 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
 
         if (event.udata == delete_marker) continue;
 
-        // Sockets: the filter tells us the direction; ERR/EOF is delivered to
-        // the waiter, which surfaces it via its syscall.
+        // Registered fds: the filter tells us the direction; ERR/EOF is
+        // delivered to the waiter, which surfaces it via its syscall.
         if (udataIsSocket(event.udata)) {
             const sock_fd: NetHandle = @intCast(event.ident);
             const dir: sockreg.Dir = if (event.filter == std.c.EVFILT.READ) .read else .write;
@@ -833,7 +787,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
 
         const key = makeKey(event.ident, event.filter);
         reload: while (true) {
-            const entry = self.poll_queue.get(key) orelse break :reload;
+            const entry = self.object_waits.get(key) orelse break :reload;
 
             var iter: ?*Completion = entry.completions.head;
             var completed_any = false;
@@ -846,7 +800,7 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
 
                 switch (checkCompletion(completion, &event)) {
                     .completed => {
-                        self.removeFromPollQueue(completion);
+                        self.removeObjectWait(completion);
                         state.markCompletedFromBackend(completion);
                         completed_any = true;
                         break;
