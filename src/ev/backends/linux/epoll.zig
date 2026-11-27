@@ -569,6 +569,12 @@ pub fn forgetSocket(poller_fd: i32, fd: NetHandle) void {
     _ = linux.epoll_ctl(poller_fd, linux.EPOLL.CTL_DEL, fd, null);
 }
 
+/// Remove an open socket from another loop's epoll (see sockreg.Table.claim).
+pub fn dropSocket(poller_fd: i32, fd: NetHandle, registered: sockreg.Dirs) void {
+    _ = registered;
+    forgetSocket(poller_fd, fd);
+}
+
 /// A no-error event for the optimistic (pre-park) checkCompletion attempt.
 pub fn probeEvent(fd: NetHandle, dir: sockreg.Dir) linux.epoll_event {
     _ = dir;

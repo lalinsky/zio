@@ -545,6 +545,10 @@ fn removeFromPollQueue(self: *Self, completion: *Completion) void {
 /// close of the fd and then applied to whatever reuses its number. Called by
 /// sockreg.
 pub fn setInterest(self: *Self, fd: NetHandle, old: sockreg.Dirs, new: sockreg.Dirs, gen: sockreg.Gen) bool {
+    return changeInterest(self.kqueue_fd, fd, old, new, gen);
+}
+
+fn changeInterest(kqueue_fd: i32, fd: NetHandle, old: sockreg.Dirs, new: sockreg.Dirs, gen: sockreg.Gen) bool {
     var changes: [2]std.c.Kevent = undefined;
     var n: usize = 0;
     for ([_]sockreg.Dir{ .read, .write }) |dir| {
@@ -561,7 +565,7 @@ pub fn setInterest(self: *Self, fd: NetHandle, old: sockreg.Dirs, new: sockreg.D
         n += 1;
     }
     while (true) {
-        const rc = std.c.kevent(self.kqueue_fd, &changes, @intCast(n), &.{}, 0, null);
+        const rc = std.c.kevent(kqueue_fd, &changes, @intCast(n), &.{}, 0, null);
         switch (posix.errno(rc)) {
             .SUCCESS => return true,
             .INTR => continue,
@@ -583,6 +587,12 @@ pub fn setInterest(self: *Self, fd: NetHandle, old: sockreg.Dirs, new: sockreg.D
 pub fn forgetSocket(poller_fd: i32, fd: NetHandle) void {
     _ = poller_fd;
     _ = fd;
+}
+
+/// Delete an open socket's knotes from another loop's kqueue (see
+/// sockreg.Table.claim). Called by sockreg.
+pub fn dropSocket(poller_fd: i32, fd: NetHandle, registered: sockreg.Dirs) void {
+    _ = changeInterest(poller_fd, fd, registered, 0, 0);
 }
 
 /// A no-error event for the optimistic (pre-park) checkCompletion attempt.

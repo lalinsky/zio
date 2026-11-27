@@ -17,15 +17,20 @@
 //! parked. Registering a socket, or adding a direction to it, reports readiness
 //! that already exists.
 //!
-//! A registration no local completion uses any more is dropped lazily. Every
-//! park sets its direction's `used` bit; an edge that finds no waiter in that
-//! direction clears the bit, and a second such edge removes the direction from
-//! the poller. A socket that stays on one loop keeps its registration, and one
-//! whose tasks moved to other loops costs this loop at most two spurious edges.
+//! A registration no local completion uses any more is dropped in two ways.
+//! When a loop registers a socket, it removes the registrations other loops
+//! hold with nothing parked on them: a task that moved to this loop took the
+//! socket's I/O along, and a registration left behind would make every edge
+//! run the kernel's wakeup callback twice and wake the old loop for nothing.
+//! A socket that simply goes quiet is dropped by its own loop: every park sets
+//! its direction's `used` bit, an edge that finds no waiter in that direction
+//! clears the bit, and a second such edge removes the direction from the
+//! poller.
 //!
-//! The group-shared `Table` only records which loops have a socket registered,
-//! so that closing it, from any thread, can remove it from each of their pollers
-//! before the fd is gone. The fd is the only handle a registration can be
+//! The group-shared `Table` records which loops have a socket registered, so
+//! that closing it, from any thread, can remove it from each of their pollers
+//! before the fd is gone, and so that a loop registering it can find the other
+//! loops' registrations. The fd is the only handle a registration can be
 //! removed by, and an epoll registration on a description that outlives the
 //! close (dup, fork) would otherwise keep firing for whatever reuses the fd
 //! number.
@@ -82,7 +87,8 @@ pub const Entry = struct {
 };
 
 /// One loop's registrations. Only the loop's own thread touches it, except a
-/// close, which may run on any thread; the mutex is for that.
+/// close, which may run on any thread, and another loop registering one of its
+/// sockets (`Table.claim`); the mutex is for those.
 pub const Local = struct {
     mutex: os.Mutex = .init(),
     entries: std.AutoHashMapUnmanaged(u32, Entry) = .empty,
@@ -138,9 +144,13 @@ pub const Table = struct {
     next_live: ?*Table = null,
     /// Removes an fd from a poller, for a close; set by the backend.
     forget_fn: *const fn (poller_fd: i32, fd: net.fd_t) void = undefined,
+    /// Removes an fd's registered directions from a poller, from any thread,
+    /// for a socket that stays open; set by the backend.
+    drop_fn: *const fn (poller_fd: i32, fd: net.fd_t, registered: Dirs) void = undefined,
 
     /// Register a loop whose poller is `poller_fd`. `Backend.forgetSocket`
-    /// removes an fd from such a poller before it is closed.
+    /// removes an fd from such a poller before it is closed, and
+    /// `Backend.dropSocket` removes an open one.
     pub fn acquire(self: *Table, allocator: std.mem.Allocator, comptime Backend: type, poller_fd: i32) error{ OutOfMemory, TooManyLoops }!*Local {
         live_tables_mutex.lock();
         defer live_tables_mutex.unlock();
@@ -149,6 +159,7 @@ pub const Table = struct {
         if (self.refcount == 0) {
             self.allocator = allocator;
             self.forget_fn = Backend.forgetSocket;
+            self.drop_fn = Backend.dropSocket;
         }
         const index = std.mem.indexOfScalar(?*Local, &self.locals, null) orelse return error.TooManyLoops;
         const local = try self.allocator.create(Local);
@@ -221,13 +232,33 @@ pub const Table = struct {
         }
     }
 
-    fn setBit(self: *Table, fd: net.fd_t, bit: u64) bool {
+    /// Record that loop `index` has `fd` registered, and remove the
+    /// registrations of the other loops that have nothing parked on it.
+    /// Returns false, recording nothing, when out of memory.
+    fn claim(self: *Table, fd: net.fd_t, index: u6) bool {
         const shard = self.shardFor(Local.key(fd));
         shard.mutex.lock();
         defer shard.mutex.unlock();
         const gop = shard.map.getOrPut(self.allocator, Local.key(fd)) catch return false;
         if (!gop.found_existing) gop.value_ptr.* = 0;
-        gop.value_ptr.* |= bit;
+        const mask = gop.value_ptr;
+        mask.* |= @as(u64, 1) << index;
+        var others = mask.* & ~(@as(u64, 1) << index);
+        while (others != 0) : (others &= others - 1) {
+            const other_index: u6 = @intCast(@ctz(others));
+            // Under the shard mutex, as in `purge`.
+            const other = self.locals[other_index].?;
+            other.mutex.lock();
+            defer other.mutex.unlock();
+            const entry = other.entries.getPtr(Local.key(fd)) orelse continue;
+            if (entry.waiters[0].head != null or entry.waiters[1].head != null) continue;
+            // An edge of this registration already harvested by the other loop
+            // finds no entry, or one of a later registration with another
+            // generation, and is ignored.
+            if (entry.registered != 0) self.drop_fn(other.poller_fd, fd, entry.registered);
+            _ = other.entries.remove(Local.key(fd));
+            mask.* &= ~(@as(u64, 1) << other_index);
+        }
         return true;
     }
 
@@ -272,6 +303,9 @@ pub fn purgeAll(fd: net.fd_t) void {
 //   * forgetSocket(poller_fd, fd) void       - remove `fd` from a poller before
 //                                              it is closed, from any thread
 //                                              (free fn)
+//   * dropSocket(poller_fd, fd, dirs) void   - remove the registered `dirs` of
+//                                              an open `fd` from a poller, from
+//                                              any thread (free fn)
 //
 // `self` is the backend, with its `Local` in `self.socks`; `state` is its
 // *LoopState.
@@ -383,8 +417,9 @@ fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion) vo
 
     // The table only needs the bit by the time the socket is closed, and a
     // close cannot race an op parked on it; set it outside the loop's mutex to
-    // keep the lock order (see `Table`).
-    if (newly_registered and !local.table.setBit(fd, @as(u64, 1) << local.index)) {
+    // keep the lock order (see `Table`). Another loop's claim cannot remove
+    // this entry meanwhile: the completion just parked in it keeps it.
+    if (newly_registered and !local.table.claim(fd, local.index)) {
         // Without the bit a close would leave the registration behind, so undo
         // it. Nothing else can have touched the entry: only this thread parks
         // or services on it.
@@ -573,6 +608,11 @@ const TestBackend = struct {
     }
 
     pub fn forgetSocket(_: i32, _: net.fd_t) void {}
+
+    var drops: usize = 0;
+    pub fn dropSocket(_: i32, _: net.fd_t, _: Dirs) void {
+        drops += 1;
+    }
 };
 
 const TestState = struct {
@@ -676,4 +716,51 @@ test "sockreg: a registration is dropped after two edges with no waiter" {
     try std.testing.expectEqual(null, backend.socks.entries.get(Local.key(fd)));
     try std.testing.expectEqual(0, testMask(&table, fd));
     try std.testing.expectEqual(0, state.finished_count);
+}
+
+test "sockreg: registering a socket drops other loops' idle registrations of it" {
+    const ReadBuf = @import("buf.zig").ReadBuf;
+    const fd: net.fd_t = 9;
+
+    var table: Table = .{};
+    var old: TestBackend = .{};
+    old.socks = try table.acquire(std.testing.allocator, TestBackend, -1);
+    defer table.release(old.socks);
+    var busy: TestBackend = .{};
+    busy.socks = try table.acquire(std.testing.allocator, TestBackend, -1);
+    defer table.release(busy.socks);
+    var new: TestBackend = .{};
+    new.socks = try table.acquire(std.testing.allocator, TestBackend, -1);
+    defer table.release(new.socks);
+
+    var buf: [1]u8 = undefined;
+    var iov: [1]os.iovec = undefined;
+    var ops: [3]NetRecv = undefined;
+    for (&ops) |*op| {
+        op.* = .init(fd, ReadBuf.fromSlice(&buf, &iov), .{});
+        _ = op.c.enterRunning();
+    }
+
+    // `busy` has a receive parked; `old` used the socket after it and has
+    // nothing parked on it any more.
+    var busy_state: TestState = .{ .backend = &busy };
+    park(&busy, &busy_state, fd, &ops[1].c);
+    var old_state: TestState = .{ .backend = &old };
+    park(&old, &old_state, fd, &ops[0].c);
+    try std.testing.expect(detach(&old, &ops[0].c));
+    try std.testing.expect(busy.socks.entries.get(Local.key(fd)) != null);
+
+    const drops = TestBackend.drops;
+    var new_state: TestState = .{ .backend = &new };
+    park(&new, &new_state, fd, &ops[2].c);
+
+    try std.testing.expectEqual(drops + 1, TestBackend.drops);
+    try std.testing.expectEqual(null, old.socks.entries.get(Local.key(fd)));
+    try std.testing.expect(busy.socks.entries.get(Local.key(fd)) != null);
+    const busy_bit = @as(u64, 1) << busy.socks.index;
+    const new_bit = @as(u64, 1) << new.socks.index;
+    try std.testing.expectEqual(busy_bit | new_bit, testMask(&table, fd));
+
+    try std.testing.expect(detach(&busy, &ops[1].c));
+    try std.testing.expect(detach(&new, &ops[2].c));
 }
