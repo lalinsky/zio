@@ -28,6 +28,13 @@ All notable changes to this project will be documented in this file.
   8 connections ran at about half the throughput on a 48-thread machine) and woke more
   executors than needed otherwise.
 
+- On Linux (epoll), macOS and BSD, a socket is now watched by each executor that waits on
+  it, so its I/O completes on the waiting task's executor instead of always on the executor
+  that first waited on the socket.
+
+- In the low-level `ev` API, a loop sharing a group on Linux (epoll), macOS and BSD no longer
+  keeps running while only other loops of the group have I/O in flight.
+
 - In the low-level `ev` API, a completion with a null `callback` is no longer delivered
   through `Loop.nextDispatched()`; only `do_not_call_callbacks` does that. Removed
   `Loop.takeLastDispatched()`.
@@ -47,12 +54,19 @@ All notable changes to this project will be documented in this file.
 
 - Fixed a crash when `ev.Async.notify` raced with its loop finishing and being deinitialized.
 
+- Fixed tasks waiting on a socket on Linux (epoll), macOS and BSD sometimes never waking
+  when another executor polled or peeked it, when it was also used as a file, or when its
+  descriptor number was reused after a close off the event loop or through a file handle.
+
 - Fixed `std.Io.net.Stream.readWithControl` and `readerWithControl` never receiving control data.
 
 - Fixed accept errors that belong to a single queued connection being reported as
   unexpected or fatal, and a crash in accept on Windows.
 
 - Fixed `Server.accept` not timing out while queued connections kept failing.
+
+- Fixed a rare race on macOS and BSD where closing a socket could leave a stale readiness
+  registration on a new file that reused its descriptor number.
 
 - Fixed Windows terminating the process right after delivering a `terminate` signal, before
   the waiting task could clean up.

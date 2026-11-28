@@ -31,6 +31,7 @@ const FileSize = @import("../completion.zig").FileSize;
 const FileStat = @import("../completion.zig").FileStat;
 const DirOpen = @import("../completion.zig").DirOpen;
 const DirClose = @import("../completion.zig").DirClose;
+const readiness = @import("../readiness.zig");
 const DirSetPermissions = @import("../completion.zig").DirSetPermissions;
 const DirSetOwner = @import("../completion.zig").DirSetOwner;
 const DirSetFilePermissions = @import("../completion.zig").DirSetFilePermissions;
@@ -169,6 +170,9 @@ pub fn handleFileCreate(c: *Completion) void {
 /// Helper to handle file close operation
 pub fn handleFileClose(c: *Completion) void {
     const data = c.cast(FileClose);
+    // A file handle can be a socket a loop has registered. Closed off the loop,
+    // so the group it was used in is unknown.
+    if (builtin.os.tag != .windows) readiness.purgeAll(data.handle);
     if (fs.close(data.handle)) |_| {
         c.setResult(.file_close, {});
     } else |err| {

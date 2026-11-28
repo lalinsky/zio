@@ -134,6 +134,10 @@ test sendfileLayout {
     }
 }
 
+/// Loops that share backend state. On epoll and kqueue a group holds at most
+/// 64 loops (`Loop.init` fails with `error.TooManyLoops` beyond that), and the
+/// first loop's allocator serves every loop's fd registrations, so it must be
+/// thread-safe and outlive the group.
 pub const LoopGroup = struct {
     shared: Backend.SharedState = .{},
     /// Loops initialized with this group and not yet deinitialized.
@@ -304,9 +308,9 @@ pub const LoopState = struct {
     }
 
     /// Called by backends when an operation they accepted completes. Tells the
-    /// backend to drop its inflight count (the backend of the loop running the
-    /// completion, whose storage covers the op on every backend) and marks the
-    /// completion done.
+    /// backend to drop its inflight count and marks the completion done. Runs
+    /// on the loop that accepted the op on every backend but IOCP, whose
+    /// count is shared by the group.
     pub fn markCompletedFromBackend(self: *LoopState, completion: *Completion) void {
         self.loop.backend.decrInflight();
         self.markCompleted(completion);
@@ -565,8 +569,9 @@ pub const Loop = struct {
         net.ensureWSAInitialized();
         self.state.updateNow();
 
-        // Grouped loops service and complete each other's operations, which
-        // the plain state transitions of `single_owner` do not allow.
+        // Grouped loops route cancels to each other (and on IOCP complete each
+        // other's operations), which the plain state transitions of
+        // `single_owner` do not allow.
         if (self.loop_group.loops.fetchAdd(1, .monotonic) != 0 and single_owner) {
             @panic("zio: .single_executor scheduling allows only one loop per LoopGroup");
         }
@@ -620,9 +625,9 @@ pub const Loop = struct {
 
     /// Whether this loop has nothing left to do: no backend I/O in flight, no
     /// armed timer, no registered async handle, no thread-pool job outstanding,
-    /// and no finished completion waiting for its callback. On backends whose
-    /// in-flight count is shared by a loop group (epoll, kqueue, IOCP), I/O
-    /// submitted by any loop of the group keeps every loop of the group busy.
+    /// and no finished completion waiting for its callback. On IOCP, whose
+    /// in-flight count is shared by a loop group, I/O submitted by any loop of
+    /// the group keeps every loop of the group busy.
     /// Completions handed out via `nextDispatched` are already finished and do
     /// not keep the loop running.
     ///

@@ -289,7 +289,7 @@ fn getPollType(op: Op) PollEntryType {
     };
 }
 
-/// Try a socket op once before it joins the poll set, as the sockreg backends
+/// Try a socket op once before it joins the poll set, as the readiness backends
 /// do: a ready socket completes inline without a poll round trip, and a
 /// dontwait receive on an empty queue completes as WouldBlock here instead of
 /// waiting for readiness it never asked for.

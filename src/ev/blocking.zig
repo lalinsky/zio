@@ -37,6 +37,7 @@ const Work = @import("completion.zig").Work;
 const ProcessWait = @import("completion.zig").ProcessWait;
 const DeviceIoControl = @import("completion.zig").DeviceIoControl;
 const common = @import("backends/common.zig");
+const readiness = @import("readiness.zig");
 const os = @import("../os/root.zig");
 const time = @import("../time.zig");
 
@@ -253,6 +254,8 @@ fn handlePipeCreate(c: *Completion) void {
 /// Helper to handle pipe close operation
 fn handlePipeClose(c: *Completion) void {
     const data = c.cast(PipeClose);
+    // Not closed on a loop, so the group the fd was used in is unknown.
+    if (builtin.os.tag != .windows) readiness.purgeAll(data.handle);
     if (os.fs.close(data.handle)) |_| {
         c.setResult(.pipe_close, {});
     } else |err| {
@@ -282,6 +285,8 @@ fn handlePipePoll(c: *Completion) void {
 /// Helper to handle socket close operation
 fn handleNetClose(c: *Completion) void {
     const data = c.cast(NetClose);
+    // Not closed on a loop, so the group the socket was used in is unknown.
+    if (builtin.os.tag != .windows) readiness.purgeAll(data.handle);
     os.net.close(data.handle);
     c.setResult(.net_close, {});
 }

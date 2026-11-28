@@ -814,9 +814,9 @@ fn waitForIoImpl(c: *ev.Completion, comptime cancel_check: CancelCheck, comptime
 
     // Async path: Submit to the event loop and wait for completion
     task.getExecutor().loopAdd(c);
-    // An operation that finishes inside loopAdd, or on the thread of another
-    // loop that owns the socket, signals before the wait, which then returns
-    // without parking.
+    // An operation that finishes inside loopAdd, or on another loop's thread
+    // (IOCP loops share one completion port), signals before the wait, which
+    // then returns without parking.
     const signaled_early = waiter.signalCount() != 0;
     waiter.wait(1, .allow_cancel) catch |err| switch (err) {
         error.Canceled => {

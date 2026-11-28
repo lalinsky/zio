@@ -563,11 +563,11 @@ pub const Group = struct {
 
         // Race mode: first to clear the flag wins, cancels siblings.
         //
-        // This MUST run before the `remaining` decrement below. With a
-        // multi-threaded backend (IOCP, or epoll/kqueue once a socket op is
-        // serviced cross-loop) the children of a race group can complete
-        // concurrently on different loops - e.g. the I/O on the owner loop and
-        // its timeout timer on the submitting loop. Whichever thread drives
+        // This MUST run before the `remaining` decrement below. With IOCP,
+        // whose loops share one completion port, the children of a race group
+        // can complete concurrently on different loops - e.g. the I/O on
+        // whichever loop dequeued it and its timeout timer on the submitting
+        // loop. Whichever thread drives
         // `remaining` to zero completes the group and wakes its waiter, which
         // frees the stack frame the Group (and the sibling completions) live on.
         // If we decremented first, that free could happen while this thread is
@@ -1090,6 +1090,19 @@ pub const NetSendFile = struct {
         /// sent, and the caller can copy the file itself.
         Unimplemented,
     };
+
+    /// Set the result of a native sendfile that ends early (failed, canceled,
+    /// or unable to wait) to the bytes it already sent, if it sent any, and
+    /// return whether it did. The caller sets the outcome otherwise.
+    pub fn finishPartial(self: *NetSendFile) bool {
+        if (comptime @hasField(@TypeOf(self.internal), "sent")) {
+            if (self.internal.sent > 0) {
+                self.c.setResult(.net_send_file, self.internal.sent);
+                return true;
+            }
+        }
+        return false;
+    }
 
     /// `bufs` are borrowed for the generic fallback loop and must outlive the
     /// operation. Provide two non-empty buffers for double-buffering, or one
