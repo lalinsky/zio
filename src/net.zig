@@ -3085,10 +3085,9 @@ test "Stream.Reader/Writer.fromStd" {
 // Multi-executor socket stress: drives concurrent socket I/O across several
 // executors with byte-level verification (task migration on). Besides exercising
 // cross-loop socket usage, it is a regression test for the race-group
-// use-after-free fixed in completion.zig: on a multi-threaded backend (IOCP, and
-// epoll/kqueue once a socket op is serviced cross-loop) a timed op's I/O and its
-// timeout timer can complete on different loops at once, which the fix makes
-// safe. It stresses:
+// use-after-free fixed in completion.zig: on a backend that completes ops on
+// another loop's thread (IOCP) a timed op's I/O and its timeout timer can
+// complete on different loops at once, which the fix makes safe. It stresses:
 //
 //   * concurrent full-duplex - each connection's reader and writer run as
 //     separate tasks that may land on different executors, so recv and send for
@@ -3099,10 +3098,10 @@ test "Stream.Reader/Writer.fromStd" {
 //   * fd reuse across loops - many short connections in waves, so closed fd
 //     numbers get reused by new sockets, possibly on different loops.
 //
-// A lost wakeup (the failure mode of a per-loop readiness backend on a fd whose
-// loop changed) would stall the op until its finite timeout, which is counted as
-// an error; std.testing.allocator also fails on any leak, exercising the shared
-// table teardown.
+// A lost wakeup (a registration left on a loop the fd's task moved away from,
+// or one that disappeared under a loop still using it) would stall the op until
+// its finite timeout, which is counted as an error; std.testing.allocator also
+// fails on any leak, exercising the registration tables' teardown.
 test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reuse)" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
@@ -3278,26 +3277,6 @@ test "multi-executor: cross-loop socket stress (full-duplex + migration + fd reu
     try std.testing.expectEqual(@as(u32, H.waves * H.per_wave), sh.verified.load(.monotonic));
 }
 
-// Regression test for the cancel/readiness race on cross-loop socket ops.
-//
-// A socket op parks in the (fd, dir) waiter queue of the loop that owns the fd's
-// poller registration, but stays owned by the loop that submitted it. So a recv
-// carrying a timeout gets cancelled by its timer on the submitting loop while the
-// owner services it on another thread. The owner runs the syscall and stores the
-// result under the shard lock but marks the op completed only after unlocking, so
-// a cancel landing in that window must not complete it a second time, and must
-// not discard bytes the kernel already moved out of the socket.
-//
-// Each pair writes one byte per jittered tick against a reader whose recv timeout
-// is drawn from the same distribution, so recvs park and their timers expire
-// alongside arriving data. The reader hops to another executor after every byte,
-// so the loop submitting the recv is usually not the loop owning the fd.
-//
-// The failure is asserted as byte loss rather than as a crash: a recv whose
-// result the racing cancel overwrote consumed bytes that nobody will ever
-// receive, so the reader runs out of input and sees EOF early. That holds in any
-// build mode, though safe builds usually trip the double-completion assertion
-// first.
 /// Decodes an `@intFromError` code stored in an atomic slot. 0 means nothing
 /// was recorded.
 fn errName(code: u16) []const u8 {
@@ -3305,6 +3284,25 @@ fn errName(code: u16) []const u8 {
     return @errorName(@errorFromInt(code));
 }
 
+// Regression test for a timeout cancel racing a readiness edge.
+//
+// A recv carrying a timeout parks on its loop and can be cancelled by its timer
+// while the same loop services a readiness edge for it. The loop runs the
+// syscall and stores the result under its table's lock but marks the op
+// completed only after unlocking, so a cancel landing in that window (from a
+// callback the completion runs) must not complete it a second time, and must
+// not discard bytes the kernel already moved out of the socket.
+//
+// Each pair writes one byte per jittered tick against a reader whose recv timeout
+// is drawn from the same distribution, so recvs park and their timers expire
+// alongside arriving data. The reader hops to another executor after every byte,
+// so the socket's registration moves between loops as well.
+//
+// The failure is asserted as byte loss rather than as a crash: a recv whose
+// result the racing cancel overwrote consumed bytes that nobody will ever
+// receive, so the reader runs out of input and sees EOF early. That holds in any
+// build mode, though safe builds usually trip the double-completion assertion
+// first.
 test "multi-executor: timeout cancel racing a cross-loop readiness edge" {
     if (builtin.single_threaded) return error.SkipZigTest;
     if (builtin.os.tag == .windows) return error.SkipZigTest;
