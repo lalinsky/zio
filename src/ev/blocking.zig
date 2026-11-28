@@ -254,6 +254,8 @@ fn handlePipeCreate(c: *Completion) void {
 /// Helper to handle pipe close operation
 fn handlePipeClose(c: *Completion) void {
     const data = c.cast(PipeClose);
+    // Not closed on a loop, so the group the fd was used in is unknown.
+    if (builtin.os.tag != .windows) readiness.purgeAll(data.handle);
     if (os.fs.close(data.handle)) |_| {
         c.setResult(.pipe_close, {});
     } else |err| {

@@ -126,7 +126,6 @@ pub const SharedState = struct {
 // Pollable fds are registered edge-triggered with the poller of each loop that
 // parks on them (see readiness.zig); sockets persistently, with no per-op MOD on
 // read/write switch and no DEL on completion.
-const epoll_et: u32 = linux.EPOLL.ET;
 
 // epoll_event.data.u64 layout for fd registrations: the fd in the low 32 bits,
 // a tag in bit 32 distinguishing them from the loop's own fds (waker, wall
@@ -315,91 +314,56 @@ pub fn syncWallTimer(self: *Self, clock: Clock, deadline: ?u64) bool {
     }
 }
 
-fn getEvents(completion: *Completion) u32 {
-    return switch (completion.op) {
-        .net_connect => std.os.linux.EPOLL.OUT,
-        .net_accept => std.os.linux.EPOLL.IN,
-        .net_recv => std.os.linux.EPOLL.IN,
-        .net_send => std.os.linux.EPOLL.OUT,
-        .net_recvfrom => std.os.linux.EPOLL.IN,
-        .net_sendto => std.os.linux.EPOLL.OUT,
-        .net_recvmsg => std.os.linux.EPOLL.IN,
-        .net_recvmmsg => std.os.linux.EPOLL.IN,
-        .net_sendmsg => std.os.linux.EPOLL.OUT,
-        .net_sendmmsg => std.os.linux.EPOLL.OUT,
-        .net_poll => blk: {
-            const poll_data = completion.cast(NetPoll);
-            break :blk switch (poll_data.event) {
-                .recv => std.os.linux.EPOLL.IN,
-                .send => std.os.linux.EPOLL.OUT,
-            };
-        },
-        .file_read_streaming => std.os.linux.EPOLL.IN,
-        .file_write_streaming => std.os.linux.EPOLL.OUT,
-        .pipe_poll => blk: {
-            const poll_data = completion.cast(PipePoll);
-            break :blk switch (poll_data.event) {
-                .read => std.os.linux.EPOLL.IN,
-                .write => std.os.linux.EPOLL.OUT,
-            };
-        },
-        .process_wait => std.os.linux.EPOLL.IN,
-        else => unreachable,
+/// The epoll events of direction `dir`.
+fn dirEvents(dir: readiness.Dir) u32 {
+    return switch (dir) {
+        .read => linux.EPOLL.IN,
+        .write => linux.EPOLL.OUT,
     };
 }
 
 // ---- fd registration path ----------------------------------------------------
 
-const epoll_bit_in: u32 = linux.EPOLL.IN;
-const epoll_bit_out: u32 = linux.EPOLL.OUT;
+/// Closing an fd does not remove it from an epoll while a dup or a forked
+/// child keeps its file description open, so a close deletes it first.
+pub const close_drops_registrations = false;
 
-/// Change the directions `fd` is registered for in this loop's epoll from `old`
-/// to `new`: ADD, MOD or DEL. A stale kernel registration (the fd was closed and
-/// its number reused without passing through readiness.zig) or a missing one is
-/// tolerated by falling back to the other operation. Called by readiness.zig.
-pub fn setInterest(self: *Self, fd: NetHandle, old: readiness.Dirs, new: readiness.Dirs, gen: readiness.Gen) bool {
+/// Change the directions `fd` is registered for in the epoll `poller_fd` from
+/// `old` to `new`: ADD, MOD or DEL, from any thread. ADD falls back to MOD (and
+/// MOD to ADD) when the epoll disagrees with the table, which happens after an
+/// fd was closed without a purge and its number reused. Called by readiness.zig.
+pub fn changeInterest(poller_fd: i32, fd: NetHandle, old: readiness.Dirs, new: readiness.Dirs, gen: readiness.Gen) readiness.E {
     if (new == 0) {
-        return switch (posix.errno(linux.epoll_ctl(self.epoll_fd, linux.EPOLL.CTL_DEL, fd, null))) {
+        return switch (posix.errno(linux.epoll_ctl(poller_fd, linux.EPOLL.CTL_DEL, fd, null))) {
             // BADF: a pidfd its wait closed, which removed it already.
-            .SUCCESS, .NOENT, .BADF => true,
-            else => |err| blk: {
-                log.err("Failed to remove fd from epoll: {}", .{err});
-                break :blk false;
-            },
+            .SUCCESS, .NOENT, .BADF => .SUCCESS,
+            else => |err| err,
         };
     }
-    var mask: u32 = epoll_et;
-    if (new & readiness.dirBit(.read) != 0) mask |= epoll_bit_in;
-    if (new & readiness.dirBit(.write) != 0) mask |= epoll_bit_out;
+    var mask: u32 = linux.EPOLL.ET;
+    if (new & readiness.dirBit(.read) != 0) mask |= linux.EPOLL.IN;
+    if (new & readiness.dirBit(.write) != 0) mask |= linux.EPOLL.OUT;
     var event = linux.epoll_event{ .data = .{ .u64 = regData(fd, gen) }, .events = mask };
     const first: u32 = if (old == 0) linux.EPOLL.CTL_ADD else linux.EPOLL.CTL_MOD;
     const fallback: u32 = if (old == 0) linux.EPOLL.CTL_MOD else linux.EPOLL.CTL_ADD;
-    var err = posix.errno(linux.epoll_ctl(self.epoll_fd, first, fd, &event));
-    if (err == .EXIST or err == .NOENT) err = posix.errno(linux.epoll_ctl(self.epoll_fd, fallback, fd, &event));
-    if (err != .SUCCESS) {
-        log.err("Failed to register fd with epoll: {}", .{err});
-        return false;
-    }
-    return true;
+    const err = posix.errno(linux.epoll_ctl(poller_fd, first, fd, &event));
+    if (err != .EXIST and err != .NOENT) return err;
+    return posix.errno(linux.epoll_ctl(poller_fd, fallback, fd, &event));
 }
 
-/// Remove `fd` from the epoll `poller_fd` before the socket is closed. Called
-/// by readiness.zig from whichever thread closes it (epoll_ctl on another thread's
-/// epoll is safe).
-pub fn forgetSocket(poller_fd: i32, fd: NetHandle) void {
-    _ = linux.epoll_ctl(poller_fd, linux.EPOLL.CTL_DEL, fd, null);
-}
-
-/// Remove an open socket from another loop's epoll (see readiness.Holders.claim).
-pub fn dropSocket(poller_fd: i32, fd: NetHandle, registered: readiness.Dirs) void {
-    _ = registered;
-    forgetSocket(poller_fd, fd);
+/// Finish an op that could not be parked because registering its fd failed.
+/// Called by readiness.zig.
+pub fn failRegistration(c: *Completion, err: readiness.E) void {
+    log.err("Failed to register fd with epoll: {}", .{err});
+    // The wait owns its pidfd, which completing it would have closed.
+    if (c.op == .process_wait) _ = linux.close(@intCast(c.cast(ProcessWait).internal.pidfd));
+    c.setError(error.Unexpected);
 }
 
 /// A no-error event for the optimistic (pre-park) checkCompletion attempt.
 pub fn probeEvent(fd: NetHandle, dir: readiness.Dir) linux.epoll_event {
     _ = dir;
-    return .{ .data = .{ .u64 = regData(fd, 0) }, .events = 0 };
+    return .{ .data = .{ .u64 = fdData(fd) }, .events = 0 };
 }
 
 /// Drop one inflight op. Called via LoopState.markCompletedFromBackend on the
@@ -444,7 +408,7 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
             const data = c.cast(NetClose);
             // Tear down the persistent registration before the fd is closed, so a
             // future socket that reuses this fd number starts clean on every loop.
-            readiness.unregister(self, data.handle);
+            readiness.purge(self, data.handle);
             common.handleNetClose(c);
             state.markCompletedFromBackend(c);
         },
@@ -482,6 +446,7 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
         .file_read_streaming, .file_write_streaming => readiness.submitIo(self, state, c),
         .pipe_close => {
             const data = c.cast(PipeClose);
+            readiness.purge(self, data.handle);
             if (fs.close(data.handle)) |_| {
                 c.setResult(.pipe_close, {});
             } else |err| {
@@ -496,7 +461,7 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
             switch (posix.errno(rc)) {
                 .SUCCESS => {
                     data.internal.pidfd = @intCast(rc);
-                    readiness.submitWait(self, state, data.internal.pidfd, c);
+                    readiness.park(self, state, c, data.internal.pidfd, .read);
                 },
                 .SRCH => {
                     c.setError(error.ProcessNotFound);
@@ -530,8 +495,11 @@ pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
     // than overwriting it with Canceled and completing it twice. A socket's
     // registration is left in place, and dropped later if it goes unused; any
     // other is dropped with its last waiter.
-    std.debug.assert(readiness.isRegisteredOp(target.op) or target.op == .process_wait);
-    if (!readiness.detach(self, target)) return;
+    const fd: NetHandle, const dir: readiness.Dir = switch (target.op) {
+        .process_wait => .{ @intCast(target.cast(ProcessWait).internal.pidfd), .read },
+        else => .{ readiness.handleOf(target), readiness.dirForOp(target) },
+    };
+    if (!readiness.detach(self, target, fd, dir)) return;
 
     // The wait owns its pidfd, which completing it would have closed.
     if (target.op == .process_wait) {
@@ -826,7 +794,7 @@ pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) C
             }
 
             // Check if the requested events are actually ready
-            const requested_events = getEvents(c);
+            const requested_events = dirEvents(readiness.dirForOp(c));
             const ready_events = event.events & requested_events;
             if (ready_events != 0) {
                 c.setResult(.net_poll, {});
@@ -893,7 +861,7 @@ pub fn checkCompletion(c: *Completion, event: *const std.os.linux.epoll_event) C
             }
 
             // Check if the requested events are actually ready
-            const requested_events = getEvents(c);
+            const requested_events = dirEvents(readiness.dirForOp(c));
             const ready_events = event.events & requested_events;
             if (ready_events != 0) {
                 c.setResult(.pipe_poll, {});

@@ -7,8 +7,11 @@ const os = @import("../../os/root.zig");
 const Loop = ev.Loop;
 const NetRecv = ev.NetRecv;
 const NetClose = ev.NetClose;
+const FileClose = ev.FileClose;
 const FileReadStreaming = ev.FileReadStreaming;
 const net = os.net;
+const single_owner = @import("../completion.zig").single_owner;
+const fs = os.fs;
 
 test "readiness: a socket closed off the loop leaves no registration for its reused fd" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
@@ -57,7 +60,7 @@ test "readiness: a socket closed off the loop leaves no registration for its reu
 
 test "readiness: a socket used on another loop wakes this one while that loop is not polling" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
-    if (@import("../completion.zig").single_owner) return error.SkipZigTest;
+    if (single_owner) return error.SkipZigTest;
 
     const fds = try net.socketpair(.unix, .stream, .ip, .{ .nonblocking = true });
     defer net.close(fds[0]);
@@ -154,5 +157,51 @@ test "readiness: a socket read as a stream file after a socket receive on the sa
     try loop.poll(.zero);
     _ = try net.send(fds[1], &.{net.iovecConstFromSlice("x")}, .{});
     try loop.run();
+    try std.testing.expectEqual(1, try read.getResult());
+}
+
+test "readiness: a socket closed as a file leaves no registration for a pipe reusing its fd" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var loop: Loop = undefined;
+    try loop.init(.{});
+    defer loop.deinit();
+
+    var buf: [16]u8 = undefined;
+    var iov: [1]os.iovec = undefined;
+
+    // Park a receive so the loop registers the socket, then cancel it.
+    const old = try net.socketpair(.unix, .stream, .ip, .{ .nonblocking = true });
+    var recv: NetRecv = .init(old[0], .fromSlice(&buf, &iov), .{});
+    loop.add(&recv.c);
+    loop.cancel(&recv.c);
+    try loop.run();
+    try std.testing.expectError(error.Canceled, recv.getResult());
+
+    // Close it through a file handle.
+    var close: FileClose = .init(old[0]);
+    blocking.executeBlocking(&close.c);
+    try close.c.getResult(.file_close);
+    net.close(old[1]);
+
+    const pipe = try fs.pipe();
+    defer net.close(pipe[0]);
+    defer net.close(pipe[1]);
+    if (pipe[0] != old[0]) return error.SkipZigTest;
+
+    var read: FileReadStreaming = .init(pipe[0], .fromSlice(&buf, &iov));
+    loop.add(&read.c);
+    try loop.poll(.zero);
+    _ = try fs.writev(pipe[1], &.{os.iovecConstFromSlice("x")});
+
+    var stopwatch = time.Stopwatch.start();
+    while (read.c.loadState().phase != .dead and stopwatch.read().toMilliseconds() < 1000) {
+        try loop.poll(.fromMilliseconds(100));
+    }
+    if (read.c.loadState().phase != .dead) {
+        loop.cancel(&read.c);
+        try loop.run();
+        return error.TestUnexpectedResult;
+    }
     try std.testing.expectEqual(1, try read.getResult());
 }

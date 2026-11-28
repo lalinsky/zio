@@ -54,17 +54,11 @@ All notable changes to this project will be documented in this file.
 
 - Fixed a crash when `ev.Async.notify` raced with its loop finishing and being deinitialized.
 
-- Fixed a task waiting on a socket on Linux (epoll), macOS and BSD sometimes never waking
-  when a task on another executor polled or peeked the same socket.
+- Fixed tasks waiting on a socket on Linux (epoll), macOS and BSD sometimes never waking
+  when another executor polled or peeked it, when it was also used as a file, or when its
+  descriptor number was reused after a close off the event loop or through a file handle.
 
 - Fixed `std.Io.net.Stream.readWithControl` and `readerWithControl` never receiving control data.
-
-- Fixed reading or writing a socket through a file handle failing or hanging on Linux (epoll),
-  macOS and BSD when the same executor also did socket I/O on it.
-
-- Fixed a socket closed outside the runtime, or one whose descriptor was duplicated, leaving
-  a readiness registration behind on Linux (epoll), macOS and BSD, which could hang the next
-  socket that reused its descriptor number.
 
 - Fixed accept errors that belong to a single queued connection being reported as
   unexpected or fatal, and a crash in accept on Windows.

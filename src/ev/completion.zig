@@ -1091,6 +1091,19 @@ pub const NetSendFile = struct {
         Unimplemented,
     };
 
+    /// Set the result of a native sendfile that ends early (failed, canceled,
+    /// or unable to wait) to the bytes it already sent, if it sent any, and
+    /// return whether it did. The caller sets the outcome otherwise.
+    pub fn finishPartial(self: *NetSendFile) bool {
+        if (comptime @hasField(@TypeOf(self.internal), "sent")) {
+            if (self.internal.sent > 0) {
+                self.c.setResult(.net_send_file, self.internal.sent);
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// `bufs` are borrowed for the generic fallback loop and must outlive the
     /// operation. Provide two non-empty buffers for double-buffering, or one
     /// for a serial loop. Native backends ignore `bufs`, so both can be empty.

@@ -170,8 +170,7 @@ pub const NetSendFileData = struct {
 /// Ends a native sendfile op with `err`, or with the bytes sent so far if
 /// there were any (see NetSendFile).
 fn finishNetSendFile(comp: *Completion, err: anyerror) CheckResult {
-    const sent = comp.cast(NetSendFile).internal.sent;
-    if (sent > 0) comp.setResult(.net_send_file, sent) else comp.setError(err);
+    if (!comp.cast(NetSendFile).finishPartial()) comp.setError(err);
     return .completed;
 }
 
@@ -494,65 +493,77 @@ fn removeObjectWait(self: *Self, completion: *Completion) void {
     }
 }
 
-// ---- socket registration path ------------------------------------------------
+// ---- fd registration path --------------------------------------------------
 
 // Backend hooks for the generic readiness path in readiness.zig.
 
-/// Change the directions `fd` is registered for in this loop's kqueue from
-/// `old` to `new`, adding an EV_CLEAR knote for each new direction and deleting
-/// the knote of each dropped one. Applied with an immediate kevent call rather
-/// than through the change buffer, so no change can be left pending past a
-/// close of the fd and then applied to whatever reuses its number. Called by
-/// readiness.zig.
-pub fn setInterest(self: *Self, fd: NetHandle, old: readiness.Dirs, new: readiness.Dirs, gen: readiness.Gen) bool {
-    return changeInterest(self.kqueue_fd, fd, old, new, gen);
-}
+/// Closing an fd removes its knotes from every kqueue.
+pub const close_drops_registrations = true;
 
-fn changeInterest(kqueue_fd: i32, fd: NetHandle, old: readiness.Dirs, new: readiness.Dirs, gen: readiness.Gen) bool {
+/// Change the directions `fd` is registered for in the kqueue `poller_fd` from
+/// `old` to `new`, adding an EV_CLEAR knote for each new direction and deleting
+/// the knote of each dropped one, from any thread. Applied with an immediate
+/// kevent call rather than through the change buffer, so no change can be left
+/// pending past a close of the fd and then applied to whatever reuses its
+/// number. Called by readiness.zig.
+pub fn changeInterest(poller_fd: i32, fd: NetHandle, old: readiness.Dirs, new: readiness.Dirs, gen: readiness.Gen) readiness.E {
     var changes: [2]std.c.Kevent = undefined;
     var n: usize = 0;
     for ([_]readiness.Dir{ .read, .write }) |dir| {
         const bit = readiness.dirBit(dir);
         if ((old ^ new) & bit == 0) continue;
+        const action: u16 = if (new & bit != 0) std.c.EV.ADD | std.c.EV.CLEAR else std.c.EV.DELETE;
         changes[n] = .{
             .ident = @intCast(fd),
             .filter = filterForDir(dir),
-            .flags = if (new & bit != 0) std.c.EV.ADD | std.c.EV.CLEAR else std.c.EV.DELETE,
+            .flags = action | std.c.EV.RECEIPT,
             .fflags = 0,
             .data = 0,
             .udata = regUdata(gen),
         };
         n += 1;
     }
-    while (true) {
-        const rc = std.c.kevent(kqueue_fd, &changes, @intCast(n), &.{}, 0, null);
+    if (n == 0) return .SUCCESS;
+    // With EV_RECEIPT every change reports its own outcome, so a failing one
+    // does not hide the others: EV_ERROR is set on each, with the errno (or 0)
+    // in `data`.
+    var receipts: [2]std.c.Kevent = undefined;
+    const count: usize = while (true) {
+        const rc = std.c.kevent(poller_fd, &changes, @intCast(n), &receipts, @intCast(n), null);
         switch (posix.errno(rc)) {
-            .SUCCESS => return true,
+            .SUCCESS => break @intCast(rc),
             .INTR => continue,
-            // Deleting a knote the kernel already dropped with a closed fd.
-            .NOENT => |err| if (new & ~old == 0) return true else {
-                log.err("Failed to register socket with kqueue: {}", .{err});
-                return false;
-            },
-            else => |err| {
-                log.err("Failed to register socket with kqueue: {}", .{err});
-                return false;
-            },
+            else => |err| return err,
         }
+    };
+    for (receipts[0..count]) |receipt| {
+        if (receipt.flags & EV_ERROR == 0 or receipt.data == 0) continue;
+        const err: readiness.E = @fromBackingInt(@intCast(receipt.data));
+        const dir: readiness.Dir = if (receipt.filter == std.c.EVFILT.READ) .read else .write;
+        // Deleting a knote the kernel already dropped with a closed fd.
+        if (err == .NOENT and new & readiness.dirBit(dir) == 0) continue;
+        return err;
     }
+    return .SUCCESS;
 }
 
-/// Nothing to remove before a close: closing the fd removes its knotes from
-/// every kqueue. Called by readiness.zig.
-pub fn forgetSocket(poller_fd: i32, fd: NetHandle) void {
-    _ = poller_fd;
-    _ = fd;
-}
-
-/// Delete an open socket's knotes from another loop's kqueue (see
-/// readiness.Holders.claim). Called by readiness.zig.
-pub fn dropSocket(poller_fd: i32, fd: NetHandle, registered: readiness.Dirs) void {
-    _ = changeInterest(poller_fd, fd, registered, 0, 0);
+/// Finish an op that could not be parked because registering its fd failed,
+/// mapping the error as the op maps one reported by an event. Called by
+/// readiness.zig.
+pub fn failRegistration(c: *Completion, err: readiness.E) void {
+    log.debug("Failed to register fd with kqueue: {}", .{err});
+    const event: std.c.Kevent = .{
+        .ident = @intCast(readiness.handleOf(c)),
+        .filter = filterForDir(readiness.dirForOp(c)),
+        .flags = EV_ERROR,
+        .fflags = 0,
+        .data = @backingInt(err),
+        .udata = 0,
+    };
+    switch (checkCompletion(c, &event)) {
+        .completed => {},
+        .requeue => c.setError(error.Unexpected),
+    }
 }
 
 /// A no-error event for the optimistic (pre-park) checkCompletion attempt.
@@ -609,7 +620,7 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
             const data = c.cast(NetClose);
             // Tear down the persistent registration before the fd is closed, so a
             // future socket that reuses this fd number starts clean on every loop.
-            readiness.unregister(self, data.handle);
+            readiness.purge(self, data.handle);
             common.handleNetClose(c);
             state.markCompletedFromBackend(c);
         },
@@ -651,6 +662,7 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
         },
         .pipe_close => {
             const data = c.cast(PipeClose);
+            readiness.purge(self, data.handle);
             if (fs.close(data.handle)) |_| {
                 c.setResult(.pipe_close, {});
             } else |err| {
@@ -690,28 +702,21 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
 /// Cancel a completion - infallible.
 /// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
 pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
-    if (readiness.isRegisteredOp(target.op)) {
-        // Parked in this loop's waiters for the fd. If detach finds the op
-        // already claimed by readiness.onEvent (a callback it ran is canceling
-        // it), it has a natural result, so leave it alone rather than
-        // overwriting it with Canceled and completing it twice. A socket's
-        // registration is left in place, and dropped later if it goes unused;
-        // any other is dropped with its last waiter.
-        if (!readiness.detach(self, target)) return;
-        // A sendfile parked partway through reports what it sent (see
-        // NetSendFile).
-        if (comptime capability(.net_send_file) == .yes) {
-            if (target.op == .net_send_file) {
-                const sent = target.cast(NetSendFile).internal.sent;
-                if (sent > 0) {
-                    target.setResult(.net_send_file, sent);
-                    state.markCompletedFromBackend(target);
-                    return;
-                }
+    switch (target.op) {
+        .mach_port, .process_wait => self.removeObjectWait(target),
+        else => {
+            // Parked in this loop's waiters for the fd. If detach finds the op
+            // already claimed by readiness.onEvent (a callback it ran is
+            // canceling it), it has a natural result, so leave it alone rather
+            // than overwriting it with Canceled and completing it twice. A
+            // socket's registration is left in place, and dropped later if it
+            // goes unused; any other is dropped with its last waiter.
+            if (!readiness.detach(self, target, readiness.handleOf(target), readiness.dirForOp(target))) return;
+            if (target.op == .net_send_file and target.cast(NetSendFile).finishPartial()) {
+                state.markCompletedFromBackend(target);
+                return;
             }
-        }
-    } else {
-        self.removeObjectWait(target);
+        },
     }
 
     target.setError(error.Canceled);
@@ -778,10 +783,10 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
         // Registered fds: the filter tells us the direction; ERR/EOF is
         // delivered to the waiter, which surfaces it via its syscall.
         if (udataIsReg(event.udata)) {
-            const sock_fd: NetHandle = @intCast(event.ident);
+            const reg_fd: NetHandle = @intCast(event.ident);
             const dir: readiness.Dir = if (event.filter == std.c.EVFILT.READ) .read else .write;
             const gen: readiness.Gen = @truncate(event.udata);
-            readiness.onEvent(self, state, sock_fd, gen, readiness.dirBit(dir), &event);
+            readiness.onEvent(self, state, reg_fd, gen, readiness.dirBit(dir), &event);
             continue;
         }
 
