@@ -36,14 +36,13 @@
 //! clears the bit, and a second such edge removes the direction from the
 //! poller.
 //!
-//! The group-shared `Table` records which loops have a socket registered
-//! persistently, so
-//! that closing it, from any thread, can remove it from each of their pollers
-//! before the fd is gone, and so that a loop registering it can find the other
-//! loops' registrations. The fd is the only handle a registration can be
-//! removed by, and an epoll registration on a description that outlives the
-//! close (dup, fork) would otherwise keep firing for whatever reuses the fd
-//! number.
+//! The group-shared `Holders` records which loops have a socket registered
+//! persistently, so that closing it, from any thread, can remove it from each
+//! of their pollers before the fd is gone, and so that a loop registering it
+//! can find the other loops' registrations. The fd is the only handle a
+//! registration can be removed by, and an epoll registration on a description
+//! that outlives the close (dup, fork) would otherwise keep firing for
+//! whatever reuses the fd number.
 
 const std = @import("std");
 const os = @import("../os/root.zig");
@@ -78,7 +77,7 @@ pub fn dirBit(dir: Dir) Dirs {
     return @as(Dirs, 1) << @backingInt(dir);
 }
 
-/// Most loops one group can have with a socket registration table.
+/// Most loops one group can have with fd registrations.
 pub const max_loops = 64;
 
 /// Width of a registration's generation, as carried in the poller's event data
@@ -138,29 +137,29 @@ pub const Entry = struct {
     /// closed and its number reused is not applied to the new one.
     gen: Gen,
     /// Remove each direction as soon as no completion waits in it; such an
-    /// entry is not recorded in the `Table`.
+    /// entry is not recorded in the `Holders`.
     transient: bool = false,
 };
 
 /// One loop's registrations. Only the loop's own thread touches it, except a
 /// close, which may run on any thread, and another loop registering one of its
-/// sockets (`Table.claim`); the mutex is for those.
-pub const Local = struct {
+/// sockets (`Holders.claim`); the mutex is for those.
+pub const FdTable = struct {
     mutex: os.Mutex = .init(),
     entries: std.AutoHashMapUnmanaged(u32, Entry) = .empty,
     next_gen: Gen = 0,
-    /// Bit of this loop in the table's per-fd masks.
+    /// Bit of this loop in the `Holders` per-fd masks.
     index: u6,
     /// The poller (epoll or kqueue fd) the registrations live in.
     poller_fd: i32,
-    table: *Table,
+    holders: *Holders,
 
     fn key(fd: net.fd_t) u32 {
         return @bitCast(fd);
     }
 
-    /// Drop `fd` for a close. The table's mask bit is already gone.
-    fn purge(self: *Local, fd: net.fd_t) void {
+    /// Drop `fd` for a close. The `Holders` mask bit is already gone.
+    fn purge(self: *FdTable, fd: net.fd_t) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         const removed = self.entries.fetchRemove(key(fd)) orelse return;
@@ -171,7 +170,7 @@ pub const Local = struct {
         // violation surfaces in safe builds rather than silently leaking.
         std.debug.assert(removed.value.waiters[0].isEmpty());
         std.debug.assert(removed.value.waiters[1].isEmpty());
-        if (removed.value.registered != 0) self.table.forget_fn(self.poller_fd, fd);
+        if (removed.value.registered != 0) self.holders.forget_fn(self.poller_fd, fd);
     }
 };
 
@@ -179,25 +178,25 @@ const shard_count = 64; // power of two
 
 pub const Shard = struct {
     mutex: os.Mutex = .init(),
-    /// fd -> mask of the loops (`Local.index`) that have it registered.
+    /// fd -> mask of the loops (`FdTable.index`) that have it registered.
     map: std.AutoHashMapUnmanaged(u32, u64) = .empty,
 };
 
 /// Per-group record of which loops have which sockets registered. Loops acquire
-/// it on init and release it on deinit. A table with live loops is linked into
-/// `live_tables`, so a socket closed by a thread that runs no loop can still be
+/// it on init and release it on deinit. A `Holders` with live loops is linked into
+/// `live_holders`, so a socket closed by a thread that runs no loop can still be
 /// purged from it (`purgeAll`).
 ///
-/// Lock order: a shard's mutex, then a `Local`'s. A loop never holds its own
+/// Lock order: a shard's mutex, then an `FdTable`'s. A loop never holds its own
 /// mutex while taking a shard's.
-pub const Table = struct {
+pub const Holders = struct {
     mutex: os.Mutex = .init(),
     refcount: usize = 0,
     allocator: std.mem.Allocator = undefined,
     shards: [shard_count]Shard = @splat(.{}),
-    locals: [max_loops]?*Local = @splat(null),
-    /// Link in `live_tables`, guarded by `live_tables_mutex`.
-    next_live: ?*Table = null,
+    tables: [max_loops]?*FdTable = @splat(null),
+    /// Link in `live_holders`, guarded by `live_holders_mutex`.
+    next_live: ?*Holders = null,
     /// Removes an fd from a poller, for a close; set by the backend.
     forget_fn: *const fn (poller_fd: i32, fd: net.fd_t) void = undefined,
     /// Removes an fd's registered directions from a poller, from any thread,
@@ -207,9 +206,9 @@ pub const Table = struct {
     /// Register a loop whose poller is `poller_fd`. `Backend.forgetSocket`
     /// removes an fd from such a poller before it is closed, and
     /// `Backend.dropSocket` removes an open one.
-    pub fn acquire(self: *Table, allocator: std.mem.Allocator, comptime Backend: type, poller_fd: i32) error{ OutOfMemory, TooManyLoops }!*Local {
-        live_tables_mutex.lock();
-        defer live_tables_mutex.unlock();
+    pub fn acquire(self: *Holders, allocator: std.mem.Allocator, comptime Backend: type, poller_fd: i32) error{ OutOfMemory, TooManyLoops }!*FdTable {
+        live_holders_mutex.lock();
+        defer live_holders_mutex.unlock();
         self.mutex.lock();
         defer self.mutex.unlock();
         if (self.refcount == 0) {
@@ -217,26 +216,26 @@ pub const Table = struct {
             self.forget_fn = Backend.forgetSocket;
             self.drop_fn = Backend.dropSocket;
         }
-        const index = std.mem.indexOfScalar(?*Local, &self.locals, null) orelse return error.TooManyLoops;
-        const local = try self.allocator.create(Local);
-        local.* = .{ .index = @intCast(index), .poller_fd = poller_fd, .table = self };
-        self.locals[index] = local;
+        const index = std.mem.indexOfScalar(?*FdTable, &self.tables, null) orelse return error.TooManyLoops;
+        const table = try self.allocator.create(FdTable);
+        table.* = .{ .index = @intCast(index), .poller_fd = poller_fd, .holders = self };
+        self.tables[index] = table;
         if (self.refcount == 0) {
-            self.next_live = live_tables;
-            live_tables = self;
+            self.next_live = live_holders;
+            live_holders = self;
         }
         self.refcount += 1;
-        return local;
+        return table;
     }
 
     /// Unregister a loop. Its poller is about to be closed, which drops its
-    /// registrations in the kernel; this drops them from the table.
-    pub fn release(self: *Table, local: *Local) void {
+    /// registrations in the kernel; this drops them from the `Holders`.
+    pub fn release(self: *Holders, table: *FdTable) void {
         // Clear the loop's bits from the masks rather than walking its entries:
         // a close on another thread may be removing entries meanwhile. Once a
-        // shard has no bit of this loop, no purge reaches `local` through it.
+        // shard has no bit of this loop, no purge reaches `table` through it.
         // A mask left at zero is dropped by the fd's close.
-        const bit = @as(u64, 1) << local.index;
+        const bit = @as(u64, 1) << table.index;
         for (&self.shards) |*shard| {
             shard.mutex.lock();
             defer shard.mutex.unlock();
@@ -244,18 +243,18 @@ pub const Table = struct {
             while (it.next()) |mask| mask.* &= ~bit;
         }
 
-        live_tables_mutex.lock();
-        defer live_tables_mutex.unlock();
+        live_holders_mutex.lock();
+        defer live_holders_mutex.unlock();
         self.mutex.lock();
         defer self.mutex.unlock();
-        self.locals[local.index] = null;
-        local.entries.deinit(self.allocator);
-        self.allocator.destroy(local);
+        self.tables[table.index] = null;
+        table.entries.deinit(self.allocator);
+        self.allocator.destroy(table);
         self.refcount -= 1;
         if (self.refcount == 0) {
-            var link: *?*Table = &live_tables;
-            while (link.*) |table| : (link = &table.next_live) {
-                if (table == self) {
+            var link: *?*Holders = &live_holders;
+            while (link.*) |holders| : (link = &holders.next_live) {
+                if (holders == self) {
                     link.* = self.next_live;
                     break;
                 }
@@ -268,34 +267,34 @@ pub const Table = struct {
         }
     }
 
-    fn shardFor(self: *Table, key: u32) *Shard {
+    fn shardFor(self: *Holders, key: u32) *Shard {
         return &self.shards[key & (shard_count - 1)];
     }
 
     /// Remove `fd` from every loop that has it registered. Must run before the
     /// fd is closed.
-    pub fn purge(self: *Table, fd: net.fd_t) void {
-        const shard = self.shardFor(Local.key(fd));
+    pub fn purge(self: *Holders, fd: net.fd_t) void {
+        const shard = self.shardFor(FdTable.key(fd));
         shard.mutex.lock();
         defer shard.mutex.unlock();
-        const removed = shard.map.fetchRemove(Local.key(fd)) orelse return;
+        const removed = shard.map.fetchRemove(FdTable.key(fd)) orelse return;
         var mask = removed.value;
         // Under the shard mutex, so a loop's `release` (which clears its bits
-        // under the same mutex first) cannot free a `Local` we reach here.
+        // under the same mutex first) cannot free an `FdTable` we reach here.
         while (mask != 0) : (mask &= mask - 1) {
             const index: u6 = @intCast(@ctz(mask));
-            self.locals[index].?.purge(fd);
+            self.tables[index].?.purge(fd);
         }
     }
 
     /// Record that loop `index` has `fd` registered, and remove the
     /// registrations of the other loops that have nothing parked on it.
     /// Returns false, recording nothing, when out of memory.
-    fn claim(self: *Table, fd: net.fd_t, index: u6) bool {
-        const shard = self.shardFor(Local.key(fd));
+    fn claim(self: *Holders, fd: net.fd_t, index: u6) bool {
+        const shard = self.shardFor(FdTable.key(fd));
         shard.mutex.lock();
         defer shard.mutex.unlock();
-        const gop = shard.map.getOrPut(self.allocator, Local.key(fd)) catch return false;
+        const gop = shard.map.getOrPut(self.allocator, FdTable.key(fd)) catch return false;
         if (!gop.found_existing) gop.value_ptr.* = 0;
         const mask = gop.value_ptr;
         mask.* |= @as(u64, 1) << index;
@@ -303,26 +302,26 @@ pub const Table = struct {
         while (others != 0) : (others &= others - 1) {
             const other_index: u6 = @intCast(@ctz(others));
             // Under the shard mutex, as in `purge`.
-            const other = self.locals[other_index].?;
+            const other = self.tables[other_index].?;
             other.mutex.lock();
             defer other.mutex.unlock();
-            const entry = other.entries.getPtr(Local.key(fd)) orelse continue;
+            const entry = other.entries.getPtr(FdTable.key(fd)) orelse continue;
             if (!entry.waiters[0].isEmpty() or !entry.waiters[1].isEmpty()) continue;
             // An edge of this registration already harvested by the other loop
             // finds no entry, or one of a later registration with another
             // generation, and is ignored.
             if (entry.registered != 0) self.drop_fn(other.poller_fd, fd, entry.registered);
-            _ = other.entries.remove(Local.key(fd));
+            _ = other.entries.remove(FdTable.key(fd));
             mask.* &= ~(@as(u64, 1) << other_index);
         }
         return true;
     }
 
-    fn unsetBit(self: *Table, fd: net.fd_t, bit: u64) void {
-        const shard = self.shardFor(Local.key(fd));
+    fn unsetBit(self: *Holders, fd: net.fd_t, bit: u64) void {
+        const shard = self.shardFor(FdTable.key(fd));
         shard.mutex.lock();
         defer shard.mutex.unlock();
-        clearBit(shard, Local.key(fd), bit);
+        clearBit(shard, FdTable.key(fd), bit);
     }
 };
 
@@ -332,16 +331,16 @@ fn clearBit(shard: *Shard, key: u32, bit: u64) void {
     if (mask.* == 0) _ = shard.map.remove(key);
 }
 
-var live_tables_mutex: os.Mutex = .init();
-var live_tables: ?*Table = null;
+var live_holders_mutex: os.Mutex = .init();
+var live_holders: ?*Holders = null;
 
-/// Purge `fd` from every live table, for a close that does not run on a loop
+/// Purge `fd` from every live `Holders`, for a close that does not run on a loop
 /// and so does not know which group the socket was used in.
 pub fn purgeAll(fd: net.fd_t) void {
-    live_tables_mutex.lock();
-    defer live_tables_mutex.unlock();
-    var it = live_tables;
-    while (it) |table| : (it = table.next_live) table.purge(fd);
+    live_holders_mutex.lock();
+    defer live_holders_mutex.unlock();
+    var it = live_holders;
+    while (it) |holders| : (it = holders.next_live) holders.purge(fd);
 }
 
 // ---- generic fd path --------------------------------------------------------
@@ -363,7 +362,7 @@ pub fn purgeAll(fd: net.fd_t) void {
 //                                              an open `fd` from a poller, from
 //                                              any thread (free fn)
 //
-// `self` is the backend, with its `Local` in `self.socks`; `state` is its
+// `self` is the backend, with its `FdTable` in `self.fds`; `state` is its
 // *LoopState.
 
 pub fn isSocketOp(op: Op) bool {
@@ -385,7 +384,7 @@ pub fn isSocketOp(op: Op) bool {
     };
 }
 
-/// Whether `op` waits through this table on every backend that uses it: the
+/// Whether `op` waits through this module on every backend that uses it: the
 /// socket ops, and the waits on other pollable fds. A process wait does too on
 /// Linux, where it waits on a pidfd.
 pub fn isRegisteredOp(op: Op) bool {
@@ -463,28 +462,28 @@ fn failPark(state: anytype, completion: *Completion) void {
 /// the direction) with this loop's poller if it is not yet. If that
 /// fails, finishes the completion with an error instead.
 fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion) void {
-    const local: *Local = self.socks;
+    const table: *FdTable = self.fds;
     const dir = dirForOp(completion);
     const bit = dirBit(dir);
 
-    local.mutex.lock();
-    const gop = local.entries.getOrPut(local.table.allocator, Local.key(fd)) catch {
-        local.mutex.unlock();
-        log.err("fd registration table OOM", .{});
+    table.mutex.lock();
+    const gop = table.entries.getOrPut(table.holders.allocator, FdTable.key(fd)) catch {
+        table.mutex.unlock();
+        log.err("fd registration holders OOM", .{});
         failPark(state, completion);
         return;
     };
     if (!gop.found_existing) {
-        gop.value_ptr.* = .{ .gen = local.next_gen, .transient = !isSocketOp(completion.op) };
-        local.next_gen +%= 1;
+        gop.value_ptr.* = .{ .gen = table.next_gen, .transient = !isSocketOp(completion.op) };
+        table.next_gen +%= 1;
     }
     const entry = gop.value_ptr;
     const newly_registered = entry.registered == 0;
     const transient = entry.transient;
     if (entry.registered & bit == 0) {
         if (!self.setInterest(fd, entry.registered, entry.registered | bit, entry.gen)) {
-            if (newly_registered) _ = local.entries.remove(Local.key(fd));
-            local.mutex.unlock();
+            if (newly_registered) _ = table.entries.remove(FdTable.key(fd));
+            table.mutex.unlock();
             failPark(state, completion);
             return;
         }
@@ -494,23 +493,23 @@ fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion) vo
     completion.prev = null;
     completion.next = null;
     entry.waiters[@backingInt(dir)].push(completion);
-    local.mutex.unlock();
+    table.mutex.unlock();
 
-    // The table only needs the bit by the time the socket is closed, and a
+    // `Holders` only needs the bit by the time the socket is closed, and a
     // close cannot race an op parked on it; set it outside the loop's mutex to
-    // keep the lock order (see `Table`). Another loop's claim cannot remove
+    // keep the lock order (see `Holders`). Another loop's claim cannot remove
     // this entry meanwhile: the completion just parked in it keeps it.
-    if (newly_registered and !transient and !local.table.claim(fd, local.index)) {
+    if (newly_registered and !transient and !table.holders.claim(fd, table.index)) {
         // Without the bit a close would leave the registration behind, so undo
         // it. Nothing else can have touched the entry: only this thread parks
         // or services on it.
-        log.err("fd registration table OOM", .{});
-        local.mutex.lock();
-        const entry_now = local.entries.getPtr(Local.key(fd)).?;
+        log.err("fd registration holders OOM", .{});
+        table.mutex.lock();
+        const entry_now = table.entries.getPtr(FdTable.key(fd)).?;
         entry_now.waiters[@backingInt(dir)].remove(completion);
         _ = self.setInterest(fd, entry_now.registered, 0, entry_now.gen);
-        _ = local.entries.remove(Local.key(fd));
-        local.mutex.unlock();
+        _ = table.entries.remove(FdTable.key(fd));
+        table.mutex.unlock();
         failPark(state, completion);
     }
 }
@@ -522,12 +521,12 @@ fn park(self: anytype, state: anytype, fd: net.fd_t, completion: *Completion) vo
 /// can run callbacks that submit, cancel or close re-entrantly).
 pub fn onEvent(self: anytype, state: anytype, fd: net.fd_t, gen: Gen, ready: Dirs, event: anytype) void {
     const Backend = @TypeOf(self.*);
-    const local: *Local = self.socks;
+    const table: *FdTable = self.fds;
     var to_finish: Queue(Completion) = .{};
     var dropped = false;
 
-    local.mutex.lock();
-    if (local.entries.getPtr(Local.key(fd))) |entry| if (entry.gen == gen) {
+    table.mutex.lock();
+    if (table.entries.getPtr(FdTable.key(fd))) |entry| if (entry.gen == gen) {
         inline for (.{ Dir.read, Dir.write }) |dir| {
             const bit = dirBit(dir);
             if (ready & entry.registered & bit != 0) {
@@ -573,12 +572,12 @@ pub fn onEvent(self: anytype, state: anytype, fd: net.fd_t, gen: Gen, ready: Dir
         if (entry.registered == 0) {
             std.debug.assert(entry.waiters[0].isEmpty() and entry.waiters[1].isEmpty());
             dropped = !entry.transient;
-            _ = local.entries.remove(Local.key(fd));
+            _ = table.entries.remove(FdTable.key(fd));
         }
     };
-    local.mutex.unlock();
+    table.mutex.unlock();
 
-    if (dropped) local.table.unsetBit(fd, @as(u64, 1) << local.index);
+    if (dropped) table.holders.unsetBit(fd, @as(u64, 1) << table.index);
 
     while (to_finish.pop()) |c| {
         state.markCompletedFromBackend(c);
@@ -610,20 +609,20 @@ fn dropIfIdle(self: anytype, fd: net.fd_t, entry: *Entry, dir: Dir) void {
 /// claimed sits in its private finish list, whose links it rewrites after
 /// unlocking, so they cannot tell whether it is still parked.
 pub fn detach(self: anytype, target: *Completion) bool {
-    const local: *Local = self.socks;
-    local.mutex.lock();
-    defer local.mutex.unlock();
+    const table: *FdTable = self.fds;
+    table.mutex.lock();
+    defer table.mutex.unlock();
     if (target.has_result) return false;
     // An op without a result is parked here: it was submitted on this loop, and
     // its entry can only go away with its last waiter, or when the fd is
     // closed, which the caller must not do with ops still in flight.
     const fd = handleOf(target);
-    const entry = local.entries.getPtr(Local.key(fd)) orelse return false;
+    const entry = table.entries.getPtr(FdTable.key(fd)) orelse return false;
     const dir = dirForOp(target);
     entry.waiters[@backingInt(dir)].remove(target);
     if (entry.transient) {
         dropIfIdle(self, fd, entry, dir);
-        if (entry.registered == 0) _ = local.entries.remove(Local.key(fd));
+        if (entry.registered == 0) _ = table.entries.remove(FdTable.key(fd));
     }
     return true;
 }
@@ -632,8 +631,8 @@ pub fn detach(self: anytype, target: *Completion) bool {
 /// Only persistent registrations can outlive their waiters, so only sockets
 /// need this.
 pub fn unregister(self: anytype, fd: net.fd_t) void {
-    const local: *Local = self.socks;
-    local.table.purge(fd);
+    const table: *FdTable = self.fds;
+    table.holders.purge(fd);
 }
 
 /// Generic submit for ops with a syscall of their own (socket reads, writes
@@ -700,7 +699,7 @@ pub fn submitWait(self: anytype, state: anytype, fd: net.fd_t, c: *Completion) v
 }
 
 const TestBackend = struct {
-    socks: *Local = undefined,
+    fds: *FdTable = undefined,
     interest: Dirs = 0,
     interest_changes: usize = 0,
 
@@ -748,21 +747,21 @@ const TestState = struct {
     }
 };
 
-fn testMask(table: *Table, fd: net.fd_t) u64 {
-    return table.shardFor(Local.key(fd)).map.get(Local.key(fd)) orelse 0;
+fn testMask(holders: *Holders, fd: net.fd_t) u64 {
+    return holders.shardFor(FdTable.key(fd)).map.get(FdTable.key(fd)) orelse 0;
 }
 
-test "sockreg: cancel of an op that onEvent already finished leaves it alone" {
+test "readiness: cancel of an op that onEvent already finished leaves it alone" {
     // onEvent finishes A, B and C in one pass and leaves D parked. While it
     // completes A, a cancel of B (still linked in onEvent's finish list) must
     // report it as already claimed, and must not touch the waiter queue.
     const ReadBuf = @import("buf.zig").ReadBuf;
     const fd: net.fd_t = 42;
 
-    var table: Table = .{};
+    var holders: Holders = .{};
     var backend: TestBackend = .{};
-    backend.socks = try table.acquire(std.testing.allocator, TestBackend, -1);
-    defer table.release(backend.socks);
+    backend.fds = try holders.acquire(std.testing.allocator, TestBackend, -1);
+    defer holders.release(backend.fds);
 
     var buf: [1]u8 = undefined;
     var iov: [1]os.iovec = undefined;
@@ -779,15 +778,15 @@ test "sockreg: cancel of an op that onEvent already finished leaves it alone" {
     var state: TestState = .{ .backend = &backend, .cancel_target = b };
     for ([_]*Completion{ a, b, c, d }) |op| park(&backend, &state, fd, op);
     try std.testing.expectEqual(dirBit(.read), backend.interest);
-    try std.testing.expectEqual(@as(u64, 1) << backend.socks.index, testMask(&table, fd));
+    try std.testing.expectEqual(@as(u64, 1) << backend.fds.index, testMask(&holders, fd));
 
-    const gen = backend.socks.entries.get(Local.key(fd)).?.gen;
+    const gen = backend.fds.entries.get(FdTable.key(fd)).?.gen;
     onEvent(&backend, &state, fd, gen, dirBit(.read), &TestBackend.Event{ .requeue = d });
 
     try std.testing.expectEqual(false, state.detached.?);
     try std.testing.expectEqualSlices(?*Completion, &.{ a, b, c, null }, &state.finished);
 
-    const waiters = &backend.socks.entries.getPtr(Local.key(fd)).?.waiters[@backingInt(Dir.read)];
+    const waiters = &backend.fds.entries.getPtr(FdTable.key(fd)).?.waiters[@backingInt(Dir.read)];
     try std.testing.expectEqual(d, waiters.head.?);
     try std.testing.expectEqual(null, d.next);
     try std.testing.expectEqual(d, d.prev); // the head's prev is the tail
@@ -797,14 +796,14 @@ test "sockreg: cancel of an op that onEvent already finished leaves it alone" {
     try std.testing.expect(waiters.isEmpty());
 }
 
-test "sockreg: a registration is dropped after two edges with no waiter" {
+test "readiness: a registration is dropped after two edges with no waiter" {
     const ReadBuf = @import("buf.zig").ReadBuf;
     const fd: net.fd_t = 7;
 
-    var table: Table = .{};
+    var holders: Holders = .{};
     var backend: TestBackend = .{};
-    backend.socks = try table.acquire(std.testing.allocator, TestBackend, -1);
-    defer table.release(backend.socks);
+    backend.fds = try holders.acquire(std.testing.allocator, TestBackend, -1);
+    defer holders.release(backend.fds);
 
     var buf: [1]u8 = undefined;
     var iov: [1]os.iovec = undefined;
@@ -814,40 +813,40 @@ test "sockreg: a registration is dropped after two edges with no waiter" {
     var state: TestState = .{ .backend = &backend };
     park(&backend, &state, fd, &op.c);
     try std.testing.expect(detach(&backend, &op.c));
-    const gen = backend.socks.entries.get(Local.key(fd)).?.gen;
+    const gen = backend.fds.entries.get(FdTable.key(fd)).?.gen;
     const event: TestBackend.Event = .{};
 
     // An event of an older registration of the same fd number is ignored.
     onEvent(&backend, &state, fd, gen +% 1, dirBit(.read), &event);
-    try std.testing.expectEqual(dirBit(.read), backend.socks.entries.get(Local.key(fd)).?.used);
+    try std.testing.expectEqual(dirBit(.read), backend.fds.entries.get(FdTable.key(fd)).?.used);
 
     // The first idle edge only takes away the second chance the park gave.
     onEvent(&backend, &state, fd, gen, dirBit(.read), &event);
     try std.testing.expectEqual(dirBit(.read), backend.interest);
-    try std.testing.expectEqual(0, backend.socks.entries.get(Local.key(fd)).?.used);
+    try std.testing.expectEqual(0, backend.fds.entries.get(FdTable.key(fd)).?.used);
 
-    // The second one drops the registration, and the table forgets the loop.
+    // The second one drops the registration, and `Holders` forgets the loop.
     onEvent(&backend, &state, fd, gen, dirBit(.read), &event);
     try std.testing.expectEqual(0, backend.interest);
-    try std.testing.expectEqual(null, backend.socks.entries.get(Local.key(fd)));
-    try std.testing.expectEqual(0, testMask(&table, fd));
+    try std.testing.expectEqual(null, backend.fds.entries.get(FdTable.key(fd)));
+    try std.testing.expectEqual(0, testMask(&holders, fd));
     try std.testing.expectEqual(0, state.finished_count);
 }
 
-test "sockreg: registering a socket drops other loops' idle registrations of it" {
+test "readiness: registering a socket drops other loops' idle registrations of it" {
     const ReadBuf = @import("buf.zig").ReadBuf;
     const fd: net.fd_t = 9;
 
-    var table: Table = .{};
+    var holders: Holders = .{};
     var old: TestBackend = .{};
-    old.socks = try table.acquire(std.testing.allocator, TestBackend, -1);
-    defer table.release(old.socks);
+    old.fds = try holders.acquire(std.testing.allocator, TestBackend, -1);
+    defer holders.release(old.fds);
     var busy: TestBackend = .{};
-    busy.socks = try table.acquire(std.testing.allocator, TestBackend, -1);
-    defer table.release(busy.socks);
+    busy.fds = try holders.acquire(std.testing.allocator, TestBackend, -1);
+    defer holders.release(busy.fds);
     var new: TestBackend = .{};
-    new.socks = try table.acquire(std.testing.allocator, TestBackend, -1);
-    defer table.release(new.socks);
+    new.fds = try holders.acquire(std.testing.allocator, TestBackend, -1);
+    defer holders.release(new.fds);
 
     var buf: [1]u8 = undefined;
     var iov: [1]os.iovec = undefined;
@@ -864,24 +863,24 @@ test "sockreg: registering a socket drops other loops' idle registrations of it"
     var old_state: TestState = .{ .backend = &old };
     park(&old, &old_state, fd, &ops[0].c);
     try std.testing.expect(detach(&old, &ops[0].c));
-    try std.testing.expect(busy.socks.entries.get(Local.key(fd)) != null);
+    try std.testing.expect(busy.fds.entries.get(FdTable.key(fd)) != null);
 
     const drops = TestBackend.drops;
     var new_state: TestState = .{ .backend = &new };
     park(&new, &new_state, fd, &ops[2].c);
 
     try std.testing.expectEqual(drops + 1, TestBackend.drops);
-    try std.testing.expectEqual(null, old.socks.entries.get(Local.key(fd)));
-    try std.testing.expect(busy.socks.entries.get(Local.key(fd)) != null);
-    const busy_bit = @as(u64, 1) << busy.socks.index;
-    const new_bit = @as(u64, 1) << new.socks.index;
-    try std.testing.expectEqual(busy_bit | new_bit, testMask(&table, fd));
+    try std.testing.expectEqual(null, old.fds.entries.get(FdTable.key(fd)));
+    try std.testing.expect(busy.fds.entries.get(FdTable.key(fd)) != null);
+    const busy_bit = @as(u64, 1) << busy.fds.index;
+    const new_bit = @as(u64, 1) << new.fds.index;
+    try std.testing.expectEqual(busy_bit | new_bit, testMask(&holders, fd));
 
     try std.testing.expect(detach(&busy, &ops[1].c));
     try std.testing.expect(detach(&new, &ops[2].c));
 }
 
-test "sockreg: a wait list keeps its order through removals anywhere" {
+test "readiness: a wait list keeps its order through removals anywhere" {
     var ops: [4]NetRecv = undefined;
     var buf: [1]u8 = undefined;
     var iov: [1]os.iovec = undefined;
@@ -916,18 +915,18 @@ test "sockreg: a wait list keeps its order through removals anywhere" {
     try std.testing.expectEqual(null, c.next);
 }
 
-test "sockreg: an entry holds one pointer per direction" {
+test "readiness: an entry holds one pointer per direction" {
     try std.testing.expect(@sizeOf(Entry) <= 24);
 }
 
-test "sockreg: a transient registration is dropped with its last waiter" {
+test "readiness: a transient registration is dropped with its last waiter" {
     const ReadBuf = @import("buf.zig").ReadBuf;
     const fd: net.fd_t = 11;
 
-    var table: Table = .{};
+    var holders: Holders = .{};
     var backend: TestBackend = .{};
-    backend.socks = try table.acquire(std.testing.allocator, TestBackend, -1);
-    defer table.release(backend.socks);
+    backend.fds = try holders.acquire(std.testing.allocator, TestBackend, -1);
+    defer holders.release(backend.fds);
 
     var buf: [1]u8 = undefined;
     var iov: [1]os.iovec = undefined;
@@ -941,19 +940,19 @@ test "sockreg: a transient registration is dropped with its last waiter" {
     park(&backend, &state, fd, &ops[0].c);
     park(&backend, &state, fd, &ops[1].c);
     try std.testing.expectEqual(dirBit(.read), backend.interest);
-    try std.testing.expect(backend.socks.entries.get(Local.key(fd)).?.transient);
-    // Not recorded in the table: nothing to purge on close, nothing for
+    try std.testing.expect(backend.fds.entries.get(FdTable.key(fd)).?.transient);
+    // Not recorded in `Holders`: nothing to purge on close, nothing for
     // another loop to drop.
-    try std.testing.expectEqual(0, testMask(&table, fd));
+    try std.testing.expectEqual(0, testMask(&holders, fd));
 
     // A cancel of one leaves the registration for the other.
     try std.testing.expect(detach(&backend, &ops[0].c));
     try std.testing.expectEqual(dirBit(.read), backend.interest);
 
     // Completing the last one drops it.
-    const gen = backend.socks.entries.get(Local.key(fd)).?.gen;
+    const gen = backend.fds.entries.get(FdTable.key(fd)).?.gen;
     onEvent(&backend, &state, fd, gen, dirBit(.read), &TestBackend.Event{});
     try std.testing.expectEqual(1, state.finished_count);
     try std.testing.expectEqual(0, backend.interest);
-    try std.testing.expectEqual(null, backend.socks.entries.get(Local.key(fd)));
+    try std.testing.expectEqual(null, backend.fds.entries.get(FdTable.key(fd)));
 }

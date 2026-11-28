@@ -27,7 +27,7 @@ const ProcessWait = @import("../../completion.zig").ProcessWait;
 const fs = @import("../../../os/fs.zig");
 const linux = std.os.linux;
 const os_linux = @import("../../../os/linux.zig");
-const sockreg = @import("../../sockreg.zig");
+const readiness = @import("../../readiness.zig");
 
 pub const NetHandle = net.fd_t;
 
@@ -119,26 +119,26 @@ pub fn supports(_: *const Self, comptime op: Op, data: *op.toType()) bool {
 }
 
 pub const SharedState = struct {
-    /// Which loops of the group have which sockets registered. See sockreg.zig.
-    sock_table: sockreg.Table = .{},
+    /// Which loops of the group have which sockets registered. See readiness.zig.
+    holders: readiness.Holders = .{},
 };
 
 // Pollable fds are registered edge-triggered with the poller of each loop that
-// parks on them (see sockreg.zig); sockets persistently, with no per-op MOD on
+// parks on them (see readiness.zig); sockets persistently, with no per-op MOD on
 // read/write switch and no DEL on completion.
 const epoll_et: u32 = linux.EPOLL.ET;
 
 // epoll_event.data.u64 layout for fd registrations: the fd in the low 32 bits,
 // a tag in bit 32 distinguishing them from the loop's own fds (waker, wall
 // timerfds), and the registration's generation above it.
-const sock_tag: u64 = 1 << 32;
+const reg_tag: u64 = 1 << 32;
 const gen_shift = 33;
 
-fn sockData(fd: NetHandle, gen: sockreg.Gen) u64 {
-    return @as(u64, gen) << gen_shift | sock_tag | @as(u64, @as(u32, @bitCast(fd)));
+fn regData(fd: NetHandle, gen: readiness.Gen) u64 {
+    return @as(u64, gen) << gen_shift | reg_tag | @as(u64, @as(u32, @bitCast(fd)));
 }
 
-fn sockGen(event: *const linux.epoll_event) sockreg.Gen {
+fn regGen(event: *const linux.epoll_event) readiness.Gen {
     return @truncate(event.data.u64 >> gen_shift);
 }
 
@@ -150,8 +150,8 @@ fn eventFd(event: *const linux.epoll_event) i32 {
     return @bitCast(@as(u32, @truncate(event.data.u64)));
 }
 
-fn eventIsSocket(event: *const linux.epoll_event) bool {
-    return (event.data.u64 & sock_tag) != 0;
+fn eventIsReg(event: *const linux.epoll_event) bool {
+    return (event.data.u64 & reg_tag) != 0;
 }
 
 pub const ProcessWaitData = struct {
@@ -173,8 +173,8 @@ const log = @import("../../../common.zig").log;
 
 allocator: std.mem.Allocator,
 shared: *SharedState = undefined,
-/// This loop's socket registrations (see sockreg.zig).
-socks: *sockreg.Local = undefined,
+/// This loop's fd registrations (see readiness.zig).
+fds: *readiness.FdTable = undefined,
 /// Backend-internal inflight count: ops accepted by submit() and not yet
 /// completed. Every op is completed on the loop that accepted it (a parked
 /// socket op by its own loop's poller, a cancel routed to it), so a plain
@@ -216,13 +216,13 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
         return unexpectedError(posix.errno(ctl_rc));
     }
 
-    const socks = try shared_state.sock_table.acquire(allocator, Self, epoll_fd);
-    errdefer shared_state.sock_table.release(socks);
+    const fds = try shared_state.holders.acquire(allocator, Self, epoll_fd);
+    errdefer shared_state.holders.release(fds);
 
     self.* = .{
         .allocator = allocator,
         .shared = shared_state,
-        .socks = socks,
+        .fds = fds,
         .epoll_fd = epoll_fd,
         .waker_eventfd = waker_eventfd,
         .events = undefined,
@@ -271,7 +271,7 @@ pub fn deinit(self: *Self) void {
     self.allocator.free(self.events);
     // Before closing the epoll fd: once released, no close on another thread
     // can reach this loop's poller.
-    self.shared.sock_table.release(self.socks);
+    self.shared.holders.release(self.fds);
     if (self.epoll_fd != -1) {
         _ = std.os.linux.close(self.epoll_fd);
     }
@@ -355,9 +355,9 @@ const epoll_bit_out: u32 = linux.EPOLL.OUT;
 
 /// Change the directions `fd` is registered for in this loop's epoll from `old`
 /// to `new`: ADD, MOD or DEL. A stale kernel registration (the fd was closed and
-/// its number reused without passing through sockreg) or a missing one is
-/// tolerated by falling back to the other operation. Called by sockreg.
-pub fn setInterest(self: *Self, fd: NetHandle, old: sockreg.Dirs, new: sockreg.Dirs, gen: sockreg.Gen) bool {
+/// its number reused without passing through readiness.zig) or a missing one is
+/// tolerated by falling back to the other operation. Called by readiness.zig.
+pub fn setInterest(self: *Self, fd: NetHandle, old: readiness.Dirs, new: readiness.Dirs, gen: readiness.Gen) bool {
     if (new == 0) {
         return switch (posix.errno(linux.epoll_ctl(self.epoll_fd, linux.EPOLL.CTL_DEL, fd, null))) {
             // BADF: a pidfd its wait closed, which removed it already.
@@ -369,9 +369,9 @@ pub fn setInterest(self: *Self, fd: NetHandle, old: sockreg.Dirs, new: sockreg.D
         };
     }
     var mask: u32 = epoll_et;
-    if (new & sockreg.dirBit(.read) != 0) mask |= epoll_bit_in;
-    if (new & sockreg.dirBit(.write) != 0) mask |= epoll_bit_out;
-    var event = linux.epoll_event{ .data = .{ .u64 = sockData(fd, gen) }, .events = mask };
+    if (new & readiness.dirBit(.read) != 0) mask |= epoll_bit_in;
+    if (new & readiness.dirBit(.write) != 0) mask |= epoll_bit_out;
+    var event = linux.epoll_event{ .data = .{ .u64 = regData(fd, gen) }, .events = mask };
     const first: u32 = if (old == 0) linux.EPOLL.CTL_ADD else linux.EPOLL.CTL_MOD;
     const fallback: u32 = if (old == 0) linux.EPOLL.CTL_MOD else linux.EPOLL.CTL_ADD;
     var err = posix.errno(linux.epoll_ctl(self.epoll_fd, first, fd, &event));
@@ -384,22 +384,22 @@ pub fn setInterest(self: *Self, fd: NetHandle, old: sockreg.Dirs, new: sockreg.D
 }
 
 /// Remove `fd` from the epoll `poller_fd` before the socket is closed. Called
-/// by sockreg from whichever thread closes it (epoll_ctl on another thread's
+/// by readiness.zig from whichever thread closes it (epoll_ctl on another thread's
 /// epoll is safe).
 pub fn forgetSocket(poller_fd: i32, fd: NetHandle) void {
     _ = linux.epoll_ctl(poller_fd, linux.EPOLL.CTL_DEL, fd, null);
 }
 
-/// Remove an open socket from another loop's epoll (see sockreg.Table.claim).
-pub fn dropSocket(poller_fd: i32, fd: NetHandle, registered: sockreg.Dirs) void {
+/// Remove an open socket from another loop's epoll (see readiness.Holders.claim).
+pub fn dropSocket(poller_fd: i32, fd: NetHandle, registered: readiness.Dirs) void {
     _ = registered;
     forgetSocket(poller_fd, fd);
 }
 
 /// A no-error event for the optimistic (pre-park) checkCompletion attempt.
-pub fn probeEvent(fd: NetHandle, dir: sockreg.Dir) linux.epoll_event {
+pub fn probeEvent(fd: NetHandle, dir: readiness.Dir) linux.epoll_event {
     _ = dir;
-    return .{ .data = .{ .u64 = sockData(fd, 0) }, .events = 0 };
+    return .{ .data = .{ .u64 = regData(fd, 0) }, .events = 0 };
 }
 
 /// Drop one inflight op. Called via LoopState.markCompletedFromBackend on the
@@ -444,7 +444,7 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
             const data = c.cast(NetClose);
             // Tear down the persistent registration before the fd is closed, so a
             // future socket that reuses this fd number starts clean on every loop.
-            sockreg.unregister(self, data.handle);
+            readiness.unregister(self, data.handle);
             common.handleNetClose(c);
             state.markCompletedFromBackend(c);
         },
@@ -455,7 +455,7 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
 
         // Sockets take the persistent edge-triggered path: try the syscall
         // optimistically, register with this loop's epoll only on WouldBlock.
-        .net_connect => sockreg.submitConnect(self, state, c),
+        .net_connect => readiness.submitConnect(self, state, c),
         .net_accept,
         .net_recv,
         .net_send,
@@ -465,9 +465,9 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
         .net_recvmmsg,
         .net_sendmsg,
         .net_sendmmsg,
-        => sockreg.submitIo(self, state, c),
-        .net_poll => sockreg.submitPoll(self, state, c),
-        .pipe_poll => sockreg.submitPoll(self, state, c),
+        => readiness.submitIo(self, state, c),
+        .net_poll => readiness.submitPoll(self, state, c),
+        .pipe_poll => readiness.submitPoll(self, state, c),
         .pipe_create => {
             const fds = fs.pipe() catch |err| {
                 c.setError(err);
@@ -479,7 +479,7 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
         },
         // Streaming file I/O is routed here by the loop only when the fd is
         // pollable (non-seekable): try it, park on WouldBlock.
-        .file_read_streaming, .file_write_streaming => sockreg.submitIo(self, state, c),
+        .file_read_streaming, .file_write_streaming => readiness.submitIo(self, state, c),
         .pipe_close => {
             const data = c.cast(PipeClose);
             if (fs.close(data.handle)) |_| {
@@ -496,7 +496,7 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
             switch (posix.errno(rc)) {
                 .SUCCESS => {
                     data.internal.pidfd = @intCast(rc);
-                    sockreg.submitWait(self, state, data.internal.pidfd, c);
+                    readiness.submitWait(self, state, data.internal.pidfd, c);
                 },
                 .SRCH => {
                     c.setError(error.ProcessNotFound);
@@ -525,13 +525,13 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
 /// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
 pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
     // Every op still running here is parked in this loop's waiters for its fd.
-    // If detach finds the op already claimed by sockreg.onEvent (a callback it
+    // If detach finds the op already claimed by readiness.onEvent (a callback it
     // ran is canceling it), it has a natural result, so leave it alone rather
     // than overwriting it with Canceled and completing it twice. A socket's
     // registration is left in place, and dropped later if it goes unused; any
     // other is dropped with its last waiter.
-    std.debug.assert(sockreg.isRegisteredOp(target.op) or target.op == .process_wait);
-    if (!sockreg.detach(self, target)) return;
+    std.debug.assert(readiness.isRegisteredOp(target.op) or target.op == .process_wait);
+    if (!readiness.detach(self, target)) return;
 
     // The wait owns its pidfd, which completing it would have closed.
     if (target.op == .process_wait) {
@@ -586,13 +586,13 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
     for (self.events[0..n]) |event| {
         // Registered fds: service the ready directions. ERR/HUP is delivered
         // to both so a pending op on either side returns the error.
-        if (eventIsSocket(&event)) {
+        if (eventIsReg(&event)) {
             const ev = event.events;
             const err_hup = ev & (linux.EPOLL.ERR | linux.EPOLL.HUP);
-            var ready: sockreg.Dirs = 0;
-            if ((ev & linux.EPOLL.IN) != 0 or err_hup != 0) ready |= sockreg.dirBit(.read);
-            if ((ev & linux.EPOLL.OUT) != 0 or err_hup != 0) ready |= sockreg.dirBit(.write);
-            sockreg.onEvent(self, state, eventFd(&event), sockGen(&event), ready, &event);
+            var ready: readiness.Dirs = 0;
+            if ((ev & linux.EPOLL.IN) != 0 or err_hup != 0) ready |= readiness.dirBit(.read);
+            if ((ev & linux.EPOLL.OUT) != 0 or err_hup != 0) ready |= readiness.dirBit(.write);
+            readiness.onEvent(self, state, eventFd(&event), regGen(&event), ready, &event);
             continue;
         }
 

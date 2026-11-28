@@ -10,7 +10,7 @@ const NetClose = ev.NetClose;
 const FileReadStreaming = ev.FileReadStreaming;
 const net = os.net;
 
-test "sockreg: a socket closed off the loop leaves no registration for its reused fd" {
+test "readiness: a socket closed off the loop leaves no registration for its reused fd" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     var loop: Loop = undefined;
@@ -55,7 +55,7 @@ test "sockreg: a socket closed off the loop leaves no registration for its reuse
     try std.testing.expectEqual(1, try second.getResult());
 }
 
-test "sockreg: a socket used on another loop wakes this one while that loop is not polling" {
+test "readiness: a socket used on another loop wakes this one while that loop is not polling" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     if (@import("../completion.zig").single_owner) return error.SkipZigTest;
 
@@ -127,7 +127,7 @@ test "sockreg: a socket used on another loop wakes this one while that loop is n
     try std.testing.expectEqual(1, try recv.getResult());
 }
 
-test "sockreg: a socket read as a stream file after a socket receive on the same loop" {
+test "readiness: a socket read as a stream file after a socket receive on the same loop" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     var loop: Loop = undefined;

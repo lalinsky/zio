@@ -26,7 +26,7 @@ const PipeClose = @import("../completion.zig").PipeClose;
 const MachPort = @import("../completion.zig").MachPort;
 const ProcessWait = @import("../completion.zig").ProcessWait;
 const fs = @import("../../os/fs.zig");
-const sockreg = @import("../sockreg.zig");
+const readiness = @import("../readiness.zig");
 
 pub const NetHandle = net.fd_t;
 
@@ -140,8 +140,8 @@ pub fn supports(_: *const Self, comptime op: Op, data: *op.toType()) bool {
 }
 
 pub const SharedState = struct {
-    /// Which loops of the group have which sockets registered. See sockreg.zig.
-    sock_table: sockreg.Table = .{},
+    /// Which loops of the group have which sockets registered. See readiness.zig.
+    holders: readiness.Holders = .{},
 };
 
 pub const NetOpenError = error{
@@ -195,23 +195,23 @@ const delete_marker: usize = std.math.maxInt(usize);
 // udata of an fd registration: the top two bits are 0b01, telling it apart from
 // the object waits (udata == 0) and from delete_marker, and the registration's
 // generation is in the low bits. Pollable fds are registered edge-triggered
-// (EV_CLEAR) with the kqueue of each loop that parks on them (see sockreg.zig).
-const sock_udata_shift = @bitSizeOf(usize) - 2;
-const sock_udata_tag: usize = 1 << sock_udata_shift;
+// (EV_CLEAR) with the kqueue of each loop that parks on them (see readiness.zig).
+const reg_udata_shift = @bitSizeOf(usize) - 2;
+const reg_udata_tag: usize = 1 << reg_udata_shift;
 
 comptime {
-    std.debug.assert(sockreg.gen_bits <= sock_udata_shift);
+    std.debug.assert(readiness.gen_bits <= reg_udata_shift);
 }
 
-fn sockUdata(gen: sockreg.Gen) usize {
-    return sock_udata_tag | gen;
+fn regUdata(gen: readiness.Gen) usize {
+    return reg_udata_tag | gen;
 }
 
-fn udataIsSocket(udata: usize) bool {
-    return udata >> sock_udata_shift == 0b01;
+fn udataIsReg(udata: usize) bool {
+    return udata >> reg_udata_shift == 0b01;
 }
 
-fn filterForDir(dir: sockreg.Dir) i16 {
+fn filterForDir(dir: readiness.Dir) i16 {
     return switch (dir) {
         .read => std.c.EVFILT.READ,
         .write => std.c.EVFILT.WRITE,
@@ -231,8 +231,8 @@ const ObjectWait = struct {
 
 allocator: std.mem.Allocator,
 shared: *SharedState = undefined,
-/// This loop's socket registrations (see sockreg.zig).
-socks: *sockreg.Local = undefined,
+/// This loop's fd registrations (see readiness.zig).
+fds: *readiness.FdTable = undefined,
 /// Backend-internal inflight count: ops accepted by submit() and not yet
 /// completed. Every op is completed on the loop that accepted it (a parked
 /// socket op by its own loop's poller, a cancel routed to it), so a plain
@@ -285,13 +285,13 @@ pub fn init(self: *Self, allocator: std.mem.Allocator, queue_size: u16, shared_s
         else => |err| return unexpectedError(err),
     }
 
-    const socks = try shared_state.sock_table.acquire(allocator, Self, kqueue_fd);
-    errdefer shared_state.sock_table.release(socks);
+    const fds = try shared_state.holders.acquire(allocator, Self, kqueue_fd);
+    errdefer shared_state.holders.release(fds);
 
     self.* = .{
         .allocator = allocator,
         .shared = shared_state,
-        .socks = socks,
+        .fds = fds,
         .kqueue_fd = kqueue_fd,
         .waker_ident = waker_ident,
         .change_buffer = change_buffer,
@@ -307,7 +307,7 @@ pub fn deinit(self: *Self) void {
     self.allocator.free(self.events);
     // Before closing the kqueue: once released, no close on another thread can
     // reach this loop's registrations.
-    self.shared.sock_table.release(self.socks);
+    self.shared.holders.release(self.fds);
     if (self.kqueue_fd != -1) {
         _ = std.c.close(self.kqueue_fd);
     }
@@ -496,23 +496,23 @@ fn removeObjectWait(self: *Self, completion: *Completion) void {
 
 // ---- socket registration path ------------------------------------------------
 
-// Backend hooks for the generic socket path in sockreg.zig.
+// Backend hooks for the generic readiness path in readiness.zig.
 
 /// Change the directions `fd` is registered for in this loop's kqueue from
 /// `old` to `new`, adding an EV_CLEAR knote for each new direction and deleting
 /// the knote of each dropped one. Applied with an immediate kevent call rather
 /// than through the change buffer, so no change can be left pending past a
 /// close of the fd and then applied to whatever reuses its number. Called by
-/// sockreg.
-pub fn setInterest(self: *Self, fd: NetHandle, old: sockreg.Dirs, new: sockreg.Dirs, gen: sockreg.Gen) bool {
+/// readiness.zig.
+pub fn setInterest(self: *Self, fd: NetHandle, old: readiness.Dirs, new: readiness.Dirs, gen: readiness.Gen) bool {
     return changeInterest(self.kqueue_fd, fd, old, new, gen);
 }
 
-fn changeInterest(kqueue_fd: i32, fd: NetHandle, old: sockreg.Dirs, new: sockreg.Dirs, gen: sockreg.Gen) bool {
+fn changeInterest(kqueue_fd: i32, fd: NetHandle, old: readiness.Dirs, new: readiness.Dirs, gen: readiness.Gen) bool {
     var changes: [2]std.c.Kevent = undefined;
     var n: usize = 0;
-    for ([_]sockreg.Dir{ .read, .write }) |dir| {
-        const bit = sockreg.dirBit(dir);
+    for ([_]readiness.Dir{ .read, .write }) |dir| {
+        const bit = readiness.dirBit(dir);
         if ((old ^ new) & bit == 0) continue;
         changes[n] = .{
             .ident = @intCast(fd),
@@ -520,7 +520,7 @@ fn changeInterest(kqueue_fd: i32, fd: NetHandle, old: sockreg.Dirs, new: sockreg
             .flags = if (new & bit != 0) std.c.EV.ADD | std.c.EV.CLEAR else std.c.EV.DELETE,
             .fflags = 0,
             .data = 0,
-            .udata = sockUdata(gen),
+            .udata = regUdata(gen),
         };
         n += 1;
     }
@@ -543,20 +543,20 @@ fn changeInterest(kqueue_fd: i32, fd: NetHandle, old: sockreg.Dirs, new: sockreg
 }
 
 /// Nothing to remove before a close: closing the fd removes its knotes from
-/// every kqueue. Called by sockreg.
+/// every kqueue. Called by readiness.zig.
 pub fn forgetSocket(poller_fd: i32, fd: NetHandle) void {
     _ = poller_fd;
     _ = fd;
 }
 
 /// Delete an open socket's knotes from another loop's kqueue (see
-/// sockreg.Table.claim). Called by sockreg.
-pub fn dropSocket(poller_fd: i32, fd: NetHandle, registered: sockreg.Dirs) void {
+/// readiness.Holders.claim). Called by readiness.zig.
+pub fn dropSocket(poller_fd: i32, fd: NetHandle, registered: readiness.Dirs) void {
     _ = changeInterest(poller_fd, fd, registered, 0, 0);
 }
 
 /// A no-error event for the optimistic (pre-park) checkCompletion attempt.
-pub fn probeEvent(fd: NetHandle, dir: sockreg.Dir) std.c.Kevent {
+pub fn probeEvent(fd: NetHandle, dir: readiness.Dir) std.c.Kevent {
     return .{
         .ident = @intCast(fd),
         .filter = filterForDir(dir),
@@ -609,7 +609,7 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
             const data = c.cast(NetClose);
             // Tear down the persistent registration before the fd is closed, so a
             // future socket that reuses this fd number starts clean on every loop.
-            sockreg.unregister(self, data.handle);
+            readiness.unregister(self, data.handle);
             common.handleNetClose(c);
             state.markCompletedFromBackend(c);
         },
@@ -621,7 +621,7 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
         // Sockets take the persistent edge-triggered path: try the
         // syscall optimistically, register with this loop's kqueue only on
         // WouldBlock.
-        .net_connect => sockreg.submitConnect(self, state, c),
+        .net_connect => readiness.submitConnect(self, state, c),
         .net_accept,
         .net_recv,
         .net_send,
@@ -631,13 +631,13 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
         .net_recvmmsg,
         .net_sendmsg,
         .net_sendmmsg,
-        => sockreg.submitIo(self, state, c),
-        .net_poll => sockreg.submitPoll(self, state, c),
+        => readiness.submitIo(self, state, c),
+        .net_poll => readiness.submitPoll(self, state, c),
 
-        .pipe_poll => sockreg.submitPoll(self, state, c),
+        .pipe_poll => readiness.submitPoll(self, state, c),
         // Streaming file I/O is routed here by the loop only when the fd is
         // pollable (non-seekable): try it, park on WouldBlock.
-        .file_read_streaming, .file_write_streaming => sockreg.submitIo(self, state, c),
+        .file_read_streaming, .file_write_streaming => readiness.submitIo(self, state, c),
         .mach_port, .process_wait => self.addObjectWait(state, c),
 
         .pipe_create => {
@@ -682,7 +682,7 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
             };
             data.internal.offset = data.offset;
             data.internal.remaining = @intCast(@min(@as(u64, data.remaining), file_size -| data.offset));
-            sockreg.submitIo(self, state, c);
+            readiness.submitIo(self, state, c);
         },
     }
 }
@@ -690,14 +690,14 @@ pub fn submit(self: *Self, state: *LoopState, comptime op: Op, c: *Completion) v
 /// Cancel a completion - infallible.
 /// Note: target.canceled is already set by loop.add() or loop.cancel() before this is called.
 pub fn cancel(self: *Self, state: *LoopState, target: *Completion) void {
-    if (sockreg.isRegisteredOp(target.op)) {
+    if (readiness.isRegisteredOp(target.op)) {
         // Parked in this loop's waiters for the fd. If detach finds the op
-        // already claimed by sockreg.onEvent (a callback it ran is canceling
+        // already claimed by readiness.onEvent (a callback it ran is canceling
         // it), it has a natural result, so leave it alone rather than
         // overwriting it with Canceled and completing it twice. A socket's
         // registration is left in place, and dropped later if it goes unused;
         // any other is dropped with its last waiter.
-        if (!sockreg.detach(self, target)) return;
+        if (!readiness.detach(self, target)) return;
         // A sendfile parked partway through reports what it sent (see
         // NetSendFile).
         if (comptime capability(.net_send_file) == .yes) {
@@ -777,11 +777,11 @@ pub fn poll(self: *Self, state: *LoopState, timeout: Duration) !bool {
 
         // Registered fds: the filter tells us the direction; ERR/EOF is
         // delivered to the waiter, which surfaces it via its syscall.
-        if (udataIsSocket(event.udata)) {
+        if (udataIsReg(event.udata)) {
             const sock_fd: NetHandle = @intCast(event.ident);
-            const dir: sockreg.Dir = if (event.filter == std.c.EVFILT.READ) .read else .write;
-            const gen: sockreg.Gen = @truncate(event.udata);
-            sockreg.onEvent(self, state, sock_fd, gen, sockreg.dirBit(dir), &event);
+            const dir: readiness.Dir = if (event.filter == std.c.EVFILT.READ) .read else .write;
+            const gen: readiness.Gen = @truncate(event.udata);
+            readiness.onEvent(self, state, sock_fd, gen, readiness.dirBit(dir), &event);
             continue;
         }
 

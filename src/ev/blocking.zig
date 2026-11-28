@@ -37,7 +37,7 @@ const Work = @import("completion.zig").Work;
 const ProcessWait = @import("completion.zig").ProcessWait;
 const DeviceIoControl = @import("completion.zig").DeviceIoControl;
 const common = @import("backends/common.zig");
-const sockreg = @import("sockreg.zig");
+const readiness = @import("readiness.zig");
 const os = @import("../os/root.zig");
 const time = @import("../time.zig");
 
@@ -284,7 +284,7 @@ fn handlePipePoll(c: *Completion) void {
 fn handleNetClose(c: *Completion) void {
     const data = c.cast(NetClose);
     // Not closed on a loop, so the group the socket was used in is unknown.
-    if (builtin.os.tag != .windows) sockreg.purgeAll(data.handle);
+    if (builtin.os.tag != .windows) readiness.purgeAll(data.handle);
     os.net.close(data.handle);
     c.setResult(.net_close, {});
 }
